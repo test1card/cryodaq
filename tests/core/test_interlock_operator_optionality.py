@@ -1,0 +1,470 @@
+"""Operator-owned software-interlock optionality and provenance."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+import yaml
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+
+from cryodaq.core.command_authority import ENGINE_MUTATION_CAPABILITY, MUTATION_PROTOCOL_MAJOR
+from cryodaq.core.experiment import ExperimentManager
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
+from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.engine import EngineCommandContext, _handle_gui_command
+from cryodaq.gui import theme
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.storage.sqlite_writer import OperatorLogPublicationOutboxRecord
+
+
+@pytest.fixture
+def workspace_runtime_root() -> Path:
+    root = Path(".pytest_cache") / "interlock-operator-optionality" / uuid.uuid4().hex
+    root.mkdir(parents=True, exist_ok=False)
+    return root
+
+
+@pytest.fixture(autouse=True)
+def _managed_sandbox_threaded_write_workaround(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The managed test sandbox cannot settle threaded filesystem writes.
+
+    Production retains ``asyncio.to_thread`` at both runtime write sites. This
+    file executes the exact synchronous operation inline so behavioral tests
+    can observe persistence without hanging on the sandbox mount adapter.
+    """
+
+    async def inline(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline)
+
+
+def _condition(*, action: str = "emergency_off") -> InterlockCondition:
+    return InterlockCondition(
+        name="overheat_cryostat",
+        description="Перегрев криостата",
+        channel_ids=frozenset({"cryostat/t1"}),
+        threshold=350.0,
+        comparison=">",
+        action=action,
+        cooldown_s=10.0,
+        operator_disableable=True,
+        enabled_by_default=True,
+    )
+
+
+def _reading(value: float = 360.0) -> Reading:
+    return Reading(
+        timestamp=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        instrument_id="LS218_1",
+        channel="cryostat/t1",
+        value=value,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+
+
+def _commit_receipt(request_id: str) -> dict[str, object]:
+    return {
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "entry_id": 1,
+        "experiment_id": None,
+        "committed": True,
+    }
+
+
+async def _toggle(engine: InterlockEngine, *, enabled: bool, request_id: str) -> dict[str, object]:
+    notice = engine.prepare_operator_toggle("overheat_cryostat", enabled=enabled)
+    return await engine.set_enabled(
+        "overheat_cryostat",
+        enabled=enabled,
+        operator="Иван Петров",
+        changed_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        request_id=request_id,
+        notice=notice,
+        commit_receipt=_commit_receipt(request_id),
+    )
+
+
+def test_tracked_policy_makes_every_row_optional_and_enabled_by_default() -> None:
+    payload = yaml.safe_load(Path("config/interlocks.yaml").read_text(encoding="utf-8"))
+
+    assert payload["operator_disableable"] is True
+    assert payload["enabled_by_default"] is True
+    assert all("operator_disableable" not in row and "enabled" not in row for row in payload["interlocks"])
+    assert any(row["action"] == "emergency_off" for row in payload["interlocks"])
+
+    instruments = {binding["instrument_id"] for row in payload["interlocks"] for binding in row["channel_bindings"]}
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock(), "stop_source": AsyncMock()},
+    )
+    engine.load_config(
+        Path("config/interlocks.yaml"),
+        poll_intervals_s_by_instrument={instrument_id: 2.0 for instrument_id in instruments},
+    )
+    states = engine.get_operator_state()
+    assert len(states) == len(payload["interlocks"])
+    assert all(state["operator_disableable"] is True and state["enabled"] is True for state in states)
+    assert any(state["action"] == "emergency_off" for state in states)
+
+
+@pytest.mark.asyncio
+async def test_disabled_emergency_interlock_still_evaluates_warns_and_suppresses_action(
+    workspace_runtime_root: Path,
+) -> None:
+    action = AsyncMock()
+    warnings: list[str] = []
+
+    async def warned(_condition, _reading, message: str) -> None:
+        warnings.append(message)
+
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": action},
+        suppressed_handler=warned,
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+
+    result = await _toggle(engine, enabled=False, request_id="a" * 32)
+    await engine._process_reading(_reading())
+
+    assert result["enabled"] is False
+    action.assert_not_awaited()
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert "overheat_cryostat" in warning
+    assert "360" in warning
+    assert "> 350" in warning
+    assert "подавлена решением оператора" in warning
+    assert engine.get_events()[-1].action_taken == "suppressed:emergency_off"
+
+
+@pytest.mark.asyncio
+async def test_reenable_fires_immediately_when_last_observation_is_still_true(
+    workspace_runtime_root: Path,
+) -> None:
+    action = AsyncMock()
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": action},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    await _toggle(engine, enabled=False, request_id="b" * 32)
+    await engine._process_reading(_reading())
+    action.assert_not_awaited()
+
+    await _toggle(engine, enabled=True, request_id="c" * 32)
+
+    action.assert_awaited_once()
+    assert engine.get_events()[-1].action_taken == "emergency_off"
+
+
+@pytest.mark.asyncio
+async def test_disabled_state_survives_engine_reconstruction(workspace_runtime_root: Path) -> None:
+    state_path = workspace_runtime_root / "interlock_operator_state.json"
+    first = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    first.add_condition(_condition())
+    await _toggle(first, enabled=False, request_id="d" * 32)
+
+    restarted = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    restarted.add_condition(_condition())
+    await restarted.restore_operator_state()
+
+    assert restarted.disabled_interlocks() == ("overheat_cryostat",)
+    restored = restarted.get_operator_state()[0]
+    assert restored["enabled"] is False
+    assert restored["disable_receipt"]["operator"] == "Иван Петров"
+    assert restored["disable_receipt"]["notice"]
+
+
+class _RequiredPublisher:
+    def __init__(self) -> None:
+        self.events: list[Reading] = []
+
+    async def publish_required(self, event, *, request_id: str, request_fingerprint: str):
+        self.events.append(event)
+        return {
+            "accepted": True,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+        }
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+
+    @staticmethod
+    def validates_required_publication(receipt, *, request_id: str, request_fingerprint: str) -> bool:
+        return receipt == {
+            "accepted": True,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+        }
+
+
+class _NoopEventLogger:
+    async def log_event(self, _category: str, _message: str) -> None:
+        return None
+
+
+class _ReceiptWriter:
+    def __init__(self) -> None:
+        self.entries: list[OperatorLogEntry] = []
+        self.publications: dict[str, OperatorLogPublicationOutboxRecord] = {}
+
+    async def find_operator_log_request(self, **_kwargs):
+        return None
+
+    async def append_operator_log(self, **kwargs) -> OperatorLogEntry:
+        entry = OperatorLogEntry(
+            id=len(self.entries) + 1,
+            timestamp=datetime(2026, 8, 28, 12, len(self.entries), tzinfo=UTC),
+            experiment_id=kwargs.get("experiment_id"),
+            author=kwargs["author"],
+            source=kwargs["source"],
+            message=kwargs["message"],
+            tags=tuple(kwargs["tags"]),
+        )
+        self.entries.append(entry)
+        return entry
+
+    async def append_operator_log_with_publication_intent(self, **kwargs):
+        entry = OperatorLogEntry(
+            id=len(self.entries) + 1,
+            timestamp=datetime(2026, 8, 28, 12, len(self.entries), tzinfo=UTC),
+            experiment_id=kwargs["experiment_id"],
+            author=kwargs["author"],
+            source=kwargs["source"],
+            message=kwargs["message"],
+            tags=tuple(kwargs["tags"]),
+        )
+        self.entries.append(entry)
+        event = {"schema": "operator_log_commit_v1", "entry": entry.to_payload()}
+        receipt = {
+            "schema": "operator_log_commit_v1",
+            "request_id": kwargs["request_id"],
+            "entry_id": entry.id,
+            "experiment_id": entry.experiment_id,
+            "committed": True,
+        }
+        publication = OperatorLogPublicationOutboxRecord(
+            request_id=kwargs["request_id"],
+            request_fingerprint=kwargs["request_fingerprint"],
+            state="intent",
+            event=event,
+            receipt=receipt,
+        )
+        self.publications[kwargs["request_id"]] = publication
+        return OperatorLogCommitResult(entry=entry, replayed=False), publication
+
+    async def publish_operator_log_publication_outbox(self, *, request_id: str, request_fingerprint: str):
+        publication = self.publications[request_id]
+        return OperatorLogPublicationOutboxRecord(
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            state="published",
+            event=publication.event,
+            receipt=publication.receipt,
+        )
+
+
+def _command_context(
+    *,
+    manager: ExperimentManager,
+    writer: _ReceiptWriter,
+    broker: _RequiredPublisher,
+    interlock_engine: InterlockEngine,
+) -> EngineCommandContext:
+    return EngineCommandContext(
+        safety_manager=None,
+        event_logger=_NoopEventLogger(),
+        sink_registry=SimpleNamespace(sinks=[]),
+        interlock_engine=interlock_engine,
+        leak_rate_estimator=None,
+        leak_cfg={},
+        alarm_v2_state_mgr=None,
+        alarm_ring=None,
+        broker=broker,
+        experiment_manager=manager,
+        calibration_acquisition=SimpleNamespace(deactivate=lambda: None),
+        event_bus=SimpleNamespace(publish=AsyncMock()),
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=None,
+        writer=writer,
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=None,
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+        mutation_capability_token="interlock-test-capability",
+    )
+
+
+def _mutation(command: dict[str, object]) -> dict[str, object]:
+    return {
+        **command,
+        "protocol_major": MUTATION_PROTOCOL_MAJOR,
+        "mutation_capability": ENGINE_MUTATION_CAPABILITY,
+        "capability_token": "interlock-test-capability",
+    }
+
+
+@pytest.mark.asyncio
+async def test_suppressed_warning_uses_existing_operator_log_and_alarm_event_surfaces() -> None:
+    from cryodaq.engine import _interlock_suppressed_handler, _InterlockHandlerContext
+
+    writer = _ReceiptWriter()
+    broker = _RequiredPublisher()
+    event_bus = SimpleNamespace(events=[])
+
+    async def publish(event) -> None:
+        event_bus.events.append(event)
+
+    event_bus.publish = publish
+    context = _InterlockHandlerContext(
+        safety_manager=None,
+        writer=writer,
+        broker=broker,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent=set(),
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="exp-1"),
+    )
+    message = (
+        "Блокировка 'overheat_cryostat' подавлена решением оператора: "
+        "значение 360 K пересекло порог > 350; действие 'emergency_off' не выполнено."
+    )
+
+    await _interlock_suppressed_handler(_condition(), _reading(), message, context=context)
+
+    assert writer.entries[0].message == message
+    assert writer.entries[0].experiment_id == "exp-1"
+    assert broker.events[0].channel == "analytics/operator_log_entry"
+    alarm = event_bus.events[0]
+    assert alarm.event_type == "alarm_fired"
+    assert alarm.payload["level"] == "WARNING"
+    assert alarm.payload["message"] == message
+
+
+@pytest.mark.asyncio
+async def test_toggle_commands_need_no_confirmation_write_two_receipts_and_run_interval(
+    workspace_runtime_root: Path,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    experiment_id = manager.start_experiment("Опциональные блокировки", "Иван Петров", template_id="custom")
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    broker = _RequiredPublisher()
+    context = _command_context(manager=manager, writer=writer, broker=broker, interlock_engine=engine)
+    try:
+        disabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "Иван Петров",
+                    "request_id": "e" * 32,
+                }
+            ),
+            context=context,
+        )
+        enabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": True,
+                    "operator": "Иван Петров",
+                    "request_id": "f" * 32,
+                }
+            ),
+            context=context,
+        )
+
+        assert disabled["ok"] is True
+        assert enabled["ok"] is True
+        assert disabled["commit_receipt"]["request_id"] == "e" * 32
+        assert enabled["commit_receipt"]["request_id"] == "f" * 32
+        for result in (disabled, enabled):
+            assert result["entry"]["author"] == "Иван Петров"
+            assert result["entry"]["timestamp"]
+            assert "overheat_cryostat" in result["entry"]["message"]
+            assert result["entry"]["message"] == result["interlock"]["notice"]
+
+        assert [entry.author for entry in writer.entries] == ["Иван Петров", "Иван Петров"]
+        metadata_path = workspace_runtime_root / "experiment" / "experiments" / experiment_id / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        interval = metadata["interlock_disable_intervals"][0]
+        assert interval["interlock_name"] == "overheat_cryostat"
+        assert interval["disabled_at"] == disabled["entry"]["timestamp"]
+        assert interval["reenabled_at"] == enabled["entry"]["timestamp"]
+        assert interval["disable_receipt"]["commit_receipt"] == disabled["commit_receipt"]
+        assert interval["reenable_receipt"]["commit_receipt"] == enabled["commit_receipt"]
+    finally:
+        context.experiment_commands_accepting = False
+
+
+def test_bottom_bar_lists_currently_disabled_interlocks() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindowV2()
+    try:
+        window._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="safety_manager",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={
+                    "state": "ready",
+                    "reason": "",
+                    "disabled_interlocks": ["overheat_compressor", "overheat_cryostat"],
+                },
+            )
+        )
+        bar = window._bottom_bar
+        assert "overheat_compressor" in bar._interlock_label.text()
+        assert "overheat_cryostat" in bar._interlock_label.text()
+        assert theme.STATUS_WARNING in bar._interlock_label.styleSheet()
+        assert "Отключённые программные блокировки" in bar._interlock_label.accessibleDescription()
+    finally:
+        for timer in window.findChildren(QTimer):
+            timer.stop()
+        window.close()
+        app.processEvents()

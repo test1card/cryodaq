@@ -179,6 +179,7 @@ class SafetyManager:
         self._reviewed_source_generation: _ReviewedSourceGeneration | None = None
         self._data_broker = data_broker
         self._fault_log_callback = fault_log_callback
+        self._interlock_state_provider: Callable[[], tuple[str, ...]] | None = None
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
@@ -2900,7 +2901,29 @@ class SafetyManager:
             "mock": self._mock,
             "qualification_mode": qualification_mode,
             "qualification_refusal": qualification_refusal,
+            "disabled_interlocks": list(self._disabled_interlocks()),
         }
+
+    def set_interlock_state_provider(self, provider: Callable[[], tuple[str, ...]]) -> None:
+        """Attach the observational software-interlock state owner."""
+        if not callable(provider):
+            raise TypeError("interlock state provider must be callable")
+        self._interlock_state_provider = provider
+
+    def _disabled_interlocks(self) -> tuple[str, ...]:
+        provider = self._interlock_state_provider
+        if provider is None:
+            return ()
+        disabled = provider()
+        if type(disabled) is not tuple or any(type(name) is not str or not name for name in disabled):
+            raise RuntimeError("interlock state provider returned an invalid snapshot")
+        if tuple(sorted(set(disabled))) != disabled:
+            raise RuntimeError("interlock state provider snapshot is not canonical")
+        return disabled
+
+    async def publish_interlock_operator_state(self) -> None:
+        """Refresh the existing safety-state carrier after an operator toggle."""
+        await self._publish_state("interlock_operator_state_changed")
 
     def get_events(self) -> list[SafetyEvent]:
         return list(self._events)
@@ -2916,7 +2939,11 @@ class SafetyManager:
             value=0.0,
             unit="",
             instrument_id="safety_manager",
-            metadata={"state": self._state.value, "reason": reason},
+            metadata={
+                "state": self._state.value,
+                "reason": reason,
+                "disabled_interlocks": list(self._disabled_interlocks()),
+            },
         )
         try:
             await self._data_broker.publish(reading)

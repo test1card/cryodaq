@@ -70,6 +70,7 @@ ENGINE_READ_ACTIONS = frozenset(
         "periodic_subscription_barrier",
         "periodic_alarm_snapshot",
         "safety_status",
+        "interlock_status",
         "annunciation_status",
         "sinks_status",
         "alarm_v2_status",

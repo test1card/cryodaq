@@ -2232,6 +2232,128 @@ class ExperimentManager:
 
         atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    @_serialized_lifecycle_mutation
+    def record_interlock_operator_state(
+        self,
+        *,
+        interlock_name: str,
+        enabled: bool,
+        operator: str,
+        changed_at: str,
+        notice: str,
+        receipt: dict[str, Any],
+    ) -> bool:
+        """Carry one software-interlock disable interval in the active run record."""
+        if self._active is None:
+            return False
+        if type(interlock_name) is not str or not interlock_name:
+            raise ValueError("interlock_name must be non-empty")
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be an exact bool")
+        if type(operator) is not str or not operator.strip():
+            raise ValueError("operator must be non-empty")
+        if _parse_time(changed_at) is None or type(notice) is not str or not notice:
+            raise ValueError("interlock transition time and notice must be explicit")
+        if type(receipt) is not dict:
+            raise TypeError("interlock receipt must be a dict")
+
+        payload = self._read_metadata_payload(self._active.experiment_id)
+        intervals = list(payload.get("interlock_disable_intervals") or [])
+        if not all(type(item) is dict for item in intervals):
+            raise RuntimeError("interlock disable provenance is invalid")
+        if enabled:
+            for interval in reversed(intervals):
+                if interval.get("interlock_name") == interlock_name and interval.get("reenabled_at") is None:
+                    interval["reenabled_at"] = changed_at
+                    interval["reenabled_by"] = operator.strip()
+                    interval["reenable_notice"] = notice
+                    interval["reenable_receipt"] = dict(receipt)
+                    break
+        elif not any(
+            interval.get("interlock_name") == interlock_name and interval.get("reenabled_at") is None
+            for interval in intervals
+        ):
+            intervals.append(
+                {
+                    "interlock_name": interlock_name,
+                    "disabled_at": changed_at,
+                    "disabled_by": operator.strip(),
+                    "disable_notice": notice,
+                    "disable_receipt": dict(receipt),
+                    "reenabled_at": None,
+                    "reenabled_by": None,
+                    "reenable_notice": None,
+                    "reenable_receipt": None,
+                }
+            )
+        payload["interlock_disable_intervals"] = intervals
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(
+            self._metadata_path(self._active.experiment_id),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        return True
+
+    @_serialized_lifecycle_mutation
+    def sync_interlock_operator_provenance(self, states: list[dict[str, Any]]) -> bool:
+        """Reconcile a newly active or recovered run from durable toggle state."""
+        if self._active is None:
+            return False
+        if type(states) is not list or any(type(item) is not dict for item in states):
+            raise TypeError("interlock states must be an exact dict list")
+        payload = self._read_metadata_payload(self._active.experiment_id)
+        intervals = list(payload.get("interlock_disable_intervals") or [])
+        if not all(type(item) is dict for item in intervals):
+            raise RuntimeError("interlock disable provenance is invalid")
+        changed = False
+        for state in states:
+            last_receipt = state.get("last_transition_receipt")
+            if type(last_receipt) is not dict:
+                continue
+            name = state.get("name")
+            if type(name) is not str or not name:
+                raise RuntimeError("interlock state lacks receipt provenance")
+            open_interval = next(
+                (
+                    interval
+                    for interval in reversed(intervals)
+                    if interval.get("interlock_name") == name and interval.get("reenabled_at") is None
+                ),
+                None,
+            )
+            if state.get("enabled") is False and open_interval is None:
+                intervals.append(
+                    {
+                        "interlock_name": name,
+                        "disabled_at": last_receipt.get("changed_at"),
+                        "disabled_by": last_receipt.get("operator"),
+                        "disable_notice": last_receipt.get("notice"),
+                        "disable_receipt": dict(last_receipt.get("commit_receipt") or {}),
+                        "reenabled_at": None,
+                        "reenabled_by": None,
+                        "reenable_notice": None,
+                        "reenable_receipt": None,
+                    }
+                )
+                changed = True
+            elif state.get("enabled") is True and open_interval is not None:
+                open_interval["reenabled_at"] = last_receipt.get("changed_at")
+                open_interval["reenabled_by"] = last_receipt.get("operator")
+                open_interval["reenable_notice"] = last_receipt.get("notice")
+                open_interval["reenable_receipt"] = dict(last_receipt.get("commit_receipt") or {})
+                changed = True
+        if not changed:
+            return False
+        payload["interlock_disable_intervals"] = intervals
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(
+            self._metadata_path(self._active.experiment_id),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Phase tracking
     # ------------------------------------------------------------------

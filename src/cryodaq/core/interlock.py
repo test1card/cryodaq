@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from collections import deque
@@ -27,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.core.broker import DataBroker, PublishedReading
 from cryodaq.core.descriptor_transport import encode_descriptor_envelope
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
@@ -156,6 +158,8 @@ class InterlockCondition:
     action: str
     channel_bindings: frozenset[InterlockChannelBinding] = frozenset()
     cooldown_s: float = 0.0
+    operator_disableable: bool = True
+    enabled_by_default: bool = True
 
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
@@ -177,6 +181,10 @@ class InterlockCondition:
             and frozenset(binding.channel_id for binding in self.channel_bindings) != self.channel_ids
         ):
             raise ValueError(f"Блокировка '{self.name}': channel_ids disagree with channel_bindings")
+        if type(self.operator_disableable) is not bool:
+            raise ValueError(f"Блокировка '{self.name}': operator_disableable must be an exact bool")
+        if type(self.enabled_by_default) is not bool:
+            raise ValueError(f"Блокировка '{self.name}': enabled_by_default must be an exact bool")
 
     def matches_channel(self, channel: str) -> bool:
         """Проверить точное совпадение с объявленной привязкой датчика."""
@@ -225,6 +233,12 @@ class _InterlockRecord:
     state: InterlockState = InterlockState.ARMED
     last_trip_time: datetime | None = None
     trip_count: int = 0
+    enabled: bool = True
+    latest_reading: Reading | None = None
+    condition_active: bool = False
+    last_suppressed_warning: datetime | None = None
+    disable_receipt: dict[str, Any] | None = None
+    last_transition_receipt: dict[str, Any] | None = None
 
 
 @dataclass
@@ -280,6 +294,9 @@ class InterlockEngine:
         alarm_publisher: Any | None = None,
         dead_channel_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
         dead_channel_recovery_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
+        suppressed_handler: Callable[[InterlockCondition, Reading, str], Any] | None = None,
+        state_changed_handler: Callable[[], Any] | None = None,
+        state_path: Path | None = None,
     ) -> None:
         """Initialize.
 
@@ -320,6 +337,11 @@ class InterlockEngine:
         self._alarm_publisher = alarm_publisher
         self._dead_channel_handler = dead_channel_handler
         self._dead_channel_recovery_handler = dead_channel_recovery_handler
+        self._suppressed_handler = suppressed_handler
+        self._state_changed_handler = state_changed_handler
+        self._state_path = state_path
+        self._state_change_lock = asyncio.Lock()
+        self._retired_operator_state: dict[str, dict[str, Any]] = {}
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[PublishedReading] | None = None
@@ -400,6 +422,13 @@ class InterlockEngine:
                 f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
             )
 
+        operator_disableable_default = raw.get("operator_disableable", True)
+        enabled_by_default = raw.get("enabled_by_default", True)
+        if type(operator_disableable_default) is not bool or type(enabled_by_default) is not bool:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: operator_disableable and enabled_by_default must be exact bools"
+            )
+
         loaded = 0
         for entry in entries:
             try:
@@ -417,6 +446,8 @@ class InterlockEngine:
                     action=entry["action"],
                     channel_bindings=channel_bindings,
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
+                    operator_disableable=operator_disableable_default,
+                    enabled_by_default=enabled_by_default,
                 )
                 self.add_condition(condition)
                 loaded += 1
@@ -536,7 +567,10 @@ class InterlockEngine:
                 f"'{condition.action}'. Доступные действия: "
                 f"{list(self._actions.keys())}."
             )
-        self._interlocks[condition.name] = _InterlockRecord(condition=condition)
+        self._interlocks[condition.name] = _InterlockRecord(
+            condition=condition,
+            enabled=condition.enabled_by_default,
+        )
         logger.info(
             "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | действие: '%s' | кулдаун: %.1f с.",
             condition.name,
@@ -619,16 +653,13 @@ class InterlockEngine:
     async def _process_reading(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
         """Проверить показание против всех подходящих ARMED-блокировок."""
         # ARMED-блокировки, чьи объявленные привязки совпали с каналом показания.
-        matching = [
-            record
-            for record in self._interlocks.values()
-            if record.state == InterlockState.ARMED and record.condition.matches_reading(reading, descriptor_envelope)
-        ]
-        protected_matching = [
+        identity_matching = [
             record
             for record in self._interlocks.values()
             if record.condition.matches_reading(reading, descriptor_envelope)
         ]
+        matching = [record for record in identity_matching if record.enabled and record.state == InterlockState.ARMED]
+        protected_matching = identity_matching
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
         # interlock-защищённом канале. Пороговое сравнение с NaN всегда даёт
@@ -641,7 +672,9 @@ class InterlockEngine:
             if protected_matching:
                 await self._handle_usable(reading, protected_matching[0].condition)
         elif protected_matching:
-            if math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
+            if math.isinf(reading.value) and any(
+                record.condition.is_triggered(reading.value) for record in identity_matching
+            ):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
                 # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
@@ -656,6 +689,30 @@ class InterlockEngine:
             else:
                 await self._handle_nonusable(reading, protected_matching[0].condition)
                 return
+
+        for record in identity_matching:
+            if reading.is_usable() or math.isinf(reading.value):
+                record.latest_reading = reading
+
+        for record in identity_matching:
+            if record.enabled:
+                continue
+            triggered = (reading.is_usable() or math.isinf(reading.value)) and record.condition.is_triggered(
+                reading.value
+            )
+            if not triggered:
+                record.condition_active = False
+                continue
+            now = datetime.now(UTC)
+            repeat_s = record.condition.cooldown_s if record.condition.cooldown_s > 0 else 60.0
+            should_warn = (
+                not record.condition_active
+                or record.last_suppressed_warning is None
+                or (now - record.last_suppressed_warning).total_seconds() >= repeat_s
+            )
+            record.condition_active = True
+            if should_warn:
+                await self._warn_suppressed(record, reading, now=now)
 
         for record in matching:
             condition = record.condition
@@ -675,6 +732,45 @@ class InterlockEngine:
                     and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
+
+    async def _warn_suppressed(
+        self,
+        record: _InterlockRecord,
+        reading: Reading,
+        *,
+        now: datetime,
+    ) -> None:
+        """Publish one loud observation while deliberately suppressing action."""
+        condition = record.condition
+        record.last_suppressed_warning = now
+        message = (
+            f"Блокировка '{condition.name}' подавлена решением оператора: "
+            f"значение {reading.value:.4g} {reading.unit} пересекло порог "
+            f"{condition.comparison} {condition.threshold:.4g}; "
+            f"действие '{condition.action}' не выполнено."
+        )
+        self._events.append(
+            InterlockEvent(
+                timestamp=now,
+                interlock_name=condition.name,
+                channel=reading.channel,
+                value=reading.value,
+                threshold=condition.threshold,
+                action_taken=f"suppressed:{condition.action}",
+            )
+        )
+        logger.warning(message)
+        if self._suppressed_handler is not None:
+            try:
+                result = self._suppressed_handler(condition, reading, message)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.error(
+                    "Suppressed interlock warning publication failed for '%s': %s",
+                    condition.name,
+                    type(exc).__name__,
+                )
 
     async def _handle_usable(self, reading: Reading, condition: InterlockCondition) -> None:
         """Clear dead-channel state only after recovery authority accepts this sample."""
@@ -916,6 +1012,176 @@ class InterlockEngine:
             interlock_name,
             previous_state.value,
         )
+
+    @staticmethod
+    def operator_notice(condition: InterlockCondition, *, enabled: bool) -> str:
+        """Return the exact warning text receipted before an operator toggle."""
+        if enabled:
+            return (
+                f"Блокировка '{condition.name}' снова активна. Если последнее показание уже пересекло порог "
+                f"{condition.comparison} {condition.threshold:.4g}, действие '{condition.action}' "
+                "будет выполнено немедленно."
+            )
+        return (
+            f"Блокировка '{condition.name}' продолжит оценивать условие "
+            f"{condition.comparison} {condition.threshold:.4g}, но действие '{condition.action}' "
+            "будет подавлено решением оператора; при нарушении будет выдано предупреждение."
+        )
+
+    def get_operator_state(self) -> list[dict[str, Any]]:
+        """Return detached per-row operator state for commands and presentation."""
+        return [
+            {
+                "name": name,
+                "enabled": record.enabled,
+                "operator_disableable": record.condition.operator_disableable,
+                "action": record.condition.action,
+                "comparison": record.condition.comparison,
+                "threshold": record.condition.threshold,
+                "disable_receipt": None if record.disable_receipt is None else dict(record.disable_receipt),
+                "last_transition_receipt": (
+                    None if record.last_transition_receipt is None else dict(record.last_transition_receipt)
+                ),
+            }
+            for name, record in self._interlocks.items()
+        ]
+
+    def prepare_operator_toggle(self, interlock_name: str, *, enabled: bool) -> str:
+        """Validate one toggle target and return the exact text to receipt."""
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be an exact bool")
+        record = self._interlocks.get(interlock_name)
+        if record is None:
+            raise KeyError(interlock_name)
+        if not record.condition.operator_disableable:
+            raise PermissionError(interlock_name)
+        return self.operator_notice(record.condition, enabled=enabled)
+
+    def disabled_interlocks(self) -> tuple[str, ...]:
+        return tuple(sorted(name for name, record in self._interlocks.items() if not record.enabled))
+
+    async def set_enabled(
+        self,
+        interlock_name: str,
+        *,
+        enabled: bool,
+        operator: str,
+        changed_at: datetime,
+        request_id: str,
+        notice: str,
+        commit_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one operator decision, then apply it and immediately re-evaluate."""
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be an exact bool")
+        record = self._interlocks.get(interlock_name)
+        if record is None:
+            raise KeyError(interlock_name)
+        if not record.condition.operator_disableable:
+            raise PermissionError(interlock_name)
+        if type(operator) is not str or not operator.strip():
+            raise ValueError("operator must be non-empty")
+        if changed_at.tzinfo is None or changed_at.utcoffset() is None:
+            raise ValueError("changed_at must be timezone-aware")
+        receipt = {
+            "operator": operator.strip(),
+            "changed_at": changed_at.astimezone(UTC).isoformat(),
+            "request_id": request_id,
+            "notice": notice,
+            "commit_receipt": dict(commit_receipt),
+        }
+        async with self._state_change_lock:
+            previous = record.enabled
+            next_state = {
+                name: {
+                    "enabled": item.enabled,
+                    "receipt": dict(item.last_transition_receipt),
+                }
+                for name, item in self._interlocks.items()
+                if name != interlock_name and item.last_transition_receipt is not None
+            }
+            next_state[interlock_name] = {"enabled": enabled, "receipt": receipt}
+            next_state.update(self._retired_operator_state)
+            await asyncio.to_thread(self._write_operator_state, next_state)
+            record.enabled = enabled
+            record.disable_receipt = None if enabled else receipt
+            record.last_transition_receipt = receipt
+            if not enabled:
+                record.condition_active = False
+            elif (
+                not previous
+                and record.latest_reading is not None
+                and record.condition.is_triggered(record.latest_reading.value)
+            ):
+                await self._trip(record, record.latest_reading)
+            if self._state_changed_handler is not None:
+                result = self._state_changed_handler()
+                if asyncio.iscoroutine(result):
+                    await result
+        return {
+            "name": interlock_name,
+            "enabled": enabled,
+            "previous_enabled": previous,
+            "operator_disableable": record.condition.operator_disableable,
+            "notice": notice,
+            "changed_at": receipt["changed_at"],
+        }
+
+    def _load_operator_state(self) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        if not path.exists():
+            self._write_operator_state({})
+            return
+        if path.stat().st_size > 4 * 1024 * 1024:
+            raise InterlockConfigError(f"interlock operator state at {path} exceeds its size bound")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise InterlockConfigError(f"interlock operator state at {path} is unreadable") from exc
+        if type(payload) is not dict or set(payload) != {"schema_version", "interlocks", "updated_at"}:
+            raise InterlockConfigError(f"interlock operator state at {path} is invalid")
+        states = payload.get("interlocks")
+        if payload.get("schema_version") != 1 or type(states) is not dict or type(payload.get("updated_at")) is not str:
+            raise InterlockConfigError(f"interlock operator state at {path} is invalid")
+        for name, state in states.items():
+            if (
+                type(name) is not str
+                or type(state) is not dict
+                or set(state) != {"enabled", "receipt"}
+                or type(state.get("enabled")) is not bool
+                or type(state.get("receipt")) is not dict
+            ):
+                raise InterlockConfigError(f"interlock operator state at {path} is invalid")
+            record = self._interlocks.get(name)
+            if record is None:
+                self._retired_operator_state[name] = {
+                    "enabled": state["enabled"],
+                    "receipt": dict(state["receipt"]),
+                }
+                continue
+            if state["enabled"] is False and not record.condition.operator_disableable:
+                raise InterlockConfigError(f"persisted disabled interlock {name!r} is no longer operator-disableable")
+            record.enabled = state["enabled"]
+            record.last_transition_receipt = dict(state["receipt"])
+            record.disable_receipt = None if state["enabled"] else dict(state["receipt"])
+
+    async def restore_operator_state(self) -> None:
+        """Load or initialize operator state without blocking the engine loop."""
+        await asyncio.to_thread(self._load_operator_state)
+
+    def _write_operator_state(self, states: dict[str, dict[str, Any]]) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        payload = {
+            "schema_version": 1,
+            "interlocks": states,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
 
     def get_state(self) -> dict[str, InterlockState]:
         """Вернуть текущее состояние всех зарегистрированных блокировок.

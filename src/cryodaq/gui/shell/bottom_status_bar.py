@@ -19,6 +19,7 @@ from cryodaq.gui import theme
 _HEIGHT_PX = theme.BOTTOM_BAR_HEIGHT  # DESIGN: invariant #1 — canonical 28px
 _MAX_VISIBLE_STATE_CHARS = 28
 _MAX_VISIBLE_CONNECTION_CHARS = 22
+_MAX_VISIBLE_INTERLOCK_CHARS = 64
 _MAX_VISIBLE_UPTIME_CHARS = 20
 _MAX_VISIBLE_NUMERIC = 1_000_000.0
 
@@ -94,6 +95,15 @@ class BottomStatusBar(QWidget):
         self._safety_label.setMaximumWidth(250)
         self._safety_label.setStyleSheet(muted)
         layout.addWidget(self._safety_label)
+
+        layout.addWidget(_separator())
+
+        self._interlock_label = QLabel("Откл. блокировки: —")
+        self._interlock_label.setMaximumWidth(460)
+        self._interlock_label.setStyleSheet(muted)
+        self._interlock_label.setToolTip("Нет подтверждённого списка отключённых программных блокировок")
+        self._interlock_label.setAccessibleDescription("Нет подтверждённого списка отключённых программных блокировок")
+        layout.addWidget(self._interlock_label)
 
         layout.addWidget(_separator())
 
@@ -199,6 +209,45 @@ class BottomStatusBar(QWidget):
             self._rate_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._rate_label.setToolTip(detail)
         self._rate_label.setAccessibleDescription(detail)
+
+    def set_disabled_interlocks(
+        self,
+        names: tuple[str, ...] | list[str] | None,
+        *,
+        stale: bool = False,
+    ) -> bool:
+        """Present the backend-owned list; unknown never looks like an empty list."""
+        if names is None:
+            self._interlock_label.setText("Откл. блокировки: —")
+            detail = "Нет подтверждённого списка отключённых программных блокировок"
+            self._interlock_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            self._interlock_label.setToolTip(detail)
+            self._interlock_label.setAccessibleDescription(detail)
+            return False
+        if type(names) not in (tuple, list) or any(type(name) is not str or not name for name in names):
+            return False
+        canonical = tuple(sorted(set(names)))
+        if tuple(names) != canonical:
+            return False
+        if canonical:
+            listing = ", ".join(canonical)
+            suffix = " · нет связи" if stale else ""
+            visible = _bounded_visible(f"Откл. блокировки: {listing}{suffix}", _MAX_VISIBLE_INTERLOCK_CHARS)
+            detail = f"Отключённые программные блокировки: {listing}"
+            if stale:
+                detail += "; список последний подтверждённый, текущая связь с Engine отсутствует"
+            color = theme.TEXT_MUTED if stale else theme.STATUS_WARNING
+        else:
+            visible = "Откл. блокировки: нет" if not stale else "Откл. блокировки: нет · нет связи"
+            detail = "Отключённых программных блокировок нет"
+            if stale:
+                detail += "; это последнее подтверждённое состояние, текущая связь с Engine отсутствует"
+            color = theme.TEXT_MUTED
+        self._interlock_label.setText(visible)
+        self._interlock_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self._interlock_label.setToolTip(detail)
+        self._interlock_label.setAccessibleDescription(detail)
+        return True
 
     def set_connected(self, connected: bool, label: str | None = None) -> None:
         presentation = label if type(label) is str and label else ("Подключено" if connected else "Отключено")

@@ -2394,6 +2394,8 @@ async def _safety_fault_log_callback(
 @dataclass(slots=True)
 class _InterlockHandlerContext:
     safety_manager: Any
+    writer: Any
+    broker: Any
     alarm_dispatch_tasks: set[asyncio.Task[Any]]
     dead_channel_alarm_sent: set[str]
     event_bus: Any | None = None
@@ -2436,6 +2438,159 @@ async def _interlock_trip_handler(
                 "Interlock fault escalation failed: exception=%s; instrument state is unknown",
                 type(exc2).__name__,
             )
+
+
+async def _interlock_suppressed_handler(
+    condition: Any,
+    reading: Any,
+    message: str,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Persist and dispatch a disabled-condition warning on existing surfaces."""
+    experiment_id = context.experiment_manager.active_experiment_id if context.experiment_manager is not None else None
+    failures: list[Exception] = []
+    try:
+        await _dispatch_alarm_notification(
+            context.event_bus,
+            context.alarm_dispatch_tasks,
+            alarm_id=f"interlock_suppressed_{condition.name}",
+            level="WARNING",
+            message=message,
+            experiment_id=experiment_id,
+            channel=reading.channel,
+            value=float(reading.value),
+        )
+    except Exception as exc:
+        failures.append(exc)
+    try:
+        entry = await context.writer.append_operator_log(
+            message=message,
+            author="interlock",
+            source="machine",
+            experiment_id=experiment_id,
+            tags=("interlock_suppressed", condition.name),
+        )
+        await _publish_operator_log_entry(context.broker, entry)
+    except Exception as exc:
+        failures.append(exc)
+    if failures:
+        raise RuntimeError("one or more suppressed-interlock warning surfaces failed") from failures[0]
+
+
+async def _set_interlock_operator_state(
+    cmd: dict[str, Any],
+    *,
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Receipt one unobstructed operator toggle, persist it, and project provenance."""
+    required = {"cmd", "interlock_name", "enabled", "operator", "request_id"}
+    if set(cmd) != required:
+        return {
+            "ok": False,
+            "error_code": "interlock_toggle_invalid",
+            "error": "Переключение блокировки требует имя, состояние, оператора и идентификатор запроса.",
+            "retry_safe": True,
+        }
+    name = cmd.get("interlock_name")
+    enabled = cmd.get("enabled")
+    operator = cmd.get("operator")
+    request_id = cmd.get("request_id")
+    if (
+        type(name) is not str
+        or not name
+        or type(enabled) is not bool
+        or type(operator) is not str
+        or not operator.strip()
+        or type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+    ):
+        return {
+            "ok": False,
+            "error_code": "interlock_toggle_invalid",
+            "error": "Поля переключения блокировки недействительны.",
+            "retry_safe": True,
+        }
+    try:
+        notice = context.interlock_engine.prepare_operator_toggle(name, enabled=enabled)
+    except KeyError:
+        return {
+            "ok": False,
+            "error_code": "interlock_unknown",
+            "error": "Запрошенная блокировка не найдена.",
+            "retry_safe": False,
+        }
+    except PermissionError:
+        return {
+            "ok": False,
+            "error_code": "interlock_not_operator_disableable",
+            "error": "Эта блокировка не допускает переключение оператором.",
+            "retry_safe": False,
+        }
+
+    log_cmd: dict[str, Any] = {
+        "cmd": "log_entry",
+        "request_id": request_id,
+        "message": notice,
+        "author": operator.strip(),
+        "source": "gui",
+        "tags": ["interlock_override", name],
+    }
+    experiment_id = context.experiment_manager.active_experiment_id
+    if experiment_id is None:
+        log_cmd["experiment_unbound"] = True
+    else:
+        log_cmd["experiment_id"] = experiment_id
+    receipt_result = await _submit_operator_log_entry(log_cmd, context)
+    entry = receipt_result.get("entry") if type(receipt_result) is dict else None
+    commit_receipt = receipt_result.get("commit_receipt") if type(receipt_result) is dict else None
+    if receipt_result.get("committed") is not True or type(entry) is not dict or type(commit_receipt) is not dict:
+        return receipt_result
+    try:
+        changed_at = datetime.fromisoformat(entry["timestamp"])
+        state = await context.interlock_engine.set_enabled(
+            name,
+            enabled=enabled,
+            operator=operator,
+            changed_at=changed_at,
+            request_id=request_id,
+            notice=notice,
+            commit_receipt=commit_receipt,
+        )
+        await asyncio.to_thread(
+            context.experiment_manager.record_interlock_operator_state,
+            interlock_name=name,
+            enabled=enabled,
+            operator=operator,
+            changed_at=state["changed_at"],
+            notice=notice,
+            receipt={"entry": dict(entry), "commit_receipt": dict(commit_receipt)},
+        )
+    except Exception as exc:
+        logger.error(
+            "Receipted interlock toggle could not settle: interlock=%s exception=%s",
+            _bounded_action_label(name),
+            type(exc).__name__,
+        )
+        return {
+            "ok": False,
+            "committed": True,
+            "error_code": "interlock_toggle_reconciliation_failed",
+            "error": "Решение оператора записано, но состояние блокировки не подтверждено.",
+            "retry_safe": False,
+            "entry": entry,
+            "commit_receipt": commit_receipt,
+        }
+    return {
+        "ok": receipt_result.get("ok") is True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": receipt_result.get("publication_state"),
+        "interlock": state,
+        "entry": entry,
+        "commit_receipt": commit_receipt,
+    }
 
 
 async def _interlock_dead_channel_handler(
@@ -4807,6 +4962,14 @@ async def _execute_owned_experiment_command(
         if action in {"experiment_start", "experiment_create"}:
             await _attempt_experiment_reconciliation_async(
                 reconciliation_failures,
+                "interlock_disable_provenance_seed",
+                lambda: asyncio.to_thread(
+                    experiment_manager.sync_interlock_operator_provenance,
+                    context.interlock_engine.get_operator_state(),
+                ),
+            )
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
                 "calibration_acquisition_activate",
                 lambda: asyncio.to_thread(
                     _try_activate_calibration_acquisition,
@@ -5255,6 +5418,14 @@ async def _handle_gui_command(
                 **safety_manager.get_status(),
                 "engine_instance_id": context.engine_instance_id,
             }
+        if action == "interlock_status":
+            if set(cmd) != {"cmd"}:
+                return {"ok": False, "error_code": "interlock_status_invalid"}
+            return {
+                "ok": True,
+                "interlocks": interlock_engine.get_operator_state(),
+                "disabled_interlocks": list(interlock_engine.disabled_interlocks()),
+            }
         if action == "annunciation_status":
             if set(cmd) != {"cmd"}:
                 return {"ok": False, "error": "invalid_annunciation_command"}
@@ -5398,6 +5569,8 @@ async def _handle_gui_command(
                     "error_code": "interlock_unknown",
                     "error": "The requested interlock is unknown.",
                 }
+        if action == "interlock_set_enabled":
+            return await _set_interlock_operator_state(cmd, context=context)
         _leak_resp = await _handle_leak_rate_command(action, cmd, leak_rate_estimator, _leak_cfg, event_logger)
         if _leak_resp is not None:
             return _leak_resp
@@ -6728,6 +6901,8 @@ async def _run_engine(
 
     interlock_handler_context = _InterlockHandlerContext(
         safety_manager=safety_manager,
+        writer=writer,
+        broker=broker,
         alarm_dispatch_tasks=_alarm_dispatch_tasks,
         dead_channel_alarm_sent=set(),
     )
@@ -6747,7 +6922,14 @@ async def _run_engine(
             _interlock_dead_channel_recovery_handler,
             context=interlock_handler_context,
         ),
+        suppressed_handler=functools.partial(
+            _interlock_suppressed_handler,
+            context=interlock_handler_context,
+        ),
+        state_changed_handler=safety_manager.publish_interlock_operator_state,
+        state_path=_DATA_DIR / "interlock_operator_state.json",
     )
+    safety_manager.set_interlock_state_provider(interlock_engine.disabled_interlocks)
     _log_physical_policy_receipt(
         "interlocks",
         interlock_engine.load_config(
@@ -6757,12 +6939,17 @@ async def _run_engine(
             poll_intervals_s_by_instrument={config.driver.name: config.poll_interval_s for config in driver_configs},
         ),
     )
+    await interlock_engine.restore_operator_state()
 
     # ExperimentManager
     experiment_manager = ExperimentManager(
         data_dir=_DATA_DIR,
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
+    )
+    await asyncio.to_thread(
+        experiment_manager.sync_interlock_operator_provenance,
+        interlock_engine.get_operator_state(),
     )
     try:
         _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
