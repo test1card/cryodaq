@@ -344,17 +344,19 @@ def _parse_rows(lines: list[str]) -> tuple[list[str], list[dict[str, float] | No
     reader = csv.DictReader(data_lines)
     rows: list[dict[str, float] | None] = []
     row_positions = [line_number for line_number, _ in data_entries[1:]]
+    numeric_fields = _COLUMNS[1:] if tuple(reader.fieldnames or ()) == _COLUMNS else ("T_avg_K", "G_WK", "R_KW")
     for item in reader:
         try:
+            numeric = {name: float(item.get(name, "")) for name in numeric_fields}
             row = {
-                "temperature_k": float(item.get("T_avg_K", "")),
-                "conductance_wk": float(item.get("G_WK", "")),
-                "resistance_kw": float(item.get("R_KW", "")),
+                "temperature_k": numeric["T_avg_K"],
+                "conductance_wk": numeric["G_WK"],
+                "resistance_kw": numeric["R_KW"],
             }
         except (TypeError, ValueError):
             rows.append(None)
             continue
-        rows.append(row if all(math.isfinite(value) for value in row.values()) else None)
+        rows.append(row if all(math.isfinite(value) for value in numeric.values()) else None)
     return list(reader.fieldnames or []), rows, row_positions
 
 

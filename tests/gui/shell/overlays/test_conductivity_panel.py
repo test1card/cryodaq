@@ -301,6 +301,10 @@ def _descriptor(channel: str) -> ChannelDescriptorV1:
     )
 
 
+def _handle_descriptor_reading(panel: ConductivityPanel, reading: Reading) -> None:
+    panel._handle_reading(reading, _descriptor(reading.channel))
+
+
 def _install_descriptors(panel: ConductivityPanel, channels: list[str]) -> dict[str, ChannelDescriptorV1]:
     descriptors = {
         channel: _descriptor(channel) for channel in [*channels, "Keithley_1/smua/power", "Keithley_1/smub/power"]
@@ -1226,22 +1230,24 @@ def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
         ingress = acquisition + 1.0
         ts = datetime.fromtimestamp(now_wall - offset, tz=UTC)
         for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
-            panel._handle_reading(
+            _handle_descriptor_reading(
+                panel,
                 _temp_reading(
                     channel,
                     value,
                     timestamp=ts,
                     acquisition_started_monotonic=acquisition,
                     bridge_ingress_monotonic=ingress,
-                )
+                ),
             )
-        panel._handle_reading(
+        _handle_descriptor_reading(
+            panel,
             _power_reading(
                 0.012,
                 timestamp=ts,
                 acquisition_started_monotonic=acquisition,
                 bridge_ingress_monotonic=ingress,
-            )
+            ),
         )
 
     # Drive the real predictor exactly as the production refresh tick does, then
@@ -1429,9 +1435,9 @@ def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatc
     assert all(not checkbox.isEnabled() for checkbox in panel._checkboxes.values())
 
     panel._on_power_changed("Keithley_1/smub/power")
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012, channel="Keithley_1/smua/power"))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012, channel="Keithley_1/smua/power"))
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
     panel._auto_step_start = _time.monotonic() - 60.0
 
@@ -1473,9 +1479,9 @@ def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode)
     panel.set_connected(True)
     panel._on_auto_start()
     _DeferredWorker.instances[-1].finish({"ok": True})
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012))
 
     if failure_mode.startswith("sensor_error"):
         reading = _temp_reading(
@@ -1485,10 +1491,10 @@ def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode)
         )
         if failure_mode == "sensor_error_without_provenance":
             reading.metadata.clear()
-        panel._handle_reading(reading)
+        _handle_descriptor_reading(panel, reading)
     elif failure_mode == "power_sensor_error":
-        panel._handle_reading(_power_reading(float("nan"), status=ChannelStatus.SENSOR_ERROR))
-        panel._handle_reading(_power_reading(0.012))
+        _handle_descriptor_reading(panel, _power_reading(float("nan"), status=ChannelStatus.SENSOR_ERROR))
+        _handle_descriptor_reading(panel, _power_reading(0.012))
     else:
         sample_max_age_s = getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0)
         stale_received_at = _time.monotonic() - sample_max_age_s - 1.0
@@ -1502,9 +1508,9 @@ def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode)
     assert panel._auto_step == 0
     assert panel._auto_results == []
     if failure_mode == "power_sensor_error":
-        panel._handle_reading(_temp_reading("Т1", 110.0))
-        panel._handle_reading(_temp_reading("Т2", 100.0))
-        panel._handle_reading(_power_reading(0.012))
+        _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+        _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+        _handle_descriptor_reading(panel, _power_reading(0.012))
         panel._auto_tick()
         assert panel._auto_step == 1
         assert len(panel._auto_results) == 1
@@ -1531,9 +1537,9 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     panel.set_connected(True)
     panel._on_auto_start()
     _DeferredWorker.instances[-1].finish({"ok": True})
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012))
 
     def _fake_get_prediction(ch: str):
         return _StubPrediction(percent_settled=99.0)
@@ -1602,9 +1608,9 @@ def test_real_fsync_failure_keeps_point_unaccepted_and_stops_before_failed_attac
     panel._on_auto_start()
     assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.instances)
     _DeferredWorker.instances[-1].finish({"ok": True})
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012))
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
     panel._auto_step_start = _time.monotonic() - 60.0
 
@@ -2311,6 +2317,95 @@ def test_run_persists_authoritative_descriptor_envelopes(app, monkeypatch) -> No
     ]
 
 
+def test_legacy_readings_cannot_reuse_cached_identity_as_autosweep_evidence(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    descriptors = _install_descriptors(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    target_worker = _DeferredWorker.instances[-1]
+    target_worker.finish({"ok": True})
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = time.monotonic() - 60.0
+
+    readings = (
+        _temp_reading("Т1", 110.0),
+        _temp_reading("Т2", 100.0),
+        _power_reading(0.012),
+    )
+    for reading in readings:
+        panel.on_reading(reading)
+    app.processEvents()
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    assert panel._auto_step_temperature_values == {}
+    assert panel._auto_step_power_value is None
+
+    for reading in readings:
+        panel.on_descriptor_reading(reading, descriptors[reading.channel])
+    app.processEvents()
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
+def test_start_freezes_and_persists_acceptance_settings(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    descriptors = _install_descriptors(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._settled_pct_spin.setValue(96.0)
+    panel._min_wait_spin.setValue(42.0)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+
+    writer = panel._auto_run_writer
+    assert writer is not None
+    assert writer.parameters["stabilization_threshold_pct"] == 96.0
+    assert writer.parameters["minimum_wait_s"] == 42.0
+    running_attachment = _DeferredWorker.all_instances[0]
+    assert running_attachment.cmd["parameters"] == writer.parameters
+    assert panel._settled_pct_spin.isEnabled() is False
+    assert panel._min_wait_spin.isEnabled() is False
+
+    target_worker = _DeferredWorker.instances[-1]
+    target_worker.finish({"ok": True})
+    panel._settled_pct_spin.setValue(99.9)
+    panel._min_wait_spin.setValue(600.0)
+    for reading in (
+        _temp_reading("Т1", 110.0),
+        _temp_reading("Т2", 100.0),
+        _power_reading(0.012),
+    ):
+        panel.on_descriptor_reading(reading, descriptors[reading.channel])
+    app.processEvents()
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=97.0)  # type: ignore[method-assign]
+    panel._auto_step_start = time.monotonic() - 50.0
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
 def test_terminal_attachment_ack_precedes_completion_publication(app, monkeypatch) -> None:
     _DeferredWorker.defer_terminal_attachment = True
     monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
@@ -2413,6 +2508,32 @@ def test_writer_creation_failure_waits_for_pending_stop_then_settles_idle(app, m
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
     assert panel._auto_run_writer is None
+
+
+def test_start_data_directory_failure_never_leaves_sweep_active(app, monkeypatch) -> None:
+    import cryodaq.paths as paths_module
+
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+
+    def _fail_data_directory():
+        raise PermissionError("configured data volume is read-only")
+
+    monkeypatch.setattr(paths_module, "get_data_dir", _fail_data_directory)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_run_writer is None
+    assert panel._auto_run_path is None
+    assert panel._auto_start_btn.isEnabled() is True
+    assert panel._auto_stop_btn.isEnabled() is False
+    assert _DeferredWorker.all_instances == []
+    assert "файл данных не создан" in panel._auto_status_label.text()
 
 
 def test_stop_during_writer_creation_persists_explicit_unbound_before_terminal(app, monkeypatch) -> None:
@@ -2607,7 +2728,7 @@ def test_reconnect_retires_stale_running_attachment_before_fresh_stop(app, monke
     snapshot = read_conductivity_run(panel._auto_run_path)
     assert snapshot.status == "ABORTED"
     assert snapshot.binding_recorded is True
-    assert snapshot.bound_experiment_id is None
+    assert snapshot.bound_experiment_id == "experiment-a"
     assert panel.get_auto_state() == "idle"
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
@@ -2724,9 +2845,9 @@ def test_failed_terminal_intent_survives_stop_failure_and_operator_retry(app, mo
     _ControllablePersistenceWorker.instances[-1].finish()
     target_worker = _DeferredWorker.instances[-1]
     target_worker.finish({"ok": True})
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012))
     assert panel._auto_record_point()
     point_worker = _ControllablePersistenceWorker.instances[-1]
     writer = panel._auto_run_writer
@@ -2818,9 +2939,9 @@ def test_point_effect_order_is_row_checkpoint_ui_accept_then_next_target(app, mo
     monkeypatch.setattr(panel, "_send_auto_cmd", _traced_send)
     panel._min_wait_spin.setValue(10)
     panel._settled_pct_spin.setValue(50.0)
-    panel._handle_reading(_temp_reading("Т1", 110.0))
-    panel._handle_reading(_temp_reading("Т2", 100.0))
-    panel._handle_reading(_power_reading(0.012))
+    _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
+    _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
+    _handle_descriptor_reading(panel, _power_reading(0.012))
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
     panel._auto_step_start = time.monotonic() - 60.0
 

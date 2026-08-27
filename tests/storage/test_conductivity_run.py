@@ -237,6 +237,31 @@ def test_terminal_cannot_publish_row_without_checkpoint(tmp_path) -> None:
         read_conductivity_run(path)
 
 
+@pytest.mark.parametrize("field", ["P_W", "T_hot_K", "T_cold_K", "dT_K", "settled_pct"])
+def test_checkpoint_cannot_authorize_any_nonfinite_durable_point_field(tmp_path, field: str) -> None:
+    path = tmp_path / f"corrupt-{field}.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="run-1",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters={},
+    )
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header_index = next(index for index, line in enumerate(lines) if line.startswith("timestamp_utc,"))
+    row_index = next(index for index, line in enumerate(lines) if line.startswith("2026-08-27T12:00:00"))
+    header = lines[header_index].split(",")
+    row = lines[row_index].split(",")
+    row[header.index(field)] = "nan"
+    lines[row_index] = ",".join(row)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ConductivityRunFormatError, match="invalid row"):
+        read_conductivity_run(path)
+
+
 def test_durable_header_without_start_cannot_fall_back_to_legacy(tmp_path) -> None:
     path = tmp_path / "run.csv"
     path.write_text(

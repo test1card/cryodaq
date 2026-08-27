@@ -338,6 +338,8 @@ class ConductivityPanel(QWidget):
         self._auto_bound_temperature_channels: tuple[str, ...] = ()
         self._auto_bound_descriptors: dict[str, ChannelDescriptorV1] = {}
         self._auto_descriptor_parameters: dict[str, Any] | None = None
+        self._auto_stabilization_threshold_pct: float | None = None
+        self._auto_minimum_wait_s: float | None = None
         self._auto_persistence_error: str | None = None
         self._auto_trailing_write_outcome: str | None = None
         self._auto_experiment_id: str | None = None
@@ -1193,6 +1195,7 @@ class ConductivityPanel(QWidget):
     def _handle_reading(self, reading: Reading, descriptor: ChannelDescriptorV1 | None = None) -> None:
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
+        descriptor_was_supplied = descriptor is not None
         if descriptor is not None:
             try:
                 envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
@@ -1213,14 +1216,13 @@ class ConductivityPanel(QWidget):
                     if self._connected:
                         self._latest_channel_descriptors[ch] = verified
                         self._latest_channel_descriptor_generations[ch] = self._auto_connection_generation
-        if descriptor is None:
-            cached_channel = ch_id or ch
-            if self._latest_channel_descriptor_generations.get(cached_channel) == self._auto_connection_generation:
-                descriptor = self._latest_channel_descriptors.get(cached_channel)
         bound_descriptor = self._auto_bound_descriptors.get(ch_id or ch)
-        if bound_descriptor is not None and (
-            descriptor is None or descriptor.canonical_json != bound_descriptor.canonical_json
-        ):
+        descriptor_matches_bound = (
+            bound_descriptor is not None
+            and descriptor is not None
+            and descriptor.canonical_json == bound_descriptor.canonical_json
+        )
+        if bound_descriptor is not None and descriptor_was_supplied and not descriptor_matches_bound:
             self._reset_auto_temperature_evidence()
             self._auto_step_power_value = None
             self._auto_step_power_received_at = None
@@ -1249,9 +1251,10 @@ class ConductivityPanel(QWidget):
             auto_step_fresh
             and received_at is not None
             and received_at - acquisition_started_monotonic <= self._auto_feed_max_age_s(ch_id or ch)
+            and descriptor_matches_bound
         )
         selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._auto_step_temperature_channels
-        if selected_auto_temperature and not reading.is_usable():
+        if selected_auto_temperature and descriptor_matches_bound and not reading.is_usable():
             self._reset_auto_temperature_evidence()
         if ch_id is not None and reading.unit == "K" and reading.is_usable():
             # Hide the empty-state overlay only when a real temperature
@@ -1277,7 +1280,7 @@ class ConductivityPanel(QWidget):
             if auto_step_current and reading.is_usable():
                 self._auto_step_power_value = reading.value
                 self._auto_step_power_received_at = received_at
-            elif not reading.is_usable():
+            elif descriptor_matches_bound and not reading.is_usable():
                 self._auto_step_power_value = None
                 self._auto_step_power_received_at = None
                 self._reset_auto_temperature_evidence()
@@ -1611,6 +1614,8 @@ class ConductivityPanel(QWidget):
             descriptor.channel_id: descriptor for descriptor in (power_descriptor, *temperature_descriptors)
         }
         self._auto_descriptor_parameters = descriptor_parameters
+        self._auto_stabilization_threshold_pct = float(self._settled_pct_spin.value())
+        self._auto_minimum_wait_s = float(self._min_wait_spin.value())
         return True
 
     def _current_cached_descriptor(self, channel: str) -> ChannelDescriptorV1 | None:
@@ -1625,20 +1630,24 @@ class ConductivityPanel(QWidget):
         self._auto_bound_temperature_channels = ()
         self._auto_bound_descriptors.clear()
         self._auto_descriptor_parameters = None
+        self._auto_stabilization_threshold_pct = None
+        self._auto_minimum_wait_s = None
 
-    def _begin_auto_run_async(self, powers: list[float]) -> bool:
+    def _begin_auto_run_async(self, powers: list[float], data_dir: Path) -> bool:
         """Create the run file off-thread before any source target can change."""
-
-        from cryodaq.paths import get_data_dir
 
         started_at = datetime.now(UTC)
         run_id = f"conductivity-{started_at.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:12]}"
-        path = get_data_dir() / "conductivity_runs" / f"{run_id}.csv"
+        path = data_dir / "conductivity_runs" / f"{run_id}.csv"
         descriptor_parameters = self._auto_descriptor_parameters
-        if descriptor_parameters is None:
+        threshold = self._auto_stabilization_threshold_pct
+        minimum_wait = self._auto_minimum_wait_s
+        if descriptor_parameters is None or threshold is None or minimum_wait is None:
             return False
         parameters = {
             "power_values_w": list(powers),
+            "stabilization_threshold_pct": threshold,
+            "minimum_wait_s": minimum_wait,
             **descriptor_parameters,
         }
         self._auto_run_writer = None
@@ -2079,10 +2088,9 @@ class ConductivityPanel(QWidget):
         if token == pending_token:
             self._auto_pending_token = None
 
-        if (
-            expected_connection_generation != self._auto_connection_generation
-            or expected_operation_generation != self._auto_operation_generation
-            or not self._connected
+        if expected_operation_generation != self._auto_operation_generation or (
+            not reconcile_start_attachment
+            and (expected_connection_generation != self._auto_connection_generation or not self._connected)
         ):
             logger.warning(
                 "Запоздалый ответ автоизмерения проигнорирован: %s, token=%s",
@@ -2259,6 +2267,19 @@ class ConductivityPanel(QWidget):
             return
         if not self._snapshot_auto_selection():
             return
+        from cryodaq.paths import get_data_dir
+
+        try:
+            data_dir = get_data_dir()
+        except OSError as exc:
+            self._on_auto_run_created(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            )
+            return
         self._auto_power_list = powers
         self._auto_step = 0
         self._auto_results = []
@@ -2284,7 +2305,7 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
         self._update_control_enablement()
 
-        if not self._begin_auto_run_async(powers):
+        if not self._begin_auto_run_async(powers, data_dir):
             self._latch_auto_outcome_unknown("Создание файла не поставлено в очередь; мощность не изменена.")
             return
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
@@ -2399,8 +2420,11 @@ class ConductivityPanel(QWidget):
             else:
                 settled_values.append(0.0)
         min_settled = min(settled_values) if settled_values else 0.0
-        threshold = self._settled_pct_spin.value()
-        min_wait = self._min_wait_spin.value()
+        threshold = self._auto_stabilization_threshold_pct
+        min_wait = self._auto_minimum_wait_s
+        if threshold is None or min_wait is None:
+            self._latch_auto_outcome_unknown("Параметры приёмки шага потеряны; переход мощности запрещён.")
+            return
         temperature_ages_are_current = bool(temperature_channels) and all(
             ch in self._auto_step_temperature_values
             and ch in self._auto_step_temperature_received_at
@@ -2801,8 +2825,6 @@ class ConductivityPanel(QWidget):
             self._latest_channel_descriptor_generations.clear()
             self._auto_verified_off_connection_generation = None
         if not connected and self._auto_state == "stabilizing":
-            if self._auto_binding_resolution == "attachment_pending":
-                self._auto_binding_resolution = "unrequested"
             self._auto_pending_token = None
             self._auto_pending_stop_intent = None
             self._auto_terminal_attachment_inflight = False
@@ -2833,6 +2855,8 @@ class ConductivityPanel(QWidget):
         self._auto_start_btn.setEnabled(start_ok)
         self._auto_stop_btn.setEnabled(stop_ok)
         self._power_combo.setEnabled(not active)
+        self._settled_pct_spin.setEnabled(not active)
+        self._min_wait_spin.setEnabled(not active)
         for checkbox in self._checkboxes.values():
             checkbox.setEnabled(not active)
 
