@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -138,7 +139,7 @@ def test_a_long_profile_is_refused_by_the_runner_for_the_contract_reason(monkeyp
             instance._run_owned(object(), soak.profile(name))
 
 
-def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
+def test_the_short_profile_passes_the_selection_boundary(tmp_path, monkeypatch) -> None:
     """The short profile must pass both refusals AND reach the evidence contract.
 
     WHAT THE BOUNDARY IS. Past the two refusals, `_run_owned` inspects the host
@@ -169,6 +170,28 @@ def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
     """
 
     from contextlib import contextmanager
+
+    git_root = tmp_path / "git-root"
+    git_root.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=git_root, check=True)
+    tracked = git_root / "tracked.txt"
+    tracked.write_text("selection-boundary fixture\n", encoding="utf-8")
+    subprocess.run(("git", "add", "tracked.txt"), cwd=git_root, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Soak Selection Test",
+            "-c",
+            "user.email=soak-selection@example.invalid",
+            "commit",
+            "-qm",
+            "seed",
+        ),
+        cwd=git_root,
+        check=True,
+    )
+    monkeypatch.setattr(runner, "_REPO_ROOT", git_root)
 
     class _ManifestBoundaryReached(Exception):
         """Raised by the evidence double exactly at `evidence.write_manifest`."""
