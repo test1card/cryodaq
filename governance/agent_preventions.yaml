@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NIGHTLY-QT-PREREQUISITES-FALSE-GREEN-056
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-PREREQUISITES-055
+    guard: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -7243,12 +7251,12 @@ records:
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: The golden-replay and mock-stack-short-soak nightly jobs' Linux Qt system-library installation steps.
-    classification: default_ci_coverage_escape
+    classification: nightly_qt_linux_runtime_prerequisite
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
     consequence: Either nightly Qt-dependent job can lose a required Linux shared library while its own schedule remains the only execution path, producing collection or launcher failures after a pull request merges.
-    invariant: The golden-replay and mock-stack-short-soak nightly jobs each install libegl1, libgl1, libxkbcommon0, and libdbus-1-3 under the Linux condition before Python dependencies are installed; the default remaining partition executes the guard that verifies this exact job-level contract.
+    invariant: The golden-replay and mock-stack-short-soak nightly jobs each use the eight-minute, noninteractive, cached-index-first bounded apt contract to install libegl1, libgl1, libxkbcommon0, and libdbus-1-3 under the Linux condition before Python dependencies are installed.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry

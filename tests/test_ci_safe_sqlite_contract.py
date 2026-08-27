@@ -128,6 +128,28 @@ def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
 
 _NIGHTLY_QT_JOB_NAMES = ("golden-replay", "mock-stack-short-soak")
 _QT_LINUX_LIBRARIES = ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3")
+_BOUNDED_QT_INSTALL_COMMANDS = (
+    'missing=""',
+    "for package in libegl1 libgl1 libxkbcommon0 libdbus-1-3; do",
+    'dpkg -s "$package" >/dev/null 2>&1 || missing="$missing $package"',
+    "done",
+    'if [ -z "$missing" ]; then',
+    'echo "Qt offscreen libraries already present; nothing to fetch"',
+    "else",
+    'echo "missing:$missing"',
+    'apt_options="-o DPkg::Lock::Timeout=180"',
+    'apt_options="$apt_options -o Acquire::http::Timeout=15"',
+    'apt_options="$apt_options -o Acquire::https::Timeout=15"',
+    'apt_options="$apt_options -o Acquire::Retries=2"',
+    "if sudo apt-get $apt_options install -y $missing; then",
+    'echo "installed from the package index already on the image"',
+    "else",
+    'echo "the index on the image did not satisfy$missing; refreshing it"',
+    "sudo apt-get $apt_options update",
+    "sudo apt-get $apt_options install -y $missing",
+    "fi",
+    "fi",
+)
 
 
 def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
@@ -154,7 +176,7 @@ def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
 
 
 def _assert_nightly_qt_prerequisites(text: str) -> None:
-    """Require each Qt lane to install its libraries, rather than merely name them."""
+    """Require each Qt lane to use the proven bounded installation contract."""
 
     for job_name in _NIGHTLY_QT_JOB_NAMES:
         install, dependencies, step = _nightly_qt_install_step(text, job_name)
@@ -162,12 +184,18 @@ def _assert_nightly_qt_prerequisites(text: str) -> None:
         assert step.get("if") == "runner.os == 'Linux'", (
             f"{job_name} install step must be gated by `runner.os == 'Linux'`, found {step.get('if')!r}"
         )
-        expected_commands = [
-            "sudo apt-get update",
-            "sudo apt-get install -y " + " ".join(_QT_LINUX_LIBRARIES),
+        assert step.get("timeout-minutes") == 8, (
+            f"{job_name} install step must retain its eight-minute timeout, found {step.get('timeout-minutes')!r}"
+        )
+        assert step.get("env") == {"DEBIAN_FRONTEND": "noninteractive"}, (
+            f"{job_name} install step must set noninteractive package installation, found {step.get('env')!r}"
+        )
+        commands = [
+            line.strip() for line in step["run"].splitlines() if line.strip() and not line.lstrip().startswith("#")
         ]
-        commands = [line.strip() for line in step["run"].splitlines() if line.strip()]
-        assert commands == expected_commands, f"{job_name} must use the exact fail-closed Qt installation command block"
+        assert commands == list(_BOUNDED_QT_INSTALL_COMMANDS), (
+            f"{job_name} must use the exact bounded Qt installation command block"
+        )
 
 
 def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
@@ -178,22 +206,29 @@ def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> No
 
 
 def test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed() -> None:
-    """The guard must reject named-only libraries and an early successful exit."""
+    """The guard must reject named-only libraries, early exits, and an absent bound."""
 
     text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
-    install = "sudo apt-get install -y " + " ".join(_QT_LINUX_LIBRARIES)
-    assert text.count(install) == len(_NIGHTLY_QT_JOB_NAMES)
+    install = "sudo apt-get $apt_options install -y $missing"
+    assert text.count(install) == 2 * len(_NIGHTLY_QT_JOB_NAMES)
     mutated = text.replace(install, "echo " + " ".join(_QT_LINUX_LIBRARIES))
 
-    with pytest.raises(AssertionError, match="exact fail-closed"):
+    with pytest.raises(AssertionError, match="exact bounded"):
         _assert_nightly_qt_prerequisites(mutated)
 
-    update = "sudo apt-get update"
+    update = "sudo apt-get $apt_options update"
     assert text.count(update) == len(_NIGHTLY_QT_JOB_NAMES)
     early_exit = text.replace(update, update + "\n          exit 0")
 
-    with pytest.raises(AssertionError, match="exact fail-closed"):
+    with pytest.raises(AssertionError, match="exact bounded"):
         _assert_nightly_qt_prerequisites(early_exit)
+
+    timeout = "        timeout-minutes: 8\n"
+    assert text.count(timeout) == len(_NIGHTLY_QT_JOB_NAMES)
+    unbounded = text.replace(timeout, "")
+
+    with pytest.raises(AssertionError, match="eight-minute timeout"):
+        _assert_nightly_qt_prerequisites(unbounded)
 
 
 def test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed() -> None:
