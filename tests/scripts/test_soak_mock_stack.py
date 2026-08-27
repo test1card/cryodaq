@@ -322,6 +322,12 @@ def test_redaction_covers_nested_logs_urls_assignments_bearer_and_adjacent_argv(
         assert secret not in encoded
 
 
+def _runner_instrument() -> str:
+    from scripts import soak_mock_stack_runner as runner
+
+    return runner._ISOLATED_MOCK_INSTRUMENT_NAME
+
+
 def _source_fixture() -> dict[str, object]:
     files = (
         "agent.yaml",
@@ -356,7 +362,10 @@ def _source_fixture() -> dict[str, object]:
     )
     return {
         "schema": "cryodaq-soak-source-fixture/v1",
-        "instrument_id": "LS218_1",
+        # Read from the runner rather than written as a literal: a literal here is how the
+        # emitted fixture and the validator drifted apart in the first place, with every
+        # manifest test staying green while the real runner emitted a different instrument.
+        "instrument_id": _runner_instrument(),
         "authority": "passive_measurement",
         "mock": True,
         "descriptor_count": 16,
@@ -435,6 +444,12 @@ def _qualification_samples() -> list[dict[str, object]]:
         elapsed = sample["elapsed_s"]
         if elapsed >= 190:
             sample["roles"]["engine"].update({"pid": 21, "started_ns": 210, "epoch": 1})
+            # THE BRIDGE GOES WITH IT. Every scheduled engine replacement shuts the bridge
+            # down and starts another, because a new child must not inherit an old
+            # transport. This fixture showed the engine replaced and the bridge untouched,
+            # which is a run that cannot happen -- and it was the baseline several tests
+            # called clean.
+            sample["roles"]["bridge"].update({"pid": 31, "started_ns": 310, "epoch": 1})
         if elapsed >= 305:
             sample["roles"]["assistant"].update({"pid": 23, "started_ns": 230, "epoch": 1})
     return samples
@@ -1040,7 +1055,59 @@ def test_faults_are_exactly_correlated_to_sample_transitions_and_injection_contr
     launcher_restart = json.loads(json.dumps(samples))
     launcher_restart[-1]["roles"]["launcher"].update({"epoch": 1, "pid": 110, "started_ns": 1100})
     errors = soak._validate_faults(faults, selected, launcher_restart)
-    assert "launcher or bridge restarted during fault qualification" in errors
+    assert "launcher restarted during fault qualification" in errors
+
+
+def test_a_bridge_replacement_is_expected_only_while_an_engine_fault_recovers() -> None:
+    """The bridge was forbidden outright, which was right until the engine could restart.
+
+    An engine replacement replaces the bridge on purpose -- a new child must not inherit an
+    old transport -- so this contract makes the same distinction the evidence stream makes.
+    A bridge transition inside a scheduled engine fault's recovery window is expected; one
+    anywhere else is still exactly the defect the old refusal was written for.
+    """
+
+    selected = soak.profile("short")
+    samples = _qualification_samples()
+    faults = _faults()
+    engine_fault_s = next(float(record["observed_s"]) for record in faults if record["target"] == "engine")
+
+    def _with_bridge_change_at(threshold: float) -> list[dict]:
+        """The baseline already replaces the bridge with the engine; MOVE that one."""
+
+        changed = json.loads(json.dumps(samples))
+        for sample in changed:
+            row = sample["roles"]["bridge"]
+            if float(sample["elapsed_s"]) >= threshold:
+                row.update({"epoch": 1, "pid": 131, "started_ns": 1310})
+            else:
+                row.update({"epoch": 0, "pid": 13, "started_ns": 130})
+        return changed
+
+    accompanying = _with_bridge_change_at(engine_fault_s + 1.0)
+    assert soak._validate_faults(faults, selected, accompanying) == [], (
+        "a bridge replaced while the engine fault recovers is what an engine restart does"
+    )
+
+    # Far from any engine fault: the original defect, and it must still be refused. Two
+    # complaints are correct here, and both are true: this replacement accompanies no
+    # fault, and that fault has no accompanying replacement.
+    stray = _with_bridge_change_at(engine_fault_s + soak.RECOVERY_CEILING_S + 30.0)
+    errors = soak._validate_faults(faults, selected, stray)
+    assert any("bridge restarted outside" in error for error in errors), errors
+    assert any("not accompanied by exactly one" in error for error in errors), errors
+
+    # And an engine fault with NO replacement at all -- the gap a count ceiling missed.
+    none_at_all = json.loads(json.dumps(samples))
+    for sample in none_at_all:
+        sample["roles"]["bridge"].update({"epoch": 0, "pid": 13, "started_ns": 130})
+    errors = soak._validate_faults(faults, selected, none_at_all)
+    assert any("not accompanied by exactly one" in error for error in errors), errors
+
+    # And a launcher transition has no such exception at all.
+    launcher_restart = json.loads(json.dumps(samples))
+    launcher_restart[-1]["roles"]["launcher"].update({"epoch": 1, "pid": 110, "started_ns": 1100})
+    assert "launcher restarted during fault qualification" in soak._validate_faults(faults, selected, launcher_restart)
 
 
 @_POSIX_EVIDENCE
@@ -1228,7 +1295,7 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
         def require_platform() -> None:
             return None
 
-        def run(self, evidence: soak.Evidence) -> None:
+        def run(self, evidence: soak.Evidence, selected=None) -> None:
             evidence.write_manifest(
                 {
                     "profile": "short",
@@ -1302,7 +1369,7 @@ class FakeRunner:
     def require_platform():
         return None
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         from scripts import soak_mock_stack as soak
         if type(evidence) is not soak.Evidence:
             raise TypeError("evidence must be the exact Evidence type")
@@ -1357,7 +1424,7 @@ class MustNotRun:
     def require_platform():
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("require-platform")
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("run")
 
 runner._PosixSoakRunner = MustNotRun

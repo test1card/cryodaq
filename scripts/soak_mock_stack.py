@@ -262,17 +262,74 @@ def classify_tree(
     if bridge_identity is None:
         raise ValueError("positive bridge identity is unavailable")
     bridge = tree.get(bridge_identity)
-    if bridge is None or bridge.parent_pid != root.pid:
-        raise ValueError("positive bridge identity is not a direct launcher child")
+    if bridge is None:
+        raise ValueError("positive bridge identity is absent from observed tree")
+
+    # Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+    # 3.14.6, so a multiprocessing child is forked from a fork-server process that is
+    # itself a direct child of the launcher. Two consequences here, and BOTH refused the
+    # whole run: the bridge is not a direct child any more, and the fork server itself is
+    # a descendant whose argv matches no role, so it read as an unclassified process.
+    #
+    # The property this function proves is unchanged -- every live descendant is accounted
+    # for and belongs to this launcher. The fork server is accounted for BY NAME rather
+    # than excused, so an unexpected descendant still refuses.
+    #
+    # THE NAME ALONE IS NOT ENOUGH, and this was measured rather than reasoned about. A
+    # process forked BY the fork server inherits the fork server's command line EXACTLY:
+    # on the laboratory interpreter the fork server and the child it forked print
+    # byte-identical argv. So `multiprocessing.forkserver` appears in the argv of the fork
+    # server AND of every child it makes, the bridge included. Matching on the token alone
+    # would excuse every multiprocessing child from role classification by name, and then
+    # "an unexpected descendant still refuses" would be false for exactly the descendants
+    # this check exists to catch.
+    #
+    # Only the PARENT separates them: the fork server and the resource tracker are direct
+    # children of the launcher, their children are not. Both sets below therefore require
+    # a direct child of the root, which is the same requirement the runner's
+    # `_forkserver_of` makes, so the two implementations prove the same property instead
+    # of one proving a weaker one.
+    # multiprocessing starts TWO helper processes, not one: the fork server and the
+    # resource tracker. Both are launched with `-c` and name their module inside that
+    # code string, and both are descendants of this launcher with no role of their own.
+    # Measured on the laboratory machine: accepting only the fork server left
+    # `unclassified descendant process: pid 801 argv ['python', '-B', '-s', '-c']`, which
+    # is the tracker. Naming both is what accounts for them; excusing every `-c` child
+    # would not.
+    infrastructure = {
+        identity
+        for identity, item in tree.items()
+        if identity != root
+        and item.parent_pid == root.pid
+        and any(
+            module in argument
+            for argument in item.argv
+            for module in ("multiprocessing.forkserver", "multiprocessing.resource_tracker")
+        )
+    }
+    forkservers = {
+        identity
+        for identity, item in tree.items()
+        if identity in infrastructure and any("multiprocessing.forkserver" in argument for argument in item.argv)
+    }
+    if bridge.parent_pid != root.pid and not any(bridge.parent_pid == identity.pid for identity in forkservers):
+        raise ValueError(
+            "positive bridge identity is neither a launcher child nor a fork-server child: "
+            f"bridge parent {bridge.parent_pid}, launcher {root.pid}, "
+            f"fork servers {sorted(identity.pid for identity in forkservers)}"
+        )
     if exact_process_role(bridge.argv) is not None:
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
     for identity, item in tree.items():
-        if identity in {root, bridge_identity}:
+        if identity in {root, bridge_identity} or identity in infrastructure:
             continue
         role = exact_process_role(item.argv)
         if role is None:
-            raise ValueError("unclassified descendant process")
+            raise ValueError(
+                f"unclassified descendant process: pid {identity.pid} parent {item.parent_pid} "
+                f"argv {[argument[:120] for argument in item.argv]}"
+            )
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
@@ -1074,6 +1131,40 @@ def _validate_periodic_delivery_payload(
     return errors, tuple(artifact_names)
 
 
+# The empty template directory and the POPULATED theme directory. The second exists
+# because the launcher resolves a theme at import, so a fixture without the packs cannot
+# start the program at all; see the runner's own note beside its tracked-directory list.
+_EXPECTED_FIXTURE_DIRECTORIES = {"experiment_templates", "themes"}
+# Only ONE of those two may hold files. `experiment_templates` is sealed EMPTY by the
+# runner, so a member of it in an accepted manifest means the manifest and the seal
+# disagree. Treating both directories alike made the theme-presence check satisfiable by
+# a stray template member -- a guard that guards nothing.
+_POPULATED_FIXTURE_DIRECTORY = "themes"
+
+
+def _is_tracked_directory_member(path: str) -> bool:
+    """True for a file one level inside the POPULATED sealed directory."""
+
+    head, separator, tail = path.partition("/")
+    return bool(separator) and head == _POPULATED_FIXTURE_DIRECTORY and bool(tail) and "/" not in tail
+
+
+def _expected_fixture_instrument() -> str:
+    """The instrument the RUNNER actually seals, read from the runner itself.
+
+    This was a hard-coded "LS218_1" and the runner moved to LS218_2, so the validator
+    rejected the exact payload the runner now writes -- and no test saw it, because every
+    manifest test hand-builds the payload. The soak would have run its full duration and
+    then failed its own verdict step. Reading the constant is what makes the two sides
+    unable to drift again; the module already imports the runner lazily elsewhere, so this
+    adds no new coupling.
+    """
+
+    from scripts import soak_mock_stack_runner as runner
+
+    return runner._ISOLATED_MOCK_INSTRUMENT_NAME
+
+
 def _validate_source_fixture(payload: object) -> list[str]:
     expected_files = {
         "agent.yaml",
@@ -1103,19 +1194,23 @@ def _validate_source_fixture(payload: object) -> list[str]:
     if type(payload) is not dict or set(payload) != expected_top:
         return ["source fixture schema is invalid"]
     entries = payload.get("entries")
-    if not isinstance(entries, list) or len(entries) != len(expected_files) + 1:
+    if not isinstance(entries, list) or not entries:
         return ["source fixture entries are invalid"]
+    # The fixture carries a POPULATED tracked directory as well as the empty template one,
+    # so the topology is checked by SHAPE rather than by a fixed entry count: the count
+    # would otherwise have to know how many theme packs the tracked tree happens to hold,
+    # and the two numbers drifted apart the moment the packs were added.
     paths: list[str] = []
     for entry in entries:
         if type(entry) is not dict or not isinstance(entry.get("path"), str):
             return ["source fixture entry schema is invalid"]
         path = entry["path"]
         paths.append(path)
-        if path == "experiment_templates":
+        if path in _EXPECTED_FIXTURE_DIRECTORIES:
             if entry != {"path": path, "kind": "directory"}:
                 return ["source fixture directory entry is invalid"]
         elif (
-            path not in expected_files
+            (path not in expected_files and not _is_tracked_directory_member(path))
             or set(entry) != {"path", "kind", "bytes", "sha256"}
             or entry.get("kind") != "file"
             or type(entry.get("bytes")) is not int
@@ -1131,11 +1226,14 @@ def _validate_source_fixture(payload: object) -> list[str]:
             json.dumps(canonical_entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         ).hexdigest()
     )
+    theme_members = {path for path in paths if _is_tracked_directory_member(path)}
     if (
         paths != sorted(paths)
-        or set(paths) != expected_files | {"experiment_templates"}
+        or len(paths) != len(set(paths))
+        or set(paths) != expected_files | _EXPECTED_FIXTURE_DIRECTORIES | theme_members
+        or not theme_members
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
-        or payload.get("instrument_id") != "LS218_1"
+        or payload.get("instrument_id") != _expected_fixture_instrument()
         or payload.get("authority") != "passive_measurement"
         or payload.get("mock") is not True
         or payload.get("descriptor_count") != 16
@@ -1480,24 +1578,57 @@ def _validate_faults(
                     )
                 )
             previous = current
-    if any(role in {"launcher", "bridge"} for role, *_ in transitions):
-        errors.append("launcher or bridge restarted during fault qualification")
+    # A LAUNCHER transition is still always a defect: nothing in this profile replaces it.
+    if any(role == "launcher" for role, *_ in transitions):
+        errors.append("launcher restarted during fault qualification")
+
     expected_transitions: list[tuple[str, float, tuple[int, int], tuple[int, int]]] = []
+    engine_fault_times: list[float] = []
     for record in records:
-        if str(record.get("target")) not in {"engine", "assistant"}:
+        target = str(record.get("target"))
+        if target not in {"engine", "assistant"}:
             continue
         try:
+            observed_s = float(record["observed_s"])
             expected_transitions.append(
                 (
-                    str(record["target"]),
-                    float(record["observed_s"]),
+                    target,
+                    observed_s,
                     (int(record["pre_pid"]), int(record["pre_started_ns"])),
                     (int(record["replacement_pid"]), int(record["replacement_started_ns"])),
                 )
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             errors.append("fault transition correlation schema is invalid")
-    for role, transition_s, old_identity, new_identity in transitions:
+            continue
+        if target == "engine":
+            engine_fault_times.append(observed_s)
+
+    # A BRIDGE transition used to be a defect without exception, which was right while an
+    # owned engine could never restart. It can now, and every engine replacement replaces
+    # the bridge on purpose -- a new child must not inherit an old transport -- so this
+    # contract has to make the same distinction the evidence stream makes: a bridge
+    # replacement that ACCOMPANIES a scheduled engine fault is expected, and one that
+    # happens anywhere else is still exactly the defect this refusal was written for.
+    # ONE-TO-ONE, IN BOTH DIRECTIONS. A ceiling on the count only catches an excess, so an
+    # engine fault with NO bridge replacement still passed -- and that is not a cosmetic
+    # gap: every scheduled engine replacement shuts the bridge down and starts another,
+    # because a new child must not inherit an old transport. A run whose evidence shows the
+    # engine replaced and the bridge untouched did not do what the launcher does.
+    bridge_transitions = [item for item in transitions if item[0] == "bridge"]
+    for _role, transition_s, _old_identity, _new_identity in bridge_transitions:
+        accompanying = [
+            fault_s for fault_s in engine_fault_times if fault_s < transition_s <= fault_s + RECOVERY_CEILING_S
+        ]
+        if len(accompanying) != 1:
+            errors.append("bridge restarted outside any scheduled engine fault recovery")
+    for fault_s in engine_fault_times:
+        replacements = [item for item in bridge_transitions if fault_s < item[1] <= fault_s + RECOVERY_CEILING_S]
+        if len(replacements) != 1:
+            errors.append("engine fault is not accompanied by exactly one bridge replacement")
+
+    role_transitions = [item for item in transitions if item[0] in {"engine", "assistant"}]
+    for role, transition_s, old_identity, new_identity in role_transitions:
         candidates = [
             item
             for item in expected_transitions
@@ -1508,7 +1639,7 @@ def _validate_faults(
         ]
         if len(candidates) != 1:
             errors.append(f"{role} sample transition is phantom, unscheduled, or ambiguous")
-    if len(transitions) != len(expected_transitions):
+    if len(role_transitions) != len(expected_transitions):
         errors.append("fault ledger and sample epoch transitions are not one-to-one")
     return errors
 
@@ -2649,7 +2780,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, interrupt_handler)
-        runner._PosixSoakRunner().run(evidence)
+        # Pass the profile this function selected. It used not to be passed at all, and the
+        # runner chose its own.
+        #
+        # SAY WHAT THIS DOES AND DOES NOT DO. Today the refusal above returns 3 for every
+        # profile but the short one, so `selected` here is ALWAYS the short profile and
+        # this call cannot yet carry another. Saying the request was "silently ignored"
+        # would be false: it is refused, loudly, before it reaches this line. What was
+        # true is that the runner would have ignored it had the refusal been lifted, and
+        # that is the trap being removed ahead of lifting it.
+        runner._PosixSoakRunner().run(evidence, selected)
         return 0
     except RunInterrupted as exc:
         evidence.finish_fail(

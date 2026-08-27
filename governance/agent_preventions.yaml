@@ -43,7 +43,6 @@ default_ci_jobs:
   remaining:
     - test (ubuntu-latest, remaining)
     - test (windows-latest, remaining)
-
 false_green_pair_semantics:
   status: required_and_linked
   scope: inherited_from_runtime_prevention_id
@@ -223,6 +222,142 @@ false_green_pairs:
     guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
     ci_partition: agents
     red_evidence: three_separate_nodes_stepped_the_clock_forward_without_refiring_the_alarm_so_seen_went_stale_and_the_ordinary_quiet_for_a_full_window_branch_admitted_the_dispatch_while_the_escalation_and_retry_branches_under_test_were_never_reached_the_helper_flap_quietly_now_carries_the_refires_so_they_cannot_be_omitted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-LATE-DELIVERY-PRUNE-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
+    ci_partition: agents
+    red_evidence: cross_alarm_pruning_used_only_source_activity_so_a_delivery_one_second_old_was_deleted_when_another_alarm_dispatched_and_the_next_refire_was_admitted_as_new_2026_08_15
+    green_evidence: pending
+  - id: NARRATION-GUARD-BACKPRESSURE-REARM-FALSE-GREEN-343
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap
+    ci_partition: agents
+    red_evidence: restoring the pre_68d2a284 late_delivery_rearm production logic made test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap fail its final admission assertion while the restored file compiled_2026_08_15_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-ORDINARY-UNREADABLE-HOLD-FALSE-GREEN-344
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_ordinary_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence
+    ci_partition: gui
+    red_evidence: the_replacement_recovery_guard_passed_while_the_ordinary_health_handler_reentered_immutable_malformed_shutdown_evidence_on_every_tick_2026_08_24
+    green_evidence: pending
+  - id: LAUNCHER-CONFIG-ERROR-WORKER-REPOLL-FALSE-GREEN-345
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_config_error_health_handler_keeps_polling_a_running_shutdown_worker
+    ci_partition: gui
+    red_evidence: the_existing_config_error_guards_passed_while_exit_code_2_latched_giving_up_before_a_running_shutdown_worker_settled_so_the_health_callback_never_polled_that_progress_capable_owner_again_2026_08_24
+    green_evidence: pending
+  - id: LAUNCHER-HEALTH-WORKER-RECEIPT-BYPASS-FALSE-GREEN-346
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_health_tick_validates_a_finished_worker_receipt_before_retirement
+    ci_partition: gui
+    red_evidence: the_existing_receipt_and_transport_health_guards_passed_while_a_finished_worker_result_was_retired_without_receipt_or_exit_validation_3_new_regressions_failed_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-DIRECT-STOP-INVALID-EVIDENCE-LOSS-FALSE-GREEN-347
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
+    ci_partition: remaining
+    red_evidence: normal_quit_cleared_the_finished_worker_before_strict_receipt_validation_rejected_its_concrete_result_3_new_regressions_failed_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-IMMUTABLE-CONCRETE-RETRY-LIVELOCK-FALSE-GREEN-348
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_finished_invalid_concrete_result_latches_terminal_hold_without_rescheduling
+    ci_partition: gui
+    red_evidence: replacement_recovery_scheduled_another_200_ms_pass_for_a_finished_worker_whose_invalid_concrete_result_could_never_change_3_new_regressions_failed_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-READER-SETTLEMENT-FALSE-GREEN-349
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
+    ci_partition: remaining
+    red_evidence: the_registry_named_a_deleted_normal_quit_guard_and_omitted_the_reader_settlement_failure_guard_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-LIVE-CHILD-REAP-FALSE-GREEN-350
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression
+    ci_partition: remaining
+    red_evidence: exact_head_80e826fb_left_the_live_engine_unreaped_and_the_guard_failed_on_terminate_calls_zero_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-RAISING-DECISION-FALSE-GREEN-351
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive
+    ci_partition: remaining
+    red_evidence: exact_d4c5fb70_retried_forever_after_poll_exception_with_zero_terminate_or_kill_attempts_and_the_updated_guard_failed_before_the_owned_reap_machine_armed_2026_08_25
+    green_evidence: exact_candidate_focused_lifecycle_13_passed_and_the_production_file_reversion_control_failed_then_restored_byte_exact_and_passed_2026_08_25
+  - id: LAUNCHER-CONSTRUCTION-LIVE-CHILD-REAP-FALSE-GREEN-352
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STARTUP-AUTHORITY-002
+    guard: tests/test_launcher_shutdown_ownership.py::test_construction_rollback_never_suppresses_over_a_live_engine
+    ci_partition: remaining
+    red_evidence: restoring_the_construction_failure_exemption_left_the_spawned_child_alive_and_failed_the_guard_2026_08_25
+    green_evidence: focused_guard_1_passed_shutdown_ownership_44_passed_and_adjacent_launcher_set_67_passed_2026_08_25
+  - id: LAUNCHER-REPLACEMENT-POLL-OWNER-ESCAPE-FALSE-GREEN-353
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold
+    ci_partition: gui
+    red_evidence: reverting_launcher_py_at_b6eb7a9_let_the_replacement_poll_exception_escape_before_any_owner_bound_callback_or_owned_hold_latch_and_two_guards_failed_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-MULTI-OWNER-REAPER-BYPASS-FALSE-GREEN-354
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps
+    ci_partition: remaining
+    red_evidence: live_engine_unreaped_when_assistant_and_engine_failed_together_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-REJECTED-RECEIPT-CLEAN-EXIT-LIVELOCK-FALSE-GREEN-355
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_reconciled_malformed_reply_on_a_clean_exit_reaches_reader_settled_hold
+    ci_partition: remaining
+    red_evidence: the_same_rejected_receipt_was_repolled_and_terminal_readers_never_settled_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-PUBLISHED-RECEIPT-RAISING-POLL-FALSE-GREEN-356
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_published_receipt_with_raising_poll_is_bounded_not_polled_forever
+    ci_partition: remaining
+    red_evidence: exact_pre_fix_7ab833f8_left_terminal_quit_reap_state_absent_after_a_validated_receipt_and_persistent_poll_exception_2026_08_25
+    green_evidence: exact_candidate_34da3848_passed_154_focused_tests_on_windows_and_ubuntu_22_04_2026_08_25
+  - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_does_not_reset_source_activity_for_returning_alarm
+    ci_partition: agents
+    red_evidence: the_t_0_admission_t_10_suppression_t_35_late_delivery_t_41_return_control_stayed_FALSE_when_confirmed_delivery_refreshed_activity_and_the_returning_source_event_was_lost_2026_08_13
+    green_evidence: pending
+  - id: NARRATION-GUARD-QUIET-GAP-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
+    ci_partition: agents
+    red_evidence: the_quiet_gap_regression_was_green_with_the_suppression_defect_restored_so_the_suite_missed_that_a_quiet_gap_must_clear_suppression_before_escalation_retirement_2026_08_13
     green_evidence: pending
   - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
     status: open
@@ -3057,6 +3192,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-REPLY-COUNT-FALSE-GREEN-249
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
+    ci_partition: core
+    red_evidence: an_always_false_reply_count_predicate_passed_only_the_negative_loss_test_while_the_positive_exact_count_control_was_unmapped_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: MONTANA-METRICS-SNAPSHOT-FALSE-GREEN-239
     status: open
     scope: repository
@@ -3250,6 +3393,269 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: CONDUCTIVITY-GUARD-ACQUISITION-CUT-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
+      sha256: sha256:5c86df35ead7fd1d341814b8e5426391cfb9301fea85d2cbb92145f1a2af2fd7
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
+      sha256: sha256:3aa74ab9b75463ed7f550387125ee7d1490568b51fd3145c85098d8180a892a8
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
+      sha256: sha256:ce7d9e552bb0faddb528974c0831eb819ef890216016b619bef315413c2186cc
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
+      sha256: sha256:5c4c2bf65344ad269e904131c397ba086924234abfb066a5a314ab3ab031cf3f
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_keithley_acquisition_false_green_081.json
+      sha256: sha256:5c8451e01643dc2a16f46016476450fc5ba786274f4b68ac1595ef345a77111c
+    green_evidence: pending
+  - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+    ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_independent_report_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_skip_second_power_and_queued_first_point_were_accepted_as_the_second_thermal_point
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-ENGINE-CLI-FORWARDING-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_engine_main_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-RUN-ENGINE-FORWARDING-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_run_engine_to_load_drivers_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-CONNECT-SETTLEMENT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+    ci_partition: remaining
+    red_evidence: exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_independent_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_initial_zero_failure_preceded_connect_cleanup_and_left_connect_in_progress_permanently_true_while_the_remaining_suite_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ALREADY-LATCHED-OFF-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898479_and_guard_red_the_failed_target_update_returned_before_the_concurrent_already_latched_external_OFF_side_effect_settled
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ENDPOINT-CONSTRUCTION-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898486_and_guard_red_direct_construction_accepted_a_remote_host_and_unbounded_ports_while_parser_only_guards_stayed_green_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_localhost_literal_was_accepted_without_peer_resolution_proof
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-HEATER-IDENTITY-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+    ci_partition: remaining
+    red_evidence: exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_and_guard_red_the_external_plant_received_0_5_W_from_smua_0_2_W_plus_smub_0_3_W_while_the_shipped_calculator_consumed_only_smua_power_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_and_guard_red_a_renamed_Keithley_aux_smua_received_the_external_client_and_applied_0_0_then_0_2_W_while_the_shipped_calculator_consumed_only_Keithley_1_smua
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-THERMOMETER-IDENTITY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+    ci_partition: remaining
+    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_rebinding_to_a_future_auxiliary_LakeShore_left_the_closed_enumeration_guard_green_and_remapped_hot_cold_LS218_1_channel_labels_were_accepted_and_bound_the_plant_while_the_older_enumeration_guard_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-INCOMPLETE-ROSTER-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_guards_always_constructed_a_complete_canonical_roster_so_a_roster_omitting_or_renaming_either_Keithley_1_or_LS218_1_could_accept_the_run_without_the_engine_drivers_ever_proving_the_external_client_could_bind_the_full_plant
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-CLIENT-TIMEOUT-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_per_call_timeout_ms_was_ignored_so_a_quiet_loopback_endpoint_could_hang_past_the_deadline_while_the_registered_guards_only_exercised_the_client_default_timeout
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-LAKESHORE-TIMEOUT-FALSE-GREEN-011
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_lakeshore_external_query_dropped_the_per_call_timeout_ms_so_the_configured_read_timeout_was_not_honored_on_the_external_path_while_the_registered_guards_only_asserted_instrument_identity
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-READY-FILE-FALSE-GREEN-012
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_ready_file_was_written_in_place_so_a_launcher_polling_by_existence_could_read_a_partially_written_document_while_no_registered_guard_asserted_atomic_publish
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-PRODUCER-CONSUMER-DRIFT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-FRAME-ADMISSION-001
+    guard: tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer
+    ci_partition: agents
+    red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
+    green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: LAUNCHER-STALE-OWNER-SUCCESSOR-SIDE-EFFECT-FALSE-GREEN-357
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot
+    ci_partition: gui
+    red_evidence: exact_pre_fix_8cead1f1ebbb707182f02824d476e3d275c0a6c9_with_strengthened_effect_observing_guard_drove_the_queued_successor_and_failed_call_count_3_not_1_exit_1_2026_08_26
+    green_evidence: pending_exact_candidate_and_hosted_gui_partition
+  - id: LAUNCHER-SHUTDOWN-TRANSACTION-BINDING-FALSE-GREEN-358
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_owner_bound_settlement_callback_is_inert_after_shutdown_transaction_changes
+    ci_partition: gui
+    red_evidence: exact_1e4ea5beea2acf2ad90739d1dc22754a91286837_tree_92c5de242be973074bd2114202d79305eb4445f7_github_codex_finding_3863342340_the_owner_and_deduplication_tuple_omitted_shutdown_request_id_and_capability_while_prior_registered_guards_stayed_green_pending_exact_guard_red_control
+    green_evidence: pending_exact_corrected_commit_tree_guard_blob_stdout_stderr_digest_and_sealed_hosted_gui_artifact
+  - id: LAUNCHER-IMMUTABLE-WORKER-LIVE-CHILD-REAP-FALSE-GREEN-359
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_live_child_with_immutable_finished_worker_enters_bounded_reaping
+    ci_partition: gui
+    red_evidence: exact_1e4ea5beea2acf2ad90739d1dc22754a91286837_tree_92c5de242be973074bd2114202d79305eb4445f7_github_codex_finding_3863342356_a_finished_immutable_rejected_worker_blocked_every_process_supervisor_and_stranded_the_live_child_while_prior_registered_guards_stayed_green_plus_final_cold_review_at_59148a502fa1d32ff5c9563f6046b053b94d5c48_tree_ff1694fb5eb88874dc073931e286dffbbc4c0329_found_both_that_the_registered_guard_covered_only_readable_alive_poll_and_not_the_same_immutable_worker_with_unobservable_poll_and_that_the_immediate_readable_live_route_falsely_logged_an_unobservable_supervision_budget_as_spent_when_no_budget_elapsed_plus_final_cold_review_at_4b721e508396606346720437705c83c54cea1524_tree_bbdee26d7845242aba461090968b69f76132260d_found_all_six_immutable_evidence_and_poll_shape_variants_left_both_the_old_watch_callback_and_new_bounded_reap_callback_live_pending_exact_guard_red_control
+    green_evidence: pending_exact_corrected_commit_tree_guard_blob_stdout_stderr_digest_and_sealed_hosted_gui_artifact
+  - id: LAUNCHER-LIVE-SOURCE-RESTART-AUTHORITY-FALSE-GREEN-360
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_owned_live_observed_exit_latches_permanent_hold_before_reaping
+    ci_partition: remaining
+    red_evidence: exact_ff4c4909440ef81d216e60314fca51b94c9d7a5a_with_only_the_six_new_guard_nodes_applied_left_the_launcher_production_blob_0c012dbf2eaa9157e3cb3404285517c6f0d51e91_and_failed_four_nodes_live_observed_exit_hold_ambiguous_missing_handle_hold_stale_timer_hold_and_gui_production_path_hold_while_explicit_mock_restart_and_shutdown_owned_clean_exit_passed_4_failed_2_passed_2026_08_26
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: LAUNCHER-LIVE-INVALIDATION-MANUAL-RESTART-FALSE-GREEN-361
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_live_invalidation_failure_cannot_be_cleared_by_manual_restart
+    ci_partition: remaining
+    red_evidence: exact_bd6422c86311a608e6440ae3fe6f0974293a3849_tree_2fbdd6f613bec6549419a175b05e651f8a26079d_cold_review_counterexample_and_exact_guard_red_before_showed_a_live_exit_whose_producer_invalidation_failed_left_engine_unsettled_incarnation_None_so_manual_restart_cleared_restart_giving_up_and_started_a_replacement_1_failed_2026_08_26
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: LAUNCHER-CLEAN-PRESPAWN-RECOVERY-FALSE-GREEN-362
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_clean_pre_spawn_live_restart_recovery_stays_operator_retryable
+    ci_partition: remaining
+    red_evidence: exact_ae2ff30a76f466dea8d525e4ef7625c55d946d9d_tree_e3f6f65e8a6c4359fc9905edfa646f579e708263_guard_red_before_misclassified_a_commanded_settled_pre_spawn_restart_failure_as_unknown_live_loss_and_latched_permanent_hold_1_failed_2026_08_26
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: LAUNCHER-LIVE-HOLD-READER-CALLBACK-FALSE-GREEN-363
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_live_hold_reader_settlement_returns_before_blocked_reader_close
+    ci_partition: remaining
+    red_evidence: exact_ae2ff30a76f466dea8d525e4ef7625c55d946d9d_tree_e3f6f65e8a6c4359fc9905edfa646f579e708263_guard_red_before_blocked_the_health_callback_on_the_reader_close_side_effect_1_failed_2026_08_26
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+    ci_partition: remaining
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_found_that_width_only_rotation_recognition_admitted_an_impossible_calendar_suffix_and_an_executed_mutation_restoring_that_logic_displaced_the_genuine_2026_02_28_rotation_with_oversized_2026_02_31_content
+    green_evidence: pending_corrected_worktree_blobs_70af6458543390a479996b0b7ac34975a6d5c106_and_838ed3bd8e09f573695e17de53bce18dec5f4d7c_and_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-ANCESTOR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_reproduced_that_opening_state_root_slash_logs_followed_a_state_root_symlink_and_published_external_assistant_log_bytes
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-STATE-DIRECTORY-ABA-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_showed_the_preexisting_link_guard_stayed_green_when_state_and_logs_opened_identity_checks_were_neutralized
+    green_evidence: pending_exact_corrected_commit_tree_mutation_red_and_hosted_remaining_partition
+  - id: SOAK-DANGLING-STATE-ROOT-DIAGNOSTIC-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_a_dangling_state_root_link_was_untrusted_for_assistant_but_misreported_as_engine_never_started_for_engine_stderr
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-UNREADABLE-STATE-ROOT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_posix_engine_stderr_pathname_preflight_raised_permission_error_while_assistant_refused_the_same_unreadable_state_root
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-MISSING-LOGS-ABSENCE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -3325,6 +3731,14 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_does_not_reset_source_activity_for_returning_alarm
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
         ci_partition: agents
@@ -3747,6 +4161,36 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_checks_every_timeout_handler_exit
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_asyncio_timeout_error_handlers_as_timeout_error_type
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_continue_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_logging_only_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_aliased_queue_getter_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_keyword_future_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_conditional_loop_jump_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_resolves_wait_for_import_aliases
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_accepts_positional_wait_for_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_allows_diagnostic_timeout_reraise
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_nested_timeout_handler_exit_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_os_error_handlers_as_timeout_handlers
+        ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_active_guard_execution_rejects_skip_xfail_deselection_collect_only_and_warnings
         ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_open_reopened_and_closed_guards_execute_while_expired_does_not
@@ -3984,16 +4428,16 @@ records:
     red_evidence: max_inflight_two_reproduction_pending_artifact_binding
     green_evidence: pending
   - id: LAUNCHER-SHUTDOWN-RECEIPT-001
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Launcher-owned engine shutdown on every supported operating system.
+    applies_to: Launcher-owned engine shutdown and restart authority on every supported operating system.
     classification: false_shutdown_success
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Windows terminate or kill can bypass engine cleanup while process death is reported as successful shutdown.
-    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle.
+    consequence: Windows terminate or kill can bypass engine cleanup while process death is reported as successful shutdown, a persistent poll failure can leave a possibly live engine retained forever while the visible retry ladder performs zero terminate or kill attempts, inline reader settlement can hold the Qt health callback for seconds while the HOLD surface must remain responsive, a clean commanded pre-spawn restart failure can be misclassified as unknown live loss and permanently disable operator retry, a stale owner-bound callback can recover or deduplicate under an earlier request ID or capability after the shutdown transaction changed without changing the process, session, incarnation, worker, or transport-owner tuple, immutable rejected finished-worker evidence can suppress every process supervisor and strand a still-live engine indefinitely, or observed live-engine process death can be mistaken for descendant and host-side I/O settlement and authorize an overlapping replacement source.
+    invariant: "Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle. When poll cannot observe a retained child during terminal normal quit or construction rollback, the same exact handle enters the nonblocking bounded terminate-then-kill machine; a failed bound retains the handle, publishes no invented exit code, and rearms both the bound and retry ladder without any synchronous wait on the Qt thread. If a shutdown worker remains running, the Qt health callback polls it without synchronously waiting, retains its owner and terminal process handle, and keeps restart blocked until a later poll settles it. Every unexpected launcher-owned live or ambiguous acquisition exit remains permanent HOLD even when its process handle reports a terminal code: process or child death does not prove descendant VISA/USBTMC or already-accepted host-side USB I/O settlement. The HOLD latches before retained-process reaping; elapsed backoff, free lock or port, READY, process death, and stale callbacks cannot clear it, and both timed and manual restart remain blocked pending independently authoritative recovery proof. A commanded manual restart that settled the old child, reached no replacement spawn, and then completed exact recovery bridge shutdown remains an explicitly operator-retryable empty slot; it must not be reclassified as unknown live loss. Automatic backoff is restricted to explicit non-actuating replay or mock mode. A configuration-error exit remains the separately classified operator-corrected refusal, and progress-capable shutdown-worker or late-reconciliation evidence is preserved and classified before the live-source HOLD becomes stable. The same rule governs a live REPLACEMENT that fails to reach readiness; only explicit replay or mock replacements may settle a terminal child and back off. Every finished shutdown-worker result claiming an unknown outcome is parsed by one strict shared parser in BOTH shutdown paths against the exact envelope family ZmqBridge.send_command itself produces -- post-dispatch timeout, post-dispatch cancellation, lifecycle settlement carrying delivery_state and commit_state, and safe-transport variants additionally carrying error_code and retry_safe; a claim outside that family is HOLD evidence, never settled, and a recognized envelope retains its exact request-ID-and-generation identity until reconcile_late_result yields the matching LateCommandResult, with the bridge left live while any transport identity remains unresolved. Deferred replacement-settlement passes bind to the full captured pending shutdown transaction -- the exact worker thread, process handle, replay session, engine incarnation, retained transport identity, shutdown request ID, and shutdown capability -- never to the restart generation or the process-owner tuple alone. Both callback admission and callback deduplication require that full transaction identity; a changed request ID or capability creates a distinct successor flight and makes every callback from the prior transaction inert. They keep settling that exact owner across generation advances. If the health tick transfers a finished worker into the same transaction's published transport identity before a callback fires, the stale callback must settle neither shape and must leave exactly one progress-capable successor bound to the current recorded owner. If ownership moved to a different transaction or a new engine, the stale callback stays inert. A failed manual stop latches its visible HOLD while scheduling exactly such an owner-bound continuation instead of stranding the pending command with zero further callbacks. A finished shutdown worker with absent, malformed unknown-outcome, or invalid concrete evidence remains retained as immutable HOLD evidence, but that immutable command evidence must not block the independent process owner: if its exact child is still live or unobservable, the existing nonblocking bounded terminate-then-kill supervisor remains armed while preserving the worker and its result byte-for-byte. A finished worker with absent, malformed unknown-outcome, or invalid concrete evidence enters stable HOLD without another settlement callback and logs each immutable diagnosis once per worker; parseable unreconciled evidence continues polling. One retained child has exactly one process-supervision owner. A watch-to-bounded-reap transition atomically retires the watch's unique registration before arming or returning the reap owner; every queued watch callback validates that exact registration before poll, recovery, or re-arm, so stale callbacks remain inert even if the same process object is re-entered. Immutable absent, malformed, or invalid worker evidence preserves the worker and result byte-for-byte while both readable-alive and unobservable child shapes traverse the sole terminate-to-kill-to-final-bounded-outcome machine, and the log names the actual entry reason. When a terminal child still has live reader threads, every health-callback path, including permanent live-source HOLD, hands settlement to the existing deferred machine, retains the exact handle until settlement succeeds, and never runs bounded joins or stream close on the Qt callback stack."
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4006,7 +4450,159 @@ records:
         ci_partition: remaining
       - node: tests/integration/test_launcher_shutdown_ownership.py::test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold
         ci_partition: remaining
-      - node: tests/gui/shell/test_d7_1b_repair.py::test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_restart_and_quit
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_lost_owned_engine_handle_preserves_hold_and_blocks_restart_and_quit
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_observed_owned_live_engine_exit_latches_hold_before_reaping
+        ci_partition: gui
+      - node: tests/test_launcher_backoff.py::test_owned_live_observed_exit_latches_permanent_hold_before_reaping
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_live_invalidation_failure_cannot_be_cleared_by_manual_restart
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_clean_pre_spawn_live_restart_recovery_stays_operator_retryable
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_live_hold_reader_settlement_returns_before_blocked_reader_close
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_ambiguous_live_missing_handle_never_authorizes_replacement
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_explicit_mock_observed_exit_keeps_bounded_restart_backoff
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_stale_restart_shot_cannot_clear_a_later_live_source_hold
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_shutdown_owned_clean_exit_stays_with_exact_shutdown_path
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_owned_config_error_exit_records_the_reason_and_refuses_to_retry
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_config_error_health_handler_keeps_polling_a_running_shutdown_worker
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_config_error_health_handler_holds_a_finished_worker_without_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_config_error_health_handler_keeps_an_open_reconciliation_progress_capable
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_config_error_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_observed_engine_exit_logs_identity_before_fallible_producer_invalidation
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_dies_before_readiness_schedules_another_try
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_still_alive_is_asked_to_stop_as_before
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_an_unready_still_settling_replacement_is_not_reported_alive
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_health_tick_keeps_the_down_banner_while_replacement_settlement_pends
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_failed_replacement_logs_its_observed_incarnation_and_exit_code
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_still_running_shutdown_worker_keeps_its_owner_and_holds
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_verified_receipt_exit_wait_keeps_repolling_until_the_budget_spends
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_stale_replacement_settlement_callback_cannot_stop_manual_restart
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_failed_manual_restart_keeps_replacement_settlement_poll_live
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_real_bridge_cancellation_unknown_envelope_is_reconciled_before_release
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_real_bridge_timeout_unknown_envelope_is_reconciled_before_release
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_real_bridge_safe_transport_failure_envelope_is_reconciled_before_release
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_extended_unknown_envelopes_refuse_malformed_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_invalid_concrete_result_latches_terminal_hold_without_rescheduling
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_health_tick_validates_a_finished_worker_receipt_before_retirement
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_published_receipt_with_raising_poll_is_bounded_not_polled_forever
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_malformed_unknown_outcome_latches_terminal_hold_without_rescheduling
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_ordinary_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_ordinary_health_handler_keeps_polling_a_running_shutdown_worker
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_ordinary_health_handler_keeps_an_open_reconciliation_progress_capable
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_unreconciled_unknown_outcome_keeps_its_settlement_loop_alive
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_malformed_unknown_outcome_diagnosis_logs_once_across_repeat_polls
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_manual_restart_generation_advance_keeps_the_old_owner_settlement_alive
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_interrupted_manual_restart_schedules_owner_bound_settlement_continuation
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_foreign_error_codes_in_safe_transport_envelopes_stay_hold_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_missing_transport_key_is_hold_evidence_not_keyerror
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_recovery_validates_reconciled_late_shutdown_receipt_with_terminal_exit
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_replacement_with_a_finished_valid_receipt_settles_through_the_stop_path
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_finished_receipt_on_a_nonzero_terminal_exit_keeps_its_receipt_bound_settlement
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_missing_transport_key_worker_result_remains_retained
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_published_receipt_survives_the_blind_stop_handoff_catch
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_observed_exit_without_worker_evidence_reaches_hold_without_backoff
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_beside_a_pending_owner_keeps_the_bounded_callback
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_reconciled_malformed_reply_on_a_clean_exit_reaches_reader_settled_hold
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_validated_receipt_with_retryable_reader_failure_keeps_its_polling_loop
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_bounded_reap_never_blocks_or_waits_on_the_qt_thread
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_quit_reap_failure_injections_keep_the_ladder_and_ownership
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_running_shutdown_worker_keeps_the_quit_ladder_without_starting_the_reap_machine
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_process_bound_supervision_settles_the_same_owned_child_once_observed
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_process_bound_supervision_hands_a_live_child_to_the_owned_stop_path
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_supervision_deadline_spent_escalates_to_owned_reap_ladder_until_explicit_failure
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_stale_ladder_tick_for_a_replaced_process_is_inert
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_owned_reap_ladder_never_blocks_or_waits_on_the_qt_thread
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_plain_retained_handle_with_raising_poll_is_bounded_not_polled_forever
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_construction_rollback_binds_a_plain_retained_raising_poll_child_to_the_bounded_reap
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_deferred_transaction_success_settles_readers_off_the_health_tick_stack
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_owner_bound_settlement_callback_is_inert_after_shutdown_transaction_changes
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_live_child_with_immutable_finished_worker_enters_bounded_reaping
         ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending
@@ -4014,13 +4610,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Launcher child construction, live and replay readiness, refusal of unauthenticated external adoption, and assistant post-spawn ownership.
+    applies_to: Launcher child construction and rollback, live and replay readiness, refusal of unauthenticated external adoption, and assistant post-spawn ownership.
     classification: false_startup_success
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A foreign listener can be adopted as CryoDAQ, a descendant can retain a shared readiness stream, a loose replay status or protocol-missing mock can false-green startup, a failed pre-spawn step can publish phantom shutdown authority, or a post-spawn failure can abandon a live child handle.
-    invariant: Ports are observations only; unauthenticated external engines are never adopted; readiness uses one direct-child-only private pipe that descendants cannot retain plus a strict full-tuple REP challenge carrying the real protocol version; identities publish only after successful spawn; and every spawned process remains owned through terminal stop.
+    consequence: A foreign listener can be adopted as CryoDAQ, a descendant can retain a shared readiness stream, a loose replay status or protocol-missing mock can false-green startup, a failed pre-spawn step can publish phantom shutdown authority, or a construction rollback can suppress while its live child remains owned.
+    invariant: Ports are observations only; unauthenticated external engines are never adopted; readiness uses one direct-child-only private pipe that descendants cannot retain plus a strict full-tuple REP challenge carrying the real protocol version; identities publish only after successful spawn; and every spawned process remains owned through terminal stop, including construction rollback.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -4068,6 +4664,8 @@ records:
       - node: tests/test_launcher_engine_stderr.py::test_pre_spawn_logger_failure_cannot_publish_phantom_engine_authority
         ci_partition: remaining
       - node: tests/test_launcher_shutdown_ownership.py::test_assistant_post_spawn_failure_retains_process_until_exact_stop
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_construction_rollback_never_suppresses_over_a_live_engine
         ci_partition: remaining
       - node: tests/core/test_engine_launch_authority.py::test_complete_or_absent_launch_envelope_is_consumed_exactly_once
         ci_partition: core
@@ -4126,16 +4724,16 @@ records:
     red_evidence: gui_app_imported_generic_unlinking_release_for_both_exit_paths_2026_07_23_pending_artifact_binding
     green_evidence: pending
   - id: ENGINE-FORCE-PROCESS-IDENTITY-001
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Engine --force takeover, persistent lock diagnostics, and any attempted incumbent-process termination on every supported operating system.
+    applies_to: Engine --force takeover, persistent lock diagnostics, any attempted incumbent-process termination, and every qualification or soak fault-injection and cleanup process signal on every supported operating system.
     classification: arbitrary_process_termination
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A corrupt, hostile, stale, reused, group, current-process, replay, or unrelated PID can turn force mode into an arbitrary-process kill primitive.
-    invariant: Force mode proceeds only after acquiring the exact stable kernel lock itself; stale file contents are non-authoritative, while held, replaced, or unsafe locks fail closed without process lookup or termination.
+    consequence: A corrupt, hostile, stale, reused, group, current-process, replay, or unrelated PID can turn force mode into an arbitrary-process kill primitive; a signal resolved from a previously observed PID alone can terminate whichever unrelated process recycled that PID between authorization and delivery, and recheck evidence copied from the authorization instead of the fresh observation seals a false identity claim into sealed evidence.
+    invariant: Force mode proceeds only after acquiring the exact stable kernel lock itself; stale file contents are non-authoritative, while held, replaced, or unsafe locks fail closed without process lookup or termination. Every qualification process signal requires a freshly observed full identity -- PID plus platform start identity -- equal to the previously authorized identity, refused before any signal or evidence when it differs; only that exact rechecked identity may be signaled, and recheck evidence serializes the fresh observation, never the prior authorization.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -4148,7 +4746,11 @@ records:
         ci_partition: core
       - node: tests/core/test_engine_force_kill.py::test_force_mode_refuses_a_held_kernel_lock_without_process_inspection_or_kill
         ci_partition: core
-    red_evidence: pid_and_argv_based_force_kill_could_not_prove_that_the_target_owned_this_exact_kernel_lock_and_data_root_2026_07_23_pending_immutable_capture
+      - node: tests/scripts/test_soak_mock_stack_runner_bridge_handshake.py::test_recovery_refuses_to_signal_a_recycled_engine_pid_and_records_nothing
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_bridge_handshake.py::test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_records_it
+        ci_partition: remaining
+    red_evidence: pid_and_argv_based_force_kill_could_not_prove_that_the_target_owned_this_exact_kernel_lock_and_data_root_2026_07_23_pending_immutable_capture soak_fault_injection_resolved_identity_by_pid_only_so_a_recycled_pid_was_signaled_and_recheck_evidence_serialized_the_stale_authorized_start_2026_08_23_pending_immutable_capture
     green_evidence: pending
   - id: REPLAY-RUNTIME-SETTLEMENT-010
     status: open
@@ -5641,12 +6243,14 @@ records:
       covered_classifications:
         - coverage_escape
         - evidence_misbinding
+        - evidence_retention_authority
         - instrument_authority_escape
         - late_side_effect
         - markup_interpretation
         - production_test_divergence
         - publication_loss
         - retained_handle_loss
+        - server_client_contract_split
         - silent_failure
         - stale_authority
     red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
@@ -5898,6 +6502,8 @@ records:
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success
         ci_partition: core
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
         ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending
@@ -6409,7 +7015,229 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
-
+  - id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The automatic conductivity step from an acknowledged Keithley target through sample qualification, point recording, the next target, and Stop.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The automatic sweep can advance or record a conductivity point from a bridge backlog, from measurements acquired before the target acknowledgement after a wall-clock step, from temperature stability that spans a power-feed failure, or from controls rebuilt onto channels that differ from the commanded step.
+    invariant: Each automatic step binds one immutable Keithley channel and one immutable temperature chain. LakeShore and Keithley readings carry a monotonic acquisition start captured before I/O, and the bridge stamps monotonic ingress before its process queue. The panel accepts only usable samples acquired after the monotonic target acknowledgement and within a freshness bound at bridge ingress that has a fail-closed floor of ten seconds, widened to three times the largest per-channel median acquisition gap when the observed cadence of the bound channels is slower. An unusable or silent selected power feed clears both power and temperature evidence plus the stability predictor. Channel-manager rebuilds preserve the bound chain and re-disable every rebuilt selector until settlement; inactive controls then reconcile to current settings. The next target and Stop use the bound Keithley channel. The panel does not advance without current qualified power and temperature evidence.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_advances_when_stable_and_min_wait_elapsed
+        ci_partition: gui
+      - node: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+        ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
+      sha256: sha256:305b9c74d3d4eeda82903c00cc927ce18e9931e2de75956c167120821900a869
+    green_evidence: pending
+  - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: External mock thermal endpoint construction and instrument selection, and the SafetyManager to Keithley connect, start, target-update, OFF, Scheduler, and ThermalCalculator path.
+    classification: late_side_effect
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, replay one external thermometer stream under auxiliary instrument identities, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
+    invariant: Every external mock endpoint, including direct construction, uses the literal numeric loopback address 127.0.0.1 with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction, and the production roster proves exactly one LakeShore owns that client; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_start_lost_ack_reconciles_external_zero
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_failure_forces_external_zero_and_latches_fault
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_target_update_settles_external_zero_before_cancellation
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_cannot_report_success_after_emergency_off_authority
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_start_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_update_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_stop_settles_zero_after_delayed_external_power
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+        ci_partition: remaining
+      - node: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+        ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
+    green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-FRAME-ADMISSION-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The SequencedPeriodicLiveSources subscription set and the reading admission contract in src/cryodaq/agents/assistant/periodic_runtime.py.
+    classification: server_client_contract_split
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The periodic live consumer subscribed to EVERY topic on the publisher's sole PUB socket with an empty-prefix SUBSCRIBE, while its own admission path accepted only the three topics this source participates in. The subscription was therefore BROADER than the refusal rather than narrower -- the day a fourth topic appeared on that socket, the consumer received frames it was built to refuse, and a refusal invalidates the whole live generation. Separately, the reading contract did not name the descriptor envelope key the publisher had grown, so a frame the publisher legitimately writes was refused for that reason too. Either way a laboratory run loses the periodic source. An earlier version of this record stated the subscription relationship in the wrong direction; the direction matters, because the over-broad form is what makes a new publisher topic a fault in an unrelated consumer.
+    invariant: The topics the consumer subscribes to are EXACTLY the topics its admission path names as participating -- neither broader, which turns a new publisher topic into a fatal refusal, nor narrower, which silently drops a frame this source needs. That equality is a statement about INTENT and it is not what the transport enforces -- a ZMQ SUBSCRIBE matches a byte PREFIX, so a subscription to a topic also delivers every topic that extends it, and no list the consumer keeps can prevent that because the publisher owns its own topics. Admission therefore IGNORES AND COUNTS a frame whose topic is not exactly participating, and refuses only what is malformed on a topic that is. A frame nobody addressed to this source must never be able to invalidate its generation, and that holds WHATEVER ENVELOPE SHAPE it carries -- the two-part frame count is a rule about participating topics and is applied only after the topic is classified. It also requires that a foreign topic never consumes the shared sequence, since ignoring a frame that took a sequence number leaves a gap and the next participating frame invalidates the generation anyway; the publisher refuses to allocate for a topic outside the sequenced set, and refuses before the counter moves; a reading is admitted when it carries every required key, with or without the optional descriptor envelope; a reading missing a required key is refused; an unknown key is refused and its name is never echoed into the message, only its count.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_start_connects_before_subscribing_to_the_participating_topics
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_the_subscription_and_the_refusal_name_the_same_topics
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_carrying_a_descriptor_envelope_is_accepted
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_without_a_descriptor_is_still_accepted
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_missing_a_required_field_is_still_refused
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_an_unknown_field_is_refused_and_not_echoed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_the_engines_fourth_topic_never_reaches_this_source_over_a_real_socket
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_malformed_frame_on_a_participating_topic_is_still_refused
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_foreign_topic_is_ignored_whatever_shape_its_envelope_has
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_queue
+        ci_partition: agents
+    automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
+    red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
+    green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Dated assistant-log rotation admission and bounded retained-tail publication through scripts/soak_mock_stack_runner.py.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A child-created name with the right width but an impossible calendar date can consume the retained byte budget and displace a genuine diagnostic rotation from the week-run evidence bundle.
+    invariant: A rotated assistant-log name is admitted only when it matches the handler-derived name grammar and its suffix is a real calendar date under the same authoritative suffix format. An impossible date never consumes the rotation count or retained byte budget, and genuine rotations remain ordered oldest first before the active log.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_impossible_calendar_rotation_cannot_consume_the_retained_budget
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+        ci_partition: remaining
+    automation_limit: The exact full-size production-bound guard and its width-only mutation control pass locally, but the default hosted remaining partition has not yet sealed the corrected candidate.
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_finding_3868393550_reported_that_width_only_rotation_recognition_admitted_impossible_dated_names_that_could_consume_retained_budget_and_displace_genuine_diagnostics
+    green_evidence: local_corrected_production_blob_70af6458543390a479996b0b7ac34975a6d5c106_guard_blob_838ed3bd8e09f573695e17de53bce18dec5f4d7c_python_3_14_focused_five_passed_full_affected_modules_63_passed_4_platform_skipped_read_only_ruff_and_ast_clean_pending_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: POSIX retention of child-writable engine stderr and assistant logs from the isolated soak state root.
+    classification: evidence_path_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A measured child can replace the state-root ancestor with a link so descriptor checks below it copy unrelated or private bytes into the retained week-run evidence bundle, while a catch-all traversal error can misreport an ordinary pre-log startup exit as unsafe topology and hide the truthful absence diagnosis.
+    invariant: On POSIX, retained child-writable logs are reached only by opening the trusted parent, state-root leaf, and logs leaf as separate no-follow directory descriptors and verifying each opened identity. A missing logs leaf observed relative to the verified state-root descriptor is reported as an absent artifact; linked, replaced, unreadable, or identity-mismatched state/logs directories refuse both assistant-log and engine-stderr publication, and no bytes below a replacement enter the bundle.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+        ci_partition: remaining
+        platform: posix
+    automation_limit: The production-side-effect guards are locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_and_reproduction_published_external_state_root_assistant_bytes_through_the_old_logs_only_descriptor_anchor
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-DIAGNOSTIC-FINALIZATION-ATTEMPT-ALL-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Final publication of the launcher log, engine stderr, and assistant log after the soak launcher writer has settled.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A publisher failure or launcher size refusal can abort teardown before later publishers run, after which outer cleanup deletes the state root and loses diagnostics. A last-failure-wins accumulator can also replace the authoritative first exception and expose secondary detail.
+    invariant: Normal completion does not publish or return until every launcher-pipe writer end is closed and the real bounded drain thread is terminal. Finalization then attempts engine stderr, assistant-log, and launcher-log publication in order. A failure in one never suppresses later artifacts. Without a primary run failure, the exact first publisher failure is re-raised after every attempt and later failures appear only as sanitized type notes. A caller without a state root retains the same drain-settlement and launcher-publication boundary.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_oversized_launcher_log_retains_both_child_logs_before_refusal
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_attempts_later_publishers_after_engine_baseexception
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_retains_first_failure_and_sanitizes_later_failures
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_normal_success_waits_for_duplicate_launcher_writer_and_real_drain
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_without_state_root_still_settles_and_publishes_launcher
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drain_until_writer_settles
+        ci_partition: remaining
+    automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
+    green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
   - id: NIGHTLY-QT-PREREQUISITES-055
     status: open
     scope: repository
