@@ -140,6 +140,18 @@ def _run_baseline_generator_in_clone(clone: Path) -> subprocess.CompletedProcess
     )
 
 
+def test_baseline_generator_rejects_source_checkout_before_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real writer must reject ROOT before it can create a subprocess."""
+
+    def unexpected_subprocess(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the baseline generator subprocess must not start for ROOT")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_subprocess)
+
+    with pytest.raises(AssertionError, match="baseline writer must never target ROOT"):
+        _run_baseline_generator_in_clone(ROOT)
+
+
 def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
     """The tracked derived baseline is LF-only and carries no byte-order mark."""
     raw = BASELINE_ARTIFACT.read_bytes()
