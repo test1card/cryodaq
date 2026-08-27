@@ -22,6 +22,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
+from cryodaq.gui.shell import main_window_v2 as main_window_module
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.gui.zmq_client import ZmqBridge
@@ -61,6 +62,13 @@ def _stop_timers(w: MainWindowV2) -> None:
             timer.stop()
         except RuntimeError:
             pass
+
+
+def _controlled_measurement_clock(monkeypatch: pytest.MonkeyPatch, w: MainWindowV2) -> list[float]:
+    clock = [100.0]
+    monkeypatch.setattr(main_window_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    w._last_reading_time = clock[0]
+    return clock
 
 
 def _safety_reading(
@@ -138,9 +146,12 @@ def _typed_ready_snapshot(
     *,
     revision: int = 42,
     mode: SnapshotMode = SnapshotMode.LIVE,
+    observed_at: datetime | None = None,
+    received_at: datetime | None = None,
 ) -> OperatorSnapshot:
-    observed = datetime.now(UTC) - timedelta(seconds=1)
-    cut = SnapshotCut(revision, observed, observed, "engine-v1", mode, "exp-1", "engine-v1")
+    observed = observed_at or datetime.now(UTC) - timedelta(seconds=1)
+    received = received_at or observed
+    cut = SnapshotCut(revision, observed, received, "engine-v1", mode, "exp-1", "engine-v1")
     state = OperatorPresentationState.OK if mode is SnapshotMode.LIVE else OperatorPresentationState.CAUTION
     status = SummaryStatus(state, 1.0, 0.0, ("authoritative",), "Подтверждено")
     manifest = SupportBundleManifest(
@@ -751,6 +762,197 @@ def test_keithley_overlay_replays_cached_state_when_measurement_flow_recovers(
 
         assert block._channel_state == "off"
         assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize("cached_state", ["on", "off"])
+def test_keithley_overlay_revokes_cached_source_state_at_measurement_gap_recovery(
+    cached_state: str,
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        clock[0] = 101.0
+        w._dispatch_reading(_source_state_reading("smua", cached_state))
+        assert block._channel_state == cached_state
+        clock[0] = 102.0
+        w._dispatch_reading(_measurement_reading())
+
+        # The per-channel transition is missed while measurement delivery is
+        # silent. The first generic measurement must reveal the crossed gap
+        # before it overwrites the old ingress timestamp.
+        clock[0] = 112.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_resynchronizes_off_from_newer_ready_cut_after_gap(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        prior_ready = _typed_ready_snapshot(
+            revision=42,
+            observed_at=datetime.now(UTC) - timedelta(seconds=20),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(prior_ready))
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        clock[0] = 101.0
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        assert block._channel_state == "on"
+        clock[0] = 102.0
+        w._dispatch_reading(_measurement_reading())
+
+        clock[0] = 112.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        assert block._channel_state == "unknown"
+
+        # Re-delivering the pre-gap READY cut is retained presentation, not
+        # revalidation: its Safety observation predates the last-measurement
+        # boundary even though it is delivered again after recovery.
+        w.render_operator_snapshot(prior_ready)
+        assert block._channel_state == "unknown"
+
+        # A cut received after the gap is exact READY. OperatorSnapshot's
+        # constructor/composer contract makes READY impossible without
+        # current verified-OFF evidence for both channels.
+        fresh_ready = _typed_ready_snapshot(
+            revision=43,
+            observed_at=datetime.now(UTC),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(fresh_ready))
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_rejects_ready_cut_observed_before_gap_boundary(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        clock[0] = 101.0
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        clock[0] = 102.0
+        w._dispatch_reading(_measurement_reading())
+        assert w._last_measurement_received_at is not None
+        pre_gap_observation = w._last_measurement_received_at - timedelta(seconds=1)
+
+        clock[0] = 112.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        assert block._channel_state == "unknown"
+
+        # Allocation/delivery can be newer while the Safety observation is
+        # still pre-gap. Only the observation time carries source evidence.
+        delayed_ready = _typed_ready_snapshot(
+            revision=43,
+            observed_at=pre_gap_observation,
+            received_at=datetime.now(UTC),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(delayed_ready))
+
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_uses_ready_cut_received_during_gap_on_recovery(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        clock[0] = 101.0
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        clock[0] = 102.0
+        w._dispatch_reading(_measurement_reading())
+
+        # Safety reaches a coherent verified-OFF READY cut after the last
+        # generic measurement but before measurement delivery recovers.
+        clock[0] = 110.0
+        ready_during_gap = _typed_ready_snapshot(
+            revision=43,
+            observed_at=datetime.now(UTC),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(ready_during_gap))
+        assert block._channel_state == "on"
+
+        clock[0] = 112.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_retains_channel_state_received_during_gap_before_detection(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        clock[0] = 101.0
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        clock[0] = 102.0
+        w._dispatch_reading(_measurement_reading())
+
+        # The exact OFF observation arrives after the last generic reading but
+        # before the silence is old enough for the status tick to declare a
+        # gap. Recovery must retain this post-boundary evidence.
+        clock[0] = 110.0
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        clock[0] = 112.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is False  # Safety remains fail-closed.
     finally:
         _stop_timers(w)
 
