@@ -1777,3 +1777,131 @@ def test_a_directory_at_exactly_the_enumeration_ceiling_still_publishes(
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "THE CAUSE, written on day one" in published
     assert "the last day" in published
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
+def test_a_linked_state_root_is_refused_before_posix_logs_traversal(tmp_path: Path) -> None:
+    """The state root itself is child-replaceable, so ``logs`` is not an anchor.
+
+    This is the exact production side effect: both retained publishers receive a
+    state-root path after the measured session settles. A symlink at that ancestor
+    must produce refusal markers, never bytes from the directory it names.
+    """
+
+    state_root = tmp_path / "state"
+    (state_root / "logs").mkdir(parents=True)
+    saved_state = tmp_path / "state-saved"
+    outside = tmp_path / "outside-state-root"
+    (outside / "logs").mkdir(parents=True)
+    assistant_secret = "EXTERNAL STATE ROOT ASSISTANT BYTES MUST NOT PUBLISH\n"
+    engine_secret = "EXTERNAL STATE ROOT ENGINE BYTES MUST NOT PUBLISH\n"
+    (outside / "logs" / "assistant.log").write_text(assistant_secret, encoding="utf-8")
+    (outside / "logs" / "engine.stderr.log").write_text(engine_secret, encoding="utf-8")
+    state_root.rename(saved_state)
+    os.symlink(outside, state_root, target_is_directory=True)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+    runner._publish_engine_stderr(evidence, state_root)
+
+    assistant = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    engine = evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME]
+    assert assistant == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    assert engine == runner._ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER
+    assert assistant_secret.strip() not in assistant
+    assert engine_secret.strip() not in engine
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
+@pytest.mark.parametrize("publisher_name", ["assistant", "engine"])
+@pytest.mark.parametrize("replacement", ["state", "logs"])
+def test_a_directory_replacement_between_stat_and_open_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher_name: str,
+    replacement: str,
+) -> None:
+    """The opened state and logs identities must match their no-follow observations."""
+
+    state_root = tmp_path / "state"
+    logs = state_root / "logs"
+    logs.mkdir(parents=True)
+    outside_state = tmp_path / "outside-state"
+    outside_logs = outside_state / "logs"
+    outside_logs.mkdir(parents=True)
+    assistant_secret = "RACED EXTERNAL ASSISTANT BYTES MUST NOT PUBLISH\n"
+    engine_secret = "RACED EXTERNAL ENGINE BYTES MUST NOT PUBLISH\n"
+    (outside_logs / "assistant.log").write_text(assistant_secret, encoding="utf-8")
+    (outside_logs / "engine.stderr.log").write_text(engine_secret, encoding="utf-8")
+    saved_state = tmp_path / "saved-state"
+    saved_logs = tmp_path / "saved-logs"
+    real_open = runner.os.open
+    replacement_happened = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal replacement_happened
+        leaf = os.fspath(path)
+        replace_state = replacement == "state" and leaf == state_root.name
+        replace_logs = replacement == "logs" and leaf == "logs"
+        if not replacement_happened and dir_fd is not None and (replace_state or replace_logs):
+            if replace_state:
+                state_root.rename(saved_state)
+                outside_state.rename(state_root)
+            else:
+                logs.rename(saved_logs)
+                outside_logs.rename(logs)
+            replacement_happened = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "open", racing_open)
+    evidence = _Evidence()
+    if publisher_name == "assistant":
+        runner._publish_assistant_log(evidence, state_root)
+        published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+        expected = runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    else:
+        runner._publish_engine_stderr(evidence, state_root)
+        published = evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME]
+        expected = runner._ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER
+
+    assert replacement_happened, "the control did not replace the directory between stat and open"
+    assert published == expected
+    assert assistant_secret.strip() not in published
+    assert engine_secret.strip() not in published
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
+def test_a_dangling_state_root_link_refuses_both_publishers(tmp_path: Path) -> None:
+    """A dangling replacement is untrusted; it does not mean the engine never started."""
+
+    state_root = tmp_path / "state"
+    (state_root / "logs").mkdir(parents=True)
+    state_root.rename(tmp_path / "saved-state")
+    os.symlink(tmp_path / "missing-target", state_root, target_is_directory=True)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+    runner._publish_engine_stderr(evidence, state_root)
+
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
+def test_an_unreadable_state_root_refuses_both_publishers(tmp_path: Path) -> None:
+    """A child-owned unreadable root is refused instead of escaping the capture path."""
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can bypass the mode-based unreadable-root control")
+    state_root = tmp_path / "state"
+    (state_root / "logs").mkdir(parents=True)
+    state_root.chmod(0)
+    evidence = _Evidence()
+    try:
+        runner._publish_assistant_log(evidence, state_root)
+        runner._publish_engine_stderr(evidence, state_root)
+    finally:
+        state_root.chmod(0o700)
+
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER

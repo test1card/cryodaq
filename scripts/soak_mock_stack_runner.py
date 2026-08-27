@@ -1012,12 +1012,15 @@ def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
     from scripts.soak_mock_stack import redact_text
 
     logs_directory = Path(state_root) / "logs"
-    try:
-        os.lstat(logs_directory)
-    except FileNotFoundError:
-        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
-        return
-    identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            os.lstat(logs_directory)
+        except FileNotFoundError:
+            evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+            return
+        identity_before = _directory_identity(logs_directory)
+    else:
+        identity_before = None
     selected = _engine_stderr_file(state_root)
     if isinstance(selected, _AssistantLogDirectoryRefusal):
         evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER)
@@ -1295,35 +1298,82 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
     return (info.st_dev, info.st_ino)
 
 
+def _open_posix_state_logs_directory(
+    state_root: Path,
+) -> int | _AssistantLogDirectoryRefusal:
+    """Open ``logs`` through the state root from its trusted parent descriptor.
+
+    The measured child can rename or replace ``state_root`` itself. Opening
+    ``state_root / "logs"`` follows a replaced ancestor before ``O_NOFOLLOW``
+    can protect the final component. Bind the trusted parent first, then open and
+    verify the state root and logs directory one leaf at a time.
+    """
+
+    state_root = Path(state_root)
+    state_name = state_root.name
+    if not state_name or state_name in {".", ".."}:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = -1
+    state_descriptor = -1
+    logs_descriptor = -1
+    keep_logs_descriptor = False
+    try:
+        parent_info = os.lstat(state_root.parent)
+        if not stat.S_ISDIR(parent_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        parent_descriptor = os.open(state_root.parent, directory_flags)
+        opened_parent = os.fstat(parent_descriptor)
+        if not stat.S_ISDIR(opened_parent.st_mode) or not os.path.samestat(parent_info, opened_parent):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+
+        state_info = os.stat(state_name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(state_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        state_descriptor = os.open(state_name, directory_flags, dir_fd=parent_descriptor)
+        opened_state = os.fstat(state_descriptor)
+        if not stat.S_ISDIR(opened_state.st_mode) or not os.path.samestat(state_info, opened_state):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+
+        logs_info = os.stat("logs", dir_fd=state_descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(logs_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        logs_descriptor = os.open("logs", directory_flags, dir_fd=state_descriptor)
+        opened_logs = os.fstat(logs_descriptor)
+        if not stat.S_ISDIR(opened_logs.st_mode) or not os.path.samestat(logs_info, opened_logs):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        keep_logs_descriptor = True
+        return logs_descriptor
+    except OSError:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    finally:
+        if state_descriptor >= 0:
+            os.close(state_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if logs_descriptor >= 0 and not keep_logs_descriptor:
+            os.close(logs_descriptor)
+
+
 def _engine_stderr_file(
     state_root: Path,
 ) -> tuple[int | None, Path | str] | _AssistantLogDirectoryRefusal:
     """Bind the exact engine stderr leaf to its child-writable logs directory."""
 
     directory = Path(state_root) / "logs"
-    try:
-        directory_info = os.lstat(directory)
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            directory_info = os.lstat(directory)
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
             return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
-        if _assistant_log_uses_pathname_traversal():
-            return None, directory / _ENGINE_STDERR_BASENAME
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        directory_descriptor = os.open(directory, directory_flags)
-    except OSError:
-        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
-    keep_descriptor = False
-    try:
-        opened_info = os.fstat(directory_descriptor)
-        if not stat.S_ISDIR(opened_info.st_mode) or not os.path.samestat(directory_info, opened_info):
-            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
-    except OSError:
-        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
-    else:
-        keep_descriptor = True
-        return directory_descriptor, _ENGINE_STDERR_BASENAME
-    finally:
-        if not keep_descriptor:
-            os.close(directory_descriptor)
+        return None, directory / _ENGINE_STDERR_BASENAME
+
+    directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
+    if isinstance(directory_descriptor, _AssistantLogDirectoryRefusal):
+        return directory_descriptor
+    return directory_descriptor, _ENGINE_STDERR_BASENAME
 
 
 def _rotated_assistant_log_names(
@@ -1383,33 +1433,31 @@ def _assistant_log_files(
 
     directory = Path(state_root) / "logs"
     active = _ASSISTANT_LOG_ACTIVE_NAME
-    try:
-        directory_info = os.lstat(directory)
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            directory_info = os.lstat(directory)
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
             return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
-        if _assistant_log_uses_pathname_traversal():
-            # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
-            # then use a non-globbing enumeration. Any directory access failure is refused.
-            # The window this leaves open -- the directory replaced between here and the
-            # leaf reads -- cannot be closed on this platform, so the publisher proves
-            # afterwards that the directory did not change, and refuses if it did.
+        # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
+        # then use a non-globbing enumeration. Any directory access failure is refused.
+        # The window this leaves open -- the directory replaced between here and the
+        # leaf reads -- cannot be closed on this platform, so the publisher proves
+        # afterwards that the directory did not change, and refuses if it did.
+        try:
             rotated = _rotated_assistant_log_names(directory)
-            if isinstance(rotated, _AssistantLogDirectoryRefusal):
-                return rotated
-            return None, [*(directory / name for name in rotated), directory / active]
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        directory_descriptor = os.open(directory, directory_flags)
-    except OSError:
-        # The measured process can replace `logs`, so a descriptor is the authority for
-        # traversal. Do not fall back to pathname globbing when opening it fails.
-        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        if isinstance(rotated, _AssistantLogDirectoryRefusal):
+            return rotated
+        return None, [*(directory / name for name in rotated), directory / active]
+
+    directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
+    if isinstance(directory_descriptor, _AssistantLogDirectoryRefusal):
+        return directory_descriptor
     keep_descriptor = False
     try:
-        opened_info = os.fstat(directory_descriptor)
-        if not stat.S_ISDIR(opened_info.st_mode) or (
-            (opened_info.st_dev, opened_info.st_ino) != (directory_info.st_dev, directory_info.st_ino)
-        ):
-            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         rotated = _rotated_assistant_log_names(directory_descriptor)
         if isinstance(rotated, _AssistantLogDirectoryRefusal):
             return rotated

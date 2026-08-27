@@ -3611,6 +3611,42 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_found_that_width_only_rotation_recognition_admitted_an_impossible_calendar_suffix_and_an_executed_mutation_restoring_that_logic_displaced_the_genuine_2026_02_28_rotation_with_oversized_2026_02_31_content
     green_evidence: pending_corrected_worktree_blobs_70af6458543390a479996b0b7ac34975a6d5c106_and_838ed3bd8e09f573695e17de53bce18dec5f4d7c_and_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-ANCESTOR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_reproduced_that_opening_state_root_slash_logs_followed_a_state_root_symlink_and_published_external_assistant_log_bytes
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-STATE-DIRECTORY-ABA-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_showed_the_preexisting_link_guard_stayed_green_when_state_and_logs_opened_identity_checks_were_neutralized
+    green_evidence: pending_exact_corrected_commit_tree_mutation_red_and_hosted_remaining_partition
+  - id: SOAK-DANGLING-STATE-ROOT-DIAGNOSTIC-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_a_dangling_state_root_link_was_untrusted_for_assistant_but_misreported_as_engine_never_started_for_engine_stderr
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-UNREADABLE-STATE-ROOT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_posix_engine_stderr_pathname_preflight_raised_permission_error_while_assistant_refused_the_same_unreadable_state_root
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7128,3 +7164,34 @@ records:
     automation_limit: The exact full-size production-bound guard and its width-only mutation control pass locally, but the default hosted remaining partition has not yet sealed the corrected candidate.
     red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_finding_3868393550_reported_that_width_only_rotation_recognition_admitted_impossible_dated_names_that_could_consume_retained_budget_and_displace_genuine_diagnostics
     green_evidence: local_corrected_production_blob_70af6458543390a479996b0b7ac34975a6d5c106_guard_blob_838ed3bd8e09f573695e17de53bce18dec5f4d7c_python_3_14_focused_five_passed_full_affected_modules_63_passed_4_platform_skipped_read_only_ruff_and_ast_clean_pending_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: POSIX retention of child-writable engine stderr and assistant logs from the isolated soak state root.
+    classification: evidence_path_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A measured child can replace the state-root ancestor with a link so descriptor checks below it copy unrelated or private bytes into the retained week-run evidence bundle.
+    invariant: On POSIX, retained child-writable logs are reached only by opening the trusted parent, state-root leaf, and logs leaf as separate no-follow directory descriptors and verifying each opened identity. Replacing the state root or logs directory with a link refuses both assistant-log and engine-stderr publication; no bytes below the replacement enter the bundle.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+    automation_limit: The production-side-effect guard is locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_and_reproduction_published_external_state_root_assistant_bytes_through_the_old_logs_only_descriptor_anchor
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
