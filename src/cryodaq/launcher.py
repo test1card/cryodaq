@@ -129,6 +129,13 @@ _ENGINE_READER_SETTLEMENT_TICK_MS = 200
 # this covers the whole worker -- every join plus the stream/handler closes --
 # with slack, and its expiry is fail-closed (owners retained, explicit failure).
 _ENGINE_READER_SETTLEMENT_BOUND_S = 8.0
+# A cold engine establishes persistence and safety owners before it can emit
+# the exact readiness receipt.  The laboratory Ubuntu cold-start measurement
+# was about ten seconds, so retain a six-times margin while still reporting a
+# stuck child at roughly one minute.  The monotonic deadline below also bounds
+# a receipt whose REP endpoints never become challengeable.
+_ENGINE_STARTUP_READY_MAX_ATTEMPTS = 120
+_ENGINE_STARTUP_READY_POLL_INTERVAL_S = 0.5
 _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
@@ -3678,10 +3685,28 @@ class LauncherWindow(QMainWindow):
             if context is not None:
                 context.term()
 
-    def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
+    def _wait_engine_ready(
+        self,
+        max_attempts: int = _ENGINE_STARTUP_READY_MAX_ATTEMPTS,
+        interval_s: float = _ENGINE_STARTUP_READY_POLL_INTERVAL_S,
+    ) -> None:
         """Wait for exact child/session readiness, never port occupancy alone."""
+        started_at = time.monotonic()
+        budget_s = max_attempts * interval_s
+        deadline = started_at + budget_s
+        next_progress_log_s = 10.0
+        child_label = "Replay engine" if self._replay_source is not None else "Engine"
+        logger.info(
+            "%s выполняет fail-closed инициализацию; ожидание точной готовности ограничено %.1f с",
+            child_label,
+            budget_s,
+        )
         for attempt in range(max_attempts):
-            time.sleep(interval_s)
+            if attempt:
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0:
+                    break
+                time.sleep(min(interval_s, remaining_s))
             if self._replay_source is not None:
                 process = self._engine_proc
                 if process is None or process.poll() is not None:
@@ -3700,22 +3725,33 @@ class LauncherWindow(QMainWindow):
                         process.pid,
                     )
                     return
-                continue
-            process = self._engine_proc
-            if process is None or process.poll() is not None:
-                raise RuntimeError("live engine child exited before exact readiness")
-            if self._engine_ready.is_set():
-                with self._engine_ready_lock:
-                    if self._engine_ready_state.get("error") is not None:
-                        raise RuntimeError("live engine child emitted an invalid readiness receipt")
-            if self._probe_exact_live_engine_session():
+            else:
+                process = self._engine_proc
+                if process is None or process.poll() is not None:
+                    raise RuntimeError("live engine child exited before exact readiness")
+                if self._engine_ready.is_set():
+                    with self._engine_ready_lock:
+                        if self._engine_ready_state.get("error") is not None:
+                            raise RuntimeError("live engine child emitted an invalid readiness receipt")
+                if self._probe_exact_live_engine_session():
+                    logger.info(
+                        "Live engine exact child/incarnation readiness established (attempt %d/%d, pid=%d)",
+                        attempt + 1,
+                        max_attempts,
+                        process.pid,
+                    )
+                    return
+            elapsed_s = time.monotonic() - started_at
+            if elapsed_s >= next_progress_log_s:
                 logger.info(
-                    "Live engine exact child/incarnation readiness established (attempt %d/%d, pid=%d)",
-                    attempt + 1,
-                    max_attempts,
-                    process.pid,
+                    "%s ещё запускается: дочерний процесс активен, точная готовность ожидается (%.1f/%.1f с)",
+                    child_label,
+                    elapsed_s,
+                    budget_s,
                 )
-                return
+                next_progress_log_s += 10.0
+            if time.monotonic() >= deadline:
+                break
         if self._replay_source is not None:
             self._replay_engine_failed = True
             raise RuntimeError("replay child did not establish exact session readiness")
