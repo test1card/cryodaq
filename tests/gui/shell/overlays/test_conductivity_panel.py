@@ -2342,6 +2342,49 @@ def test_terminal_attachment_ack_precedes_completion_publication(app, monkeypatc
     assert completed == [0]
 
 
+def test_disconnect_during_terminal_attachment_requires_fresh_stop_before_retry(app, monkeypatch) -> None:
+    _DeferredWorker.defer_terminal_attachment = True
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel, target_worker = _start_bound_autosweep(monkeypatch)
+    target_worker.finish({"ok": True})
+    completed: list[int] = []
+    panel.auto_sweep_completed.connect(completed.append)
+
+    panel._auto_complete()
+    first_stop = _DeferredWorker.instances[-1]
+    first_stop.finish({"ok": True})
+    stale_attachment = _DeferredWorker.instances[-1]
+    assert stale_attachment.cmd["cmd"] == "experiment_attach_run_record"
+    assert stale_attachment.cmd["status"] == "COMPLETED"
+
+    panel.set_connected(False)
+    panel.set_connected(True)
+    stale_attachment.finish(_terminal_attachment_reply(stale_attachment))
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel._auto_outcome_unknown is True
+    assert completed == []
+
+    panel._on_auto_stop()
+    reverification_stop = _DeferredWorker.instances[-1]
+    assert reverification_stop is not stale_attachment
+    assert reverification_stop.cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    assert panel._auto_outcome_unknown is True
+    assert panel.get_auto_state() == "stabilizing"
+    assert completed == []
+    reverification_stop.finish({"ok": True})
+
+    retry_attachment = _DeferredWorker.instances[-1]
+    assert retry_attachment is not reverification_stop
+    assert retry_attachment.cmd == stale_attachment.cmd
+    assert panel.get_auto_state() == "stabilizing"
+    assert completed == []
+
+    retry_attachment.finish(_terminal_attachment_reply(retry_attachment))
+    assert panel.get_auto_state() == "done"
+    assert panel._auto_outcome_unknown is False
+    assert completed == [0]
+
+
 def test_writer_creation_failure_waits_for_pending_stop_then_settles_idle(app, monkeypatch) -> None:
     monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ControllablePersistenceWorker)
     monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
@@ -2521,6 +2564,53 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
         "experiment_attach_run_record",
         "keithley_stop",
     ]
+    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+
+
+def test_reconnect_retires_stale_running_attachment_before_fresh_stop(app, monkeypatch) -> None:
+    _DeferredWorker.defer_running_attachment = True
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    stale_attachment = _DeferredWorker.instances[-1]
+    assert stale_attachment.cmd["cmd"] == "experiment_attach_run_record"
+    assert stale_attachment.cmd["status"] == "RUNNING"
+
+    panel.set_connected(False)
+    panel.set_connected(True)
+    stale_attachment.finish(
+        {
+            "ok": True,
+            "attached": True,
+            "run_record": {
+                "source_run_id": stale_attachment.cmd["source_run_id"],
+                "status": "RUNNING",
+                "experiment_context": {"experiment_id": "experiment-a"},
+            },
+        }
+    )
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel._auto_outcome_unknown is True
+
+    panel._on_auto_stop()
+    fresh_stop = _DeferredWorker.instances[-1]
+    assert fresh_stop is not stale_attachment
+    assert fresh_stop.cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    fresh_stop.finish({"ok": True})
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_pending_stop_intent is None
+    assert panel._auto_outcome_unknown is False
     assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
 
 

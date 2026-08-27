@@ -355,6 +355,7 @@ class ConductivityPanel(QWidget):
         self._auto_terminal_attachment_inflight = False
         self._auto_workers: list[ZmqCommandWorker] = []
         self._auto_connection_generation = 0
+        self._auto_verified_off_connection_generation: int | None = None
         self._auto_operation_generation = 0
         self._auto_command_sequence = 0
         self._auto_settled_command_tokens: set[int] = set()
@@ -1927,6 +1928,9 @@ class ConductivityPanel(QWidget):
         command = self._auto_terminal_attachment_command
         if command is None or self._auto_terminal_attachment_inflight:
             return False
+        if self._auto_verified_off_connection_generation != self._auto_connection_generation:
+            self._update_control_enablement()
+            return False
         self._auto_terminal_attachment_inflight = True
         if self._send_auto_cmd(command):
             self._update_control_enablement()
@@ -2032,6 +2036,8 @@ class ConductivityPanel(QWidget):
         worker.finished.connect(_completed)
         self._auto_workers.append(worker)
         self._auto_pending_token = token
+        if cmd.get("cmd") == "keithley_set_target":
+            self._auto_verified_off_connection_generation = None
         if cmd.get("cmd") == "experiment_attach_run_record" and cmd.get("status") == "RUNNING":
             self._auto_binding_resolution = "attachment_pending"
         worker.start()
@@ -2115,6 +2121,9 @@ class ConductivityPanel(QWidget):
                 if status is None or status != command.get("status"):
                     self._block_after_terminal_attachment_failure("идентичность терминального состояния потеряна")
                     return
+                if self._auto_verified_off_connection_generation != self._auto_connection_generation:
+                    self._block_after_terminal_attachment_failure("подтверждение отключения источника устарело")
+                    return
                 self._auto_terminal_attachment_command = None
                 self._auto_terminal_publication_status = None
                 self._auto_outcome_unknown = False
@@ -2168,8 +2177,14 @@ class ConductivityPanel(QWidget):
             return
 
         if command.get("cmd") == "keithley_stop":
+            self._auto_verified_off_connection_generation = expected_connection_generation
             if self._auto_run_creation_failed:
                 self._settle_prearm_creation_failure_after_off(self._auto_run_creation_error or "файл данных не создан")
+                return
+            if stop_intent == "terminal_attachment":
+                self._auto_outcome_unknown = False
+                if not self._dispatch_pending_terminal_attachment():
+                    self._block_after_terminal_attachment_failure("команда прикрепления не отправлена")
                 return
             if stop_intent == "complete":
                 self._commit_auto_complete()
@@ -2257,6 +2272,7 @@ class ConductivityPanel(QWidget):
         self._auto_terminal_attachment_command = None
         self._auto_terminal_publication_status = None
         self._auto_terminal_attachment_inflight = False
+        self._auto_verified_off_connection_generation = None
         self._auto_terminal_failure_required = False
         self._invalidate_auto_step_evidence()
 
@@ -2277,7 +2293,11 @@ class ConductivityPanel(QWidget):
     def _on_auto_stop(self) -> None:
         if self._auto_state != "stabilizing":
             return
-        if self._auto_terminal_attachment_command is not None:
+        terminal_attachment_pending = self._auto_terminal_attachment_command is not None
+        if (
+            terminal_attachment_pending
+            and self._auto_verified_off_connection_generation == self._auto_connection_generation
+        ):
             if self._auto_terminal_attachment_inflight or self._auto_pending_token is not None:
                 return
             self._dispatch_pending_terminal_attachment()
@@ -2290,7 +2310,10 @@ class ConductivityPanel(QWidget):
             )
             return
         self._auto_timer.stop()
-        stop_intent = "failure" if self._auto_terminal_failure_required else "operator"
+        if terminal_attachment_pending:
+            stop_intent = "terminal_attachment"
+        else:
+            stop_intent = "failure" if self._auto_terminal_failure_required else "operator"
         self._auto_pending_stop_intent = stop_intent
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText("Останов запрошен — ожидается подтверждение отключения источника")
@@ -2776,7 +2799,10 @@ class ConductivityPanel(QWidget):
         if not connected:
             self._latest_channel_descriptors.clear()
             self._latest_channel_descriptor_generations.clear()
+            self._auto_verified_off_connection_generation = None
         if not connected and self._auto_state == "stabilizing":
+            if self._auto_binding_resolution == "attachment_pending":
+                self._auto_binding_resolution = "unrequested"
             self._auto_pending_token = None
             self._auto_pending_stop_intent = None
             self._auto_terminal_attachment_inflight = False
