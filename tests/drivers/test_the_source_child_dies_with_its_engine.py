@@ -102,33 +102,51 @@ class _UnstableIdentity(RuntimeError):
     """The kernel surface for stable process identity is unavailable here."""
 
 
+def _pidfd_open_syscall(pid: int) -> int:
+    """Open one exact process identity without depending on Python's wrapper."""
+
+    if _PIDFD_OPEN_SYSCALL is None:
+        raise _UnstableIdentity(f"no pidfd_open syscall on {platform.machine()} / {sys.version_info[:3]}")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    pidfd = libc.syscall(
+        ctypes.c_long(_PIDFD_OPEN_SYSCALL),
+        ctypes.c_int(pid),
+        ctypes.c_uint(0),
+    )
+    if pidfd >= 0:
+        return int(pidfd)
+    code = ctypes.get_errno()
+    raise _UnstableIdentity(os.strerror(code)) from OSError(code, os.strerror(code))
+
+
 def _stable_identity(pid: int) -> int:
-    """Open a pidfd BEFORE anything can exit and its number be reused."""
+    """Open a pidfd before reuse, recovering independently from wrapper failure."""
 
     if _PIDFD_SEND_SIGNAL_SYSCALL is None or _PIDFD_OPEN_SYSCALL is None:
         raise _UnstableIdentity(f"no pidfd surface on {platform.machine()} / {sys.version_info[:3]}")
-    try:
-        if hasattr(os, "pidfd_open"):
+
+    wrapper_error: BaseException | None = None
+    if hasattr(os, "pidfd_open"):
+        try:
             return os.pidfd_open(pid)
+        except (OSError, ValueError) as exc:
+            wrapper_error = exc
 
-        # The laboratory conda-forge Python omits os.pidfd_open even though its
-        # Ubuntu 22.04 kernel provides the syscall. Use the same exact kernel
-        # identity surface directly instead of skipping every registered guard.
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.syscall.restype = ctypes.c_long
-        pidfd = libc.syscall(
-            ctypes.c_long(_PIDFD_OPEN_SYSCALL),
-            ctypes.c_int(pid),
-            ctypes.c_uint(0),
-        )
-        if pidfd >= 0:
-            return int(pidfd)
-        code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code))
-    except OSError as exc:
-        raise _UnstableIdentity(str(exc)) from exc
+    # The laboratory conda-forge Python can omit os.pidfd_open even though its
+    # Ubuntu 22.04 kernel provides the syscall. A present wrapper can also fail
+    # after preflight. In both cases use an independently resolved raw syscall,
+    # never another alias of the same Python wrapper or a reusable numeric PID.
+    try:
+        return _pidfd_open_syscall(pid)
+    except (_UnstableIdentity, OSError, ValueError) as raw_error:
+        if wrapper_error is None:
+            raise _UnstableIdentity(str(raw_error)) from raw_error
+        raise _UnstableIdentity(
+            f"os.pidfd_open failed ({wrapper_error}); raw pidfd_open failed ({raw_error})"
+        ) from wrapper_error
 
 
 def _identity_exited(pidfd: int) -> bool:
@@ -164,6 +182,16 @@ def _signal_via_identity(pidfd: int, sig: int) -> None:
     """Signal the EXACT process the pidfd names; ESRCH means it is already gone."""
 
     _pidfd_send_signal_syscall(pidfd, sig)
+
+
+# Keep parent lifecycle seams distinct from the child seams that existing mutation guards
+# replace. Both aliases still use the same kernel pidfd authority; the separation lets a
+# guard falsify parent pinning/signalling without also changing the child under test.
+_stable_parent_identity = _stable_identity
+_recover_parent_identity = _stable_identity
+_recover_child_identity = _stable_identity
+_adopted_descendant_identity = _stable_identity
+_signal_parent_via_identity = _signal_via_identity
 
 
 def _set_child_subreaper(enabled: bool) -> bool:
@@ -213,6 +241,9 @@ def _reap_adopted_child(child_pid: int, *, timeout: float = 10.0) -> None:
         time.sleep(0.05)
 
 
+_reap_adopted_descendant = _reap_adopted_child
+
+
 def _restore_child_subreaper(previous: bool) -> None:
     _set_child_subreaper(previous)
 
@@ -222,9 +253,18 @@ def _restore_child_subreaper(previous: bool) -> None:
 _BUSY_CHILD_PARENT = textwrap.dedent(
     """
     import multiprocessing, os, sys, time
+    from pathlib import Path
     sys.path.insert(0, {src!r})
 
+    _identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+    _gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+
     def _busy(_connection, expected_parent):
+        # Publish identity before the worker can become signal-immune or touch VISA.
+        _identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+        while not _gate.is_file():
+            time.sleep(0.01)
+
         # DETACH THIS PROCESS FROM THE HARNESS BEFORE DOING ANYTHING ELSE. The control case
         # deliberately leaks a process, and a leaked process that still holds pytest's
         # stdout and stderr keeps those pipes open after pytest exits -- which broke the
@@ -252,6 +292,8 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
         {busy}
 
     if __name__ == "__main__":
+        if sys.stdin.buffer.readline().strip() != b"START":
+            raise RuntimeError("parent did not receive the exact start authority")
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         process = context.Process(target=_busy, args=(child_connection, os.getpid()), daemon=True)
@@ -287,12 +329,14 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
 # holds the GIL and ignores SIGTERM, matching the unsafe in-flight transaction shape.
 _PRODUCTION_PROCESS_PARENT = textwrap.dedent(
     """
-    import asyncio, ctypes, os, signal, sys, types
+    import asyncio, ctypes, os, signal, sys, time, types
     from pathlib import Path
     sys.path.insert(0, {src!r})
 
 
     _entered = Path({entered!r})
+    _identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+    _gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
 
     class _Resource:
         timeout = 0
@@ -316,16 +360,38 @@ _PRODUCTION_PROCESS_PARENT = textwrap.dedent(
     _pyvisa.ResourceManager = _Manager
     sys.modules["pyvisa"] = _pyvisa
 
-    async def _main():
-        from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+    from cryodaq.drivers.transport import usbtmc as _usbtmc
 
-        transport = USBTMCTransport(mock=False)
+    _production_visa_process_main = _usbtmc._visa_process_main
+
+    def _identity_gated_visa_process_main(connection, expected_parent):
+        _identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+        while not _gate.is_file():
+            time.sleep(0.01)
+        _production_visa_process_main(connection, expected_parent)
+
+    _usbtmc._visa_process_main = _identity_gated_visa_process_main
+
+    async def _main():
+        if (await asyncio.to_thread(sys.stdin.buffer.readline)).strip() != b"START":
+            raise RuntimeError("parent did not receive the exact start authority")
+        transport = _usbtmc.USBTMCTransport(mock=False)
         try:
-            await transport._settle_process_open("USB0::PRODUCTION-SPAWN-PROBE")
-            owner = transport._process_owner
-            if owner is None or owner.process.pid is None:
-                raise RuntimeError("production spawn returned no exact process owner")
+            opening = asyncio.create_task(
+                transport._settle_process_open("USB0::PRODUCTION-SPAWN-PROBE")
+            )
+            deadline = asyncio.get_running_loop().time() + 10.0
+            while True:
+                owner = transport._process_owner
+                if opening.done():
+                    await opening
+                if owner is not None and owner.process.pid is not None:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError("production spawn returned no exact process owner")
+                await asyncio.sleep(0.01)
             print(f"SPAWNED {{owner.process.pid}}", flush=True)
+            await opening
             operation = asyncio.create_task(transport.write("production-spawn-boundary"))
             deadline = asyncio.get_running_loop().time() + 10.0
             while not _entered.is_file():
@@ -357,11 +423,13 @@ _PRODUCTION_PROCESS_PARENT = textwrap.dedent(
 # fake pyvisa ResourceManager records any external effect.
 _PREBINDER_REPARENT_PARENT = textwrap.dedent(
     """
-    import asyncio, sys, time, types
+    import asyncio, os, sys, time, types
     from pathlib import Path
     sys.path.insert(0, {src!r})
 
     _blocked = Path({blocked!r})
+    _identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+    _gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
     _pinned = Path({pinned!r})
     _release = Path({release!r})
     _request_sent = Path({request_sent!r})
@@ -394,6 +462,9 @@ _PREBINDER_REPARENT_PARENT = textwrap.dedent(
     _production_send_process_request = _usbtmc.USBTMCTransport._send_process_request
 
     def _blocked_visa_process_main(connection, expected_parent):
+        _identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+        while not _gate.is_file():
+            time.sleep(0.01)
         _blocked.write_bytes(b"BLOCKED_BEFORE_BINDER")
         while not _release.is_file():
             time.sleep(0.01)
@@ -408,6 +479,8 @@ _PREBINDER_REPARENT_PARENT = textwrap.dedent(
     _usbtmc.USBTMCTransport._send_process_request = _recording_send_process_request
 
     async def _main():
+        if (await asyncio.to_thread(sys.stdin.buffer.readline)).strip() != b"START":
+            raise RuntimeError("parent did not receive the exact start authority")
         transport = _usbtmc.USBTMCTransport(mock=False)
         operation = asyncio.create_task(
             transport._settle_process_open("USB0::PREBINDER-REPARENT-PROBE")
@@ -455,13 +528,236 @@ _PREBINDER_REPARENT_PARENT = textwrap.dedent(
 
 
 def _read_startup_line(stream, *, timeout: float) -> str:
-    """Return one flushed parent startup line, or an empty string at the deadline."""
+    """Read one newline-terminated frame without ever entering blocking ``readline``.
 
+    Readiness says that *some* bytes exist, not that a complete line exists. The old
+    select-then-readline sequence could therefore wait forever when a faulty parent kept
+    stdout open after writing a partial frame. One-byte ``os.read`` calls preserve the
+    framing boundary while every wait remains under the same monotonic deadline.
+    """
+
+    deadline = time.monotonic() + timeout
+    frame = bytearray()
+    fd = stream.fileno()
     with selectors.DefaultSelector() as selector:
-        selector.register(stream, selectors.EVENT_READ)
-        if not selector.select(timeout):
-            return ""
-    return stream.readline().decode().strip()
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                return ""
+            chunk = os.read(fd, 1)
+            if not chunk:
+                return frame.decode(errors="replace").strip()
+            if chunk == b"\n":
+                return frame.decode(errors="replace").strip()
+            frame.extend(chunk)
+
+
+def _pidfd_process_id(pidfd: int) -> int:
+    """Return the kernel identity named by a pidfd, never a caller-supplied PID."""
+
+    for line in Path(f"/proc/self/fdinfo/{pidfd}").read_text(encoding="ascii").splitlines():
+        key, separator, value = line.partition(":")
+        if key == "Pid" and separator and value.strip().isdigit():
+            return int(value.strip())
+    raise _UnstableIdentity(f"pidfd {pidfd} exposed no kernel Pid field")
+
+
+def _proc_parent_pid(pid: int) -> int:
+    """Read Linux's kernel-maintained parent relationship for one live process."""
+
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    close = stat.rfind(")")
+    if close < 0:
+        raise _UnstableIdentity(f"malformed /proc/{pid}/stat")
+    fields = stat[close + 2 :].split()
+    if len(fields) < 2 or not fields[1].isdigit():
+        raise _UnstableIdentity(f"missing PPid in /proc/{pid}/stat")
+    return int(fields[1])
+
+
+def _validate_child_authority(
+    child_pid: int,
+    child_pidfd: int,
+    parent_pid: int,
+    parent_pidfd: int,
+) -> None:
+    """Authenticate a numeric frame against two exact pidfds and the kernel lineage."""
+
+    if _pidfd_process_id(parent_pidfd) != parent_pid:
+        raise _UnstableIdentity("the retained parent pidfd no longer names the Popen parent")
+    if _pidfd_process_id(child_pidfd) != child_pid:
+        raise _UnstableIdentity("the candidate child pidfd does not name the framed process")
+    if _proc_parent_pid(child_pid) != parent_pid:
+        raise _UnstableIdentity("the framed process is not a kernel child of the pinned parent")
+    if _identity_exited(parent_pidfd) or _identity_exited(child_pidfd):
+        raise _UnstableIdentity("parent or child exited before lineage authentication completed")
+
+
+def _direct_child_pids() -> set[int]:
+    """Return this process's current kernel children (including adopted orphans)."""
+
+    children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+    text = children.read_text(encoding="ascii").strip()
+    return {int(value) for value in text.split()} if text else set()
+
+
+_ADOPTED_PIN_RETRY_LIMIT = 3
+_ADOPTED_PIN_RETRY_BACKOFF_S = 0.02
+_ADOPTED_PIN_RETRY_BACKOFF_MAX_S = 0.1
+_ADOPTED_DIAGNOSTIC_ENTRY_LIMIT = 12
+_ADOPTED_DIAGNOSTIC_TEXT_LIMIT = 180
+_ADOPTED_DIAGNOSTIC_TOTAL_LIMIT = 2048
+
+
+def _settle_new_adopted_descendants(
+    baseline: set[int],
+    known_pids: set[int],
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Kill and reap every newly adopted descendant before restoring subreaper state."""
+
+    deadline = time.monotonic() + timeout
+    empty_observations = 0
+    pin_failures: dict[int, int] = {}
+    first_error: BaseException | None = None
+    error_details: list[str] = []
+    seen_details: set[str] = set()
+    suppressed_details = 0
+
+    def record_error(context: str, error: BaseException) -> None:
+        nonlocal first_error, suppressed_details
+        if first_error is None:
+            first_error = error
+        raw_detail = f"{context}: {type(error).__name__}: {error}"
+        detail = raw_detail[:_ADOPTED_DIAGNOSTIC_TEXT_LIMIT]
+        if detail in seen_details:
+            return
+        seen_details.add(detail)
+        if len(error_details) < _ADOPTED_DIAGNOSTIC_ENTRY_LIMIT:
+            error_details.append(detail)
+        else:
+            suppressed_details += 1
+
+    def fail(message: str) -> None:
+        suffix = "; ".join(error_details)
+        if suppressed_details:
+            suffix += f"; {suppressed_details} additional distinct errors suppressed"
+        diagnostic = f"{message}: {suffix}"[:_ADOPTED_DIAGNOSTIC_TOTAL_LIMIT]
+        raise AssertionError(diagnostic) from first_error
+
+    while time.monotonic() < deadline:
+        candidates = _direct_child_pids() - baseline - known_pids
+        if not candidates:
+            empty_observations += 1
+            if empty_observations >= 3:
+                if first_error is not None:
+                    fail("adopted descendant cleanup completed with errors")
+                return
+            time.sleep(_ADOPTED_PIN_RETRY_BACKOFF_S)
+            continue
+        empty_observations = 0
+        # Inventory the entire generation before cleanup. A failure on one identity must
+        # never prevent exact SIGKILL/reap attempts for its siblings.
+        identities: list[tuple[int, int]] = []
+        for candidate in sorted(candidates):
+            if pin_failures.get(candidate, 0) >= _ADOPTED_PIN_RETRY_LIMIT:
+                continue
+            pidfd: int | None = None
+            try:
+                pidfd = _adopted_descendant_identity(candidate)
+                if _pidfd_process_id(pidfd) != candidate or _proc_parent_pid(candidate) != os.getpid():
+                    raise _UnstableIdentity(f"new process {candidate} was not authenticated as this subreaper's child")
+                identities.append((candidate, pidfd))
+                pin_failures.pop(candidate, None)
+            except BaseException as exc:
+                pin_failures[candidate] = pin_failures.get(candidate, 0) + 1
+                record_error(f"pin adopted descendant {candidate}", exc)
+                if pidfd is not None:
+                    try:
+                        os.close(pidfd)
+                    except BaseException as close_exc:
+                        record_error(f"close unauthenticated pidfd for {candidate}", close_exc)
+
+        for candidate, pidfd in identities:
+            exited = False
+            reaped = False
+            try:
+                try:
+                    _signal_via_identity(pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as exc:
+                    record_error(f"signal adopted descendant {candidate}", exc)
+                    # The raw syscall is deliberately independent of the fallible wrapper.
+                    try:
+                        _pidfd_send_signal_syscall(pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except BaseException as recovery_exc:
+                        record_error(f"raw signal adopted descendant {candidate}", recovery_exc)
+                exit_deadline = time.monotonic() + 2.0
+                while time.monotonic() < exit_deadline and not _identity_exited(pidfd):
+                    time.sleep(_ADOPTED_PIN_RETRY_BACKOFF_S)
+                exited = _identity_exited(pidfd)
+                if not exited:
+                    record_error(
+                        f"wait adopted descendant {candidate}",
+                        AssertionError("identity did not exit after exact SIGKILL"),
+                    )
+                if exited:
+                    try:
+                        _reap_adopted_descendant(candidate)
+                        reaped = True
+                    except AssertionError as exc:
+                        if isinstance(exc.__cause__, ChildProcessError):
+                            reaped = True
+                        else:
+                            record_error(f"reap adopted descendant {candidate}", exc)
+                    except ChildProcessError:
+                        reaped = True
+            except BaseException as exc:
+                record_error(f"settle adopted descendant {candidate}", exc)
+            finally:
+                if exited and reaped:
+                    try:
+                        os.close(pidfd)
+                    except BaseException as exc:
+                        record_error(f"close adopted descendant {candidate}", exc)
+                else:
+                    record_error(
+                        f"retain adopted descendant {candidate}",
+                        AssertionError(f"pidfd {pidfd} retained because exit and reap did not settle"),
+                    )
+
+        exhausted = sorted(
+            candidate for candidate in candidates if pin_failures.get(candidate, 0) >= _ADOPTED_PIN_RETRY_LIMIT
+        )
+        if exhausted:
+            for candidate in exhausted:
+                record_error(
+                    f"pin adopted descendant {candidate}",
+                    AssertionError(f"retry limit {_ADOPTED_PIN_RETRY_LIMIT} reached"),
+                )
+            fail("adopted descendant cleanup failed")
+
+        remaining = _direct_child_pids() - baseline - known_pids
+        if remaining:
+            retry_level = max((pin_failures.get(pid, 0) for pid in remaining), default=1)
+            backoff = min(
+                _ADOPTED_PIN_RETRY_BACKOFF_S * (2 ** max(0, retry_level - 1)),
+                _ADOPTED_PIN_RETRY_BACKOFF_MAX_S,
+            )
+            time.sleep(min(backoff, max(0.0, deadline - time.monotonic())))
+
+    remaining = _direct_child_pids() - baseline - known_pids
+    if remaining:
+        record_error(
+            "adopted descendant deadline",
+            AssertionError(f"new descendants did not settle before restore: {sorted(remaining)}"),
+        )
+    fail("adopted descendant cleanup failed")
 
 
 def _preflight_stable_identity_surface() -> None:
@@ -503,17 +799,126 @@ def _reported_child_identity(parent: subprocess.Popen[bytes], *, marker: str, ti
     return int(reported_pid)
 
 
-def _request_exact_parent_cleanup(parent: subprocess.Popen[bytes]) -> None:
-    """Let the still-live parent kill and join its exact Process child."""
+def _send_parent_command(parent: subprocess.Popen[bytes], command: bytes) -> None:
+    assert parent.stdin is not None
+    parent.stdin.write(command + b"\n")
+    parent.stdin.flush()
 
-    if parent.poll() is None:
+
+def _wait_for_child_identity_file(
+    identity_path: Path,
+    parent_pidfd: int,
+    *,
+    timeout: float,
+) -> int:
+    """Read the live child's self-published PID before allowing hazardous startup."""
+
+    deadline = time.monotonic() + timeout
+    last_text = ""
+    while time.monotonic() < deadline:
+        try:
+            last_text = identity_path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            last_text = ""
+        prefix = "PID "
+        suffix = " END\n"
+        if last_text.startswith(prefix) and last_text.endswith(suffix):
+            framed_pid = last_text[len(prefix) : -len(suffix)]
+            if framed_pid.isdigit():
+                return int(framed_pid)
+        if _identity_exited(parent_pidfd):
+            raise AssertionError("harness parent exited before its child published exact identity")
+        time.sleep(0.01)
+    raise AssertionError(f"child did not publish exact identity before startup deadline; got {last_text!r}")
+
+
+_PARENT_CLEANUP_WAIT_S = 15.0
+_PARENT_TERMINATE_WAIT_S = 2.0
+_PARENT_KILL_WAIT_S = 10.0
+
+
+def _wait_for_parent_exit(parent: subprocess.Popen[bytes], *, timeout: float) -> bool:
+    try:
+        parent.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _signal_exact_parent_and_wait(
+    parent: subprocess.Popen[bytes],
+    parent_pidfd: int,
+    sig: int,
+    *,
+    timeout: float,
+) -> bool:
+    """Signal only the pinned parent identity and wait for the direct child boundedly."""
+
+    try:
+        _signal_parent_via_identity(parent_pidfd, sig)
+    except ProcessLookupError:
+        pass
+    return _wait_for_parent_exit(parent, timeout=timeout)
+
+
+def _request_exact_parent_cleanup(
+    parent: subprocess.Popen[bytes], parent_pidfd: int
+) -> tuple[bool, list[BaseException]]:
+    """Settle the exact parent and return settlement separately from preserved errors."""
+
+    errors: list[BaseException] = []
+    if not _identity_exited(parent_pidfd):
         assert parent.stdin is not None
         try:
             parent.stdin.write(b"CLEANUP\n")
             parent.stdin.flush()
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError) as exc:
+            errors.append(exc)
+
+    try:
+        if _wait_for_parent_exit(parent, timeout=_PARENT_CLEANUP_WAIT_S):
+            return True, errors
+    except BaseException as exc:
+        errors.append(exc)
+
+    for sig, timeout in (
+        (signal.SIGTERM, _PARENT_TERMINATE_WAIT_S),
+        (signal.SIGKILL, _PARENT_KILL_WAIT_S),
+    ):
+        try:
+            _signal_parent_via_identity(parent_pidfd, sig)
+        except ProcessLookupError:
             pass
-    parent.wait(timeout=15)
+        except BaseException as exc:
+            errors.append(exc)
+            if sig == signal.SIGKILL:
+                try:
+                    _pidfd_send_signal_syscall(parent_pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as recovery_exc:
+                    errors.append(recovery_exc)
+        try:
+            if _wait_for_parent_exit(parent, timeout=timeout):
+                return True, errors
+        except BaseException as exc:
+            errors.append(exc)
+
+    # Preserve every earlier error, but still make one final independent raw kill/wait
+    # attempt. The caller owns propagation only after child/descendant settlement.
+    try:
+        _pidfd_send_signal_syscall(parent_pidfd, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except BaseException as exc:
+        errors.append(exc)
+    try:
+        if _wait_for_parent_exit(parent, timeout=_PARENT_KILL_WAIT_S):
+            return True, errors
+    except BaseException as exc:
+        errors.append(exc)
+    errors.append(AssertionError("stalled harness parent did not settle after exact-identity SIGTERM and SIGKILL"))
+    return False, errors
 
 
 def _close_parent_streams(parent: subprocess.Popen[bytes]) -> None:
@@ -542,39 +947,133 @@ def _spawned_child_survives_killed_parent(
     parent_file: Path,
     *,
     after_child_pin: Callable[[], None] | None = None,
+    before_parent_kill: Callable[[], None] | None = None,
     after_parent_kill: Callable[[], None] | None = None,
     require_sigterm_immunity: bool = True,
 ) -> bool:
-    """Run one parent FILE and settle parent, child, pipes, and pidfd on every exit."""
+    """Run one parent FILE and settle parent, child, pipes, and pidfds on every exit."""
 
     _preflight_stable_identity_surface()
+    identity_token = f"{os.getpid()}-{time.monotonic_ns()}"
+    identity_path = parent_file.with_name(f".{parent_file.name}.{identity_token}.child.pid")
+    gate_path = parent_file.with_name(f".{parent_file.name}.{identity_token}.child.gate")
+    parent_env = os.environ.copy()
+    parent_env["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"] = str(identity_path)
+    parent_env["CRYODAQ_HARNESS_CHILD_GATE_PATH"] = str(gate_path)
     try:
         previous_subreaper = _set_child_subreaper(True)
     except _UnstableIdentity as exc:
         pytest.skip(
             f"this Linux host cannot make the lifecycle harness the exact orphan reaper; refusing to spawn ({exc})"
         )
+    baseline_child_pids = _direct_child_pids()
     try:
         parent = subprocess.Popen(
             [sys.executable, "-B", str(parent_file)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=parent_env,
         )
     except BaseException:
         _restore_child_subreaper(previous_subreaper)
         raise
+    try:
+        # No START byte is granted until one exact parent authority exists. The recovery
+        # wrappers are independent seams; the final direct kernel opener was preflighted
+        # before Popen and never falls back to signalling ``parent.pid``.
+        parent_pidfd = _stable_parent_identity(parent.pid)
+    except BaseException as pin_error:
+        recovery_pidfd: int | None = None
+        cleanup_errors: list[BaseException] = []
+        try:
+            for opener in (_recover_parent_identity, _pidfd_open_syscall):
+                try:
+                    recovery_pidfd = opener(parent.pid)
+                    break
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            if recovery_pidfd is None:
+                # With no exact signal authority, revoke startup by closing stdin and wait
+                # only. Every parent FILE is required to block on START before spawning.
+                if parent.stdin is not None:
+                    try:
+                        parent.stdin.close()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+                try:
+                    if not _wait_for_parent_exit(parent, timeout=_PARENT_KILL_WAIT_S):
+                        raise AssertionError(
+                            "all exact parent pin attempts failed and the unstarted parent ignored EOF"
+                        )
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            else:
+                parent_settled, parent_errors = _request_exact_parent_cleanup(parent, recovery_pidfd)
+                cleanup_errors.extend(parent_errors)
+                try:
+                    if not parent_settled or not _identity_exited(recovery_pidfd):
+                        raise AssertionError("recovered exact parent identity remained live")
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            try:
+                _settle_new_adopted_descendants(baseline_child_pids, {parent.pid})
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            if recovery_pidfd is not None:
+                try:
+                    os.close(recovery_pidfd)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            try:
+                _close_parent_streams(parent)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            for scratch_path in (identity_path, gate_path):
+                try:
+                    scratch_path.unlink(missing_ok=True)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        finally:
+            try:
+                _restore_child_subreaper(previous_subreaper)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        # Recovery failures are evidence, but the original pin failure remains the cause
+        # once every side effect is proven settled and process-global state restored.
+        unexpected = [error for error in cleanup_errors if not isinstance(error, _UnstableIdentity)]
+        if unexpected:
+            details = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)
+            raise AssertionError(f"parent pin failure cleanup failed: {details}") from pin_error
+        raise
     child_pid: int | None = None
     child_pidfd: int | None = None
-    parent_was_killed = False
+    parent_identity_settled = False
     try:
-        child_pid = _reported_child_identity(parent, marker="SPAWNED", timeout=10.0)
-        # From this point onward the exact child is pinned before READY, polling, or any
-        # signal. A setup failure is an error, never a post-spawn skip; the live parent
-        # still owns the multiprocessing.Process and the finally block asks it to reap it.
-        child_pidfd = _stable_identity(child_pid)
+        _send_parent_command(parent, b"START")
+        child_pid = _wait_for_child_identity_file(identity_path, parent_pidfd, timeout=10.0)
+        # The child-writable frame is only a candidate. Open an exact pidfd, then authenticate
+        # it as a live kernel child of the still-pinned Popen parent BEFORE assigning cleanup
+        # authority or releasing the worker gate. A forged/reused numeric PID is closed
+        # untouched and can never become a signal target.
+        candidate_child_pidfd: int | None = None
+        try:
+            candidate_child_pidfd = _stable_identity(child_pid)
+            _validate_child_authority(child_pid, candidate_child_pidfd, parent.pid, parent_pidfd)
+        except BaseException:
+            if candidate_child_pidfd is not None:
+                os.close(candidate_child_pidfd)
+            child_pid = None
+            raise
+        child_pidfd = candidate_child_pidfd
         if after_child_pin is not None:
             after_child_pin()
+        spawned_pid = _reported_child_identity(parent, marker="SPAWNED", timeout=10.0)
+        if spawned_pid != child_pid:
+            raise AssertionError(f"SPAWNED changed child identity from {child_pid} to {spawned_pid}")
+        # The parent-owned SPAWNED frame is the second authority. Only exact equality
+        # with the self-report and authenticated pidfd permits a worker side effect.
+        gate_path.write_bytes(b"PINNED")
         ready_pid = _reported_child_identity(parent, marker="READY", timeout=10.0)
         if ready_pid != child_pid:
             raise AssertionError(f"READY changed child identity from {child_pid} to {ready_pid}")
@@ -589,11 +1088,16 @@ def _spawned_child_survives_killed_parent(
             if _identity_exited(child_pidfd):
                 raise AssertionError("the child died of a bare SIGTERM; only SIGKILL may close it")
 
-        parent.kill()
-        # From the successful kill onward this process, as subreaper, owns the
-        # adopted-child waitpid even if the first parent.wait() itself fails.
-        parent_was_killed = True
+        # From this boundary onward cleanup unconditionally attempts the exact adopted-child
+        # waitpid after parent settlement. The hook reproduces death just before this signal.
+        if before_parent_kill is not None:
+            before_parent_kill()
+        try:
+            _signal_parent_via_identity(parent_pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         parent.wait(timeout=10)
+        parent_identity_settled = True
         if after_parent_kill is not None:
             after_parent_kill()
         return not _wait_for_identity_exit(child_pidfd, timeout=6.0)
@@ -630,25 +1134,27 @@ def _spawned_child_survives_killed_parent(
                     child_identity_settled = True
                 except BaseException as exc:
                     cleanup_errors.append(exc)
-            if not parent_was_killed:
-                try:
-                    _request_exact_parent_cleanup(parent)
-                    child_identity_settled = True
-                    child_reap_settled = True
-                except BaseException as exc:
-                    cleanup_errors.append(exc)
-            else:
-                try:
-                    parent.wait(timeout=10)
-                except BaseException as exc:
-                    cleanup_errors.append(exc)
-            if parent_was_killed and child_pid is not None:
+
+            parent_identity_settled, parent_errors = _request_exact_parent_cleanup(parent, parent_pidfd)
+            cleanup_errors.extend(parent_errors)
+
+            if parent_identity_settled and child_pid is not None:
+                # Always attempt the exact waitpid after parent settlement. A CLEANUP write
+                # is not proof that the parent consumed it or completed Process.join: the
+                # parent can die between flush and read. If the normal parent already joined,
+                # ChildProcessError is positive evidence that no adopted zombie remains.
                 try:
                     _reap_adopted_child(child_pid)
                     child_identity_settled = True
                     child_reap_settled = True
-                except BaseException as exc:
-                    cleanup_errors.append(exc)
+                except AssertionError as exc:
+                    if isinstance(exc.__cause__, ChildProcessError):
+                        child_reap_settled = True
+                    else:
+                        cleanup_errors.append(exc)
+                except ChildProcessError:
+                    child_reap_settled = True
+
             if child_pidfd is not None and child_identity_settled and child_reap_settled:
                 try:
                     os.close(child_pidfd)
@@ -658,10 +1164,35 @@ def _spawned_child_survives_killed_parent(
                 cleanup_errors.append(
                     AssertionError(f"retained exact child pidfd {child_pidfd} because exit and reap did not settle")
                 )
+
+            if parent_identity_settled:
+                try:
+                    os.close(parent_pidfd)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            else:
+                cleanup_errors.append(
+                    AssertionError(f"retained exact parent pidfd {parent_pidfd} because parent exit did not settle")
+                )
+
+            if parent_identity_settled:
+                try:
+                    _settle_new_adopted_descendants(
+                        baseline_child_pids,
+                        ({parent.pid, child_pid} if child_pid is not None else {parent.pid}),
+                    )
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+
             try:
                 _close_parent_streams(parent)
             except BaseException as exc:
                 cleanup_errors.append(exc)
+            for scratch_path in (identity_path, gate_path):
+                try:
+                    scratch_path.unlink(missing_ok=True)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
         finally:
             try:
                 _restore_child_subreaper(previous_subreaper)
@@ -677,6 +1208,7 @@ def _child_survives_a_killed_parent(
     *,
     bound: bool,
     busy: str,
+    before_parent_kill: Callable[[], None] | None = None,
     after_parent_kill: Callable[[], None] | None = None,
 ) -> bool:
     """Kill a parent with SIGKILL and report whether its busy child outlived it."""
@@ -690,7 +1222,11 @@ def _child_survives_a_killed_parent(
         ),
         encoding="utf-8",
     )
-    return _spawned_child_survives_killed_parent(parent_file, after_parent_kill=after_parent_kill)
+    return _spawned_child_survives_killed_parent(
+        parent_file,
+        before_parent_kill=before_parent_kill,
+        after_parent_kill=after_parent_kill,
+    )
 
 
 def _assert_proof_pidfd_exited(pidfd: int, identity_exited) -> None:
@@ -722,6 +1258,1128 @@ def test_stable_identity_uses_kernel_pidfd_when_python_omits_wrapper(
         _signal_via_identity(pidfd, 0)
     finally:
         os.close(pidfd)
+
+
+@pytest.mark.parametrize("wrapper_mode", ["failure", "absence"])
+@_LINUX_ONLY
+def test_child_and_adopted_pins_recover_raw_after_post_start_wrapper_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrapper_mode: str,
+) -> None:
+    descendant_marker = tmp_path / f"raw_recovery_descendant_{wrapper_mode}"
+    parent_file = tmp_path / f"post_start_pidfd_wrapper_{wrapper_mode}.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, signal, sys, time
+            from pathlib import Path
+            sys.path.insert(0, {_SRC!r})
+
+            identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            descendant_marker = Path({str(descendant_marker)!r})
+
+            def worker(connection, expected_parent):
+                descendant = os.fork()
+                if descendant == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    descendant_marker.write_text(str(os.getpid()), encoding="ascii")
+                    time.sleep(600)
+                    os._exit(0)
+                while not descendant_marker.is_file():
+                    time.sleep(0.01)
+                identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+                while not gate.is_file():
+                    time.sleep(0.01)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
+                _bind_lifetime_to_parent(expected_parent)
+                connection.send("READY")
+                connection.close()
+                time.sleep(600)
+
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                context = multiprocessing.get_context("spawn")
+                parent_connection, child_connection = context.Pipe(duplex=True)
+                process = context.Process(
+                    target=worker,
+                    args=(child_connection, os.getpid()),
+                    daemon=True,
+                )
+                try:
+                    process.start()
+                    child_connection.close()
+                    print(f"SPAWNED {{process.pid}}", flush=True)
+                    if not parent_connection.poll(10) or parent_connection.recv() != "READY":
+                        raise RuntimeError("worker did not become READY")
+                    print(f"READY {{process.pid}}", flush=True)
+                    if sys.stdin.buffer.readline().strip() != b"CLEANUP":
+                        raise RuntimeError("missing CLEANUP")
+                finally:
+                    if process.pid is not None:
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_parent_identity = _stable_parent_identity
+    real_send_parent_command = _send_parent_command
+    real_wrapper_open = getattr(os, "pidfd_open", _pidfd_open_syscall)
+    real_raw_open = _pidfd_open_syscall
+    real_identity_exited = _identity_exited
+    real_reap_child = _reap_adopted_child
+    real_close = os.close
+    parent_pinned = False
+    start_sent = False
+    wrapper_failed_pids: set[int] = set()
+    raw_opened: list[tuple[int, int]] = []
+    live_raw_authorities: dict[int, int] = {}
+    closed_raw_pids: list[int] = []
+    proof_pidfds: dict[int, int] = {}
+    reaped_pids: list[int] = []
+
+    def record_parent_pin(pid: int) -> int:
+        nonlocal parent_pinned
+        pidfd = real_parent_identity(pid)
+        parent_pinned = True
+        return pidfd
+
+    def fail_once_per_identity(pid: int, flags: int = 0) -> int:
+        assert parent_pinned and start_sent
+        assert flags == 0
+        if pid not in wrapper_failed_pids:
+            wrapper_failed_pids.add(pid)
+            raise OSError(errno.EIO, f"injected post-START pidfd_open failure for {pid}")
+        return real_wrapper_open(pid, flags)
+
+    def send_start_then_remove_wrapper(parent: subprocess.Popen[bytes], command: bytes) -> None:
+        nonlocal start_sent
+        assert command == b"START"
+        assert parent_pinned, "the wrapper surface changed before the parent identity was pinned"
+        real_send_parent_command(parent, command)
+        start_sent = True
+        if wrapper_mode == "failure":
+            monkeypatch.setattr(os, "pidfd_open", fail_once_per_identity, raising=False)
+        else:
+            monkeypatch.delattr(os, "pidfd_open", raising=False)
+
+    def record_raw_open(pid: int) -> int:
+        pidfd = real_raw_open(pid)
+        if not start_sent:
+            # Python may not expose os.pidfd_open at all. In that supported
+            # environment the harness legitimately uses the raw syscall for
+            # preflight and for pinning the parent before START; neither call
+            # is the post-START recovery this guard is meant to measure.
+            return pidfd
+        assert parent_pinned, "post-START raw recovery ran before the parent was pinned"
+        raw_opened.append((pid, pidfd))
+        live_raw_authorities[pidfd] = pid
+        proof_pidfds.setdefault(pid, os.dup(pidfd))
+        return pidfd
+
+    def record_close(fd: int) -> None:
+        raw_pid = live_raw_authorities.pop(fd, None)
+        if raw_pid is not None:
+            closed_raw_pids.append(raw_pid)
+        real_close(fd)
+
+    def record_reap(pid: int) -> None:
+        real_reap_child(pid)
+        reaped_pids.append(pid)
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_parent_identity", record_parent_pin)
+    monkeypatch.setattr(sys.modules[__name__], "_send_parent_command", send_start_then_remove_wrapper)
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_open_syscall", record_raw_open)
+    monkeypatch.setattr(os, "close", record_close)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", record_reap)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_descendant", record_reap)
+    try:
+        assert not _spawned_child_survives_killed_parent(parent_file)
+        descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
+        recovered_pids = [pid for pid, _pidfd in raw_opened]
+        assert len(recovered_pids) >= 2
+        worker_pid = recovered_pids[0]
+        assert worker_pid != descendant_pid
+        assert descendant_pid in recovered_pids
+        assert sorted(reaped_pids) == sorted(recovered_pids)
+        if wrapper_mode == "failure":
+            assert wrapper_failed_pids == set(recovered_pids)
+        else:
+            assert wrapper_failed_pids == set()
+        assert live_raw_authorities == {}
+        assert sorted(closed_raw_pids) == sorted(recovered_pids)
+        for pid in recovered_pids:
+            _assert_proof_pidfd_exited(proof_pidfds[pid], real_identity_exited)
+            with pytest.raises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+    finally:
+        for pid, proof_pidfd in proof_pidfds.items():
+            if not real_identity_exited(proof_pidfd):
+                _pidfd_send_signal_syscall(proof_pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(proof_pidfd, real_identity_exited)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            _close_proof_pidfd(proof_pidfd)
+
+
+@_LINUX_ONLY
+def test_partial_startup_frame_is_deadline_bounded_and_every_process_is_settled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_file = tmp_path / "partial_startup_frame_parent.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            """
+            import multiprocessing, os, signal, sys, time
+            from pathlib import Path
+            identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            def child():
+                identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+                while not gate.is_file():
+                    time.sleep(0.01)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                time.sleep(600)
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                process = multiprocessing.get_context("spawn").Process(target=child, daemon=True)
+                try:
+                    process.start()
+                    sys.stdout.write("SPAW")
+                    sys.stdout.flush()
+                    time.sleep(600)
+                finally:
+                    if process.pid is not None:
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_identity = _stable_identity
+    real_read = _read_startup_line
+    real_reap = _reap_adopted_child
+    child_pids: list[int] = []
+    child_pidfds: list[int] = []
+    proof_pidfds: list[int] = []
+    reaped: list[int] = []
+    original_subreaper = _child_subreaper_state()
+
+    def record_identity(pid: int) -> int:
+        pidfd = real_identity(pid)
+        if pid != os.getpid():
+            child_pids.append(pid)
+            child_pidfds.append(pidfd)
+            proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def record_reap(pid: int) -> None:
+        real_reap(pid)
+        reaped.append(pid)
+
+    def short_read(stream, *, timeout: float) -> str:
+        return real_read(stream, timeout=min(timeout, 0.3))
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", record_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_read_startup_line", short_read)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", record_reap)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(AssertionError, match="parent did not report SPAWNED"):
+            _spawned_child_survives_killed_parent(parent_file)
+        assert time.monotonic() - started < 5.0, "a newline-free partial frame blocked past its deadline"
+        assert len(child_pids) == 1
+        assert reaped == child_pids
+        assert _child_subreaper_state() is original_subreaper
+        for pidfd in child_pidfds:
+            with pytest.raises(OSError) as raised:
+                os.fstat(pidfd)
+            assert raised.value.errno == errno.EBADF
+        for pidfd in proof_pidfds:
+            _assert_proof_pidfd_exited(pidfd, _identity_exited)
+    finally:
+        for pidfd in proof_pidfds:
+            if not _identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_forged_child_pid_is_never_signalled_or_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    sentinel_pidfd = _stable_identity(sentinel.pid)
+    forged_candidate_fds: list[int] = []
+    parent_file = tmp_path / "forged_child_identity_parent.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, sys, time
+            from pathlib import Path
+            identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            def child():
+                identity.write_text("PID {sentinel.pid} END\\n", encoding="ascii")
+                while not gate.is_file():
+                    time.sleep(0.01)
+                raise RuntimeError("forged worker gate was released")
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                process = multiprocessing.get_context("spawn").Process(target=child, daemon=True)
+                try:
+                    process.start()
+                    time.sleep(600)
+                finally:
+                    if process.pid is not None:
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_identity = _stable_identity
+
+    def record_forged_candidate(pid: int) -> int:
+        pidfd = real_identity(pid)
+        if pid == sentinel.pid:
+            forged_candidate_fds.append(pidfd)
+        return pidfd
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", record_forged_candidate)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    try:
+        with pytest.raises(_UnstableIdentity, match="not a kernel child"):
+            _spawned_child_survives_killed_parent(parent_file)
+        assert not _identity_exited(sentinel_pidfd), "forged numeric identity caused sentinel settlement"
+        assert len(forged_candidate_fds) == 1
+        with pytest.raises(OSError) as raised:
+            os.fstat(forged_candidate_fds[0])
+        assert raised.value.errno == errno.EBADF
+    finally:
+        if not _identity_exited(sentinel_pidfd):
+            _signal_via_identity(sentinel_pidfd, signal.SIGKILL)
+        sentinel.wait(timeout=5)
+        os.close(sentinel_pidfd)
+
+
+@_LINUX_ONLY
+def test_same_parent_sibling_forgery_never_releases_worker_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = tmp_path / "forged_sibling_released"
+    parent_file = tmp_path / "same_parent_sibling_forgery.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, sys, time
+            from pathlib import Path
+            identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            released = Path({str(released)!r})
+            def forged_sibling():
+                identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+                while not gate.is_file():
+                    time.sleep(0.01)
+                released.write_bytes(b"RELEASED")
+                time.sleep(600)
+            def actual_worker():
+                time.sleep(600)
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                context = multiprocessing.get_context("spawn")
+                forged = context.Process(target=forged_sibling, daemon=True)
+                actual = context.Process(target=actual_worker, daemon=True)
+                forged.start()
+                actual.start()
+                try:
+                    while not released.is_file():
+                        time.sleep(0.01)
+                    print(f"SPAWNED {{actual.pid}}", flush=True)
+                    time.sleep(600)
+                finally:
+                    for process in (forged, actual):
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_read_startup_line = _read_startup_line
+
+    def bounded_startup_read(stream, *, timeout: float) -> str:
+        return real_read_startup_line(stream, timeout=min(timeout, 0.3))
+
+    monkeypatch.setattr(sys.modules[__name__], "_read_startup_line", bounded_startup_read)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_TERMINATE_WAIT_S", 0.1)
+    try:
+        with pytest.raises(AssertionError, match="parent did not report SPAWNED"):
+            _spawned_child_survives_killed_parent(parent_file)
+        assert not released.exists(), "the forged same-parent sibling observed a RELEASED gate side effect"
+    finally:
+        released.unlink(missing_ok=True)
+
+
+@_LINUX_ONLY
+def test_parent_signal_error_preserves_error_after_child_descendant_reap_and_fd_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descendant_marker = tmp_path / "hidden_descendant"
+    parent_file = tmp_path / "cleanup_error_parent.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, signal, sys, time
+            from pathlib import Path
+            identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            marker = Path({str(descendant_marker)!r})
+            def worker():
+                descendant = os.fork()
+                if descendant == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    marker.write_text(str(os.getpid()), encoding="ascii")
+                    time.sleep(600)
+                    os._exit(0)
+                identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+                while not gate.is_file():
+                    time.sleep(0.01)
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                process = multiprocessing.get_context("spawn").Process(target=worker, daemon=True)
+                process.start()
+                print(f"SPAWNED {{process.pid}}", flush=True)
+                time.sleep(600)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_child_identity = _stable_identity
+    real_parent_signal = _signal_parent_via_identity
+    real_adopted_identity = _adopted_descendant_identity
+    real_reap_child = _reap_adopted_child
+    real_identity_exited = _identity_exited
+    real_close = os.close
+    child_pids: list[int] = []
+    child_pidfds: list[int] = []
+    child_proofs: list[int] = []
+    descendant_proofs: dict[int, int] = {}
+    reaped_children: list[int] = []
+    closed_child_pidfds: list[int] = []
+
+    def record_child(pid: int) -> int:
+        pidfd = real_child_identity(pid)
+        if pid != os.getpid():
+            child_pids.append(pid)
+            child_pidfds.append(pidfd)
+            child_proofs.append(os.dup(pidfd))
+        return pidfd
+
+    def fail_term(pidfd: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            raise OSError(errno.EIO, "injected parent TERM wrapper error")
+        real_parent_signal(pidfd, sig)
+
+    def record_adopted(pid: int) -> int:
+        pidfd = real_adopted_identity(pid)
+        descendant_proofs[pid] = os.dup(pidfd)
+        return pidfd
+
+    def record_reap(pid: int) -> None:
+        real_reap_child(pid)
+        reaped_children.append(pid)
+
+    def record_close(fd: int) -> None:
+        if fd in child_pidfds:
+            assert real_identity_exited(fd)
+            assert reaped_children == child_pids
+            closed_child_pidfds.append(fd)
+        real_close(fd)
+
+    def stop_after_pin() -> None:
+        deadline = time.monotonic() + 2.0
+        while not descendant_marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert descendant_marker.is_file()
+        raise RuntimeError("injected failure after exact child pin")
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", record_child)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_parent_via_identity", fail_term)
+    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", record_adopted)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", record_reap)
+    monkeypatch.setattr(os, "close", record_close)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_TERMINATE_WAIT_S", 0.1)
+    try:
+        with pytest.raises(AssertionError, match="injected parent TERM wrapper error"):
+            _spawned_child_survives_killed_parent(parent_file, after_child_pin=stop_after_pin)
+        assert reaped_children == child_pids
+        assert closed_child_pidfds == child_pidfds
+        hidden_descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
+        assert hidden_descendant_pid in descendant_proofs
+        for pidfd in child_proofs + list(descendant_proofs.values()):
+            _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+        for pid in child_pids + list(descendant_proofs):
+            with pytest.raises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+    finally:
+        for pidfd in child_proofs + list(descendant_proofs.values()):
+            if not real_identity_exited(pidfd):
+                _pidfd_send_signal_syscall(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "adopted_descendants"
+    launcher = tmp_path / "fork_two_descendants.py"
+    launcher.write_text(
+        textwrap.dedent(
+            f"""
+            import os, signal, time
+            from pathlib import Path
+            marker = Path({str(marker)!r})
+            pids = []
+            for _ in range(2):
+                pid = os.fork()
+                if pid == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    time.sleep(600)
+                    os._exit(0)
+                pids.append(pid)
+            marker.write_text(" ".join(map(str, pids)), encoding="ascii")
+            """
+        ),
+        encoding="utf-8",
+    )
+    previous_subreaper = _set_child_subreaper(True)
+    baseline = _direct_child_pids()
+    owner = subprocess.Popen([sys.executable, "-B", str(launcher)])
+    owner.wait(timeout=5)
+    deadline = time.monotonic() + 2.0
+    while not marker.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    descendant_pids = [int(value) for value in marker.read_text(encoding="ascii").split()]
+    real_adopted_identity = _adopted_descendant_identity
+    real_wrapper_signal = _signal_via_identity
+    real_raw_signal = _pidfd_send_signal_syscall
+    real_identity_exited = _identity_exited
+    pidfd_to_pid: dict[int, int] = {}
+    proof_pidfds: dict[int, int] = {}
+    wrapper_attempts: list[int] = []
+    raw_attempts: list[int] = []
+
+    def record_adopted(pid: int) -> int:
+        pidfd = real_adopted_identity(pid)
+        pidfd_to_pid[pidfd] = pid
+        proof_pidfds[pid] = os.dup(pidfd)
+        return pidfd
+
+    def fail_wrapper(pidfd: int, sig: int) -> None:
+        if pidfd in pidfd_to_pid and sig == signal.SIGKILL:
+            wrapper_attempts.append(pidfd_to_pid[pidfd])
+            raise OSError(errno.EIO, f"injected descendant wrapper EIO for {pidfd_to_pid[pidfd]}")
+        real_wrapper_signal(pidfd, sig)
+
+    def record_raw(pidfd: int, sig: int) -> None:
+        if pidfd in pidfd_to_pid and sig == signal.SIGKILL:
+            raw_attempts.append(pidfd_to_pid[pidfd])
+        real_raw_signal(pidfd, sig)
+
+    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", record_adopted)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_via_identity", fail_wrapper)
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_send_signal_syscall", record_raw)
+    try:
+        with pytest.raises(AssertionError, match="injected descendant wrapper EIO"):
+            _settle_new_adopted_descendants(baseline, {owner.pid}, timeout=3.0)
+        assert sorted(wrapper_attempts) == sorted(descendant_pids)
+        assert sorted(raw_attempts) == sorted(descendant_pids)
+        assert sorted(proof_pidfds) == sorted(descendant_pids)
+        for pid in descendant_pids:
+            _assert_proof_pidfd_exited(proof_pidfds[pid], real_identity_exited)
+            with pytest.raises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+    finally:
+        for pid, pidfd in proof_pidfds.items():
+            if not real_identity_exited(pidfd):
+                real_raw_signal(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            _close_proof_pidfd(pidfd)
+        _restore_child_subreaper(previous_subreaper)
+
+
+@_LINUX_ONLY
+def test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "persistent_pin_failure_descendants"
+    launcher = tmp_path / "fork_two_persistent_pin_failures.py"
+    launcher.write_text(
+        textwrap.dedent(
+            f"""
+            import os, signal, time
+            from pathlib import Path
+            marker = Path({str(marker)!r})
+            pids = []
+            for _ in range(2):
+                pid = os.fork()
+                if pid == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    time.sleep(600)
+                    os._exit(0)
+                pids.append(pid)
+            marker.write_text(" ".join(map(str, pids)), encoding="ascii")
+            """
+        ),
+        encoding="utf-8",
+    )
+    previous_subreaper = _set_child_subreaper(True)
+    baseline = _direct_child_pids()
+    owner = subprocess.Popen([sys.executable, "-B", str(launcher)])
+    owner.wait(timeout=5)
+    deadline = time.monotonic() + 2.0
+    while not marker.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    descendant_pids = [int(value) for value in marker.read_text(encoding="ascii").split()]
+    proof_pidfds = {pid: _pidfd_open_syscall(pid) for pid in descendant_pids}
+    attempts = {pid: 0 for pid in descendant_pids}
+    injected_text = "persistent adopted pin failure " + ("x" * 4096)
+
+    def persistent_pin_failure(pid: int) -> int:
+        attempts[pid] += 1
+        raise OSError(errno.EIO, injected_text)
+
+    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", persistent_pin_failure)
+    started = time.monotonic()
+    try:
+        with pytest.raises(AssertionError) as raised:
+            _settle_new_adopted_descendants(baseline, {owner.pid}, timeout=3.0)
+        elapsed = time.monotonic() - started
+        assert set(attempts) == set(descendant_pids)
+        assert set(attempts.values()) == {3}
+        assert elapsed >= 0.02
+        assert elapsed < 1.0
+        diagnostic = str(raised.value)
+        assert len(diagnostic) <= 2048
+        assert diagnostic.count("persistent adopted pin failure") == len(descendant_pids)
+    finally:
+        for pid, pidfd in proof_pidfds.items():
+            if not _identity_exited(pidfd):
+                _pidfd_send_signal_syscall(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, _identity_exited)
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            os.close(pidfd)
+        _restore_child_subreaper(previous_subreaper)
+
+
+@_LINUX_ONLY
+def test_parent_term_signal_and_first_wait_failures_still_end_in_exact_kill_and_reap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_file = tmp_path / "term_failure_parent.py"
+    parent_file.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('STALLED', flush=True)\n"
+        "time.sleep(600)\n",
+        encoding="utf-8",
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-B", str(parent_file)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    pidfd = _stable_parent_identity(parent.pid)
+    real_signal = _signal_parent_via_identity
+    real_wait = parent.wait
+    signals: list[int] = []
+    first_wait_failed = False
+
+    def fail_term(pidfd_arg: int, sig: int) -> None:
+        assert pidfd_arg == pidfd
+        signals.append(sig)
+        if sig == signal.SIGTERM:
+            raise OSError(errno.EIO, "injected exact TERM send failure")
+        real_signal(pidfd_arg, sig)
+
+    def fail_first_wait(timeout=None):
+        nonlocal first_wait_failed
+        if not first_wait_failed:
+            first_wait_failed = True
+            raise OSError(errno.EIO, "injected first parent wait failure")
+        return real_wait(timeout=timeout)
+
+    assert parent.stdout is not None
+    assert _read_startup_line(parent.stdout, timeout=5.0) == "STALLED"
+    parent.wait = fail_first_wait
+    monkeypatch.setattr(sys.modules[__name__], "_signal_parent_via_identity", fail_term)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_TERMINATE_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_KILL_WAIT_S", 2.0)
+    try:
+        settled, errors = _request_exact_parent_cleanup(parent, pidfd)
+        assert settled is True
+        assert any("injected exact TERM send failure" in str(error) for error in errors)
+        assert any("injected first parent wait failure" in str(error) for error in errors)
+        assert first_wait_failed is True
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert _identity_exited(pidfd)
+        assert parent.returncode == -signal.SIGKILL
+        with pytest.raises(ChildProcessError):
+            os.waitpid(parent.pid, os.WNOHANG)
+    finally:
+        if not _identity_exited(pidfd):
+            real_signal(pidfd, signal.SIGKILL)
+            real_wait(timeout=2)
+        os.close(pidfd)
+        _close_parent_streams(parent)
+
+
+@_LINUX_ONLY
+def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descendant_marker = tmp_path / "unreported_descendant_pid"
+    parent_file = tmp_path / "unreported_descendant_parent.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, signal, sys, time
+            from pathlib import Path
+            marker = Path({str(descendant_marker)!r})
+            def worker():
+                descendant = os.fork()
+                if descendant == 0:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    marker.write_text(str(os.getpid()), encoding="ascii")
+                    time.sleep(600)
+                    os._exit(0)
+                time.sleep(600)
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing START")
+                process = multiprocessing.get_context("spawn").Process(target=worker, daemon=True)
+                try:
+                    process.start()
+                    while not marker.is_file():
+                        time.sleep(0.01)
+                    time.sleep(600)
+                finally:
+                    if process.pid is not None:
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_wait_identity = _wait_for_child_identity_file
+    real_adopted_identity = _adopted_descendant_identity
+    descendant_proofs: dict[int, int] = {}
+    inventoried: set[int] = set()
+
+    def short_identity_wait(path: Path, parent_pidfd: int, *, timeout: float) -> int:
+        deadline = time.monotonic() + 0.5
+        while not descendant_marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if descendant_marker.is_file():
+            descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
+            descendant_proofs[descendant_pid] = _stable_identity(descendant_pid)
+        return real_wait_identity(path, parent_pidfd, timeout=min(timeout, 0.5))
+
+    def record_adopted(pid: int) -> int:
+        pidfd = real_adopted_identity(pid)
+        inventoried.add(pid)
+        return pidfd
+
+    monkeypatch.setattr(sys.modules[__name__], "_wait_for_child_identity_file", short_identity_wait)
+    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", record_adopted)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    try:
+        with pytest.raises(AssertionError, match="child did not publish exact identity"):
+            _spawned_child_survives_killed_parent(parent_file)
+        descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
+        assert descendant_pid in inventoried, "the unreported descendant was never kernel-inventoried"
+        _assert_proof_pidfd_exited(descendant_proofs[descendant_pid], _identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(descendant_pid, os.WNOHANG)
+    finally:
+        for adopted_pid, pidfd in descendant_proofs.items():
+            if not _identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, _identity_exited)
+            try:
+                _reap_adopted_child(adopted_pid)
+            except AssertionError as exc:
+                if not isinstance(exc.__cause__, ChildProcessError):
+                    raise
+            _close_proof_pidfd(pidfd)
+
+
+@pytest.mark.parametrize("failing_suffix", [".child.pid", ".child.gate"])
+@_LINUX_ONLY
+def test_scratch_unlink_failure_cannot_skip_actual_subreaper_restoration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_suffix: str,
+) -> None:
+    real_unlink = Path.unlink
+    original_subreaper = _child_subreaper_state()
+    injected: list[Path] = []
+
+    def fail_selected_unlink(path: Path, *args, **kwargs) -> None:
+        if str(path).endswith(failing_suffix) and not injected:
+            injected.append(path)
+            raise OSError(errno.EIO, f"injected unlink failure for {failing_suffix}")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_selected_unlink)
+    try:
+        with pytest.raises(AssertionError, match="injected unlink failure"):
+            _child_survives_a_killed_parent(tmp_path, bound=True, busy="time.sleep(600)")
+        assert len(injected) == 1
+        assert _child_subreaper_state() is original_subreaper
+    finally:
+        for path in injected:
+            real_unlink(path, missing_ok=True)
+
+
+@_LINUX_ONLY
+def test_stalled_harness_parent_is_exactly_terminated_killed_and_waited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_file = tmp_path / "stalled_parent.py"
+    parent_file.write_text(
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('STALLED', flush=True)\n"
+        "time.sleep(600)\n",
+        encoding="utf-8",
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-B", str(parent_file)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    parent_pidfd = _stable_parent_identity(parent.pid)
+    signals: list[int] = []
+    real_parent_signal = _signal_parent_via_identity
+
+    def recording_parent_signal(pidfd: int, sig: int) -> None:
+        assert pidfd == parent_pidfd
+        signals.append(sig)
+        real_parent_signal(pidfd, sig)
+
+    monkeypatch.setattr(sys.modules[__name__], "_signal_parent_via_identity", recording_parent_signal)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_TERMINATE_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_KILL_WAIT_S", 2.0)
+    try:
+        assert parent.stdout is not None
+        assert _read_startup_line(parent.stdout, timeout=5.0) == "STALLED"
+        settled, errors = _request_exact_parent_cleanup(parent, parent_pidfd)
+        assert settled is True
+        assert errors == []
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert parent.returncode == -signal.SIGKILL
+        assert _identity_exited(parent_pidfd)
+    finally:
+        if not _identity_exited(parent_pidfd):
+            real_parent_signal(parent_pidfd, signal.SIGKILL)
+            parent.wait(timeout=2)
+        os.close(parent_pidfd)
+        _close_parent_streams(parent)
+
+
+@_LINUX_ONLY
+def test_pre_spawn_report_stall_settles_immune_child_by_preopened_pidfd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    immune = tmp_path / "child_is_sigterm_immune"
+    parent_file = tmp_path / "stall_after_immune_before_spawned.py"
+    parent_file.write_text(
+        textwrap.dedent(
+            f"""
+            import multiprocessing, os, signal, sys, time
+            from pathlib import Path
+
+            _identity = Path(os.environ["CRYODAQ_HARNESS_CHILD_IDENTITY_PATH"])
+            _gate = Path(os.environ["CRYODAQ_HARNESS_CHILD_GATE_PATH"])
+            _immune = Path({str(immune)!r})
+
+            def _immune_child():
+                _identity.write_text("PID " + str(os.getpid()) + " END\\n", encoding="ascii")
+                while not _gate.is_file():
+                    time.sleep(0.01)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                _immune.write_bytes(b"IMMUNE")
+                time.sleep(600)
+
+            if __name__ == "__main__":
+                if sys.stdin.buffer.readline().strip() != b"START":
+                    raise RuntimeError("missing start authority")
+                process = multiprocessing.get_context("spawn").Process(
+                    target=_immune_child,
+                    daemon=True,
+                )
+                try:
+                    process.start()
+                    deadline = time.monotonic() + 10.0
+                    while not _immune.is_file():
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("child never became signal-immune")
+                        time.sleep(0.01)
+                    time.sleep(600)  # Deliberately never publish SPAWNED.
+                finally:
+                    if process.pid is not None:
+                        if process.is_alive():
+                            process.kill()
+                        process.join(10)
+            """
+        ),
+        encoding="utf-8",
+    )
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    real_read_startup_line = _read_startup_line
+    child_pids: list[int] = []
+    proof_pidfds: list[int] = []
+
+    def recording_child_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        if pid != os.getpid():
+            child_pids.append(pid)
+            proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def bounded_startup_read(stream, *, timeout: float) -> str:
+        return real_read_startup_line(stream, timeout=min(timeout, 0.5))
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_read_startup_line", bounded_startup_read)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
+    monkeypatch.setattr(sys.modules[__name__], "_PARENT_TERMINATE_WAIT_S", 1.0)
+    try:
+        with pytest.raises(AssertionError, match="parent did not report SPAWNED"):
+            _spawned_child_survives_killed_parent(parent_file)
+        assert not immune.exists(), "the worker crossed its side-effect gate before SPAWNED corroboration"
+        assert len(child_pids) == 1
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pids[0], os.WNOHANG)
+    finally:
+        for pidfd in proof_pidfds:
+            if not real_identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            _close_proof_pidfd(pidfd)
+        for child_pid in child_pids:
+            try:
+                _reap_adopted_child(child_pid)
+            except AssertionError as exc:
+                if not isinstance(exc.__cause__, ChildProcessError):
+                    raise
+
+
+@_LINUX_ONLY
+def test_parent_pin_failure_settles_started_parent_before_restoring_subreaper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_effect = tmp_path / "start_was_granted"
+    parent_file = tmp_path / "parent_waiting_for_start.py"
+    parent_file.write_text(
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        f"effect = Path({str(start_effect)!r})\n"
+        "if sys.stdin.buffer.readline().strip() == b'START':\n"
+        "    effect.write_bytes(b'STARTED')\n"
+        "time.sleep(600)\n",
+        encoding="utf-8",
+    )
+    real_popen = subprocess.Popen
+    real_raw_open = _pidfd_open_syscall
+    real_identity_exited = _identity_exited
+    real_parent_signal = _signal_parent_via_identity
+    parent_pids: list[int] = []
+    proof_pidfds: list[int] = []
+    raw_recovery_pids: list[int] = []
+
+    def wrapper_failure(pid: int, flags: int = 0) -> int:
+        raise _UnstableIdentity(f"injected real os.pidfd_open failure for {pid}/{flags}")
+
+    def recording_popen(*args, **kwargs):
+        parent = real_popen(*args, **kwargs)
+        parent_pids.append(parent.pid)
+        proof_pidfds.append(real_raw_open(parent.pid))
+        # Force both named parent seams to fail only after Popen. The final raw opener
+        # remains independent and must settle the still-unstarted parent.
+        monkeypatch.setattr(sys.modules[__name__], "_stable_parent_identity", wrapper_failure)
+        monkeypatch.setattr(sys.modules[__name__], "_recover_parent_identity", wrapper_failure)
+        return parent
+
+    def recording_raw_open(pid: int) -> int:
+        raw_recovery_pids.append(pid)
+        return real_raw_open(pid)
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_open_syscall", recording_raw_open)
+    try:
+        with pytest.raises(_UnstableIdentity, match="injected real os.pidfd_open failure"):
+            _spawned_child_survives_killed_parent(parent_file)
+        assert not start_effect.exists(), "child creation authority must not be granted before parent pin"
+        assert raw_recovery_pids[-1:] == parent_pids, "cleanup did not use the independent raw pidfd opener"
+        assert len(parent_pids) == 1
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(parent_pids[0], os.WNOHANG)
+    finally:
+        for parent_pid, pidfd in zip(parent_pids, proof_pidfds, strict=True):
+            if not real_identity_exited(pidfd):
+                real_parent_signal(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            try:
+                os.waitpid(parent_pid, 0)
+            except ChildProcessError:
+                pass
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_pins_parent_before_startup_and_signals_same_pidfd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_parent_identity = _stable_parent_identity
+    real_parent_signal = _signal_parent_via_identity
+    real_read_startup_line = _read_startup_line
+    parent_pidfds: list[int] = []
+    parent_signals: list[tuple[int, int]] = []
+
+    def recording_parent_identity(pid: int) -> int:
+        pidfd = real_parent_identity(pid)
+        parent_pidfds.append(pidfd)
+        return pidfd
+
+    def startup_requires_parent_pin(stream, *, timeout: float) -> str:
+        assert len(parent_pidfds) == 1, "parent pidfd must exist before any startup line is read"
+        return real_read_startup_line(stream, timeout=timeout)
+
+    def recording_parent_signal(pidfd: int, sig: int) -> None:
+        parent_signals.append((pidfd, sig))
+        real_parent_signal(pidfd, sig)
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_parent_identity", recording_parent_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_read_startup_line", startup_requires_parent_pin)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_parent_via_identity", recording_parent_signal)
+
+    assert not _child_survives_a_killed_parent(tmp_path, bound=True, busy="time.sleep(600)")
+    assert len(parent_pidfds) == 1
+    assert parent_signals == [(parent_pidfds[0], signal.SIGKILL)]
+    with pytest.raises(OSError) as raised:
+        os.fstat(parent_pidfds[0])
+    assert raised.value.errno == errno.EBADF
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_reaps_child_when_parent_dies_before_explicit_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_parent_identity = _stable_parent_identity
+    real_parent_signal = _signal_parent_via_identity
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    real_reap_adopted_child = _reap_adopted_child
+    parent_proof_pidfds: list[int] = []
+    child_pids: list[int] = []
+    reaped_child_pids: list[int] = []
+
+    def recording_parent_identity(pid: int) -> int:
+        pidfd = real_parent_identity(pid)
+        parent_proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def recording_child_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        if pid != os.getpid():
+            child_pids.append(pid)
+        return pidfd
+
+    def kill_parent_before_harness_signal() -> None:
+        assert len(parent_proof_pidfds) == 1
+        real_parent_signal(parent_proof_pidfds[0], signal.SIGKILL)
+        assert _wait_for_identity_exit(parent_proof_pidfds[0], timeout=2.0)
+
+    def recording_reap(child_pid: int) -> None:
+        real_reap_adopted_child(child_pid)
+        reaped_child_pids.append(child_pid)
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_parent_identity", recording_parent_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", recording_reap)
+    try:
+        assert not _child_survives_a_killed_parent(
+            tmp_path,
+            bound=True,
+            busy="time.sleep(600)",
+            before_parent_kill=kill_parent_before_harness_signal,
+        )
+        assert len(child_pids) == 1
+        assert reaped_child_pids == child_pids
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pids[0], os.WNOHANG)
+    finally:
+        for pidfd in parent_proof_pidfds:
+            if not real_identity_exited(pidfd):
+                real_parent_signal(pidfd, signal.SIGKILL)
+            _close_proof_pidfd(pidfd)
+        for child_pid in child_pids:
+            try:
+                real_reap_adopted_child(child_pid)
+            except AssertionError as exc:
+                if not isinstance(exc.__cause__, ChildProcessError):
+                    raise
 
 
 @_LINUX_ONLY
@@ -880,6 +2538,7 @@ def test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_popen = subprocess.Popen
+    real_parent_signal = _signal_parent_via_identity
     real_stable_identity = _stable_identity
     real_identity_exited = _identity_exited
     real_reap_adopted_child = _reap_adopted_child
@@ -900,15 +2559,15 @@ def test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails(
         real_reap_adopted_child(child_pid)
         reaped_child_pids.append(child_pid)
 
+    def recording_parent_signal(pidfd: int, sig: int) -> None:
+        nonlocal parent_kill_succeeded
+        real_parent_signal(pidfd, sig)
+        if sig == signal.SIGKILL:
+            parent_kill_succeeded = True
+
     def popen_with_first_post_kill_wait_failure(*args, **kwargs):
         parent = real_popen(*args, **kwargs)
-        real_kill = parent.kill
         real_wait = parent.wait
-
-        def recording_kill() -> None:
-            nonlocal parent_kill_succeeded
-            real_kill()
-            parent_kill_succeeded = True
 
         def fail_first_post_kill_wait(timeout=None):
             nonlocal injected
@@ -917,12 +2576,12 @@ def test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails(
                 raise OSError(errno.EIO, "injected first parent wait failure after successful kill")
             return real_wait(timeout=timeout)
 
-        parent.kill = recording_kill
         parent.wait = fail_first_post_kill_wait
         return parent
 
     monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
     monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", recording_reap)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_parent_via_identity", recording_parent_signal)
     monkeypatch.setattr(subprocess, "Popen", popen_with_first_post_kill_wait_failure)
     try:
         with pytest.raises(OSError, match="injected first parent wait failure after successful kill"):
