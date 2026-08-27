@@ -649,6 +649,22 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: source_order_builder_check_stayed_green_when_alias_and_bulk_mutation_restored_ambient_authority_conditional_loop_or_try_sanitization_did_not_dominate_spawn_or_a_stateful_capability_mapping_changed_between_validation_and_use_2026_08_27_pending_immutable_capture
     green_evidence: pending
+  - id: LAUNCHER-SPAWN-CALLSITE-INVENTORY-FALSE-GREEN-510
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
+    guard: tests/test_launcher_bridge_handshake.py::test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation
+    ci_partition: remaining
+    red_evidence: added_allowed_spawn_boundary_call_with_exact_three_key_grant_and_pass_fds_999_reached_fake_Popen_while_the_existing_definition_and_process_reference_inventory_stayed_green_2026_08_27_pending_candidate_binding
+    green_evidence: focused_spawn_callsite_inventory_fake_sink_guard_passed_2026_08_27_pending_candidate_binding
+  - id: LAUNCHER-TRACEBACK-BUILTINS-RECOVERY-FALSE-GREEN-511
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
+    guard: tests/test_launcher_bridge_handshake.py::test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected
+    ci_partition: remaining
+    red_evidence: exception_traceback_tb_frame_f_builtins_recovered_import_and_getattr_and_reached_fake_Popen_while_the_existing_reflection_inventory_stayed_green_2026_08_27_pending_candidate_binding
+    green_evidence: focused_traceback_frame_builtin_recovery_fake_sink_guard_passed_2026_08_27_pending_candidate_binding
   - id: LAUNCHER-STDOUT-INHERIT-FALSE-GREEN-002
     status: open
     scope: product_contract
@@ -5792,7 +5808,12 @@ records:
       return. The sole Popen allowance is bound to that exact frozen definition
       node, so moving authority through a same-identity capture/redefine/restore
       sequence cannot inherit the allowance. The inventory freezes the exact
-      reviewed import syntax and freezes every syntactic occurrence rooted at an imported
+      three production _spawn_child_process calls by their enclosing semantic
+      scope and signature, complete call AST, and immediate parent AST. Any
+      added call fails closed even when it uses the allowed boundary and forges
+      the exact three-key assistant grant while delegating an unrelated
+      pass_fds descriptor. It also freezes the exact reviewed import syntax and
+      every syntactic occurrence rooted at an imported
       module alias. Each occurrence is bound to its enclosing class/function,
       function signature, full direct attribute chain, and immediate semantic
       parent; duplicates remain separate. Assigning even an already-seen bare
@@ -5820,8 +5841,14 @@ records:
       decorator forms. Globals, locals, eval, exec, compile, __import__, builtins
       recovery, executable breakpoint dispatch, object/inspect/importlib
       reflection, sys.modules, module namespaces, and dunder recovery are
-      rejected. Direct subprocess aliases and alternate
-      os spawn/exec/system/fork/posix_spawn, asyncio subprocess, or ctypes
+      rejected. Traceback, generator, coroutine, frame, and traceback-chain
+      traversal through __traceback__, ag_frame, cr_frame, f_back, f_builtins,
+      f_globals, f_locals, gi_frame, tb_frame, or tb_next is also rejected. A
+      runtime side-effect control proves that
+      error.__traceback__.tb_frame.f_builtins otherwise recovers __import__ and
+      getattr and reaches an unsanitized fake Popen sink.
+      Direct subprocess aliases and alternate os
+      spawn/exec/system/fork/posix_spawn, asyncio subprocess, or ctypes
       CreateProcess surfaces are outside the vocabulary. Named mutations cover
       each recovery class, including logging.os.system, threading._os.system,
       assignment from socket to a local alias, and a duplicate dynamic-getattr
@@ -5851,6 +5878,10 @@ records:
       - node: tests/test_launcher_bridge_handshake.py::test_process_authority_mutants_reach_a_fake_sink_before_the_inventory_rejects_them
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_popen_inventory_rejects_descriptor_reintroduction_after_sanitization
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant
         ci_partition: remaining

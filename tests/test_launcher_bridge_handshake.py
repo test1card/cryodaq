@@ -727,6 +727,18 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
         if spawn_definition_digest != "ecd94f462f3373b4fa816d1348ffe0c358f49f0868b69260952e46f724a95540":
             unsafe.append("the complete reviewed _spawn_child_process definition changed")
 
+    spawn_call_occurrences = sorted(
+        f"{semantic_scope(node)}|{ast.dump(node, include_attributes=False)}|{immediate_context(node)}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and node not in annotation_nodes and call_name(node) == "_spawn_child_process"
+    )
+    spawn_call_digest = hashlib.sha256("\n".join(spawn_call_occurrences).encode("utf-8")).hexdigest()
+    if (
+        len(spawn_call_occurrences) != 3
+        or spawn_call_digest != "9e6105955c850cc5913a77eba1646c126521feef000a62699b8e6e31f5f9920e"
+    ):
+        unsafe.append("the exact reviewed _spawn_child_process call sites changed")
+
     if len(imports) != 80 or import_digest != "8069275ec1216221ff3e09ce5303af2a1fc2a0202fafb84311ede476cc94a936":
         unsafe.append("the exact reviewed import vocabulary changed")
 
@@ -785,13 +797,23 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
         "__mro__",
         "__self__",
         "__subclasses__",
+        "__traceback__",
+        "ag_frame",
         "breakpoint",
         "compile",
+        "cr_frame",
         "eval",
+        "f_back",
+        "f_builtins",
+        "f_globals",
+        "f_locals",
         "getattr",
         "getattr_static",
+        "gi_frame",
         "import_module",
         "modules",
+        "tb_frame",
+        "tb_next",
         "vars",
     }
     for node in ast.walk(tree):
@@ -1371,6 +1393,126 @@ def test_process_authority_mutants_reach_a_fake_sink_before_the_inventory_reject
     assert len(breakpoint_calls[1]) == 1
     assert callable(breakpoint_calls[1][0])
     assert sys.breakpointhook is original_breakpoint_hook
+
+
+def test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An added allowed-boundary call cannot delegate an unreviewed descriptor."""
+
+    source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
+    mutant = source + (
+        "\n\ndef _escape(environment):\n"
+        "    return _spawn_child_process(\n"
+        "        ['escaped'],\n"
+        "        environment=environment,\n"
+        "        assistant_artifact_grant={\n"
+        "            'CRYODAQ_SOAK_ARTIFACT_FD': '999',\n"
+        "            'CRYODAQ_SOAK_ARTIFACT_NONCE': '" + "f" * 64 + "',\n"
+        "            'CRYODAQ_SOAK_ASSISTANT_GENERATION': '7',\n"
+        "        },\n"
+        "        close_fds=True,\n"
+        "        pass_fds=(999,),\n"
+        "    )\n"
+    )
+    popen_count, mutant_unsafe = _launcher_process_authority_violations(mutant)
+    assert popen_count == 1
+    assert mutant_unsafe == ["the exact reviewed _spawn_child_process call sites changed"]
+
+    observed: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+
+    def process_sink(command, *_args, **kwargs):
+        observed.append((list(command), dict(kwargs["env"]), tuple(kwargs["pass_fds"])))
+        return SimpleNamespace(pid=1)
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", process_sink)
+    exact_grant = {
+        launcher._SOAK_ARTIFACT_FD_ENV: "999",
+        launcher._SOAK_ARTIFACT_NONCE_ENV: "f" * 64,
+        launcher._SOAK_ASSISTANT_GENERATION_ENV: "7",
+    }
+    launcher._spawn_child_process(
+        ["escaped"],
+        environment={"SAFE": "kept"},
+        assistant_artifact_grant=exact_grant,
+        close_fds=True,
+        pass_fds=(999,),
+    )
+    assert observed == [(["escaped"], {"SAFE": "kept", **exact_grant}, (999,))]
+
+
+def test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Traceback/frame traversal cannot recover builtins and process authority."""
+
+    source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
+    traceback_mutant = source + (
+        "\n\ndef _escape():\n"
+        "    try:\n"
+        "        raise RuntimeError('probe')\n"
+        "    except RuntimeError as error:\n"
+        "        built = error.__traceback__.tb_frame.f_builtins\n"
+        "        load = built['__im' + 'port__']\n"
+        "        reflect = built['get' + 'attr']\n"
+        "        return reflect(load('sub' + 'process'), 'Po' + 'pen')(['probe'])\n"
+    )
+    _count, traceback_unsafe = _launcher_process_authority_violations(traceback_mutant)
+    for forbidden_attribute in ("__traceback__", "tb_frame", "f_builtins"):
+        assert any(f".{forbidden_attribute} reflection is forbidden" in finding for finding in traceback_unsafe), (
+            forbidden_attribute
+        )
+
+    forbidden_frame_attributes = (
+        "__traceback__",
+        "ag_frame",
+        "cr_frame",
+        "f_back",
+        "f_builtins",
+        "f_globals",
+        "f_locals",
+        "gi_frame",
+        "tb_frame",
+        "tb_next",
+    )
+    for forbidden_attribute in forbidden_frame_attributes:
+        attribute_mutant = source + (
+            f"\n\ndef _codex_frame_attribute_probe(owner):\n    return owner.{forbidden_attribute}\n"
+        )
+        _count, attribute_unsafe = _launcher_process_authority_violations(attribute_mutant)
+        tree = ast.parse(attribute_mutant)
+        occurrences = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr == forbidden_attribute
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "owner"
+        ]
+        assert len(occurrences) == 1, forbidden_attribute
+        assert attribute_unsafe == [f"line {occurrences[0].lineno}: .{forbidden_attribute} reflection is forbidden"], (
+            forbidden_attribute
+        )
+
+    calls: list[list[str]] = []
+
+    def sink(command: list[str], *_args, **_kwargs) -> None:
+        calls.append(command)
+
+    monkeypatch.setitem(sys.modules, "subprocess", SimpleNamespace(Popen=sink))
+
+    def traceback_frame_attack() -> None:
+        try:
+            raise RuntimeError("probe")
+        except RuntimeError as error:
+            assert error.__traceback__ is not None
+            recovered = error.__traceback__.tb_frame.f_builtins
+            load = recovered["__import__"]
+            reflect = recovered["getattr"]
+            reflect(load("sub" + "process"), "Po" + "pen")(["probe"])
+
+    traceback_frame_attack()
+    assert calls == [["probe"]], "traceback/frame recovery did not reach the fake process-creation sink"
 
 
 def test_popen_inventory_rejects_descriptor_reintroduction_after_sanitization(
