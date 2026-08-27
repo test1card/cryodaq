@@ -1022,6 +1022,9 @@ def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
     else:
         identity_before = None
     selected = _engine_stderr_file(state_root)
+    if selected is _AssistantLogDirectoryAbsence.MISSING_DIRECTORY:
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+        return
     if isinstance(selected, _AssistantLogDirectoryRefusal):
         evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER)
         return
@@ -1115,9 +1118,9 @@ _ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER: Final = (
 )
 _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER: Final = (
     "<the assistant log was refused: the logs directory under the isolated state root could "
-    "not be opened and proven to be a plain, unlinked directory -- missing, linked, "
-    "replaced, or unreadable. Nothing is published, because nothing inside it can be "
-    "trusted on that platform.>\n"
+    "not be opened and proven to be a plain, unlinked directory -- linked, replaced, or "
+    "unreadable. Nothing is published, because nothing inside it can be trusted on that "
+    "platform.>\n"
 )
 _ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER: Final = (
     "<the assistant log was refused: more than "
@@ -1130,6 +1133,12 @@ _ASSISTANT_LOG_ROTATION_CEILING_MARKER: Final = (
     f"were observed, exceeding the configured {_ASSISTANT_LOG_BACKUP_COUNT}-backup retention plus the single "
     "bounded residue of an interrupted rollover. No bytes from the directory were published.>\n"
 )
+
+
+class _AssistantLogDirectoryAbsence(StrEnum):
+    """The exact securely observed reason no log directory can hold artifacts."""
+
+    MISSING_DIRECTORY = "missing-directory"
 
 
 class _AssistantLogDirectoryRefusal(StrEnum):
@@ -1300,7 +1309,7 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
 
 def _open_posix_state_logs_directory(
     state_root: Path,
-) -> int | _AssistantLogDirectoryRefusal:
+) -> int | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
     """Open ``logs`` through the state root from its trusted parent descriptor.
 
     The measured child can rename or replace ``state_root`` itself. Opening
@@ -1335,7 +1344,10 @@ def _open_posix_state_logs_directory(
         if not stat.S_ISDIR(opened_state.st_mode) or not os.path.samestat(state_info, opened_state):
             return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
 
-        logs_info = os.stat("logs", dir_fd=state_descriptor, follow_symlinks=False)
+        try:
+            logs_info = os.stat("logs", dir_fd=state_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return _AssistantLogDirectoryAbsence.MISSING_DIRECTORY
         if not stat.S_ISDIR(logs_info.st_mode):
             return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         logs_descriptor = os.open("logs", directory_flags, dir_fd=state_descriptor)
@@ -1357,7 +1369,7 @@ def _open_posix_state_logs_directory(
 
 def _engine_stderr_file(
     state_root: Path,
-) -> tuple[int | None, Path | str] | _AssistantLogDirectoryRefusal:
+) -> tuple[int | None, Path | str] | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
     """Bind the exact engine stderr leaf to its child-writable logs directory."""
 
     directory = Path(state_root) / "logs"
@@ -1371,7 +1383,7 @@ def _engine_stderr_file(
         return None, directory / _ENGINE_STDERR_BASENAME
 
     directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
-    if isinstance(directory_descriptor, _AssistantLogDirectoryRefusal):
+    if isinstance(directory_descriptor, (_AssistantLogDirectoryAbsence, _AssistantLogDirectoryRefusal)):
         return directory_descriptor
     return directory_descriptor, _ENGINE_STDERR_BASENAME
 
@@ -1420,7 +1432,7 @@ def _is_valid_assistant_log_rotation_name(name: str) -> bool:
 
 def _assistant_log_files(
     state_root: Path,
-) -> tuple[int | None, list[Path | str]] | _AssistantLogDirectoryRefusal:
+) -> tuple[int | None, list[Path | str]] | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
     """The active log and every rotated backup, oldest first.
 
     `setup_logging` rotates the assistant log daily and keeps up to
@@ -1454,7 +1466,7 @@ def _assistant_log_files(
         return None, [*(directory / name for name in rotated), directory / active]
 
     directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
-    if isinstance(directory_descriptor, _AssistantLogDirectoryRefusal):
+    if isinstance(directory_descriptor, (_AssistantLogDirectoryAbsence, _AssistantLogDirectoryRefusal)):
         return directory_descriptor
     keep_descriptor = False
     try:
@@ -1495,6 +1507,9 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
 
     selected = _assistant_log_files(state_root)
+    if selected is _AssistantLogDirectoryAbsence.MISSING_DIRECTORY:
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_ABSENT_MARKER)
+        return
     if isinstance(selected, _AssistantLogDirectoryRefusal):
         marker = {
             _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY: _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER,

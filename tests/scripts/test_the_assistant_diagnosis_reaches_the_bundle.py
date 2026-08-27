@@ -1813,6 +1813,29 @@ def test_a_linked_state_root_is_refused_before_posix_logs_traversal(tmp_path: Pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
+def test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers(
+    tmp_path: Path,
+) -> None:
+    """A securely observed missing logs leaf is absence, not unsafe topology.
+
+    Both production publishers traverse the real state-root boundary. Restoring the
+    former catch-all ``OSError -> UNTRUSTED_DIRECTORY`` mapping makes this guard red
+    for both retained artifacts, while missing/replaced state roots remain covered by
+    the separate refusal guards below.
+    """
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+    runner._publish_engine_stderr(evidence, state_root)
+
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._ASSISTANT_LOG_ABSENT_MARKER
+    assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._ENGINE_STDERR_ABSENT_MARKER
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative ancestor traversal")
 @pytest.mark.parametrize("publisher_name", ["assistant", "engine"])
 @pytest.mark.parametrize("replacement", ["state", "logs"])
 def test_a_directory_replacement_between_stat_and_open_is_refused(

@@ -3647,6 +3647,15 @@ false_green_pairs:
     platform: posix
     red_evidence: corrected_worktree_cold_review_reproduced_that_posix_engine_stderr_pathname_preflight_raised_permission_error_while_assistant_refused_the_same_unreadable_state_root
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-MISSING-LOGS-ABSENCE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7173,8 +7182,8 @@ records:
     correction_owner: primary
     guard_owner: reviewer
     disposition_owner: reviewer
-    consequence: A measured child can replace the state-root ancestor with a link so descriptor checks below it copy unrelated or private bytes into the retained week-run evidence bundle.
-    invariant: On POSIX, retained child-writable logs are reached only by opening the trusted parent, state-root leaf, and logs leaf as separate no-follow directory descriptors and verifying each opened identity. Replacing the state root or logs directory with a link refuses both assistant-log and engine-stderr publication; no bytes below the replacement enter the bundle.
+    consequence: A measured child can replace the state-root ancestor with a link so descriptor checks below it copy unrelated or private bytes into the retained week-run evidence bundle, while a catch-all traversal error can misreport an ordinary pre-log startup exit as unsafe topology and hide the truthful absence diagnosis.
+    invariant: On POSIX, retained child-writable logs are reached only by opening the trusted parent, state-root leaf, and logs leaf as separate no-follow directory descriptors and verifying each opened identity. A missing logs leaf observed relative to the verified state-root descriptor is reported as an absent artifact; linked, replaced, unreadable, or identity-mismatched state/logs directories refuse both assistant-log and engine-stderr publication, and no bytes below a replacement enter the bundle.
     rule_refs:
       - AGENTS.md#mission-and-safety-boundary
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
@@ -7192,6 +7201,9 @@ records:
       - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
         ci_partition: remaining
         platform: posix
-    automation_limit: The production-side-effect guard is locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+        ci_partition: remaining
+        platform: posix
+    automation_limit: The production-side-effect guards are locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_and_reproduction_published_external_state_root_assistant_bytes_through_the_old_logs_only_descriptor_anchor
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
