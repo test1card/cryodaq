@@ -3443,6 +3443,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: measured_2026_08_14_on_71e995c5_rewriting_the_three_empty_read_returns_of_read_channel_history_to_dannye_nedostupny_42_bytes_added_left_that_heads_test_diagnostic_module_7_passed_exit_0_so_the_distinction_could_collapse_toward_unavailable_unobserved_and_the_paired_node_added_here_turns_the_same_control_1_failed_7_passed_while_rewriting_the_exception_branch_back_to_net_dannyh_14_bytes_removed_turns_the_failure_node_red_and_two_further_escapes_share_the_same_false_green_shape_a_successful_channel_series_that_is_empty_or_a_one_point_pressure_trend_was_asserted_by_no_registered_node_so_the_no_data_fallback_for_that_shape_could_change_unobserved_until_test_diagnostic_reports_successful_insufficient_history_as_no_data_turned_the_same_reintroduced_defect_red_1_failed_and_an_untyped_per_chat_recipient_value_such_as_true_inside_a_mapping_settled_as_the_raw_value_or_the_string_True_in_the_audit_while_only_a_top_level_boolean_was_guarded_until_test_untyped_telegram_recipient_outcomes_are_not_reported_as_delivered_turned_the_same_reintroduced_defect_red_2_failed_pending_immutable_capture
     green_evidence: pending
+  - id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-FALSEY-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340
+    guard: tests/agents/assistant/test_output_router.py::test_falsey_untyped_telegram_outcome_is_reported_as_failed
+    ci_partition: agents
+    red_evidence: fresh_at_a51897df75820a049410d2d8cc4b415c490a09c2_the_non_mapping_telegram_settlement_branch_could_map_both_truthy_and_falsey_results_to_outcome_unknown_while_every_previously_registered_guard_remained_green_the_falsey_settlement_guard_registered_here_is_the_only_node_that_observes_that_escape
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6745,7 +6753,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: The model writing an operator-facing diagnosis reads a failed SQLite history read as an authoritative "no readings in the last 60 minutes" and reasons from an absence that was never established; and a transport result the router cannot type is recorded in the audit as a delivery nobody acknowledged.
-    invariant: 'An assistant outcome that is not known is never rendered as a settled one. A failed channel-history read renders "данные недоступны" and an authoritative empty read renders "нет данных", each asserted from the exact rendered block of the diagnostic prompt so neither wording can absorb the other; and an untyped truthy Telegram result settles as outcome_unknown rather than a delivery claim. WHAT THIS RECORD DOES NOT CLAIM: the router''s boolean branch is NOT reachable from the sole production wiring -- TelegramSender._send_to_all returns a per-chat mapping and the only other repository implementation returns None -- so its guard is compatibility evidence, not proof of a production delivery defect. The reachable per-chat mapping path is settled by ASSISTANT-EGRESS-AUTHORITY-001.'
+    invariant: 'An assistant outcome that is not known is never rendered as a settled one. A failed channel-history read renders "данные недоступны" and an authoritative empty read renders "нет данных", each asserted from the exact rendered block of the diagnostic prompt so neither wording can absorb the other; an untyped truthy Telegram result settles as outcome_unknown rather than a delivery claim; and an untyped falsey Telegram result settles as failed rather than outcome_unknown. WHAT THIS RECORD DOES NOT CLAIM: the router''s boolean branch is NOT reachable from the sole production wiring -- TelegramSender._send_to_all returns a per-chat mapping and the only other repository implementation returns None -- so its guard is compatibility evidence, not proof of a production delivery defect. The reachable per-chat mapping path is settled by ASSISTANT-EGRESS-AUTHORITY-001.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -6757,6 +6765,8 @@ records:
       - node: tests/agents/assistant/test_diagnostic.py::test_diagnostic_reports_successful_insufficient_history_as_no_data
         ci_partition: agents
       - node: tests/agents/assistant/test_output_router.py::test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_falsey_untyped_telegram_outcome_is_reported_as_failed
         ci_partition: agents
       - node: tests/agents/assistant/test_output_router.py::test_untyped_telegram_recipient_outcomes_are_not_reported_as_delivered
         ci_partition: agents
