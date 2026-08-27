@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import csv
+import json
 import os
 from datetime import UTC, datetime
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.experiment import ExperimentManager, RunRecord
 from cryodaq.storage import conductivity_run as module
 from cryodaq.storage.conductivity_run import (
@@ -25,6 +34,106 @@ def _point() -> dict[str, float | str]:
         "R_KW": 10.0 / 0.012,
         "G_WK": 0.0012,
         "settled_pct": 99.0,
+    }
+
+
+def _bound_parameters() -> dict[str, object]:
+    def _descriptor(
+        channel_id: str,
+        instrument_id: str,
+        source_key: str,
+        quantity: ChannelQuantity,
+        unit: str,
+        role: ChannelRole,
+        safety_class: ChannelSafetyClass,
+        display_order: int,
+    ) -> dict[str, object]:
+        descriptor = ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=channel_id,
+            instrument_id=instrument_id,
+            source_key=source_key,
+            quantity=quantity,
+            unit=unit,
+            role=role,
+            safety_class=safety_class,
+            display_group="test",
+            display_name=channel_id,
+            visible_by_default=True,
+            display_order=display_order,
+            descriptor_revision=1,
+        )
+        return json.loads(PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json)
+
+    return {
+        "power_values_w": [0.012],
+        "power_channel": "Keithley_1/smua/power",
+        "temperature_channels": ["Т1", "Т2"],
+        "bound_descriptors": {
+            "power": _descriptor(
+                "Keithley_1/smua/power",
+                "Keithley_1",
+                "smua.power",
+                ChannelQuantity.POWER,
+                "W",
+                ChannelRole.SOURCE_READBACK,
+                ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK,
+                2,
+            ),
+            "temperatures": [
+                _descriptor(
+                    "Т1",
+                    "LakeShore_1",
+                    "input.1.temperature",
+                    ChannelQuantity.TEMPERATURE,
+                    "K",
+                    ChannelRole.PRIMARY_MEASUREMENT,
+                    ChannelSafetyClass.OBSERVATIONAL,
+                    0,
+                ),
+                _descriptor(
+                    "Т2",
+                    "LakeShore_1",
+                    "input.2.temperature",
+                    ChannelQuantity.TEMPERATURE,
+                    "K",
+                    ChannelRole.PRIMARY_MEASUREMENT,
+                    ChannelSafetyClass.OBSERVATIONAL,
+                    1,
+                ),
+            ],
+        },
+    }
+
+
+def _identified_row() -> dict[str, object]:
+    parameters = _bound_parameters()
+    bound = parameters["bound_descriptors"]
+    assert isinstance(bound, dict)
+    power = bound["power"]
+    temperatures = bound["temperatures"]
+    assert isinstance(power, dict)
+    assert isinstance(temperatures, list)
+    hot, cold = temperatures
+    return {
+        "temperature_k": 105.0,
+        "conductance_wk": 0.0012,
+        "resistance_kw": pytest.approx(10.0 / 0.012),
+        "power_channel_id": power["descriptor"]["channel_id"],
+        "power_instrument_id": power["descriptor"]["instrument_id"],
+        "power_source_key": power["descriptor"]["source_key"],
+        "power_descriptor_hash": power["descriptor_hash"],
+        "power_descriptor_revision": power["descriptor"]["descriptor_revision"],
+        "hot_channel_id": hot["descriptor"]["channel_id"],
+        "hot_instrument_id": hot["descriptor"]["instrument_id"],
+        "hot_source_key": hot["descriptor"]["source_key"],
+        "hot_descriptor_hash": hot["descriptor_hash"],
+        "hot_descriptor_revision": hot["descriptor"]["descriptor_revision"],
+        "cold_channel_id": cold["descriptor"]["channel_id"],
+        "cold_instrument_id": cold["descriptor"]["instrument_id"],
+        "cold_source_key": cold["descriptor"]["source_key"],
+        "cold_descriptor_hash": cold["descriptor_hash"],
+        "cold_descriptor_revision": cold["descriptor"]["descriptor_revision"],
     }
 
 
@@ -327,11 +436,12 @@ def test_running_attachment_and_checkpoint_survive_manager_restart(tmp_path) -> 
     experiment = manager.create_experiment("Thermal run", "Operator")
     started_at = datetime(2026, 8, 27, 12, tzinfo=UTC)
     path = tmp_path / "run.csv"
+    parameters = _bound_parameters()
     writer = ConductivityRunWriter(
         path,
         run_id="run-1",
         started_at=started_at,
-        parameters={"power_values_w": [0.012]},
+        parameters=parameters,
     )
     record = manager.attach_run_record(
         experiment_id=experiment.experiment_id,
@@ -341,6 +451,7 @@ def test_running_attachment_and_checkpoint_survive_manager_restart(tmp_path) -> 
         status="RUNNING",
         source_run_id="run-1",
         started_at=started_at,
+        parameters=parameters,
         result_summary={"point_count": 0, "recovery_required": True},
         artifact_paths=[str(path)],
     )
@@ -358,13 +469,7 @@ def test_running_attachment_and_checkpoint_survive_manager_restart(tmp_path) -> 
     assert snapshot.recovery_required is True
     assert snapshot.accepted_point_count == 1
     assert snapshot.bound_experiment_id == experiment.experiment_id
-    assert restarted._collect_conductivity_rows(restored_records) == [
-        {
-            "temperature_k": 105.0,
-            "conductance_wk": 0.0012,
-            "resistance_kw": pytest.approx(10.0 / 0.012),
-        }
-    ]
+    assert restarted._collect_conductivity_rows(restored_records) == [_identified_row()]
 
 
 def _autosweep_record(
@@ -375,6 +480,7 @@ def _autosweep_record(
     point_count: int | None,
     record_id: str = "experiment:run",
     experiment_id: str = "experiment-a",
+    parameters: dict[str, object] | None = None,
 ) -> RunRecord:
     summary = {} if point_count is None else {"point_count": point_count}
     return RunRecord(
@@ -386,10 +492,92 @@ def _autosweep_record(
         status=status,
         started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
         finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC),
+        parameters=dict(_bound_parameters() if parameters is None else parameters),
         result_summary=summary,
         artifact_paths=(str(path),),
         experiment_context={"experiment_id": experiment_id},
     )
+
+
+def test_manager_requires_matching_descriptor_identity_and_keeps_it_in_derived_table(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    parameters = _bound_parameters()
+    path = tmp_path / "identified.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="identified-run",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters=parameters,
+    )
+    writer.append_binding("experiment-a")
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    record = _autosweep_record(
+        path,
+        source_run_id="identified-run",
+        status="COMPLETED",
+        point_count=1,
+        parameters=parameters,
+    )
+
+    rows = manager._collect_conductivity_rows([record])
+    assert len(rows) == 1
+    assert rows[0]["power_instrument_id"] == "Keithley_1"
+    assert rows[0]["power_channel_id"] == "Keithley_1/smua/power"
+    assert rows[0]["hot_instrument_id"] == "LakeShore_1"
+    assert rows[0]["hot_channel_id"] == "Т1"
+    assert rows[0]["cold_channel_id"] == "Т2"
+    assert rows[0]["power_descriptor_hash"].startswith("sha256:")
+    assert rows[0]["hot_descriptor_revision"] == 1
+
+    table = tmp_path / "conductivity.csv"
+    manager._write_conductivity_table(table, rows)
+    header, values = list(csv.reader(table.open(encoding="utf-8", newline="")))
+    assert "power_descriptor_hash" in header
+    assert "hot_descriptor_hash" in header
+    assert "cold_descriptor_hash" in header
+    assert values[header.index("hot_channel_id")] == "Т1"
+
+    tampered = json.loads(json.dumps(parameters, ensure_ascii=False))
+    tampered["bound_descriptors"]["temperatures"][0]["descriptor_hash"] = "sha256:" + "0" * 64
+    mismatched = _autosweep_record(
+        path,
+        source_run_id="identified-run",
+        status="COMPLETED",
+        point_count=1,
+        parameters=tampered,
+    )
+    assert manager._collect_conductivity_rows([mismatched]) == []
+
+
+def test_manager_skips_csv_parser_error_without_aborting_other_artifacts(tmp_path, caplog) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    malformed = tmp_path / "oversized.csv"
+    malformed.write_text(
+        "T_avg_K,G_WK,R_KW\n" + "9" * 128 + ",0.0012,833.3\n",
+        encoding="utf-8",
+    )
+    record = _autosweep_record(
+        malformed,
+        source_run_id="legacy-parser-error",
+        status="COMPLETED",
+        point_count=1,
+    )
+    previous_limit = csv.field_size_limit()
+    try:
+        csv.field_size_limit(32)
+        assert manager._collect_conductivity_rows([record]) == []
+    finally:
+        csv.field_size_limit(previous_limit)
+    assert "Failed to parse autosweep artifact" in caplog.text
 
 
 def test_manager_rejects_durable_identity_status_count_and_duplicate_conflicts(tmp_path) -> None:
@@ -404,19 +592,13 @@ def test_manager_rejects_durable_identity_status_count_and_duplicate_conflicts(t
         first_path,
         run_id="run-1",
         started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
-        parameters={},
+        parameters=_bound_parameters(),
     )
     first.append_binding("experiment-a")
     first.append_point(_point())
     first.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
     valid = _autosweep_record(first_path, source_run_id="run-1", status="COMPLETED", point_count=1)
-    expected = [
-        {
-            "temperature_k": 105.0,
-            "conductance_wk": 0.0012,
-            "resistance_kw": pytest.approx(10.0 / 0.012),
-        }
-    ]
+    expected = [_identified_row()]
     assert manager._collect_conductivity_rows([valid]) == expected
     assert manager._collect_conductivity_rows([valid, valid]) == expected
 
@@ -447,7 +629,7 @@ def test_manager_rejects_durable_identity_status_count_and_duplicate_conflicts(t
         second_path,
         run_id="run-1",
         started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
-        parameters={},
+        parameters=_bound_parameters(),
     )
     second.append_binding("experiment-a")
     second.append_point(_point())
@@ -474,7 +656,7 @@ def test_manager_rejects_missing_or_cross_experiment_durable_binding(tmp_path) -
         bound_path,
         run_id="run-bound",
         started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
-        parameters={},
+        parameters=_bound_parameters(),
     )
     bound.append_binding("experiment-a")
     bound.append_point(_point())
@@ -492,7 +674,7 @@ def test_manager_rejects_missing_or_cross_experiment_durable_binding(tmp_path) -
         unbound_path,
         run_id="run-unbound",
         started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
-        parameters={},
+        parameters=_bound_parameters(),
     )
     unbound.append_point(_point())
     unbound.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))

@@ -34,7 +34,11 @@ from cryodaq.report_state import (
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
-from cryodaq.storage.conductivity_run import ConductivityRunFormatError, read_conductivity_run
+from cryodaq.storage.conductivity_run import (
+    ConductivityRunFormatError,
+    read_conductivity_run,
+    validate_conductivity_descriptor_parameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2855,8 +2859,8 @@ class ExperimentManager:
                 )
         return len(run_records)
 
-    def _collect_conductivity_rows(self, run_records: list[RunRecord]) -> list[dict[str, float]]:
-        rows: list[dict[str, float]] = []
+    def _collect_conductivity_rows(self, run_records: list[RunRecord]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
         seen_paths: set[Path] = set()
         seen_durable_run_ids: set[str] = set()
         for record in run_records:
@@ -2873,7 +2877,7 @@ class ExperimentManager:
                         continue
                     seen_paths.add(resolved)
                     snapshot = read_conductivity_run(resolved)
-                except (ConductivityRunFormatError, OSError, UnicodeError) as exc:
+                except (ConductivityRunFormatError, csv.Error, OSError, UnicodeError) as exc:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
                     continue
                 if not snapshot.durable_format:
@@ -2890,6 +2894,17 @@ class ExperimentManager:
                         snapshot.run_id,
                         record.source_run_id,
                     )
+                    continue
+                try:
+                    artifact_descriptors = validate_conductivity_descriptor_parameters(snapshot.parameters)
+                    record_descriptors = validate_conductivity_descriptor_parameters(record.parameters)
+                except ConductivityRunFormatError as exc:
+                    logger.warning("Ignoring autosweep artifact %s: descriptor identity is invalid (%s)", resolved, exc)
+                    continue
+                if artifact_descriptors.power.canonical_json != record_descriptors.power.canonical_json or tuple(
+                    item.canonical_json for item in artifact_descriptors.temperatures
+                ) != tuple(item.canonical_json for item in record_descriptors.temperatures):
+                    logger.warning("Ignoring autosweep artifact %s: descriptor identity mismatch", resolved)
                     continue
                 record_experiment_id = record.experiment_context.get("experiment_id")
                 if (
@@ -2930,15 +2945,59 @@ class ExperimentManager:
                     logger.warning("Ignoring autosweep artifact %s: nonterminal state is inconsistent", resolved)
                     continue
                 seen_durable_run_ids.add(snapshot.run_id)
-                rows.extend(snapshot.rows)
+                hot = artifact_descriptors.temperatures[0]
+                cold = artifact_descriptors.temperatures[-1]
+                power = artifact_descriptors.power
+                identity = {
+                    "power_channel_id": power.channel_id,
+                    "power_instrument_id": power.instrument_id,
+                    "power_source_key": power.source_key,
+                    "power_descriptor_hash": power.descriptor_hash,
+                    "power_descriptor_revision": power.descriptor_revision,
+                    "hot_channel_id": hot.channel_id,
+                    "hot_instrument_id": hot.instrument_id,
+                    "hot_source_key": hot.source_key,
+                    "hot_descriptor_hash": hot.descriptor_hash,
+                    "hot_descriptor_revision": hot.descriptor_revision,
+                    "cold_channel_id": cold.channel_id,
+                    "cold_instrument_id": cold.instrument_id,
+                    "cold_source_key": cold.source_key,
+                    "cold_descriptor_hash": cold.descriptor_hash,
+                    "cold_descriptor_revision": cold.descriptor_revision,
+                }
+                rows.extend({**row, **identity} for row in snapshot.rows)
         return rows
 
-    def _write_conductivity_table(self, path: Path, rows: list[dict[str, float]]) -> None:
+    def _write_conductivity_table(self, path: Path, rows: list[dict[str, Any]]) -> None:
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
+            identity_columns = [
+                "power_channel_id",
+                "power_instrument_id",
+                "power_source_key",
+                "power_descriptor_hash",
+                "power_descriptor_revision",
+                "hot_channel_id",
+                "hot_instrument_id",
+                "hot_source_key",
+                "hot_descriptor_hash",
+                "hot_descriptor_revision",
+                "cold_channel_id",
+                "cold_instrument_id",
+                "cold_source_key",
+                "cold_descriptor_hash",
+                "cold_descriptor_revision",
+            ]
+            writer.writerow(["temperature_k", "conductance_wk", "resistance_kw", *identity_columns])
             for item in rows:
-                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
+                writer.writerow(
+                    [
+                        item["temperature_k"],
+                        item["conductance_wk"],
+                        item["resistance_kw"],
+                        *(item.get(column, "") for column in identity_columns),
+                    ]
+                )
 
     def _maybe_write_channel_plot(
         self,

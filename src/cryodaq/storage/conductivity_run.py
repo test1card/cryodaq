@@ -18,6 +18,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
+from cryodaq.channels.persistence import (
+    PersistedChannelEnvelopeError,
+    PersistedChannelEnvelopeV1,
+    decode_persisted_channel_envelope,
+)
+
 SCHEMA_VERSION = 1
 _COMMENT_PREFIX = "# "
 _COLUMNS = (
@@ -45,6 +52,7 @@ class ConductivityRunSnapshot:
     rows: tuple[dict[str, float], ...]
     raw_row_count: int
     run_id: str | None
+    parameters: dict[str, Any]
     status: str
     accepted_point_count: int
     checkpoint_count: int
@@ -53,6 +61,88 @@ class ConductivityRunSnapshot:
     bound_experiment_id: str | None
     terminal: dict[str, Any] | None
     durable_format: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ConductivityDescriptorBinding:
+    """Verified immutable measurement-source identity for one autosweep."""
+
+    power: ChannelDescriptorV1
+    temperatures: tuple[ChannelDescriptorV1, ...]
+
+
+def _descriptor_envelope_payload(descriptor: ChannelDescriptorV1) -> dict[str, Any]:
+    envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
+    payload = json.loads(envelope.canonical_json)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def build_conductivity_descriptor_parameters(
+    *,
+    power: ChannelDescriptorV1,
+    temperatures: tuple[ChannelDescriptorV1, ...],
+) -> dict[str, Any]:
+    """Build the self-validating descriptor portion of autosweep parameters."""
+
+    payload = {
+        "power_channel": power.channel_id,
+        "temperature_channels": [descriptor.channel_id for descriptor in temperatures],
+        "bound_descriptors": {
+            "power": _descriptor_envelope_payload(power),
+            "temperatures": [_descriptor_envelope_payload(descriptor) for descriptor in temperatures],
+        },
+    }
+    validate_conductivity_descriptor_parameters(payload)
+    return payload
+
+
+def _decode_descriptor_payload(payload: object) -> ChannelDescriptorV1:
+    if type(payload) is not dict:
+        raise ConductivityRunFormatError("Autosweep descriptor envelope must be an object.")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        envelope = decode_persisted_channel_envelope(encoded)
+    except (TypeError, ValueError, PersistedChannelEnvelopeError) as exc:
+        raise ConductivityRunFormatError(f"Autosweep descriptor envelope is invalid: {exc}") from exc
+    if encoded != envelope.canonical_json:
+        raise ConductivityRunFormatError("Autosweep descriptor envelope is not canonical.")
+    return envelope.descriptor
+
+
+def validate_conductivity_descriptor_parameters(parameters: object) -> ConductivityDescriptorBinding:
+    """Validate exact power/temperature identities carried by a durable run."""
+
+    if type(parameters) is not dict:
+        raise ConductivityRunFormatError("Autosweep parameters must be an object.")
+    bound = parameters.get("bound_descriptors")
+    if type(bound) is not dict or set(bound) != {"power", "temperatures"}:
+        raise ConductivityRunFormatError("Autosweep bound_descriptors schema is invalid.")
+    temperature_payloads = bound["temperatures"]
+    if type(temperature_payloads) is not list or len(temperature_payloads) < 2:
+        raise ConductivityRunFormatError("Autosweep requires at least two bound temperature descriptors.")
+    power = _decode_descriptor_payload(bound["power"])
+    temperatures = tuple(_decode_descriptor_payload(payload) for payload in temperature_payloads)
+    if power.quantity is not ChannelQuantity.POWER:
+        raise ConductivityRunFormatError("Autosweep power descriptor quantity is not power.")
+    if any(descriptor.quantity is not ChannelQuantity.TEMPERATURE for descriptor in temperatures):
+        raise ConductivityRunFormatError("Autosweep temperature descriptor quantity is not temperature.")
+    temperature_ids = [descriptor.channel_id for descriptor in temperatures]
+    if len(set(temperature_ids)) != len(temperature_ids):
+        raise ConductivityRunFormatError("Autosweep temperature descriptor identity is duplicated.")
+    if power.channel_id in temperature_ids:
+        raise ConductivityRunFormatError("Autosweep power and temperature descriptor identities overlap.")
+    if parameters.get("power_channel") != power.channel_id:
+        raise ConductivityRunFormatError("Autosweep power channel does not match its descriptor.")
+    if parameters.get("temperature_channels") != temperature_ids:
+        raise ConductivityRunFormatError("Autosweep temperature channels do not match their descriptors.")
+    return ConductivityDescriptorBinding(power=power, temperatures=temperatures)
 
 
 def _utc_text(value: datetime | None = None) -> str:
@@ -317,7 +407,18 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
             raise ConductivityRunFormatError("Durable autosweep header has no start authority.")
         legacy_rows = tuple(row for row in parsed_rows if row is not None)
         return ConductivityRunSnapshot(
-            legacy_rows, len(parsed_rows), None, "LEGACY", len(legacy_rows), 0, False, False, None, None, False
+            legacy_rows,
+            len(parsed_rows),
+            None,
+            {},
+            "LEGACY",
+            len(legacy_rows),
+            0,
+            False,
+            False,
+            None,
+            None,
+            False,
         )
     if len(starts) != 1 or starts[0].get("schema_version") != SCHEMA_VERSION:
         raise ConductivityRunFormatError("Autosweep start authority is missing or ambiguous.")
@@ -326,6 +427,9 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
     run_id = starts[0].get("run_id")
     if type(run_id) is not str or not run_id.strip():
         raise ConductivityRunFormatError("Autosweep start run_id is invalid.")
+    parameters = starts[0].get("parameters")
+    if type(parameters) is not dict:
+        raise ConductivityRunFormatError("Autosweep start parameters are invalid.")
     checkpoints = [item for item in metadata if item.get("record_type") == "conductivity_run_checkpoint"]
     contiguous = _contiguous_checkpoint_count(
         checkpoints,
@@ -366,6 +470,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
             published,
             len(parsed_rows),
             run_id,
+            dict(parameters),
             "RUNNING",
             contiguous,
             contiguous,
@@ -409,6 +514,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
         published_rows,
         len(parsed_rows),
         run_id,
+        dict(parameters),
         status,
         accepted,
         contiguous,
