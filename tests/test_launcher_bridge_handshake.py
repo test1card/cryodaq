@@ -1449,7 +1449,9 @@ def test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation(
     assert observed == [(["escaped"], {"SAFE": "kept", **exact_grant}, (999,))]
 
 
-def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants() -> None:
+def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Every executable reference is frozen before an alias can reach process creation."""
 
     source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
@@ -1510,18 +1512,8 @@ def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested
         "9e6105955c850cc5913a77eba1646c126521feef000a62699b8e6e31f5f9920e"
     )
 
-    def execute_mutation(suffix: str, sink_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]]) -> None:
-        def fake_popen_sink(command, *_args, **kwargs):
-            sink_calls.append(
-                (
-                    list(command),
-                    dict(kwargs["assistant_artifact_grant"]),
-                    tuple(kwargs["pass_fds"]),
-                )
-            )
-            return SimpleNamespace(pid=1)
-
-        namespace = {"_spawn_child_process": fake_popen_sink}
+    def execute_mutation(suffix: str) -> None:
+        namespace = {"_spawn_child_process": launcher._spawn_child_process}
         exec(compile(suffix, "<spawn-reference-mutant>", "exec"), namespace)
         namespace["_escape"]({"SAFE": "kept"})
 
@@ -1534,12 +1526,26 @@ def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested
         ), name
         assert "the exact reviewed _spawn_child_process references changed" in mutant_unsafe, name
 
+        def forbidden_production_popen(*_args, **_kwargs):
+            raise RuntimeError("production Popen boundary reached")
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", forbidden_production_popen)
+        with pytest.raises(RuntimeError, match="production Popen boundary reached"):
+            execute_mutation(suffix)
+
         red_control_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
-        execute_mutation(suffix, red_control_calls)
+
+        def observed_production_popen(command, *_args, **kwargs):
+            red_control_calls.append((list(command), dict(kwargs["env"]), tuple(kwargs["pass_fds"])))
+            return SimpleNamespace(pid=1)
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", observed_production_popen)
+        execute_mutation(suffix)
         assert red_control_calls == [
             (
                 ["escaped"],
                 {
+                    "SAFE": "kept",
                     "CRYODAQ_SOAK_ARTIFACT_FD": "999",
                     "CRYODAQ_SOAK_ARTIFACT_NONCE": "f" * 64,
                     "CRYODAQ_SOAK_ASSISTANT_GENERATION": "7",
@@ -1549,9 +1555,15 @@ def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested
         ], f"{name} did not reproduce the escaped descriptor side effect"
 
         guarded_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+
+        def guarded_production_popen(command, *_args, **kwargs):
+            guarded_calls.append((list(command), dict(kwargs["env"]), tuple(kwargs["pass_fds"])))
+            return SimpleNamespace(pid=1)
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", guarded_production_popen)
         if not mutant_unsafe:
-            execute_mutation(suffix, guarded_calls)
-        assert not guarded_calls, f"{name} reached the guarded fake Popen sink"
+            execute_mutation(suffix)
+        assert not guarded_calls, f"{name} reached the guarded production Popen sink"
 
 
 def test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected(

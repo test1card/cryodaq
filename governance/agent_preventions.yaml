@@ -655,8 +655,8 @@ false_green_pairs:
     runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
     guard: tests/test_launcher_bridge_handshake.py::test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants
     ci_partition: remaining
-    red_evidence: local_alias_default_alias_tuple_callee_lambda_default_and_nested_alias_references_to_the_allowed_spawn_boundary_preserved_the_exact_three_literal_callee_inventory_and_reached_fake_Popen_with_pass_fds_999_2026_08_27_pending_candidate_binding
-    green_evidence: focused_complete_spawn_reference_inventory_mutation_matrix_passed_with_each_red_control_reaching_fake_Popen_and_each_guarded_control_reaching_no_sink_2026_08_27_pending_candidate_binding
+    red_evidence: local_alias_default_alias_tuple_callee_lambda_default_and_nested_alias_references_to_the_allowed_spawn_boundary_preserved_the_exact_three_literal_callee_inventory_and_reached_the_production_launcher_subprocess_Popen_boundary_with_pass_fds_999_2026_08_27_pending_candidate_binding
+    green_evidence: focused_complete_spawn_reference_inventory_mutation_matrix_passed_with_each_red_control_reaching_the_production_launcher_subprocess_Popen_boundary_and_each_guarded_control_reaching_no_sink_2026_08_27_pending_candidate_binding
   - id: LAUNCHER-TRACEBACK-BUILTINS-RECOVERY-FALSE-GREEN-511
     status: open
     scope: product_contract
@@ -5814,9 +5814,10 @@ records:
       reviewed calls. Any added direct call, local or nested alias, default or
       lambda-default capture, or tuple-callee indirection fails closed. Red
       controls prove that each alias form preserves the earlier literal-callee
-      inventory and reaches fake Popen with an unrelated pass_fds descriptor;
-      guarded controls prove that none reaches the sink. The direct-call control
-      also covers an exact forged three-key assistant grant. The inventory also
+      inventory and reaches the production launcher subprocess.Popen boundary
+      with an unrelated pass_fds descriptor; guarded controls prove that none
+      reaches that boundary. The direct-call control also covers an exact forged
+      three-key assistant grant. The inventory also
       freezes the exact reviewed import syntax and
       every syntactic occurrence rooted at an imported
       module alias. Each occurrence is bound to its enclosing class/function,
