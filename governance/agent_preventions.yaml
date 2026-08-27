@@ -3539,6 +3539,22 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: exact_local_mutation_reordered_callback_self_cancellation_before_returned_awaitable_close_and_the_guard_failed_because_the_production_callback_coroutine_remained_unclosed
     green_evidence: local_corrected_production_blob_7bbc9a5ed0acea2fa7503b8f0f817a046909e1bd_guard_blob_1ade7e99396028c20ad8b184ff74e475d9b433da_python_3_14_3_Windows_exact_hybrid_guard_passed_pending_native_Ubuntu_and_hosted_agents_partition
+  - id: PERIODIC-LIVE-CALLBACK-PY312-CANCEL-DELIVERY-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-002
+    guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_scheduled_callback_cancellation_delivery_is_consumed_in_default_ci
+    ci_partition: agents
+    red_evidence: exact_066104f23dd5230880aeab72c6cf2113d7827240_python_3_14_3_Windows_two_parameterized_production_routes_failed_with_zero_settlement_attempts_and_the_real_call_path_broken_mutation_failed_the_guard
+    green_evidence: local_corrected_production_blob_4c70714369431b03d69b4c0a8e1fde384341cb83_guard_blob_165062c48ec01f7829487d34fc11864ece9c7558_python_3_12_13_and_3_14_3_Windows_both_parameterized_routes_passed_pending_hosted_agents_partition
+  - id: PERIODIC-LIVE-OWNER-CANCEL-SETTLEMENT-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-002
+    guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_owner_cancellation_during_callback_settlement_propagates
+    ci_partition: agents
+    red_evidence: reviewer_python_3_14_3_unconditional_settlement_swallow_mutation_left_the_existing_receive_loop_file_thirty_passed_before_this_guard_and_the_registered_guard_failed_afterward
+    green_evidence: local_corrected_production_blob_4c70714369431b03d69b4c0a8e1fde384341cb83_guard_blob_165062c48ec01f7829487d34fc11864ece9c7558_python_3_12_13_and_3_14_3_Windows_owner_cancellation_race_guard_passed_pending_hosted_agents_partition
   - id: SOAK-TERMINATION-MASK-CLEANUP-FALSE-GREEN-010
     status: open
     scope: product_contract
@@ -6930,15 +6946,24 @@ records:
       key, and log text. Cancellation already pending before callback entry propagates
       unchanged and the callback does not run. Callback-origin cancellation is consumed
       only by its post-entry cancellation delta and only after any returned awaitable is
-      detected and closed. Awaitable detection, close lookup, and close execution remain
+      detected and closed. On Python 3.12, reducing that cancellation count does not
+      rescind the already-scheduled CancelledError. The callback-failure path consumes
+      that scheduled delivery inside both active receive and held-frame replay before it
+      leaves the failure boundary. Awaitable detection, close lookup, and close execution remain
       inside the callback failure boundary. Every callback failure invalidates the source
       and releases its waiter. The private class name, raw callback detail, and a false
       barrier-failure attribution never reach operator surfaces.
+      A new owner cancellation that arrives during this settlement yield remains
+      authoritative and propagates without callback-failure recategorization.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_a_held_frame_callback_failure_keeps_its_category_through_ready
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_a_held_frame_callback_self_cancellation_is_settled_before_ready_returns
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_scheduled_callback_cancellation_delivery_is_consumed_in_default_ci
         ci_partition: agents
       - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_callback_cancelled_error_invalidates_source_and_releases_wait
         ci_partition: agents
@@ -6956,7 +6981,9 @@ records:
         ci_partition: agents
       - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_owner_receive_task_cancellation_still_propagates_without_invalidation
         ci_partition: agents
-    automation_limit: The nine registered production-state-machine guards pass locally, but the default hosted agents partition has not yet sealed the corrected candidate.
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_owner_cancellation_during_callback_settlement_propagates
+        ci_partition: agents
+    automation_limit: The twelve registered production-state-machine guards pass locally, but the default hosted agents partition has not yet sealed the corrected candidate.
     red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_red_before_guard_drove_a_held_frame_callback_failure_through_ready_and_observed_the_barrier_failed_with__FrameRejected_in_exception_state_limiter_and_log
     green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
   - id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001

@@ -415,6 +415,217 @@ def test_a_held_frame_callback_failure_keeps_its_category_through_ready(
     asyncio.run(_drive())
 
 
+def test_a_held_frame_callback_self_cancellation_is_settled_before_ready_returns() -> None:
+    """A held callback cannot cancel ready after its failure is recorded."""
+
+    source: periodic_runtime.SequencedPeriodicLiveSources
+
+    class Query:
+        async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+            cut = periodic_runtime.LiveSourceCut(
+                "0" * 32,
+                source._generation,
+                1,
+                10.5,
+                0,
+                0,
+                0,
+                "sha256:" + "0" * 64,
+            )
+            source._provisional_cut = cut
+            source._provisional_last = 2
+            source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+            assert source._ready_marker is not None
+            source._ready_marker.set_result(cut)
+            return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+    source = _SOURCE(Query())
+    source._running = True
+
+    def cancel_ready(_reading: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("HELD CALLBACK CANCELLATION SECRET")
+
+    source._on_reading = cancel_ready
+    source._on_event = lambda _event: None
+
+    async def _drive() -> None:
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await source.ready()
+
+        assert raised.value.reason == "a periodic live callback failed"
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 0
+        await source.stop()
+
+    asyncio.run(_drive())
+
+
+@pytest.mark.parametrize("route", ["active", "held"])
+def test_scheduled_callback_cancellation_delivery_is_consumed_in_default_ci(
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """Force Python 3.12 cancellation delivery through both production routes."""
+
+    settlement_attempts = 0
+    original_sleep = asyncio.sleep
+
+    def cancel_callback(_value: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("CALLBACK CANCELLATION SECRET")
+
+    async def deliver_scheduled_cancellation(delay: float) -> None:
+        nonlocal settlement_attempts
+        assert delay == 0
+        settlement_attempts += 1
+        await original_sleep(delay)
+        raise asyncio.CancelledError("SIMULATED PYTHON 3.12 CANCELLATION DELIVERY")
+
+    async def _drive_active() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = cancel_callback
+        source._socket = _Socket()
+        await _SOURCE._receive_loop(source)
+
+        assert source._invalid
+        assert source._invalidation_reason == "the receive loop stopped: a periodic live callback failed"
+
+    async def _drive_held() -> None:
+        source: periodic_runtime.SequencedPeriodicLiveSources
+
+        class Query:
+            async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+                cut = periodic_runtime.LiveSourceCut(
+                    "0" * 32,
+                    source._generation,
+                    1,
+                    10.5,
+                    0,
+                    0,
+                    0,
+                    "sha256:" + "0" * 64,
+                )
+                source._provisional_cut = cut
+                source._provisional_last = 2
+                source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+                assert source._ready_marker is not None
+                source._ready_marker.set_result(cut)
+                return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+        source = _SOURCE(Query())
+        source._running = True
+        source._on_reading = cancel_callback
+        source._on_event = lambda _event: None
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await source.ready()
+
+        assert raised.value.reason == "a periodic live callback failed"
+        await source.stop()
+
+    async def _drive() -> None:
+        with monkeypatch.context() as patch:
+            patch.setattr(periodic_runtime.asyncio, "sleep", deliver_scheduled_cancellation)
+            if route == "active":
+                await _drive_active()
+            else:
+                await _drive_held()
+
+        assert settlement_attempts == 1
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 0
+
+    asyncio.run(_drive())
+
+
+def test_owner_cancellation_during_callback_settlement_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner cancellation that arrives during settlement remains authoritative."""
+
+    original_sleep = asyncio.sleep
+    owner_scheduled = False
+
+    def cancel_callback(_event: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("CALLBACK CANCELLATION SECRET")
+
+    async def owner_cancels_during_settlement(delay: float) -> None:
+        nonlocal owner_scheduled
+        assert delay == 0
+        task = asyncio.current_task()
+        assert task is not None
+        asyncio.get_running_loop().call_soon(task.cancel, "OWNER CANCELLATION")
+        owner_scheduled = True
+        await original_sleep(delay)
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        class _Socket:
+            async def recv_multipart(self):
+                return _valid_callback_event_parts()
+
+        source._on_event = cancel_callback
+        source._socket = _Socket()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(periodic_runtime.asyncio, "sleep", owner_cancels_during_settlement)
+            with pytest.raises(asyncio.CancelledError, match="OWNER CANCELLATION"):
+                await _SOURCE._receive_loop(source)
+
+        assert owner_scheduled
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 1
+        assert not source._invalid
+        task.uncancel()
+
+    asyncio.run(_drive())
+
+
 def test_an_invalid_transport_sequence_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
     """A real reading frame must recategorize its helper validator failure."""
 
@@ -706,10 +917,9 @@ def test_cancellation_pending_before_callback_entry_is_not_consumed() -> None:
 
         assert not callback_called
         assert task.cancelling() == before
-        while task.cancelling():
-            task.uncancel()
 
-    asyncio.run(_drive())
+    with pytest.raises(asyncio.CancelledError, match="OWNER CANCELLATION"):
+        asyncio.run(_drive())
 
 
 def _valid_callback_event_parts() -> list[bytes]:

@@ -158,9 +158,16 @@ class _FrameRejected(ValueError):
     carries values, channel names and addresses.
     """
 
-    def __init__(self, category: str, detail: str) -> None:
+    def __init__(
+        self,
+        category: str,
+        detail: str,
+        *,
+        pending_callback_cancellation: bool = False,
+    ) -> None:
         super().__init__(detail)
         self.category = category
+        self.pending_callback_cancellation = pending_callback_cancellation
 
 
 def _invalidation_category(error: BaseException | None) -> str:
@@ -850,8 +857,16 @@ class SequencedPeriodicLiveSources:
                 task.uncancel()
             return True
 
-        def reject_callback(error: BaseException | None = None) -> None:
-            rejection = _FrameRejected("a periodic live callback failed", "periodic callback failed")
+        def reject_callback(
+            error: BaseException | None = None,
+            *,
+            pending_cancellation: bool = False,
+        ) -> None:
+            rejection = _FrameRejected(
+                "a periodic live callback failed",
+                "periodic callback failed",
+                pending_callback_cancellation=pending_cancellation,
+            )
             if error is None:
                 raise rejection
             raise rejection from error
@@ -869,13 +884,11 @@ class SequencedPeriodicLiveSources:
                 if callable(close):
                     close()
         except asyncio.CancelledError as exc:
-            consume_callback_cancellation()
-            reject_callback(exc)
+            reject_callback(exc, pending_cancellation=consume_callback_cancellation())
         except Exception as exc:
-            consume_callback_cancellation()
-            reject_callback(exc)
+            reject_callback(exc, pending_cancellation=consume_callback_cancellation())
         if consume_callback_cancellation():
-            reject_callback()
+            reject_callback(pending_cancellation=True)
         if returned_awaitable:
             raise _FrameRejected(
                 "a periodic callback returned an awaitable instead of running synchronously",
@@ -920,6 +933,26 @@ class SequencedPeriodicLiveSources:
         elif frame.kind == "event":
             assert self._on_event is not None
             self._call(self._on_event, frame.value)
+
+    @staticmethod
+    async def _settle_callback_cancellation(error: _FrameRejected) -> None:
+        """Consume only a callback's already-scheduled cancellation delivery.
+
+        Python 3.12 leaves the next ``CancelledError`` scheduled after
+        ``Task.uncancel()`` reduces the cancellation count to zero. Yield once
+        inside the callback-failure boundary so that delivery cannot bypass
+        ``_invalidate``. A new owner cancellation has a non-zero count and
+        remains authoritative.
+        """
+
+        if not error.pending_callback_cancellation:
+            return
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if task is not None and task.cancelling():
+                raise
 
     async def _handle_barrier(self, raw: bytes) -> None:
         payload = _bounded_json(raw)
@@ -986,7 +1019,11 @@ class SequencedPeriodicLiveSources:
             transport, frame = await self._semantic_frame(parts[0], parts[1])
             if self._session_id is not None:
                 self._validate_next(transport.session_id, transport.sequence, provisional=False)
-                self._dispatch(frame)
+                try:
+                    self._dispatch(frame)
+                except _FrameRejected as error:
+                    await self._settle_callback_cancellation(error)
+                    raise
                 self._last_sequence = transport.sequence
             elif self._provisional_cut is not None:
                 self._validate_next(transport.session_id, transport.sequence, provisional=True)
@@ -1240,7 +1277,11 @@ class SequencedPeriodicLiveSources:
                     for frame in self._provisional:
                         if frame.sequence != self._last_sequence + 1:
                             raise PeriodicLiveDiscontinuity("a held frame is out of sequence")
-                        self._dispatch(frame)
+                        try:
+                            self._dispatch(frame)
+                        except _FrameRejected as error:
+                            await self._settle_callback_cancellation(error)
+                            raise
                         self._last_sequence = frame.sequence
                     self._provisional.clear()
                     self._provisional_bytes = 0
