@@ -960,6 +960,33 @@ def _without_soak_bridge_environment(environment: Mapping[str, str]) -> dict[str
     return result
 
 
+def _spawn_child_process(
+    command: list[str],
+    *,
+    environment: Mapping[str, str],
+    assistant_artifact_grant: Mapping[str, str] | None = None,
+    **popen_kwargs: Any,
+) -> subprocess.Popen[Any]:
+    """Spawn one launcher child from a final sanitized environment boundary."""
+
+    if "env" in popen_kwargs:
+        raise TypeError("child process environment belongs to the launcher sanitizer")
+    child_environment = _without_soak_bridge_environment(environment)
+    if assistant_artifact_grant is not None:
+        grant_snapshot = dict(assistant_artifact_grant)
+        expected_grant_keys = {
+            _SOAK_ARTIFACT_FD_ENV,
+            _SOAK_ARTIFACT_NONCE_ENV,
+            _SOAK_ASSISTANT_GENERATION_ENV,
+        }
+        if set(grant_snapshot) != expected_grant_keys or not all(
+            isinstance(value, str) for value in grant_snapshot.values()
+        ):
+            raise ValueError("assistant artifact grant must contain the exact string capability triplet")
+        child_environment.update(grant_snapshot)
+    return subprocess.Popen(command, env=child_environment, **popen_kwargs)
+
+
 @dataclass(slots=True)
 class _SoakArtifactCapability:
     """Launcher-retained endpoint duplicated only into assistant execs."""
@@ -1716,24 +1743,32 @@ def _pump_engine_stderr(
                     raw_line = owner.readline(_MAX_ENGINE_STDERR_LINE_BYTES + 1)
                 stderr_logger.error("engine stderr line exceeded the forwarding bound")
                 continue
-            if raw_line.strip():
-                # KEEP WHAT THE ENGINE SAID. This logged a fixed string and threw the line
-                # away, so a soak run produced 104 identical records and the one moment the
-                # engine explains itself said nothing. Owner, 2026-08-20: "конечно
-                # сохранять, ничего не чистить. секреты хранятся на том компе, их нужно
-                # чистить только если происходит вынос с компа, а не внутри работы
-                # программы" -- redaction belongs to EXPORT off the machine, not to running
-                # on it.
-                #
-                # The bound above still holds: a line longer than the forwarding limit is
-                # drained and reported as over-long, so this decode can never see more than
-                # _MAX_ENGINE_STDERR_LINE_BYTES. Decoding replaces undecodable bytes rather
-                # than raising, because a pump that dies on one bad byte loses every line
-                # after it.
-                stderr_logger.error(
-                    "engine child stderr; phase=runtime: %s",
-                    raw_line.decode("utf-8", "replace").rstrip("\r\n"),
-                )
+            # KEEP WHAT THE ENGINE SAID. This logged a fixed string and threw the line
+            # away, so a soak run produced 104 identical records and the one moment the
+            # engine explains itself said nothing. Owner, 2026-08-20: "конечно
+            # сохранять, ничего не чистить. секреты хранятся на том компе, их нужно
+            # чистить только если происходит вынос с компа, а не внутри работы
+            # программы" -- redaction belongs to EXPORT off the machine, not to running
+            # on it.
+            #
+            # `readline()` contributes at most one LF record delimiter. Remove only that
+            # delimiter and its one optional CR partner. `strip()` would discard a
+            # whitespace-only diagnostic, while `rstrip("\r\n")` would destroy repeated
+            # CR payload and a final CR fragment observed at EOF.
+            payload = raw_line
+            if payload.endswith(b"\n"):
+                payload = payload[:-1]
+                if payload.endswith(b"\r"):
+                    payload = payload[:-1]
+            # The bound above still holds: a line longer than the forwarding limit is
+            # drained and reported as over-long, so this decode can never see more than
+            # _MAX_ENGINE_STDERR_LINE_BYTES. Decoding replaces undecodable bytes rather
+            # than raising, because a pump that dies on one bad byte loses every line
+            # after it.
+            stderr_logger.error(
+                "engine child stderr; phase=runtime: %s",
+                payload.decode("utf-8", "replace"),
+            )
     except BaseException as exc:
         owner.pump_failure = exc
     finally:
@@ -2830,9 +2865,9 @@ class LauncherWindow(QMainWindow):
                     True,
                     label="child readiness writer for engine spawn",
                 )
-            process = subprocess.Popen(
+            process = _spawn_child_process(
                 cmd,
-                env=env,
+                environment=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 creationflags=creationflags,
@@ -4046,6 +4081,7 @@ class LauncherWindow(QMainWindow):
         soak_generation: int | None = None
         soak_capability = getattr(self, "_soak_artifact_capability", None)
         process: subprocess.Popen[Any] | None = None
+        assistant_artifact_grant: Mapping[str, str] | None = None
         primary_failure: BaseException | None = None
         try:
             if sys.platform == "win32":
@@ -4062,7 +4098,7 @@ class LauncherWindow(QMainWindow):
                     else _OwnedFileDescriptor(granted_duplicate)
                 )
                 self._assistant_soak_duplicate_owner = soak_duplicate
-                env.update(grant)
+                assistant_artifact_grant = grant
                 pass_fds = (soak_duplicate,)
             popen_kwargs: dict[str, Any] = {}
             if pass_fds:
@@ -4070,9 +4106,10 @@ class LauncherWindow(QMainWindow):
                 assert isinstance(soak_capability, _SoakArtifactCapability)
                 assert soak_duplicate is not None
                 soak_capability.validate_child_grant(soak_duplicate)
-            process = subprocess.Popen(
+            process = _spawn_child_process(
                 cmd,
-                env=env,
+                environment=env,
+                assistant_artifact_grant=assistant_artifact_grant,
                 stdout=subprocess.DEVNULL,
                 # setup_logging("assistant", ...) writes logs/assistant.log —
                 # no need to pipe+pump stderr through the launcher like the
@@ -5164,7 +5201,7 @@ class LauncherWindow(QMainWindow):
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
         if self._mock:
             cmd.append("--mock")
-        subprocess.Popen(cmd, env=env, creationflags=creationflags)
+        _spawn_child_process(cmd, environment=env, creationflags=creationflags)
 
     def _ensure_shutdown_state(self) -> None:
         """Initialize lifecycle fields for real instances and narrow test hosts."""

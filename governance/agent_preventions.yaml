@@ -625,6 +625,30 @@ false_green_pairs:
     platform: posix
     red_evidence: generic_spawn_stripping_tests_stayed_green_while_the_capability_bearing_assistant_path_could_receive_launcher_owned_descriptor_authority_2026_08_20_pending_immutable_capture
     green_evidence: pending
+  - id: LAUNCHER-STDERR-FRAMING-FALSE-GREEN-507
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_record_framing_preserves_whitespace_repeated_cr_and_eof_cr
+    ci_partition: remaining
+    red_evidence: line_content_tests_stayed_green_while_rstrip_removed_whitespace_repeated_carriage_returns_and_the_eof_carriage_return_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-SPAWN-INVENTORY-FALSE-GREEN-508
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
+    guard: tests/test_launcher_bridge_handshake.py::test_popen_inventory_discovers_an_added_spawn
+    ci_partition: remaining
+    red_evidence: partial_alias_evaluation_stayed_green_while_augmented_or_f_string_reflection_tuple_container_or_starred_unpack_aliased_getattr_container_module_reflection_module_dict_vars_object_or_inspect_attribute_access_dynamic_import_and_eval_hid_runtime_Popen_access_imported_logging_os_and_threading__os_namespaces_reached_system_without_changing_the_import_digest_a_bare_socket_occurrence_was_deduplicated_before_assignment_lost_its_provenance_a_duplicate_function_name_spoofed_the_dynamic_getattr_allowance_duplicate_same_identity_spawn_definitions_could_move_capture_restore_and_expose_an_unsanitized_descriptor_path_executable_breakpoint_dispatched_to_sys_breakpointhook_built_in_function_owner___self___reflection_in_nested_default_and_lambda_scopes_reached_unsanitized_Popen_definition_time_decorator_dispatch_reached_sys_breakpointhook_and_owner___import___getattr_vars_eval_compile_or_breakpoint_attributes_remained_unproven_independently_of___self___while_the_inventory_remained_clean_and_the_first_fixed_point_could_hang_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-POST-SANITIZE-MUTATION-FALSE-GREEN-509
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
+    guard: tests/test_launcher_bridge_handshake.py::test_popen_inventory_rejects_descriptor_reintroduction_after_sanitization
+    ci_partition: remaining
+    red_evidence: source_order_builder_check_stayed_green_when_alias_and_bulk_mutation_restored_ambient_authority_conditional_loop_or_try_sanitization_did_not_dominate_spawn_or_a_stateful_capability_mapping_changed_between_validation_and_use_2026_08_27_pending_immutable_capture
+    green_evidence: pending
   - id: LAUNCHER-STDOUT-INHERIT-FALSE-GREEN-002
     status: open
     scope: product_contract
@@ -4273,7 +4297,14 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: The engine's own explanation of a fault is discarded, so the log records that a child spoke and never what it said.
-    invariant: The stderr pump forwards each bounded line as the child wrote it, adding and removing nothing; the child is spawned with an explicit UTF-8 stream encoding so both ends agree by construction; every production spawn strips the launcher-only descriptor authority; the forwarding bound still drains an over-long line without forwarding it whole; and one undecodable byte never ends the pump.
+    invariant: >-
+      The stderr pump removes only one terminal LF and at most its one framing
+      CR from each bounded record. For valid UTF-8 payload text, it preserves
+      all other decoded characters, including whitespace-only records,
+      repeated CR characters, and a final EOF CR. The child uses an explicit
+      UTF-8 stream encoding. The pump drains an over-long record without
+      forwarding it whole. Undecodable sequences may become U+FFFD because the
+      decoder uses replacement, and they do not end the pump.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4294,6 +4325,8 @@ records:
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_in_formatted_exception_text
         ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_a_bounded_final_stderr_fragment_is_forwarded_at_eof
+        ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_record_framing_preserves_whitespace_repeated_cr_and_eof_cr
         ci_partition: remaining
     red_evidence: one_soak_run_wrote_104_identical_placeholder_records_and_kept_no_engine_words_2026_08_20_pending_immutable_capture
     green_evidence: pending
@@ -5743,12 +5776,81 @@ records:
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: A poisoned or unpublished descriptor can target a reused OS object, leak into descendants, lose child failure evidence, or be overwritten by a new engine generation while the old owner remains live.
-    invariant: Every syscall-acquired owner is published before fallible wrapping; POISONED is terminal quarantine; inheritance is revoked before settlement; stderr persistence failures enter HOLD; restart preflight inventories every raw, promoted, thread, handler, process, and grant owner; cleanup is attempt-all and retains ambiguous identity.
+    invariant: >-
+      Every syscall-acquired owner is published before fallible wrapping.
+      POISONED is terminal quarantine. Inheritance is revoked before
+      settlement. One launcher boundary owns the only runtime Popen reference.
+      It strips every launcher-only descriptor key from the supplied environment
+      immediately before Popen, rejects a second env channel, and can re-add only
+      the exact three-key assistant artifact grant. It materializes a supplied
+      grant once into a plain dictionary, then validates and applies only that
+      same snapshot. Deferred type annotations and true docstrings are not runtime
+      references. The structural inventory rejects duplicate qualified
+      function, async-function, or class definitions; requires exactly one
+      top-level _spawn_child_process; and freezes that definition's complete AST,
+      including signature, control flow, sanitizer, grant handling, and Popen
+      return. The sole Popen allowance is bound to that exact frozen definition
+      node, so moving authority through a same-identity capture/redefine/restore
+      sequence cannot inherit the allowance. The inventory freezes the exact
+      reviewed import syntax and freezes every syntactic occurrence rooted at an imported
+      module alias. Each occurrence is bound to its enclosing class/function,
+      function signature, full direct attribute chain, and immediate semantic
+      parent; duplicates remain separate. Assigning even an already-seen bare
+      module occurrence therefore changes the inventory before its provenance can
+      be lost through a local alias. It additionally permits executable references
+      to asyncio, ctypes, os, signal, subprocess, sys, and webbrowser only through
+      an explicit closed set of direct attribute chains. Any added, removed,
+      aliased, or from-imported module or module-rooted occurrence changes that
+      inventory and fails closed. The sole executable Popen
+      reference is the exact subprocess.Popen call in _spawn_child_process;
+      the only browser launch remains the direct webbrowser.open call in
+      _on_open_web; and the only ctypes references remain the paired
+      OpenProcess/CloseHandle liveness probe in _is_process_alive. Every
+      name-form getattr and vars use is restricted to the existing named
+      state lookups. Every getattr occurrence is separately bound to its exact
+      call AST, enclosing class/function and signature, and immediate semantic
+      parent, so a duplicate function name or argument spelling cannot inherit
+      an allowance. Attribute-form recovery of built-in authority through a
+      bound function's __self__ owner is rejected in nested functions, default
+      arguments, lambdas, and executable decorator expressions. The rejected
+      attribute surfaces include __import__, getattr, vars, eval, compile, and
+      breakpoint. Independent owner.<attribute> mutations prove each of those
+      six recovery attributes without relying on another forbidden attribute,
+      distributed across nested, default-argument, lambda, and executable
+      decorator forms. Globals, locals, eval, exec, compile, __import__, builtins
+      recovery, executable breakpoint dispatch, object/inspect/importlib
+      reflection, sys.modules, module namespaces, and dunder recovery are
+      rejected. Direct subprocess aliases and alternate
+      os spawn/exec/system/fork/posix_spawn, asyncio subprocess, or ctypes
+      CreateProcess surfaces are outside the vocabulary. Named mutations cover
+      each recovery class, including logging.os.system, threading._os.system,
+      assignment from socket to a local alias, and a duplicate dynamic-getattr
+      function-name spoof. Their real namespace paths are proven against a fake
+      process sink; category mutations cover alternate process APIs.
+      This is a bounded AST invariant, not a claim to evaluate arbitrary Python
+      dataflow. Runtime side-effect controls prove that nested, default-argument,
+      and lambda built-in-owner reflection reaches a fake unsanitized Popen sink,
+      and that a definition-time decorator reaches sys.breakpointhook. The runtime
+      guard also observes the environment handed to Popen after
+      ambient and environment aliases, bound and bulk update APIs, in-place
+      union, conditional, loop, or try sanitizers that do not dominate the call,
+      and a stateful grant mapping that changes on a later traversal. Stderr
+      persistence failures enter HOLD. Restart preflight inventories
+      every raw, promoted, thread, handler, process, and grant owner. Cleanup is
+      attempt-all and retains ambiguous identity.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_every_popen_environment_originates_at_an_authority_stripping_builder
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_popen_inventory_discovers_an_added_spawn
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_process_authority_mutants_reach_a_fake_sink_before_the_inventory_rejects_them
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_popen_inventory_rejects_descriptor_reintroduction_after_sanitization
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant
         ci_partition: remaining

@@ -185,6 +185,24 @@ def test_a_bounded_final_stderr_fragment_is_forwarded_at_eof(tmp_path, monkeypat
     assert not any("exceeded the forwarding bound" in message for message in messages), messages
 
 
+def test_record_framing_preserves_whitespace_repeated_cr_and_eof_cr() -> None:
+    """Only the one wire delimiter may be removed from each captured payload."""
+
+    captured: list[str] = []
+
+    class _CapturePayload:
+        def error(self, message: str, *args: object) -> None:
+            if message == "engine child stderr; phase=runtime: %s":
+                assert len(args) == 1
+                assert isinstance(args[0], str)
+                captured.append(args[0])
+
+    wire = b" \t\n\n\r\r\n\r\r\r\nterminal\r"
+    launcher._pump_engine_stderr(io.BytesIO(wire), _CapturePayload())  # type: ignore[arg-type]
+
+    assert captured == [" \t", "", "\r", "\r\r", "terminal\r"]
+
+
 def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeypatch) -> None:
     """Prove _start_engine PASSES that environment, not merely that it builds one.
 
