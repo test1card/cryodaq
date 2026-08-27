@@ -220,9 +220,15 @@ def last_emission_reached_handler() -> bool:
 def defer_record(level: int, message: str, *args: object) -> None:
     """Hold one record until setup_logging has somewhere to put it."""
 
+    global _replay_pending
     with _deferred_records_lock:
         if len(_deferred_records) < _MAX_DEFERRED_RECORDS:
             _deferred_records.append((level, message, args))
+            # Retention and its future replay trigger are one state transition.  A
+            # successful foreign emission can consume every handler's recovery edge
+            # after the caller's delivery probe fails but before this append; arming
+            # here ensures the next proven success still retries the diagnostic.
+            _replay_pending = True
 
 
 def _replay_deferred_records() -> None:

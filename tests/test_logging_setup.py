@@ -545,6 +545,8 @@ def test_replay_delivery_uses_the_target_records_probe():
     target = "replay target"
     second_handler_entered = threading.Event()
     foreign_reached_first_handler = threading.Event()
+    foreign_observed_target: list[bool] = []
+    foreign_reached_first_in_time: list[bool] = []
 
     class FirstStream:
         closed = False
@@ -564,7 +566,7 @@ def test_replay_delivery_uses_the_target_records_probe():
         def write(self, message):
             if target in message:
                 second_handler_entered.set()
-                assert foreign_reached_first_handler.wait(timeout=30)
+                foreign_reached_first_in_time.append(foreign_reached_first_handler.wait(timeout=30))
             raise OSError("second sink rejected record")
 
         def flush(self):
@@ -581,8 +583,10 @@ def test_replay_delivery_uses_the_target_records_probe():
     logging_setup.defer_record(logging.ERROR, target)
 
     def emit_foreign_record():
-        assert second_handler_entered.wait(timeout=30)
-        logging.getLogger("probe.foreign").error("foreign record")
+        target_was_observed = second_handler_entered.wait(timeout=30)
+        foreign_observed_target.append(target_was_observed)
+        if target_was_observed:
+            logging.getLogger("probe.foreign").error("foreign record")
 
     foreign = threading.Thread(target=emit_foreign_record)
     foreign.start()
@@ -590,6 +594,8 @@ def test_replay_delivery_uses_the_target_records_probe():
     foreign.join(timeout=30)
 
     assert not foreign.is_alive()
+    assert foreign_observed_target == [True], "the target never reached the second handler"
+    assert foreign_reached_first_in_time == [True], "the foreign emission missed the target's handler window"
     assert logging_setup._deferred_records == [(logging.ERROR, target, ())]
 
 
@@ -629,23 +635,107 @@ def test_record_deferred_during_replay_keeps_the_replay_trigger_armed(tmp_path, 
 
 
 def test_replay_owner_lock_makes_contended_entry_nonblocking():
-    """A second replay caller must return without consuming the shared queue."""
+    """Simultaneous handler recovery must not deadlock on replay ownership.
+
+    Each recovery thread enters through ``Handler.handle`` and therefore owns a
+    different real handler lock when the mixin calls replay.  A blocking replay-owner
+    acquisition leaves the winning replay waiting for the losing handler lock while the
+    loser waits for replay ownership.  The nonblocking production path lets the loser
+    return and release its handler lock, so both logging threads terminate.
+    """
 
     import threading
 
     from cryodaq import logging_setup
 
+    class AlwaysFailingStream:
+        closed = False
+
+        def write(self, _message):
+            raise OSError("sink unavailable")
+
+        def flush(self):
+            pass
+
+    recovery_barrier = threading.Barrier(2)
+    recovery_waits: list[bool] = []
+
+    class CoordinatedRecoveryStream:
+        closed = False
+
+        def write(self, message):
+            if "recovery emission" in message:
+                try:
+                    recovery_barrier.wait(timeout=5)
+                except threading.BrokenBarrierError:
+                    recovery_waits.append(False)
+                else:
+                    recovery_waits.append(True)
+            return len(message)
+
+        def flush(self):
+            pass
+
+    replay_check_barrier = threading.Barrier(2)
+    replay_check_waits: list[bool] = []
+
+    class CoordinatedFalse:
+        """Make the superseded boolean check race reproducible on the old code."""
+
+        def __bool__(self):
+            try:
+                replay_check_barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                replay_check_waits.append(False)
+                return True
+            replay_check_waits.append(True)
+            return False
+
+    def record(message: str) -> logging.LogRecord:
+        return logging.LogRecord("probe.replay-contention", logging.ERROR, __file__, 0, message, (), None)
+
+    first_handler = logging_setup._EmissionTrackingStreamHandler(AlwaysFailingStream())
+    second_handler = logging_setup._EmissionTrackingStreamHandler(AlwaysFailingStream())
+    first_handler.handle(record("prime first failure"))
+    second_handler.handle(record("prime second failure"))
+    first_handler.stream = CoordinatedRecoveryStream()
+    second_handler.stream = CoordinatedRecoveryStream()
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(logging.INFO)
+    root.addHandler(first_handler)
+    root.addHandler(second_handler)
+
     logging_setup._deferred_records.clear()
-    logging_setup.defer_record(logging.ERROR, "held behind replay owner")
-    assert logging_setup._replay_owner_lock.acquire(blocking=False)
-    worker = threading.Thread(target=logging_setup._replay_deferred_records)
+    logging_setup._replay_pending = False
+    logging_setup.defer_record(logging.ERROR, "held behind simultaneous recovery")
+    previous_replay_state = logging_setup._replay_in_progress
+    logging_setup._replay_in_progress = CoordinatedFalse()
+    first_worker = threading.Thread(
+        target=first_handler.handle,
+        args=(record("first recovery emission"),),
+        daemon=True,
+    )
+    second_worker = threading.Thread(
+        target=second_handler.handle,
+        args=(record("second recovery emission"),),
+        daemon=True,
+    )
     try:
-        worker.start()
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-        assert logging_setup._deferred_records == [(logging.ERROR, "held behind replay owner", ())]
+        first_worker.start()
+        second_worker.start()
+        first_worker.join(timeout=5)
+        second_worker.join(timeout=5)
     finally:
-        logging_setup._replay_owner_lock.release()
+        logging_setup._replay_in_progress = previous_replay_state
+
+    assert recovery_waits == [True, True], "both handlers must hold their locks before replay contention"
+    assert replay_check_waits == [True, True], "both recovery callbacks must reach the replay decision"
+    assert not first_worker.is_alive()
+    assert not second_worker.is_alive()
+    assert not logging_setup._deferred_records
 
 
 def test_bare_token_without_bot_prefix_redacted():

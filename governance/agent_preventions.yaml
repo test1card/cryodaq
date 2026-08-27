@@ -6772,6 +6772,12 @@ records:
         ci_partition: remaining
       - node: tests/test_logging_setup.py::test_a_thread_deferring_inside_an_active_replay_cannot_lift_the_cap
         ci_partition: remaining
+      - node: tests/test_logging_setup.py::test_replay_delivery_uses_the_target_records_probe
+        ci_partition: remaining
+      - node: tests/test_logging_setup.py::test_record_deferred_during_replay_keeps_the_replay_trigger_armed
+        ci_partition: remaining
+      - node: tests/test_logging_setup.py::test_replay_owner_lock_makes_contended_entry_nonblocking
+        ci_partition: remaining
     automation_limit: The evidence below is content-addressed and local. The theme guards run in the gui partition, and the queue guards run in the remaining partition. A hosted result is pending for the corrected exact head.
     red_evidence: with_only_production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_replaced_by_master_blob_30eda78ec923876f0a96dcb74970556af182fe94_all_three_guards_error_because_master_carries_no_deferral_mechanism_at_all_transcript_sha256_85c33e11b2d4cabd1ab3fa085f4030ca784a7e48c7681814081705e7f20de33a_and_the_two_narrow_controls_on_this_branch_each_reddened_exactly_the_guard_for_that_property_delay_true_transcript_sha256_3c952d42188db22bef278203db5248d33c2aa98e454307c9b81357676fddcdc8_and_console_check_removed_transcript_sha256_70c8922526e5f0b73ef1e50219a123ffc1264abaa93f948796d533b39b5e5a77
     green_evidence: production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_with_guard_blob_2def5032dff4521689f0b3bb8106fba7b565642c_28_passed_transcript_sha256_66cf5d92b91282dadbf9ad9fd20b0cde436d85089f6ec1c64b5836d3952445cc_and_exact_dfc949a38436215957d81fff4c56be4fe9eb111c_53_focused_tests_passed_after_all_six_new_guards_failed_by_behavior_against_exact_e388bba1f961797f3de78319fe67d4dc9f64747e_production_bytes

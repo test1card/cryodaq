@@ -715,9 +715,10 @@ def test_a_foreign_thread_between_dispatch_and_decision_cannot_hide_a_failed_the
 
         def __init__(self) -> None:
             self.written = io.StringIO()
+            self.reject_theme = True
 
         def write(self, message):
-            if "theme diagnostic" in message:
+            if self.reject_theme and "theme diagnostic" in message:
                 raise OSError("disk full")
             return self.written.write(message)
 
@@ -730,6 +731,7 @@ def test_a_foreign_thread_between_dispatch_and_decision_cannot_hide_a_failed_the
     root = logging.getLogger()
     root.handlers = [tracked]
     root.setLevel(logging.INFO)
+    logging_setup._replay_pending = False
 
     theme_dispatched = threading.Event()
     foreign_done = threading.Event()
@@ -760,8 +762,8 @@ def test_a_foreign_thread_between_dispatch_and_decision_cannot_hide_a_failed_the
     assert "theme diagnostic" not in stream.written.getvalue()
     assert "unrelated concurrent success" in stream.written.getvalue()
 
-    tracked.stream = io.StringIO()
-    logging_setup._replay_deferred_records()
+    stream.reject_theme = False
+    logging.getLogger("recovered.emitter").info("subsequent successful emission")
 
-    assert not logging_setup._deferred_records
-    assert tracked.stream.getvalue().count("theme diagnostic") == 1
+    assert not logging_setup._deferred_records, "enqueue must arm replay after the earlier recovery was consumed"
+    assert stream.written.getvalue().count("theme diagnostic") == 1
