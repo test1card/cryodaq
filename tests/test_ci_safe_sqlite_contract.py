@@ -128,6 +128,7 @@ def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
 
 _NIGHTLY_QT_JOB_NAMES = ("golden-replay", "mock-stack-short-soak")
 _QT_LINUX_LIBRARIES = ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3")
+_NIGHTLY_QT_SHELL = "bash -el {0}"
 _BOUNDED_QT_INSTALL_COMMANDS = (
     'missing=""',
     "for package in libegl1 libgl1 libxkbcommon0 libdbus-1-3; do",
@@ -152,8 +153,8 @@ _BOUNDED_QT_INSTALL_COMMANDS = (
 )
 
 
-def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
-    """Return (install index, dependencies index, parsed install step) for one job.
+def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict, dict]:
+    """Return the Qt-install position and parsed job/step for one job.
 
     Parsing the workflow rather than slicing text is deliberate: the `if`
     binding must be read from the step's effective condition field, not from a
@@ -162,7 +163,8 @@ def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
     """
 
     workflow = yaml.safe_load(text)
-    steps = workflow["jobs"][job_name]["steps"]
+    job = workflow["jobs"][job_name]
+    steps = job["steps"]
     install_index = None
     dependencies_index = None
     for index, step in enumerate(steps):
@@ -172,15 +174,22 @@ def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
             dependencies_index = index
     assert install_index is not None, f"{job_name} is missing the Qt offscreen install step"
     assert dependencies_index is not None, f"{job_name} is missing the dependencies step"
-    return install_index, dependencies_index, steps[install_index]
+    return install_index, dependencies_index, job, steps[install_index]
 
 
 def _assert_nightly_qt_prerequisites(text: str) -> None:
     """Require each Qt lane to use the proven bounded installation contract."""
 
     for job_name in _NIGHTLY_QT_JOB_NAMES:
-        install, dependencies, step = _nightly_qt_install_step(text, job_name)
+        install, dependencies, job, step = _nightly_qt_install_step(text, job_name)
         assert install < dependencies, f"{job_name} installs Qt libraries after Python dependencies"
+        job_shell = job.get("defaults", {}).get("run", {}).get("shell")
+        assert job_shell == _NIGHTLY_QT_SHELL, (
+            f"{job_name} must inherit the reviewed job shell {_NIGHTLY_QT_SHELL!r}, found {job_shell!r}"
+        )
+        assert step.get("shell", job_shell) == _NIGHTLY_QT_SHELL, (
+            f"{job_name} Qt install step must run with {_NIGHTLY_QT_SHELL!r}, found {step.get('shell', job_shell)!r}"
+        )
         assert step.get("if") == "runner.os == 'Linux'", (
             f"{job_name} install step must be gated by `runner.os == 'Linux'`, found {step.get('if')!r}"
         )
@@ -246,3 +255,28 @@ def test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed() -> None
 
     with pytest.raises(AssertionError, match="runner.os == 'Linux'"):
         _assert_nightly_qt_prerequisites(mutated)
+
+
+def test_nightly_qt_guard_rejects_shell_that_does_not_run_the_install_script() -> None:
+    """A per-step shell override must not turn the install script into a no-op.
+
+    GitHub Actions gives a step-level ``shell`` precedence over the job default.
+    ``/usr/bin/true {0}`` accepts the generated script path, ignores it, and exits
+    successfully, so validating only the command text would falsely certify a
+    nightly job that never installs the libraries.
+    """
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    timeout = "        timeout-minutes: 8\n"
+    assert text.count(timeout) == len(_NIGHTLY_QT_JOB_NAMES)
+    overridden = text.replace(timeout, "        shell: /usr/bin/true {0}\n" + timeout)
+
+    with pytest.raises(AssertionError, match="Qt install step must run"):
+        _assert_nightly_qt_prerequisites(overridden)
+
+    inherited_shell = "        shell: bash -el {0}\n"
+    assert text.count(inherited_shell) >= len(_NIGHTLY_QT_JOB_NAMES)
+    changed_default = text.replace(inherited_shell, "        shell: /usr/bin/true {0}\n")
+
+    with pytest.raises(AssertionError, match="reviewed job shell"):
+        _assert_nightly_qt_prerequisites(changed_default)
