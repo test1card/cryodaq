@@ -89,6 +89,10 @@ _DISK_FUTURE_TOLERANCE_S = 5.0
 _DISK_MAX_SOURCE_AGE_S = 600.0
 _SAFETY_FUTURE_TOLERANCE_S = 5.0
 _SAFETY_MAX_SOURCE_AGE_S = 10.0
+_KEITHLEY_SOURCE_STATE_BLOCKS = {
+    "analytics/keithley_channel_state/smua": "smua",
+    "analytics/keithley_channel_state/smub": "smub",
+}
 _WORKER_SETTLE_MS = 1_500
 # settle_owned_workers() used to give every descendant QThread the full
 # _WORKER_SETTLE_MS on the Qt main thread, across up to 4 stabilization
@@ -285,6 +289,8 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        # Source-state publications belong to the engine/SafetyManager
+        # producer, not to an experiment or replaceable transport incarnation.
         self._keithley_channel_state_snapshot: dict[str, Reading] = {}
         # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
@@ -504,8 +510,7 @@ class MainWindowV2(QMainWindow):
             widget.set_connected(derived_connected)
             ready, reason_text = self._current_keithley_safety_gate()
             widget.set_safety_ready(ready, reason_text)
-            for reading in self._keithley_channel_state_snapshot.values():
-                widget.on_reading(reading)
+            self._replay_keithley_channel_state_snapshot()
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -632,6 +637,13 @@ class MainWindowV2(QMainWindow):
             if callable(fn):
                 fn(*args)
 
+    def _replay_keithley_channel_state_snapshot(self) -> None:
+        """Present retained producer truth without claiming a new observation."""
+        if self._keithley_panel is None or not self._keithley_panel._connected:
+            return
+        for key, reading in self._keithley_channel_state_snapshot.items():
+            self._keithley_panel.replay_source_state(key, reading)
+
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
@@ -703,6 +715,9 @@ class MainWindowV2(QMainWindow):
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
 
+        self._keithley_channel_state_snapshot.clear()
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_connected(False)
         self.invalidate_descriptor_transport()
         self._overview_panel.invalidate_operator_snapshot_producer()
 
@@ -767,11 +782,12 @@ class MainWindowV2(QMainWindow):
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        if channel in {
-            "analytics/keithley_channel_state/smua",
-            "analytics/keithley_channel_state/smub",
-        }:
-            self._keithley_channel_state_snapshot[channel] = reading
+        source_state_key = _KEITHLEY_SOURCE_STATE_BLOCKS.get(channel)
+        if source_state_key is not None:
+            # Admit only events observed through a valid live bridge. Once
+            # admitted, their lifetime belongs to the engine producer.
+            if self._current_bridge_instance_id() is not None:
+                self._keithley_channel_state_snapshot[source_state_key] = reading
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
@@ -1207,7 +1223,10 @@ class MainWindowV2(QMainWindow):
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
+            was_connected = self._keithley_panel._connected
             self._keithley_panel.set_connected(connected)
+            if connected and not was_connected:
+                self._replay_keithley_channel_state_snapshot()
         # Phase II.3: mirror to OperatorLog overlay (same contract).
         if self._operator_log_panel is not None:
             self._operator_log_panel.set_connected(connected)
@@ -1461,7 +1480,6 @@ class MainWindowV2(QMainWindow):
             self._analytics_snapshot.pop("set_experiment_status", None)
             self._analytics_temperature_snapshot.clear()
             self._analytics_keithley_snapshot.clear()
-            self._keithley_channel_state_snapshot.clear()
             self._analytics_last_exp_id = new_exp_id
 
         self._overview_panel.on_experiment_status(status)
