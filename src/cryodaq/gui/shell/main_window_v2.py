@@ -89,10 +89,6 @@ _DISK_FUTURE_TOLERANCE_S = 5.0
 _DISK_MAX_SOURCE_AGE_S = 600.0
 _SAFETY_FUTURE_TOLERANCE_S = 5.0
 _SAFETY_MAX_SOURCE_AGE_S = 10.0
-_KEITHLEY_SOURCE_STATE_BLOCKS = {
-    "analytics/keithley_channel_state/smua": "smua",
-    "analytics/keithley_channel_state/smub": "smub",
-}
 _WORKER_SETTLE_MS = 1_500
 # settle_owned_workers() used to give every descendant QThread the full
 # _WORKER_SETTLE_MS on the Qt main thread, across up to 4 stabilization
@@ -782,11 +778,14 @@ class MainWindowV2(QMainWindow):
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        source_state_key = _KEITHLEY_SOURCE_STATE_BLOCKS.get(channel)
-        if source_state_key is not None:
+        if channel in {
+            "analytics/keithley_channel_state/smua",
+            "analytics/keithley_channel_state/smub",
+        }:
             # Admit only events observed through a valid live bridge. Once
             # admitted, their lifetime belongs to the engine producer.
             if self._current_bridge_instance_id() is not None:
+                source_state_key = channel.rsplit("/", maxsplit=1)[-1]
                 self._keithley_channel_state_snapshot[source_state_key] = reading
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
