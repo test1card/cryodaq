@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import yaml
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
@@ -122,3 +124,159 @@ def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
     condition = lines[0].split("0 if ", 1)[1].split(" else 1", 1)[0]
 
     assert condition.replace(" ", "") == expected.replace(" ", "")
+
+
+_NIGHTLY_QT_JOB_NAMES = ("golden-replay", "mock-stack-short-soak")
+_QT_LINUX_LIBRARIES = ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3")
+_NIGHTLY_QT_SHELL = "bash -el {0}"
+_BOUNDED_QT_INSTALL_COMMANDS = (
+    'missing=""',
+    "for package in libegl1 libgl1 libxkbcommon0 libdbus-1-3; do",
+    'dpkg -s "$package" >/dev/null 2>&1 || missing="$missing $package"',
+    "done",
+    'if [ -z "$missing" ]; then',
+    'echo "Qt offscreen libraries already present; nothing to fetch"',
+    "else",
+    'echo "missing:$missing"',
+    'apt_options="-o DPkg::Lock::Timeout=180"',
+    'apt_options="$apt_options -o Acquire::http::Timeout=15"',
+    'apt_options="$apt_options -o Acquire::https::Timeout=15"',
+    'apt_options="$apt_options -o Acquire::Retries=2"',
+    "if sudo apt-get $apt_options install -y $missing; then",
+    'echo "installed from the package index already on the image"',
+    "else",
+    'echo "the index on the image did not satisfy$missing; refreshing it"',
+    "sudo apt-get $apt_options update",
+    "sudo apt-get $apt_options install -y $missing",
+    "fi",
+    "fi",
+)
+
+
+def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict, dict]:
+    """Return the Qt-install position and parsed job/step for one job.
+
+    Parsing the workflow rather than slicing text is deliberate: the `if`
+    binding must be read from the step's effective condition field, not from a
+    substring anywhere in the slice. A mutation that disables the step with
+    `if: ${{ false }}` while echoing the Linux text as a comment must fail.
+    """
+
+    workflow = yaml.safe_load(text)
+    job = workflow["jobs"][job_name]
+    steps = job["steps"]
+    install_index = None
+    dependencies_index = None
+    for index, step in enumerate(steps):
+        if step.get("name") == "Install Qt offscreen system libraries (Linux)":
+            install_index = index
+        if step.get("name") == "Install dependencies":
+            dependencies_index = index
+    assert install_index is not None, f"{job_name} is missing the Qt offscreen install step"
+    assert dependencies_index is not None, f"{job_name} is missing the dependencies step"
+    return install_index, dependencies_index, job, steps[install_index]
+
+
+def _assert_nightly_qt_prerequisites(text: str) -> None:
+    """Require each Qt lane to use the proven bounded installation contract."""
+
+    for job_name in _NIGHTLY_QT_JOB_NAMES:
+        install, dependencies, job, step = _nightly_qt_install_step(text, job_name)
+        assert install < dependencies, f"{job_name} installs Qt libraries after Python dependencies"
+        job_shell = job.get("defaults", {}).get("run", {}).get("shell")
+        assert job_shell == _NIGHTLY_QT_SHELL, (
+            f"{job_name} must inherit the reviewed job shell {_NIGHTLY_QT_SHELL!r}, found {job_shell!r}"
+        )
+        assert step.get("shell", job_shell) == _NIGHTLY_QT_SHELL, (
+            f"{job_name} Qt install step must run with {_NIGHTLY_QT_SHELL!r}, found {step.get('shell', job_shell)!r}"
+        )
+        assert step.get("if") == "runner.os == 'Linux'", (
+            f"{job_name} install step must be gated by `runner.os == 'Linux'`, found {step.get('if')!r}"
+        )
+        assert step.get("timeout-minutes") == 8, (
+            f"{job_name} install step must retain its eight-minute timeout, found {step.get('timeout-minutes')!r}"
+        )
+        assert step.get("env") == {"DEBIAN_FRONTEND": "noninteractive"}, (
+            f"{job_name} install step must set noninteractive package installation, found {step.get('env')!r}"
+        )
+        commands = [
+            line.strip() for line in step["run"].splitlines() if line.strip() and not line.lstrip().startswith("#")
+        ]
+        assert commands == list(_BOUNDED_QT_INSTALL_COMMANDS), (
+            f"{job_name} must use the exact bounded Qt installation command block"
+        )
+
+
+def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
+    """Nightly Qt lanes must retain the system libraries installed in default CI."""
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    _assert_nightly_qt_prerequisites(text)
+
+
+def test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed() -> None:
+    """The guard must reject named-only libraries, early exits, and an absent bound."""
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    install = "sudo apt-get $apt_options install -y $missing"
+    assert text.count(install) == 2 * len(_NIGHTLY_QT_JOB_NAMES)
+    mutated = text.replace(install, "echo " + " ".join(_QT_LINUX_LIBRARIES))
+
+    with pytest.raises(AssertionError, match="exact bounded"):
+        _assert_nightly_qt_prerequisites(mutated)
+
+    update = "sudo apt-get $apt_options update"
+    assert text.count(update) == len(_NIGHTLY_QT_JOB_NAMES)
+    early_exit = text.replace(update, update + "\n          exit 0")
+
+    with pytest.raises(AssertionError, match="exact bounded"):
+        _assert_nightly_qt_prerequisites(early_exit)
+
+    timeout = "        timeout-minutes: 8\n"
+    assert text.count(timeout) == len(_NIGHTLY_QT_JOB_NAMES)
+    unbounded = text.replace(timeout, "")
+
+    with pytest.raises(AssertionError, match="eight-minute timeout"):
+        _assert_nightly_qt_prerequisites(unbounded)
+
+
+def test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed() -> None:
+    """A step must carry the Linux condition in its parsed `if` field, not in a comment.
+
+    The reviewer's mutation sets `if: ${{ false }}` and keeps the Linux text as
+    a comment in the same slice. A substring assertion accepts it while GitHub
+    skips the install; the parsed effective `if` field must reject it.
+    """
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    condition = "if: runner.os == 'Linux'"
+    assert text.count(condition) == len(_NIGHTLY_QT_JOB_NAMES)
+    mutated = text.replace(condition, "if: ${{ false }}\n        # if: runner.os == 'Linux'")
+
+    with pytest.raises(AssertionError, match="runner.os == 'Linux'"):
+        _assert_nightly_qt_prerequisites(mutated)
+
+
+def test_nightly_qt_guard_rejects_shell_that_does_not_run_the_install_script() -> None:
+    """A per-step shell override must not turn the install script into a no-op.
+
+    GitHub Actions gives a step-level ``shell`` precedence over the job default.
+    ``/usr/bin/true {0}`` accepts the generated script path, ignores it, and exits
+    successfully, so validating only the command text would falsely certify a
+    nightly job that never installs the libraries.
+    """
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    timeout = "        timeout-minutes: 8\n"
+    assert text.count(timeout) == len(_NIGHTLY_QT_JOB_NAMES)
+    overridden = text.replace(timeout, "        shell: /usr/bin/true {0}\n" + timeout)
+
+    with pytest.raises(AssertionError, match="Qt install step must run"):
+        _assert_nightly_qt_prerequisites(overridden)
+
+    inherited_shell = "        shell: bash -el {0}\n"
+    assert text.count(inherited_shell) >= len(_NIGHTLY_QT_JOB_NAMES)
+    changed_default = text.replace(inherited_shell, "        shell: /usr/bin/true {0}\n")
+
+    with pytest.raises(AssertionError, match="reviewed job shell"):
+        _assert_nightly_qt_prerequisites(changed_default)

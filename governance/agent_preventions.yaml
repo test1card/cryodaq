@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NIGHTLY-QT-PREREQUISITES-FALSE-GREEN-056
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-PREREQUISITES-055
+    guard: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -7238,3 +7246,26 @@ records:
     automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
     green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
+  - id: NIGHTLY-QT-PREREQUISITES-055
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The golden-replay and mock-stack-short-soak nightly jobs' Linux Qt system-library installation steps.
+    classification: nightly_qt_linux_runtime_prerequisite
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Either nightly Qt-dependent job can lose a required Linux shared library while its own schedule remains the only execution path, producing collection or launcher failures after a pull request merges.
+    invariant: The golden-replay and mock-stack-short-soak nightly jobs each use the eight-minute, noninteractive, cached-index-first bounded apt contract to install libegl1, libgl1, libxkbcommon0, and libdbus-1-3 under the Linux condition before Python dependencies are installed.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies
+        ci_partition: remaining
+      - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed
+        ci_partition: remaining
+      - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed
+        ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
