@@ -920,8 +920,8 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
         ("at all seven sites", "at all six sites"),
         (
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:131`",
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:130`",
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:141`",
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:140`",
         ),
     ):
         mutated = text.replace(old, replacement, 1)

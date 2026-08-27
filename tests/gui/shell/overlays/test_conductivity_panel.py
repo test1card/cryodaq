@@ -25,7 +25,11 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
 from cryodaq.gui.zmq_client import ZmqBridge, registered_gui_command_workers
-from cryodaq.storage.conductivity_run import read_conductivity_run
+
+if hasattr(panel_module, "_ConductivityPersistenceWorker"):
+    from cryodaq.storage.conductivity_run import read_conductivity_run
+else:
+    read_conductivity_run = None
 
 
 @pytest.fixture(scope="session")
@@ -40,7 +44,8 @@ def _isolated_state_root(monkeypatch, tmp_path) -> None:
     _DeferredWorker.all_instances.clear()
     _DeferredWorker.defer_running_attachment = False
     _DeferredWorker.running_experiment_id = "experiment-a"
-    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ImmediatePersistenceWorker)
+    if hasattr(panel_module, "_ConductivityPersistenceWorker"):
+        monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ImmediatePersistenceWorker)
 
 
 class _StubPrediction:
@@ -108,7 +113,7 @@ class _ImmediatePersistenceWorker:
         return self._running
 
 
-_REAL_PERSISTENCE_WORKER = panel_module._ConductivityPersistenceWorker
+_REAL_PERSISTENCE_WORKER = getattr(panel_module, "_ConductivityPersistenceWorker", None)
 
 
 class _DeferredWorker:
