@@ -68,6 +68,38 @@ def _parse_blob_bindings(values: list[str]) -> dict[str, str]:
     return dict(sorted(bindings.items()))
 
 
+def _git_blob_id(raw: bytes) -> str:
+    header = f"blob {len(raw)}\0".encode("ascii")
+    return hashlib.sha1(header + raw).hexdigest()  # noqa: S324 - Git object identity, not cryptographic security
+
+
+def _parse_source_mutations(path: Path | None) -> dict[str, dict[str, str]]:
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionError("source mutation file is not readable UTF-8 JSON") from exc
+    if not isinstance(payload, dict) or not payload:
+        raise RedReproductionError("source mutation file must be a nonempty object")
+    mutations: dict[str, dict[str, str]] = {}
+    for source_path, mutation in payload.items():
+        if (
+            not isinstance(source_path, str)
+            or Path(source_path).is_absolute()
+            or ".." in Path(source_path).parts
+            or not isinstance(mutation, dict)
+            or set(mutation) != {"old", "new"}
+            or not isinstance(mutation["old"], str)
+            or not isinstance(mutation["new"], str)
+            or not mutation["old"]
+            or mutation["old"] == mutation["new"]
+        ):
+            raise RedReproductionError(f"source mutation is unsafe or malformed: {source_path!r}")
+        mutations[source_path] = {"old": mutation["old"], "new": mutation["new"]}
+    return dict(sorted(mutations.items()))
+
+
 def _test_environment(worktree: Path, python: str) -> dict[str, str]:
     """Return the complete, deliberately small environment passed to pytest."""
 
@@ -82,6 +114,40 @@ def _test_environment(worktree: Path, python: str) -> dict[str, str]:
         if value := os.environ.get(name):
             environment[name] = value
     return dict(sorted(environment.items()))
+
+
+def _published_environment() -> dict[str, str]:
+    """Describe the executed environment without publishing host identity."""
+
+    return {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "<redacted-worktree>/src",
+        "TEMP": "<redacted-worktree>/.red-reproduction-tmp",
+        "TMP": "<redacted-worktree>/.red-reproduction-tmp",
+    }
+
+
+def _normalise_output(raw: bytes, worktree: Path) -> bytes:
+    """Replace the private temporary checkout prefix in captured test output."""
+
+    normalised = raw
+    for spelling in {str(worktree), worktree.as_posix()}:
+        normalised = normalised.replace(spelling.encode(), b"<redacted-worktree>")
+    return normalised
+
+
+def _run_pytest(
+    *,
+    python: str,
+    worktree: Path,
+    environment: dict[str, str],
+    nodes: list[str],
+) -> tuple[list[str], subprocess.CompletedProcess[bytes], bytes, bytes]:
+    command = [python, "-m", "pytest", "-p", "no:cacheprovider", *nodes, "-q", "--tb=short"]
+    completed = subprocess.run(command, cwd=worktree, env=environment, capture_output=True, check=False)
+    stdout = _normalise_output(completed.stdout, worktree)
+    stderr = _normalise_output(completed.stderr, worktree)
+    return command, completed, stdout, stderr
 
 
 def _failure_signatures(output: bytes, nodes: list[str]) -> dict[str, list[str]]:
@@ -107,6 +173,9 @@ def produce_red_reproduction(
     source_paths: list[str],
     nodes: list[str],
     python: str,
+    source_mutations: dict[str, dict[str, str]] | None = None,
+    control_guard_blobs: dict[str, str] | None = None,
+    control_nodes: list[str] | None = None,
 ) -> dict[str, object]:
     """Execute a preserved-defect reproduction and atomically write its receipt."""
 
@@ -123,6 +192,23 @@ def produce_red_reproduction(
         raise RedReproductionError("source paths must be a sorted, unique, nonempty list")
     if any(Path(path).is_absolute() or ".." in Path(path).parts for path in source_paths):
         raise RedReproductionError("source paths must stay inside the repository")
+    source_mutations = source_mutations or {}
+    if not set(source_mutations) <= set(source_paths):
+        raise RedReproductionError("every source mutation path must be named by --source")
+    control_guard_blobs = control_guard_blobs or {}
+    control_nodes = control_nodes or []
+    if bool(control_guard_blobs) != bool(control_nodes):
+        raise RedReproductionError("control guard blobs and nodes must be supplied together")
+    if control_nodes:
+        if control_nodes != sorted(set(control_nodes)) or any("::" not in node for node in control_nodes):
+            raise RedReproductionError("control nodes must be sorted, unique pytest node ids")
+        control_paths = {node.split("::", 1)[0] for node in control_nodes}
+        if set(control_guard_blobs) != control_paths:
+            raise RedReproductionError("control guard blobs must exactly match the control-node files")
+        if control_nodes != nodes:
+            raise RedReproductionError("the green control and red guard must select the same nodes")
+    if set(source_mutations) & (set(guard_blobs) | set(control_guard_blobs)):
+        raise RedReproductionError("source mutation and guard overlay paths must be disjoint")
     try:
         relative_output = output.relative_to(root)
     except ValueError as exc:
@@ -134,6 +220,8 @@ def produce_red_reproduction(
     tree = _object_id(root, commit, kind="tree")
     for blob in guard_blobs.values():
         _object_id(root, blob, kind="blob")
+    for blob in control_guard_blobs.values():
+        _object_id(root, blob, kind="blob")
     source_blobs = {path: _object_id(root, f"{commit}:{path}", kind="blob") for path in source_paths}
 
     temporary_parent = Path(tempfile.mkdtemp(prefix="cryodaq-red-reproduction-"))
@@ -143,6 +231,24 @@ def produce_red_reproduction(
         archive = _git(root, "archive", "--format=tar", commit)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
             bundle.extractall(worktree, filter="data")
+        recorded_mutations: dict[str, dict[str, object]] = {}
+        for path, mutation in source_mutations.items():
+            target = worktree / path
+            raw = target.read_bytes()
+            try:
+                old = mutation["old"].encode("utf-8")
+                new = mutation["new"].encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise RedReproductionError(f"source mutation is not UTF-8 encodable: {path!r}") from exc
+            if raw.count(old) != 1:
+                raise RedReproductionError(f"source mutation old text must occur exactly once: {path!r}")
+            mutated = raw.replace(old, new, 1)
+            target.write_bytes(mutated)
+            recorded_mutations[path] = {
+                "old": mutation["old"],
+                "new": mutation["new"],
+                "result_blob": _git_blob_id(mutated),
+            }
         for path, blob in guard_blobs.items():
             target = worktree / path
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -156,30 +262,60 @@ def produce_red_reproduction(
         python_version = (version.stdout or version.stderr).decode("utf-8", errors="replace").strip()
         if not python_version:
             raise RedReproductionError("configured Python executable reported an empty version")
-        command = [python, "-m", "pytest", "-p", "no:cacheprovider", *nodes, "-q", "--tb=short"]
-        completed = subprocess.run(command, cwd=worktree, env=environment, capture_output=True, check=False)
+        control_receipt: dict[str, object] = {}
+        if control_nodes:
+            for path, blob in control_guard_blobs.items():
+                (worktree / path).write_bytes(_git(root, "cat-file", "blob", blob))
+            control_command, control_completed, control_stdout, control_stderr = _run_pytest(
+                python=python,
+                worktree=worktree,
+                environment=environment,
+                nodes=control_nodes,
+            )
+            if control_completed.returncode != 0:
+                raise RedReproductionError("old control guard failed; refusing to claim a false-green reproduction")
+            control_receipt = {
+                "control_command": ["python", *control_command[1:]],
+                "control_exit_code": control_completed.returncode,
+                "control_guard_blobs": control_guard_blobs,
+                "control_nodes": control_nodes,
+                "control_stdout_bytes_base64": base64.b64encode(control_stdout).decode("ascii"),
+                "control_stdout_sha256": f"sha256:{hashlib.sha256(control_stdout).hexdigest()}",
+                "control_stderr_bytes_base64": base64.b64encode(control_stderr).decode("ascii"),
+                "control_stderr_sha256": f"sha256:{hashlib.sha256(control_stderr).hexdigest()}",
+            }
+            for path, blob in guard_blobs.items():
+                (worktree / path).write_bytes(_git(root, "cat-file", "blob", blob))
+        command, completed, stdout, stderr = _run_pytest(
+            python=python,
+            worktree=worktree,
+            environment=environment,
+            nodes=nodes,
+        )
         if completed.returncode == 0:
             raise RedReproductionError("reproduction passed; refusing to emit a red receipt")
-        signatures = _failure_signatures(completed.stdout + completed.stderr, nodes)
+        signatures = _failure_signatures(stdout + stderr, nodes)
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2 if source_mutations or control_nodes else 1,
             "record_ids": record_ids,
             "provenance": _PROVENANCE,
             "defective_commit": commit,
             "defective_tree": tree,
             "defective_source_blobs": source_blobs,
             "guard_blobs": guard_blobs,
-            "command": command,
-            "environment": environment,
+            "command": ["python", *command[1:]],
+            "environment": _published_environment(),
             "python_version": python_version,
             "exit_code": completed.returncode,
             "guard_nodes": nodes,
             "failed_nodes": nodes,
             "failure_signatures": signatures,
-            "stdout_bytes_base64": base64.b64encode(completed.stdout).decode("ascii"),
-            "stdout_sha256": f"sha256:{hashlib.sha256(completed.stdout).hexdigest()}",
-            "stderr_bytes_base64": base64.b64encode(completed.stderr).decode("ascii"),
-            "stderr_sha256": f"sha256:{hashlib.sha256(completed.stderr).hexdigest()}",
+            "stdout_bytes_base64": base64.b64encode(stdout).decode("ascii"),
+            "stdout_sha256": f"sha256:{hashlib.sha256(stdout).hexdigest()}",
+            "stderr_bytes_base64": base64.b64encode(stderr).decode("ascii"),
+            "stderr_sha256": f"sha256:{hashlib.sha256(stderr).hexdigest()}",
+            **({"source_mutations": recorded_mutations} if source_mutations else {}),
+            **control_receipt,
         }
     finally:
         shutil.rmtree(temporary_parent, ignore_errors=True)
@@ -187,7 +323,7 @@ def produce_red_reproduction(
     output.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     temporary_output = output.with_suffix(".tmp")
-    temporary_output.write_text(rendered, encoding="utf-8", newline="\r\n")
+    temporary_output.write_text(rendered, encoding="utf-8", newline="\n")
     temporary_output.replace(output)
     return receipt
 
@@ -198,6 +334,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--defective-commit", required=True)
     parser.add_argument("--guard-blob", action="append", required=True)
     parser.add_argument("--source", action="append", required=True)
+    parser.add_argument("--source-mutations")
+    parser.add_argument("--control-guard-blob", action="append", default=[])
+    parser.add_argument("--control-node", action="append", default=[])
     parser.add_argument("--output", required=True)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("nodes", nargs="+")
@@ -213,6 +352,11 @@ def main(argv: list[str] | None = None) -> int:
             source_paths=sorted(args.source),
             nodes=sorted(args.nodes),
             python=args.python,
+            source_mutations=_parse_source_mutations(
+                (root / args.source_mutations).resolve() if args.source_mutations else None
+            ),
+            control_guard_blobs=_parse_blob_bindings(args.control_guard_blob) if args.control_guard_blob else {},
+            control_nodes=sorted(args.control_node),
         )
     except RedReproductionError as exc:
         parser.error(str(exc))

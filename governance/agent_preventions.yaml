@@ -3443,7 +3443,7 @@ false_green_pairs:
     ci_partition: agents
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/periodic_live_producer_consumer_drift_false_green_001.json
-      sha256: sha256:288315d5aa930f494f3dad85a679c99b192c7b0b31601e355b2c605cff26b4cc
+      sha256: sha256:63f9e79a630e127f2bb90fa393607604974597830cbdfee62102eb2c6b172b61
     green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
@@ -6793,5 +6793,5 @@ records:
       certify none of the final registered guards.
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/periodic_live_frame_admission_001.json
-      sha256: sha256:653ecfd12faed2e3d9579cee5a19bc7a9e60fa2b21407b72be18401a2678fc22
+      sha256: sha256:8e333b28d6d8985cc70d3d2a6ef52e62349dfc9b9b7e78fe26d3eba186ccb1cd
     green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact

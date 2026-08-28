@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -94,6 +95,62 @@ def test_live_red_reproduction_receipts_bind_executed_preserved_defects() -> Non
         "PERIODIC-LIVE-FRAME-ADMISSION-001",
         "PERIODIC-LIVE-PRODUCER-CONSUMER-DRIFT-FALSE-GREEN-001",
     }
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "periodic_live_frame_admission_001.json",
+        "periodic_live_producer_consumer_drift_false_green_001.json",
+    ),
+)
+def test_periodic_live_red_reproductions_exclude_personal_machine_details(filename: str) -> None:
+    """Published periodic evidence uses stable placeholders, never workstation details."""
+
+    receipt = json.loads((RECEIPT_DIRECTORY / filename).read_text(encoding="utf-8"))
+    assert receipt["command"][0] == "python"
+    assert receipt["environment"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "<redacted-worktree>/src",
+        "TEMP": "<redacted-worktree>/.red-reproduction-tmp",
+        "TMP": "<redacted-worktree>/.red-reproduction-tmp",
+    }
+    encoded = json.dumps(receipt, ensure_ascii=False)
+    assert "3fall" not in encoded
+    assert "C:\\\\Users\\\\" not in encoded
+    assert "AppData" not in encoded
+    assert "codex-runtimes" not in encoded
+    assert "cryodaq-red-reproduction-" not in encoded
+    for prefix in ("", "control_"):
+        stdout_key = f"{prefix}stdout_bytes_base64"
+        if stdout_key not in receipt:
+            continue
+        stdout = base64.b64decode(receipt[stdout_key])
+        stderr = base64.b64decode(receipt[f"{prefix}stderr_bytes_base64"])
+        output = (stdout + stderr).decode("utf-8", errors="replace")
+        assert "C:\\Users\\" not in output
+        assert "AppData" not in output
+        assert "cryodaq-red-reproduction-" not in output
+
+
+def test_periodic_false_green_receipt_binds_a_producer_only_mutation_and_green_old_guard() -> None:
+    """The false-green receipt isolates the coverage escape, not the old consumer defect."""
+
+    receipt = json.loads(
+        (RECEIPT_DIRECTORY / "periodic_live_producer_consumer_drift_false_green_001.json").read_text(encoding="utf-8")
+    )
+    assert receipt["schema_version"] == 2
+    assert receipt["control_exit_code"] == 0
+    assert receipt["control_nodes"] == receipt["guard_nodes"]
+    assert set(receipt["source_mutations"]) == {"src/cryodaq/core/zmq_bridge.py"}
+    mutation = receipt["source_mutations"]["src/cryodaq/core/zmq_bridge.py"]
+    assert "descriptor_envelope=item.descriptor_envelope" in mutation["old"]
+    assert "descriptor_envelope" not in mutation["new"]
+    assert "src/cryodaq/agents/assistant/periodic_runtime.py" in receipt["defective_source_blobs"]
+
+    output = base64.b64decode(receipt["stdout_bytes_base64"]).decode("utf-8", errors="replace")
+    assert "KeyError: 'desc'" in output
+    assert "ValueError: invalid reading shape" not in output
 
 
 def test_validate_registry_refuses_implicit_root_outside_module_tree(

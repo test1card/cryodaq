@@ -1,6 +1,6 @@
 {
   "command": [
-    "C:\\Python314\\python.exe",
+    "python",
     "-m",
     "pytest",
     "-p",
@@ -9,21 +9,38 @@
     "-q",
     "--tb=short"
   ],
-  "defective_commit": "062a0e3b6d9f332b47c33942d1f95ea6ace10146",
-  "defective_source_blobs": {
-    "src/cryodaq/agents/assistant/periodic_runtime.py": "f081befcae0923daec0649297a43b9edcc5b1875",
-    "src/cryodaq/core/zmq_bridge.py": "51d7283179f8b5d3b3e57ed1df6b779154b01128"
+  "control_command": [
+    "python",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer",
+    "-q",
+    "--tb=short"
+  ],
+  "control_exit_code": 0,
+  "control_guard_blobs": {
+    "tests/agents/assistant/test_periodic_runtime.py": "201595771538b97a8d86c49ca61e8d454a80ffdd"
   },
-  "defective_tree": "5519d191443adbf6aa9d1b847d163c6acacdbad9",
+  "control_nodes": [
+    "tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer"
+  ],
+  "control_stderr_bytes_base64": "",
+  "control_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "control_stdout_bytes_base64": "LiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQoxIHBhc3NlZCBpbiAwLjQycwo=",
+  "control_stdout_sha256": "sha256:791acbb2840ecff621592488f8e65512e312896e3865560d4000495c22ef5d13",
+  "defective_commit": "04e7a30918acf00024b78d2426d12c7825b2dc41",
+  "defective_source_blobs": {
+    "src/cryodaq/agents/assistant/periodic_runtime.py": "cf63760bdf65f205955a02ba5a324e434a8a55e5",
+    "src/cryodaq/core/zmq_bridge.py": "49c078363c772407cae216774583a430f912af33"
+  },
+  "defective_tree": "7ab2a65ec2d09ea6ab0469b2c1144f8bc0b05aa3",
   "environment": {
-    "COMSPEC": "C:\\WINDOWS\\system32\\cmd.exe",
-    "PATH": "C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\.codex\\tmp\\arg0\\codex-arg0MtlCs3;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\java8path;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath;C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.2.10-hotspot\\bin;C:\\Python314\\Scripts\\;C:\\Python314\\;C:\\Program Files\\Microsoft MPI\\Bin\\;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Program Files (x86)\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\DTS\\Binn\\;C:\\Program Files (x86)\\Windows Kits\\8.1\\Windows Performance Toolkit\\;C:\\Program Files\\Siemens\\NX2506\\CAPITALINTEGRATION\\capitalnxremote\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\PowerToys\\DSCModules\\;C:\\Program Files\\nodejs\\;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\Tailscale\\;C:\\Program Files\\Sunshine;C:\\Program Files\\Sunshine\\tools;C:\\Users\\3fall\\.kimi-code\\bin;C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2026.0\\bin;C:\\Users\\3fall\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts;C:\\Users\\3fall\\AppData\\Local\\hermes\\bin;C:\\Users\\3fall\\.cargo\\bin;C:\\Users\\3fall\\.local\\bin;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\3fall\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\3fall\\AppData\\Roaming\\npm;C:\\Users\\3fall\\AppData\\Local\\Programs\\Ollama;C:\\Users\\3fall\\AppData\\Local\\Programs\\MiKTeX\\miktex\\bin\\x64\\;C:\\Users\\3fall\\AppData\\Local\\Programs\\Antigravity\\bin;C:\\Users\\3fall\\.bun\\bin;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\3fall\\.cache\\lm-studio\\bin;C:\\Users\\3fall\\.dotnet\\tools;C:\\Users\\3fall\\AppData\\Roaming\\Python\\Python314\\Scripts;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\3fall\\AppData\\Local\\OpenAI\\Codex\\bin\\c6c4820dcd243daa;C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0\\app\\resources",
-    "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONPATH": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-mdimx_pm\\worktree\\src",
-    "SYSTEMROOT": "C:\\WINDOWS",
-    "TEMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-mdimx_pm\\worktree\\.red-reproduction-tmp",
-    "TMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-mdimx_pm\\worktree\\.red-reproduction-tmp"
+    "PYTHONPATH": "<redacted-worktree>/src",
+    "TEMP": "<redacted-worktree>/.red-reproduction-tmp",
+    "TMP": "<redacted-worktree>/.red-reproduction-tmp"
   },
   "exit_code": 1,
   "failed_nodes": [
@@ -41,13 +58,20 @@
     "tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer"
   ],
   "provenance": "local-executed-red-reproduction; lower provenance than sealed hosted CI",
-  "python_version": "Python 3.14.3",
+  "python_version": "Python 3.14.6",
   "record_ids": [
     "PERIODIC-LIVE-PRODUCER-CONSUMER-DRIFT-FALSE-GREEN-001"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
+  "source_mutations": {
+    "src/cryodaq/core/zmq_bridge.py": {
+      "new": "                    await self._publish_reading(item.reading)\n",
+      "old": "                    await self._publish_reading(item.reading, descriptor_envelope=item.descriptor_envelope)\n",
+      "result_blob": "70760fde95ec73dde2dc5c4c11e913c96523e244"
+    }
+  },
   "stderr_bytes_base64": "",
   "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX18gdGVzdF9ldmVyeV9rZXlfdGhlX3B1Ymxpc2hlcl93cml0ZXNfaXNfa25vd25fdG9fdGhpc19jb25zdW1lciBfX19fX19fXw0KdGVzdHNcYWdlbnRzXGFzc2lzdGFudFx0ZXN0X3BlcmlvZGljX3J1bnRpbWUucHk6MTc0NjogaW4gdGVzdF9ldmVyeV9rZXlfdGhlX3B1Ymxpc2hlcl93cml0ZXNfaXNfa25vd25fdG9fdGhpc19jb25zdW1lcg0KICAgIHRyYW5zcG9ydCwgcmVhZGluZyA9IFNlcXVlbmNlZFBlcmlvZGljTGl2ZVNvdXJjZXMuX3JlYWRpbmcoZnJhbWUpDQogICAgICAgICAgICAgICAgICAgICAgICAgXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4NCnNyY1xjcnlvZGFxXGFnZW50c1xhc3Npc3RhbnRccGVyaW9kaWNfcnVudGltZS5weTo2NDc6IGluIF9yZWFkaW5nDQogICAgcmFpc2UgVmFsdWVFcnJvcigiaW52YWxpZCByZWFkaW5nIHNoYXBlIikNCkUgICBWYWx1ZUVycm9yOiBpbnZhbGlkIHJlYWRpbmcgc2hhcGUNCj09PT09PT09PT09PT09PT09PT09PT09PT09PSBzaG9ydCB0ZXN0IHN1bW1hcnkgaW5mbyA9PT09PT09PT09PT09PT09PT09PT09PT09PT0NCkZBSUxFRCB0ZXN0cy9hZ2VudHMvYXNzaXN0YW50L3Rlc3RfcGVyaW9kaWNfcnVudGltZS5weTo6dGVzdF9ldmVyeV9rZXlfdGhlX3B1Ymxpc2hlcl93cml0ZXNfaXNfa25vd25fdG9fdGhpc19jb25zdW1lcg0KMSBmYWlsZWQgaW4gMC45NHMNCg==",
-  "stdout_sha256": "sha256:1760e02b4c3ae1576bc4bd19853df4e9757dccd3238f681efb3960fd3c082ae1"
+  "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQo9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQpfX19fX19fXyB0ZXN0X2V2ZXJ5X2tleV90aGVfcHVibGlzaGVyX3dyaXRlc19pc19rbm93bl90b190aGlzX2NvbnN1bWVyIF9fX19fX19fXwp0ZXN0cy9hZ2VudHMvYXNzaXN0YW50L3Rlc3RfcGVyaW9kaWNfcnVudGltZS5weToxNzQ1OiBpbiB0ZXN0X2V2ZXJ5X2tleV90aGVfcHVibGlzaGVyX3dyaXRlc19pc19rbm93bl90b190aGlzX2NvbnN1bWVyCiAgICBhc3NlcnQgcGF5bG9hZFsiZGVzYyJdID09IGVudmVsb3BlCiAgICAgICAgICAgXl5eXl5eXl5eXl5eXl5eCkUgICBLZXlFcnJvcjogJ2Rlc2MnCj09PT09PT09PT09PT09PT09PT09PT09PT09PSBzaG9ydCB0ZXN0IHN1bW1hcnkgaW5mbyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09CkZBSUxFRCB0ZXN0cy9hZ2VudHMvYXNzaXN0YW50L3Rlc3RfcGVyaW9kaWNfcnVudGltZS5weTo6dGVzdF9ldmVyeV9rZXlfdGhlX3B1Ymxpc2hlcl93cml0ZXNfaXNfa25vd25fdG9fdGhpc19jb25zdW1lcgoxIGZhaWxlZCBpbiAwLjQ1cwo=",
+  "stdout_sha256": "sha256:6f5d6cffa77e16efaa0ddb60b17e6602dc6212e8837f6176ef8e63e828ff6f53"
 }

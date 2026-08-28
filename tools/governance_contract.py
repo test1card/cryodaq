@@ -531,7 +531,20 @@ def _validate_red_reproduction_evidence(
         "stderr_bytes_base64",
         "stderr_sha256",
     }
-    if not isinstance(receipt, Mapping) or set(receipt) != required or receipt["schema_version"] != 1:
+    schema_version = receipt.get("schema_version") if isinstance(receipt, Mapping) else None
+    if schema_version == 2:
+        required |= {
+            "source_mutations",
+            "control_command",
+            "control_exit_code",
+            "control_guard_blobs",
+            "control_nodes",
+            "control_stdout_bytes_base64",
+            "control_stdout_sha256",
+            "control_stderr_bytes_base64",
+            "control_stderr_sha256",
+        }
+    if not isinstance(receipt, Mapping) or set(receipt) != required or schema_version not in {1, 2}:
         raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
     record_ids = receipt["record_ids"]
     if (
@@ -588,6 +601,40 @@ def _validate_red_reproduction_evidence(
         )
         if blob != resolved_blob:
             raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob does not match its tree")
+    if schema_version == 2:
+        mutations = receipt["source_mutations"]
+        if not isinstance(mutations, Mapping) or not mutations or not set(mutations) <= set(source_blobs):
+            raise GovernanceContractError(f"{entry_id}.red_evidence source mutations are missing or unbound")
+        for path, mutation in mutations.items():
+            if (
+                not isinstance(mutation, Mapping)
+                or set(mutation) != {"old", "new", "result_blob"}
+                or not isinstance(mutation["old"], str)
+                or not mutation["old"]
+                or not isinstance(mutation["new"], str)
+                or mutation["old"] == mutation["new"]
+                or not isinstance(mutation["result_blob"], str)
+                or _GIT_OBJECT_ID.fullmatch(mutation["result_blob"]) is None
+            ):
+                raise GovernanceContractError(f"{entry_id}.red_evidence source mutation shape is not exact")
+            if resolved_commit is None or git_repository is None:
+                continue
+            base = _git_stdout(
+                git_repository,
+                ["cat-file", "blob", source_blobs[path]],
+                field=f"{entry_id}.red_evidence source mutation base",
+            )
+            try:
+                old = mutation["old"].encode("utf-8")
+                new = mutation["new"].encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence source mutation is not UTF-8 encodable"
+                ) from exc
+            if base.count(old) != 1 or _git_blob_id(base.replace(old, new, 1)) != mutation["result_blob"]:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence source mutation does not reproduce its bound result blob"
+                )
     receipt_guard_blobs = receipt["guard_blobs"]
     expected_paths = {node.split("::", 1)[0] for node in guard_nodes}
     if not isinstance(receipt_guard_blobs, Mapping) or set(receipt_guard_blobs) != expected_paths:
@@ -603,6 +650,46 @@ def _validate_red_reproduction_evidence(
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
             )
+    if schema_version == 2:
+        control_nodes = receipt["control_nodes"]
+        control_guard_blobs = receipt["control_guard_blobs"]
+        control_command = receipt["control_command"]
+        if (
+            control_nodes != receipt["guard_nodes"]
+            or not isinstance(control_guard_blobs, Mapping)
+            or set(control_guard_blobs) != expected_paths
+            or not isinstance(control_command, list)
+            or not control_command
+            or control_command[0] != "python"
+            or control_command != receipt["command"]
+            or any(not isinstance(item, str) or not item for item in control_command)
+            or receipt["control_exit_code"] != 0
+        ):
+            raise GovernanceContractError(f"{entry_id}.red_evidence false-green control is not exact and green")
+        for path, blob in control_guard_blobs.items():
+            if not isinstance(blob, str) or _GIT_OBJECT_ID.fullmatch(blob) is None:
+                raise GovernanceContractError(f"{entry_id}.red_evidence control guard blob is invalid")
+            if resolved_commit is not None and git_repository is not None:
+                base_guard = _git_object_id(
+                    git_repository,
+                    f"{resolved_commit}:{path}",
+                    kind="blob",
+                    field=f"{entry_id}.red_evidence control guard blob",
+                )
+                if blob != base_guard:
+                    raise GovernanceContractError(
+                        f"{entry_id}.red_evidence control guard is not the defective commit's old guard"
+                    )
+        _decode_receipt_bytes(
+            receipt["control_stdout_bytes_base64"],
+            receipt["control_stdout_sha256"],
+            f"{entry_id}.control_stdout",
+        )
+        _decode_receipt_bytes(
+            receipt["control_stderr_bytes_base64"],
+            receipt["control_stderr_sha256"],
+            f"{entry_id}.control_stderr",
+        )
     command = receipt["command"]
     environment = receipt["environment"]
     if (
