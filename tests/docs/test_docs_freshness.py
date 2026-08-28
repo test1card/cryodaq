@@ -1295,6 +1295,43 @@ def test_design_system_release_markers_are_one_version() -> None:
     assert f"Current v{version} state" in governance_rules
 
 
+def test_v5_accessibility_slice_has_gui_change_impact_record() -> None:
+    impact = _read(REPO_ROOT / "docs" / "design-system" / "governance" / "change-impact.md")
+    marker = "## Current v5.0.0 accessibility and state-treatment slice"
+    _before, separator, remainder = impact.partition(marker)
+    assert separator, "the v5.0.0 rendered-appearance slice needs its mandatory impact record"
+    section = remainder.partition("\n## ")[0]
+
+    rows: dict[str, str] = {}
+    for line in section.splitlines():
+        if not line.startswith("|") or line.startswith("|---"):
+            continue
+        fields = [field.strip() for field in line.strip("|").split("|")]
+        if len(fields) == 2 and fields[0] != "Field":
+            rows[fields[0]] = fields[1]
+
+    required_fields = {
+        "Better",
+        "Worse",
+        "Safety/workflow justification",
+        "Mitigation and tests",
+        "Revise/revert trigger",
+    }
+    assert set(rows) == required_fields
+    assert all(rows.values())
+    assert "No downside" not in rows["Worse"]
+
+    combined = "\n".join(rows.values())
+    for required_surface in (
+        "Warm Stone",
+        "ToolRail",
+        "BottomStatusBar",
+        "validation",
+        "disabled",
+    ):
+        assert required_surface in combined, required_surface
+
+
 def test_canonical_design_system_artifacts_and_markdown_references_are_tracked() -> None:
     tracked = set(_tracked_files())
     design_root = REPO_ROOT / "docs" / "design-system"

@@ -3,7 +3,7 @@ title: GUI Change Impact Review
 keywords: tradeoff, operator impact, safety impact, mitigation, revert trigger
 applies_to: every GUI, UI, UX, and design-system change
 status: canonical
-last_updated: 2026-07-20
+last_updated: 2026-08-28
 references: ../README.md, ../patterns/operator-evidence-and-retention.md, testing-strategy.md
 ---
 
@@ -22,6 +22,16 @@ Every GUI slice includes one reviewed record with these exact fields:
 “No downside” is not an acceptable record. If the benefit is only aesthetic
 and the cost reduces truth, panorama, provenance, anomaly discovery, or
 operator agency, the change is rejected.
+
+## Current v5.0.0 accessibility and state-treatment slice
+
+| Field | Evidence |
+|---|---|
+| Better | Warm Stone secondary body text clears the AA contrast floor on every claimed surface; ToolRail keyboard focus is visible independently of selection; BottomStatusBar fault evidence and New Experiment validation remain conspicuous without low-contrast fault-coloured body text; replay-disabled creation reads as unavailable and explains why. |
+| Worse | Brighter Warm Stone secondary text and the ToolRail focus ring add visual weight to quiet surfaces; neutral fault and validation body text relies more heavily on adjacent dots, borders, and wording; the disabled create control is deliberately less prominent than an enabled action. |
+| Safety/workflow justification | Long low-light shifts require legible evidence and unambiguous keyboard location, while fault styling must not sacrifice readable operator text or let an unavailable action resemble an enabled hazardous workflow step. |
+| Mitigation and tests | Limit the Warm Stone change to six measured body-text pairings; retain non-colour text, dot, and border cues; keep focus and selection geometrically independent; preserve validation wording and accessible descriptions; give the disabled control a neutral border, ArrowCursor, and generic explanation. `test_warm_stone_muted_body_text_passes_on_every_claimed_surface`, `test_keyboard_focus_changes_real_tool_rail_pixels_and_coexists_with_selection`, `test_fault_connection_keeps_coloured_dot_and_neutral_body_label`, the New Experiment validation tests, and `test_disabled_create_action_has_truthful_generic_explanation` cover those production paths. |
+| Revise/revert trigger | Revise or revert if a claimed Warm Stone pairing falls below 4.5:1, keyboard focus becomes invisible or indistinguishable from selection, a BottomStatusBar fault loses its dot/border/text cue, validation becomes unreadable or announcement-only, disabled creation looks enabled or lacks its explanation, or the added visual weight obscures higher-priority truth. |
 
 ## Current slice: panoramic dashboard restoration
 

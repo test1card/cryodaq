@@ -128,6 +128,9 @@ class BottomStatusBar(QWidget):
         conn_layout.setSpacing(theme.SPACE_1)
         self._conn_dot_label = QLabel("●")
         self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+        # The dot is a decorative colour channel. A non-empty blank overrides
+        # QLabel's fallback accessible name, which would otherwise be "●".
+        self._conn_dot_label.setAccessibleName(" ")
         conn_layout.addWidget(self._conn_dot_label)
         self._conn_label = QLabel("Отключено")
         self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
@@ -221,9 +224,8 @@ class BottomStatusBar(QWidget):
         self._conn_label.setText(visible)
         self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
         self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_OK if connected else theme.STATUS_FAULT};")
-        for indicator in (self._conn_dot_label, self._conn_label):
-            indicator.setToolTip(detail)
-            indicator.setAccessibleDescription(detail)
+        self._conn_label.setToolTip(detail)
+        self._conn_label.setAccessibleDescription(detail)
 
     def set_disk_evidence(self, value: float, *, source: str, state: str) -> bool:
         """Present backend-owned disk evidence; this widget never probes disk."""

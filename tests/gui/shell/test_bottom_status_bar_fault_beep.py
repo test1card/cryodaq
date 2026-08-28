@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtGui import QAccessible
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui import theme
@@ -77,6 +78,23 @@ def test_fault_connection_keeps_coloured_dot_and_neutral_body_label() -> None:
     assert f"color: {theme.STATUS_FAULT}" not in disk_style
     assert theme.FOREGROUND in disk_style
     assert f"border-left: 3px solid {theme.STATUS_FAULT}" in disk_style
+
+
+def test_connection_update_has_one_accessible_announcement_owner() -> None:
+    bar = _make_bar()
+    presentation = "Engine connection evidence"
+    bar.set_connected(True, presentation)
+
+    dot_accessible = QAccessible.queryAccessibleInterface(bar._conn_dot_label)
+    label_accessible = QAccessible.queryAccessibleInterface(bar._conn_label)
+    assert dot_accessible is not None
+    assert label_accessible is not None
+    assert not dot_accessible.text(QAccessible.Text.Name).strip()
+    assert not dot_accessible.text(QAccessible.Text.Description).strip()
+
+    detail = f"Состояние связи: {presentation}"
+    assert label_accessible.text(QAccessible.Text.Description) == detail
+    assert bar._conn_label.accessibleDescription() == detail
 
 
 def test_bottom_bar_has_no_filesystem_probe_and_rejects_malformed_disk_evidence() -> None:
