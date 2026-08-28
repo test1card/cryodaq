@@ -30,6 +30,7 @@ from cryodaq.core.broker import DataBroker
 
 def _make_service(tmp_path: Path) -> CooldownService:
     cfg = {
+        "enabled": True,
         "channel_cold": "T_cold",
         "channel_warm": "T_warm",
         "predict_interval_s": 60.0,
