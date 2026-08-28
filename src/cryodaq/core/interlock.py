@@ -822,7 +822,10 @@ class InterlockEngine:
                 reading.value
             )
             if not triggered:
-                record.condition_active = False
+                record.condition_active = any(
+                    (latest.is_usable() or math.isinf(latest.value)) and record.condition.is_triggered(latest.value)
+                    for latest in record.latest_readings.values()
+                )
                 continue
             now = datetime.now(UTC)
             repeat_s = record.condition.cooldown_s if record.condition.cooldown_s > 0 else 60.0

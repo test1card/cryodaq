@@ -2709,6 +2709,35 @@ class SafetyManager:
         if critical_blocker is not None:
             blockers.append(critical_blocker)
 
+        disabled_interlocks = self._disabled_interlocks()
+        if disabled_interlocks:
+            disabled_names = ", ".join(disabled_interlocks)
+            plant.append(
+                PlantHealthFact(
+                    "software_interlocks",
+                    "Software interlocks",
+                    OperatorPresentationState.WARNING,
+                    "software_interlock_disabled",
+                )
+            )
+            blockers.append(
+                SafetyBlocker(
+                    "software_interlock_disabled",
+                    OperatorPresentationState.WARNING,
+                    f"Software interlocks are disabled: {disabled_names}",
+                    "Re-enable every named software interlock before requesting RUN",
+                )
+            )
+        else:
+            plant.append(
+                PlantHealthFact(
+                    "software_interlocks",
+                    "Software interlocks",
+                    OperatorPresentationState.OK,
+                    "software_interlocks_enabled",
+                )
+            )
+
         if self._mature_dead_interlock_channels:
             channels = ", ".join(sorted(self._mature_dead_interlock_channels))
             plant.append(
@@ -2923,6 +2952,7 @@ class SafetyManager:
 
     async def publish_interlock_operator_state(self) -> None:
         """Refresh the existing safety-state carrier after an operator toggle."""
+        self._refresh_operator_safety_snapshot()
         await self._publish_state("interlock_operator_state_changed")
 
     def get_events(self) -> list[SafetyEvent]:

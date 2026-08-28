@@ -29,6 +29,8 @@ from cryodaq.core.interlock import (
     InterlockState,
 )
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
 from cryodaq.engine_wiring.operator_safety_snapshot import (
@@ -165,6 +167,80 @@ async def test_disabled_emergency_interlock_still_evaluates_warns_and_suppresses
     assert "> 350" in warning
     assert "подавлена решением оператора" in warning
     assert engine.get_events()[-1].action_taken == "suppressed:emergency_off"
+
+
+@pytest.mark.asyncio
+async def test_safe_sibling_channel_does_not_rearm_a_persistently_active_suppressed_warning(
+    workspace_runtime_root: Path,
+) -> None:
+    warning_surface = AsyncMock()
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        suppressed_handler=warning_surface,
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(
+        InterlockCondition(
+            name="overheat_cryostat",
+            description="Перегрев криостата",
+            channel_ids=frozenset({"cryostat/t1", "cryostat/t2"}),
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+            cooldown_s=600.0,
+        )
+    )
+    await _toggle(engine, enabled=False, request_id="0" * 32)
+
+    await engine._process_reading(_reading(360.0))
+    await engine._process_reading(
+        Reading(
+            timestamp=datetime(2026, 8, 28, 12, 0, 1, tzinfo=UTC),
+            instrument_id="LS218_1",
+            channel="cryostat/t2",
+            value=300.0,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    await engine._process_reading(_reading(360.0))
+
+    warning_surface.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_disabled_interlock_refreshes_the_authoritative_readiness_cut(
+    workspace_runtime_root: Path,
+) -> None:
+    manager = SafetyManager(SafetyBroker(), mock=True)
+    await manager.start()
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_changed_handler=manager.publish_interlock_operator_state,
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    manager.set_interlock_state_provider(engine.disabled_interlocks)
+    try:
+        manager.record_reviewed_source_connected(verified_off=True)
+        manager._transition(SafetyState.READY, "qualified interlock-readiness test")
+        assert manager.snapshot_operator_safety().readiness is ReadinessTruth.READY
+
+        await _toggle(engine, enabled=False, request_id="1" * 32)
+
+        disabled = manager.snapshot_operator_safety()
+        assert disabled.readiness is not ReadinessTruth.READY
+        assert any(blocker.code == "software_interlock_disabled" for blocker in disabled.blockers)
+        assert any(
+            fact.subsystem_id == "software_interlocks"
+            and fact.state is OperatorPresentationState.WARNING
+            and fact.reason_code == "software_interlock_disabled"
+            for fact in disabled.plant_health
+        )
+    finally:
+        await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -587,6 +663,51 @@ async def test_toggle_commands_need_no_confirmation_write_two_receipts_and_run_i
 
 
 @pytest.mark.asyncio
+async def test_oversized_interlock_operator_is_rejected_before_operator_log_commit(
+    workspace_runtime_root: Path,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    context = _command_context(
+        manager=manager,
+        writer=writer,
+        broker=_RequiredPublisher(),
+        interlock_engine=engine,
+    )
+    try:
+        result = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "И" * 257,
+                    "request_id": "9" * 32,
+                }
+            ),
+            context=context,
+        )
+
+        assert result["ok"] is False
+        assert result["error_code"] == "interlock_toggle_invalid"
+        assert result["retry_safe"] is True
+        assert writer.entries == []
+        assert engine.disabled_interlocks() == ()
+    finally:
+        context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
 async def test_delayed_toggle_replay_returns_original_result_without_reapplying_stale_state(
     workspace_runtime_root: Path,
 ) -> None:
@@ -715,6 +836,196 @@ async def test_toggle_provenance_remains_bound_to_logged_experiment_across_lifec
             == experiment_a
         )
         assert metadata_b.get("interlock_disable_intervals", []) == []
+    finally:
+        context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
+async def test_disabled_interval_is_split_when_experiment_ownership_changes(
+    workspace_runtime_root: Path,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    experiment_a = manager.start_experiment(
+        "Эксперимент A",
+        "Иван Петров",
+        template_id="custom",
+        start_time=datetime(2026, 8, 28, 10, 0, tzinfo=UTC),
+    )
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    context = _command_context(
+        manager=manager,
+        writer=writer,
+        broker=_RequiredPublisher(),
+        interlock_engine=engine,
+    )
+    experiment_b: str | None = None
+    boundary = datetime(2026, 8, 28, 12, 0, 30, tzinfo=UTC)
+    try:
+        disabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "Иван Петров",
+                    "request_id": "a" * 32,
+                }
+            ),
+            context=context,
+        )
+        manager.finalize_experiment(experiment_a, end_time=boundary)
+        experiment_b = manager.start_experiment(
+            "Эксперимент B",
+            "Иван Петров",
+            template_id="custom",
+            start_time=boundary,
+        )
+        reenabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": True,
+                    "operator": "Иван Петров",
+                    "request_id": "b" * 32,
+                }
+            ),
+            context=context,
+        )
+
+        assert disabled["ok"] is True
+        assert reenabled["ok"] is True
+        metadata_a = json.loads(
+            (workspace_runtime_root / "experiment" / "experiments" / experiment_a / "metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        metadata_b = json.loads(
+            (workspace_runtime_root / "experiment" / "experiments" / experiment_b / "metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        interval_a = metadata_a["interlock_disable_intervals"][0]
+        interval_b = metadata_b["interlock_disable_intervals"][0]
+        assert interval_a["closed_at"] == boundary.isoformat()
+        assert interval_a["close_reason"] == "experiment_boundary"
+        assert interval_a["continued_in_experiment_id"] == experiment_b
+        assert interval_b["disabled_at"] == boundary.isoformat()
+        assert interval_b["continued_from_experiment_id"] == experiment_a
+        assert interval_b["reenabled_at"] == reenabled["entry"]["timestamp"]
+        assert interval_b["closed_at"] == reenabled["entry"]["timestamp"]
+        assert interval_b["disable_receipt"]["commit_receipt"] == disabled["commit_receipt"]
+        assert interval_b["reenable_receipt"]["commit_receipt"] == reenabled["commit_receipt"]
+    finally:
+        context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
+async def test_experiment_boundary_split_recovers_from_pending_transition_journal(
+    workspace_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    experiment_a = manager.start_experiment(
+        "Эксперимент A",
+        "Иван Петров",
+        template_id="custom",
+        start_time=datetime(2026, 8, 28, 10, 0, tzinfo=UTC),
+    )
+    state_path = workspace_runtime_root / "interlock_operator_state.json"
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    engine.add_condition(_condition())
+    context = _command_context(
+        manager=manager,
+        writer=writer,
+        broker=_RequiredPublisher(),
+        interlock_engine=engine,
+    )
+    boundary = datetime(2026, 8, 28, 12, 0, 30, tzinfo=UTC)
+    try:
+        disabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "Иван Петров",
+                    "request_id": "c" * 32,
+                }
+            ),
+            context=context,
+        )
+        assert disabled["ok"] is True
+        manager.finalize_experiment(experiment_a, end_time=boundary)
+        experiment_b = manager.start_experiment(
+            "Эксперимент B",
+            "Иван Петров",
+            template_id="custom",
+            start_time=boundary,
+        )
+        reconcile = manager.sync_interlock_operator_provenance
+        monkeypatch.setattr(
+            manager,
+            "record_interlock_operator_state",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError("metadata unavailable")),
+        )
+        reenabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": True,
+                    "operator": "Иван Петров",
+                    "request_id": "d" * 32,
+                }
+            ),
+            context=context,
+        )
+        assert reenabled["error_code"] == "interlock_toggle_reconciliation_failed"
+
+        restarted = InterlockEngine(
+            broker=None,  # type: ignore[arg-type]
+            actions={"emergency_off": AsyncMock()},
+            state_path=state_path,
+        )
+        restarted.add_condition(_condition())
+        await restarted.restore_operator_state()
+
+        assert reconcile(restarted.get_operator_state()) is True
+        metadata_a = json.loads(
+            (workspace_runtime_root / "experiment" / "experiments" / experiment_a / "metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        metadata_b = json.loads(
+            (workspace_runtime_root / "experiment" / "experiments" / experiment_b / "metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert metadata_a["interlock_disable_intervals"][0]["closed_at"] == boundary.isoformat()
+        recovered = metadata_b["interlock_disable_intervals"][0]
+        assert recovered["disabled_at"] == boundary.isoformat()
+        assert recovered["reenabled_at"] == reenabled["entry"]["timestamp"]
+        assert recovered["reenable_receipt"]["request_id"] == "d" * 32
     finally:
         context.experiment_commands_accepting = False
 

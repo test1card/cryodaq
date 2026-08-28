@@ -2509,12 +2509,20 @@ async def _set_interlock_operator_state(
     enabled = cmd.get("enabled")
     operator = cmd.get("operator")
     request_id = cmd.get("request_id")
+    operator_utf8_bytes: bytes | None = None
+    if type(operator) is str:
+        try:
+            operator_utf8_bytes = operator.strip().encode("utf-8")
+        except UnicodeError:
+            operator_utf8_bytes = None
     if (
         type(name) is not str
         or not name
         or type(enabled) is not bool
         or type(operator) is not str
         or not operator.strip()
+        or operator_utf8_bytes is None
+        or len(operator_utf8_bytes) > 512
         or type(request_id) is not str
         or len(request_id) != 32
         or any(char not in "0123456789abcdef" for char in request_id)
@@ -2563,6 +2571,15 @@ async def _set_interlock_operator_state(
             "retry_safe": False,
         }
 
+    prior_disable_receipt: dict[str, Any] | None = None
+    if enabled:
+        prior_state = next(
+            (state for state in context.interlock_engine.get_operator_state() if state.get("name") == name),
+            None,
+        )
+        if type(prior_state) is dict and type(prior_state.get("disable_receipt")) is dict:
+            prior_disable_receipt = dict(prior_state["disable_receipt"])
+
     log_cmd: dict[str, Any] = {
         "cmd": "log_entry",
         "request_id": request_id,
@@ -2602,6 +2619,7 @@ async def _set_interlock_operator_state(
                 notice=notice,
                 receipt={"entry": dict(entry), "commit_receipt": dict(commit_receipt)},
                 expected_experiment_id=experiment_id,
+                prior_disable_receipt=prior_disable_receipt,
             )
             if experiment_id is not None and provenance_recorded is not True:
                 raise RuntimeError("logged experiment did not record interlock provenance")
