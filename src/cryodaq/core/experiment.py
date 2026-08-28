@@ -3024,13 +3024,13 @@ class ExperimentManager:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
                     continue
                 if not snapshot.durable_format:
-                    historical = (
-                        record.result_summary.get("artifact_format") == "legacy_csv"
-                        and "bound_descriptors" not in record.parameters
-                    )
+                    # Legacy records predate the artifact-format marker.  Their
+                    # lack of descriptor-bound parameters is the compatibility
+                    # boundary; current runs always reserve those descriptors.
+                    historical = "bound_descriptors" not in record.parameters
                     if not historical:
                         logger.warning(
-                            "Ignoring legacy autosweep artifact %s: run record is not explicitly historical",
+                            "Ignoring legacy autosweep artifact %s: run record has current descriptor authority",
                             resolved,
                         )
                         continue
