@@ -1312,6 +1312,28 @@ def test_bottom_status_bar_spec_matches_live_setter_contract() -> None:
     assert "class StatusItem" not in spec
 
 
+def test_keithley_panel_spec_governs_source_state_replay_and_gap_resync() -> None:
+    source = _read(REPO_ROOT / "src/cryodaq/gui/shell/overlays/keithley_panel.py")
+    spec = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/keithley-panel.md")
+    impact = _read(REPO_ROOT / "docs/design-system/governance/change-impact.md")
+
+    assert "def replay_source_state(self, key: str, reading: Reading)" in source
+    assert "def replay_source_state(self, key: str, reading: Reading)" in spec
+    for contract_marker in (
+        "producer observation",
+        "retained presentation",
+        "measurement-flow gap",
+        "newer typed READY",
+        "verified-OFF",
+        "Safety observation",
+        "without advancing producer-observation",
+        "before generic measurement flow resumes",
+    ):
+        assert contract_marker in spec
+    assert "Keithley source-state gap resynchronization" in impact
+    assert "pre-gap ON/OFF" in impact
+
+
 def test_operator_manual_matches_current_runtime_authority_boundaries() -> None:
     manual = _read(REPO_ROOT / "docs/operator_manual.md")
     normalized = re.sub(r"\s+", " ", manual)

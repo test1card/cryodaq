@@ -55,6 +55,15 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-FD2-INHERITANCE-001
+    guard: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_post_dup2_installation_failure_fails_closed_and_reports_on_launch_pipe
+    ci_partition: remaining
+    platform: posix
+    red_evidence: post_dup2_facade_construction_failure_left_the_launcher_pipe_byte_empty_after_the_original_fd2_suite_was_green_because_no_guard_injected_a_failure_after_os_descriptor_2_was_redirected_2026_08_26_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -7238,3 +7247,49 @@ records:
     automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
     green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
+  - id: LAUNCHER-FD2-INHERITANCE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every launcher-owned POSIX engine or replay child bootstrap through src/cryodaq/_fd2_bootstrap.py isolation behind its complete-authority gate in src/cryodaq/engine.py and src/cryodaq/replay_engine/__main__.py, and every launcher stderr pump and acquisition owner settlement that requires OS descriptor 2 to reach EOF after engine death.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: On Ubuntu 22.04 an abruptly dead launcher-owned engine left the launcher stderr pipe open because the USBTMC multiprocessing spawn descendant inherited OS descriptor 2 and the multiprocessing ResourceTracker separately preserved sys.stderr.fileno(), so the pump never received EOF, restart remained in HOLD, and no registered prevention bound the production-path guards that detect it.
+    invariant: Before any multiprocessing construction every launcher-owned POSIX engine or replay child installs isolate_launcher_stderr_fd2 exactly once behind its complete-authority non-Windows gate, redirects OS descriptor 2 to devnull, keeps the private duplicate non-inheritable and retained with fileno denied, and after abrupt engine death no descendant holds a duplicate of the launch pipe so the pump reaches EOF within two seconds and both stream and acquisition owners settle.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_zmq_command_server_supervision.py::test_engine_main_installs_launcher_fd2_isolation_before_logging
+        ci_partition: core
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_leaving_fd2_attached_must_fail_detected_as_leak
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_exposing_private_fileno_must_fail_detected_as_leak
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_replay_production_entry_installs_fd2_isolation_before_runtime_spawn_boundary
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_install_is_idempotent_denies_fileno_and_keeps_logging_reaching_the_pipe
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_post_dup2_installation_failure_fails_closed_and_reports_on_launch_pipe
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_silencing_the_failure_emitter_must_leave_launch_pipe_byte_empty
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_replay_entry_installs_isolation_only_for_launcher_authority
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_windows_launcher_owned_engine_child_remains_unisolated
+        ci_partition: remaining
+        platform: windows
+    red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
+    green_evidence: pending

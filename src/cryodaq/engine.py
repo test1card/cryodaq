@@ -435,6 +435,19 @@ def _consume_engine_launch_authority(
         raise
 
 
+def _requires_launcher_fd2_isolation(
+    engine_instance_id: str,
+    shutdown_capability: str,
+    engine_ready_nonce: str,
+    engine_ready_channel_fd: int | None,
+) -> bool:
+    """True only for a launcher-owned POSIX engine child, before any descendant spawn."""
+
+    return sys.platform != "win32" and bool(
+        engine_instance_id and shutdown_capability and engine_ready_nonce and type(engine_ready_channel_fd) is int
+    )
+
+
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     """Coerce a command setpoint to ``float`` and reject non-finite values.
 
@@ -7928,6 +7941,15 @@ def main() -> None:
     engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd = (
         _consume_engine_launch_authority()
     )
+    if _requires_launcher_fd2_isolation(
+        engine_instance_id,
+        shutdown_capability,
+        engine_ready_nonce,
+        engine_ready_channel_fd,
+    ):
+        from cryodaq._fd2_bootstrap import isolate_launcher_stderr_fd2
+
+        isolate_launcher_stderr_fd2()
     import argparse
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")

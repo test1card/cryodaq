@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.1.1
 ---
 
 # Design System Changelog
@@ -12,6 +12,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.1.1] — 2026-08-28
+
+### Corrected
+
+- `cryodaq-primitives/keithley-panel.md` now distinguishes live producer
+  observations from retained `replay_source_state` presentation. Retained
+  channel state is valid only within one uninterrupted measurement-flow epoch;
+  after a gap, a new per-channel observation or a newer typed READY cut with
+  the contract's verified-OFF authority must resynchronize the badges and
+  controls. The five-field operator-impact record and executable documentation
+  guard ship in the same slice.
+- Version bumped 4.1.0 → 4.1.1 as a backward-compatible correction to the
+  canonical component contract; no token, visual layout, or public method
+  signature changed.
 
 ## [4.1.0] — 2026-08-05
 
