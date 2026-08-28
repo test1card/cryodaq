@@ -102,6 +102,7 @@ _STABILITY_THRESHOLD = 0.01  # К/мин
 _BANNER_AUTO_CLEAR_MS = 4000
 _REFRESH_INTERVAL_MS = 1000
 _AUTO_TIMER_INTERVAL_MS = 1000
+_AUTO_DESCRIPTOR_WAIT_TIMEOUT_MS = 10_000
 # F81 finding: a fixed freshness window silently rejects every sample of an
 # otherwise healthy instrument whose configured poll_interval_s (registry allows
 # up to 86_400 s) or successful read (up to 300 s) exceeds 10 seconds, leaving
@@ -339,6 +340,12 @@ class ConductivityPanel(QWidget):
         self._auto_run_parameters: dict[str, Any] | None = None
         self._latest_channel_descriptors: dict[str, object] = {}
         self._latest_channel_descriptor_generations: dict[str, int] = {}
+        self._auto_waiting_for_descriptors = False
+        self._auto_pending_start_powers: tuple[float, ...] = ()
+        self._auto_pending_start_temperature_channels: tuple[str, ...] = ()
+        self._auto_pending_start_power_channel: str | None = None
+        self._auto_pending_start_stabilization_threshold_pct: float | None = None
+        self._auto_pending_start_minimum_wait_s: float | None = None
         self._auto_bound_power_channel: str | None = None
         self._auto_bound_temperature_channels: tuple[str, ...] = ()
         self._auto_bound_descriptors: dict[str, ChannelDescriptorProjection] = {}
@@ -429,6 +436,11 @@ class ConductivityPanel(QWidget):
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(_AUTO_TIMER_INTERVAL_MS)
         self._auto_timer.timeout.connect(self._auto_tick)
+
+        self._auto_descriptor_wait_timer = QTimer(self)
+        self._auto_descriptor_wait_timer.setSingleShot(True)
+        self._auto_descriptor_wait_timer.setInterval(_AUTO_DESCRIPTOR_WAIT_TIMEOUT_MS)
+        self._auto_descriptor_wait_timer.timeout.connect(self._on_auto_descriptor_wait_timeout)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1120,7 +1132,10 @@ class ConductivityPanel(QWidget):
     def _on_channels_changed(self) -> None:
         new_channels = _get_temperature_channels()
         active = self._auto_state in {"reserving", "stabilizing"}
-        bound_channels = self._auto_bound_temperature_channels if active else ()
+        if self._auto_waiting_for_descriptors:
+            bound_channels = self._auto_pending_start_temperature_channels
+        else:
+            bound_channels = self._auto_bound_temperature_channels if active else ()
         if bound_channels:
             display_names = dict(self._all_channels)
             new_ids = {ch_id for ch_id, _ in new_channels}
@@ -1222,6 +1237,7 @@ class ConductivityPanel(QWidget):
                     if self._connected:
                         self._latest_channel_descriptors[ch] = verified
                         self._latest_channel_descriptor_generations[ch] = self._auto_connection_generation
+                        self._resume_auto_start_if_descriptors_ready()
         bound_descriptor = self._auto_bound_descriptors.get(ch_id or ch)
         descriptor_matches_bound = (
             bound_descriptor is not None
@@ -1591,11 +1607,18 @@ class ConductivityPanel(QWidget):
             return False
         return True
 
-    def _snapshot_auto_selection(self) -> bool:
+    def _snapshot_auto_selection(
+        self,
+        *,
+        temperature_channels: tuple[str, ...] | None = None,
+        power_channel: str | None = None,
+        stabilization_threshold_pct: float | None = None,
+        minimum_wait_s: float | None = None,
+    ) -> bool:
         """Freeze one descriptor-qualified channel set before asynchronous pre-arm work."""
 
-        temperature_channels = tuple(self._chain)
-        power_channel = self._power_channel
+        temperature_channels = tuple(self._chain) if temperature_channels is None else temperature_channels
+        power_channel = self._power_channel if power_channel is None else power_channel
         power_descriptor = self._current_cached_descriptor(power_channel)
         temperature_descriptors = tuple(
             descriptor
@@ -1603,7 +1626,6 @@ class ConductivityPanel(QWidget):
             if (descriptor := self._current_cached_descriptor(channel)) is not None
         )
         if power_descriptor is None or len(temperature_descriptors) != len(temperature_channels):
-            self.show_warning("Автоизмерение не запущено: нет подтверждённых дескрипторов выбранных каналов.")
             return False
         try:
             descriptor_parameters = build_conductivity_descriptor_parameters(
@@ -1612,7 +1634,6 @@ class ConductivityPanel(QWidget):
             )
         except (ConductivityRunFormatError, TypeError, ValueError, ChannelDescriptorStorageError) as exc:
             logger.warning("Autosweep descriptor selection was rejected: %s", exc)
-            self.show_warning("Автоизмерение не запущено: идентичность выбранных каналов не подтверждена.")
             return False
         self._auto_bound_power_channel = power_channel
         self._auto_bound_temperature_channels = temperature_channels
@@ -1620,9 +1641,109 @@ class ConductivityPanel(QWidget):
             descriptor.channel_id: descriptor for descriptor in (power_descriptor, *temperature_descriptors)
         }
         self._auto_descriptor_parameters = descriptor_parameters
-        self._auto_stabilization_threshold_pct = float(self._settled_pct_spin.value())
-        self._auto_minimum_wait_s = float(self._min_wait_spin.value())
+        self._auto_stabilization_threshold_pct = (
+            float(self._settled_pct_spin.value())
+            if stabilization_threshold_pct is None
+            else stabilization_threshold_pct
+        )
+        self._auto_minimum_wait_s = float(self._min_wait_spin.value()) if minimum_wait_s is None else minimum_wait_s
         return True
+
+    def _missing_auto_descriptors(
+        self,
+        *,
+        temperature_channels: tuple[str, ...],
+        power_channel: str,
+    ) -> tuple[str, ...]:
+        """Channels still lacking identity from the live transport generation."""
+
+        channels = (power_channel, *temperature_channels)
+        return tuple(channel for channel in channels if self._current_cached_descriptor(channel) is None)
+
+    def _clear_auto_descriptor_wait(self) -> None:
+        self._auto_descriptor_wait_timer.stop()
+        self._auto_waiting_for_descriptors = False
+        self._auto_pending_start_powers = ()
+        self._auto_pending_start_temperature_channels = ()
+        self._auto_pending_start_power_channel = None
+        self._auto_pending_start_stabilization_threshold_pct = None
+        self._auto_pending_start_minimum_wait_s = None
+
+    def _wait_for_auto_descriptors(
+        self,
+        *,
+        powers: list[float],
+        temperature_channels: tuple[str, ...],
+        power_channel: str,
+        stabilization_threshold_pct: float,
+        minimum_wait_s: float,
+    ) -> None:
+        """Retain Start intent until the live generation supplies every identity."""
+
+        self._auto_waiting_for_descriptors = True
+        self._auto_pending_start_powers = tuple(powers)
+        self._auto_pending_start_temperature_channels = temperature_channels
+        self._auto_pending_start_power_channel = power_channel
+        self._auto_pending_start_stabilization_threshold_pct = stabilization_threshold_pct
+        self._auto_pending_start_minimum_wait_s = minimum_wait_s
+        self._auto_state = "reserving"
+        self._auto_status_label.setVisible(True)
+        self._auto_status_label.setText(
+            "Ожидание идентичности каналов текущего подключения — автоизмерение начнётся автоматически"
+        )
+        self._auto_descriptor_wait_timer.start()
+        self._update_control_enablement()
+        logger.warning("Автоизмерение ожидает идентичность каналов текущего подключения")
+
+    def _resume_auto_start_if_descriptors_ready(self) -> None:
+        """Continue the exact frozen Start request once all identities arrive."""
+
+        power_channel = self._auto_pending_start_power_channel
+        if not self._auto_waiting_for_descriptors or power_channel is None:
+            return
+        temperature_channels = self._auto_pending_start_temperature_channels
+        if self._missing_auto_descriptors(
+            temperature_channels=temperature_channels,
+            power_channel=power_channel,
+        ):
+            return
+        powers = list(self._auto_pending_start_powers)
+        threshold = self._auto_pending_start_stabilization_threshold_pct
+        minimum_wait = self._auto_pending_start_minimum_wait_s
+        self._clear_auto_descriptor_wait()
+        if threshold is None or minimum_wait is None or not self._connected:
+            self._auto_state = "idle"
+            self._refuse_auto_start("ожидание идентичности каналов завершилось без живой связи; повторите Старт")
+            self._update_control_enablement()
+            return
+        if not self._snapshot_auto_selection(
+            temperature_channels=temperature_channels,
+            power_channel=power_channel,
+            stabilization_threshold_pct=threshold,
+            minimum_wait_s=minimum_wait,
+        ):
+            self._auto_state = "idle"
+            self._refuse_auto_start("идентичность выбранных каналов не подтверждена; повторите Старт")
+            self._update_control_enablement()
+            return
+        self._start_auto_sweep(powers)
+
+    @Slot()
+    def _on_auto_descriptor_wait_timeout(self) -> None:
+        if not self._auto_waiting_for_descriptors:
+            return
+        power_channel = self._auto_pending_start_power_channel
+        missing = self._missing_auto_descriptors(
+            temperature_channels=self._auto_pending_start_temperature_channels,
+            power_channel=power_channel or self._power_channel,
+        )
+        self._clear_auto_descriptor_wait()
+        self._auto_state = "idle"
+        suffix = f" ({', '.join(missing)})" if missing else ""
+        self._refuse_auto_start(
+            f"время ожидания идентичности каналов истекло{suffix}; проверьте связь и повторите Старт"
+        )
+        self._on_channels_changed()
 
     def _current_cached_descriptor(self, channel: str) -> ChannelDescriptorProjection | None:
         """Return descriptor authority only from the current transport incarnation."""
@@ -2417,33 +2538,9 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText(f"Автоизмерение не запущено: {reason}")
 
-    @Slot()
-    def _on_auto_start(self) -> None:
-        # Button enablement is presentation only.  The handler owns the final
-        # live-authority check so direct/queued invocation cannot bypass it.
-        # Each of these is a REFUSAL and must be spoken, never silent.
-        if not self._connected:
-            self._refuse_auto_start("нет связи с прибором")
-            return
-        if self._auto_state in {"reserving", "stabilizing"}:
-            self._refuse_auto_start(f"измерение уже идёт (состояние {self._auto_state})")
-            return
-        if self._auto_outcome_unknown:
-            self._refuse_auto_start("предыдущий результат не подтверждён; требуется сверка")
-            return
-        if self._auto_pending_token is not None:
-            self._refuse_auto_start("предыдущая команда ещё не подтверждена")
-            return
-        if len(self._chain) < 2:
-            QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
-            return
-        powers = self._generate_power_list()
-        if not powers:
-            QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
-            return
-        if not self._snapshot_auto_selection():
-            self._refuse_auto_start("выбор каналов не зафиксирован")
-            return
+    def _start_auto_sweep(self, powers: list[float]) -> None:
+        """Start pre-arm work after one descriptor-qualified selection is frozen."""
+
         from cryodaq.paths import get_data_dir
 
         try:
@@ -2489,8 +2586,64 @@ class ConductivityPanel(QWidget):
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
 
     @Slot()
+    def _on_auto_start(self) -> None:
+        # Button enablement is presentation only.  The handler owns the final
+        # live-authority check so direct/queued invocation cannot bypass it.
+        # Each of these is a REFUSAL and must be spoken, never silent.
+        if not self._connected:
+            self._refuse_auto_start("нет связи с прибором")
+            return
+        if self._auto_state in {"reserving", "stabilizing"}:
+            self._refuse_auto_start(f"измерение уже идёт (состояние {self._auto_state})")
+            return
+        if self._auto_outcome_unknown:
+            self._refuse_auto_start("предыдущий результат не подтверждён; требуется сверка")
+            return
+        if self._auto_pending_token is not None:
+            self._refuse_auto_start("предыдущая команда ещё не подтверждена")
+            return
+        if len(self._chain) < 2:
+            QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
+            return
+        powers = self._generate_power_list()
+        if not powers:
+            QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
+            return
+        temperature_channels = tuple(self._chain)
+        power_channel = self._power_channel
+        threshold = float(self._settled_pct_spin.value())
+        minimum_wait = float(self._min_wait_spin.value())
+        if self._missing_auto_descriptors(
+            temperature_channels=temperature_channels,
+            power_channel=power_channel,
+        ):
+            self._wait_for_auto_descriptors(
+                powers=powers,
+                temperature_channels=temperature_channels,
+                power_channel=power_channel,
+                stabilization_threshold_pct=threshold,
+                minimum_wait_s=minimum_wait,
+            )
+            return
+        if not self._snapshot_auto_selection(
+            temperature_channels=temperature_channels,
+            power_channel=power_channel,
+            stabilization_threshold_pct=threshold,
+            minimum_wait_s=minimum_wait,
+        ):
+            self._refuse_auto_start("выбор каналов не зафиксирован")
+            return
+        self._start_auto_sweep(powers)
+
+    @Slot()
     def _on_auto_stop(self) -> None:
         if self._auto_state not in {"reserving", "stabilizing"}:
+            return
+        if self._auto_waiting_for_descriptors:
+            self._clear_auto_descriptor_wait()
+            self._auto_state = "idle"
+            self._refuse_auto_start("ожидание идентичности каналов отменено оператором")
+            self._on_channels_changed()
             return
         self._auto_state = "stabilizing"
         terminal_attachment_pending = self._auto_terminal_attachment_command is not None
@@ -3006,7 +3159,13 @@ class ConductivityPanel(QWidget):
             self._latest_channel_descriptors.clear()
             self._latest_channel_descriptor_generations.clear()
             self._auto_verified_off_connection_generation = None
-        if not connected and self._auto_state in {"reserving", "stabilizing"}:
+        if not connected and self._auto_waiting_for_descriptors:
+            self._clear_auto_descriptor_wait()
+            self._auto_state = "idle"
+            self._refuse_auto_start(
+                "связь потеряна во время ожидания идентичности каналов; повторите Старт после восстановления"
+            )
+        elif not connected and self._auto_state in {"reserving", "stabilizing"}:
             self._auto_state = "stabilizing"
             self._auto_pending_token = None
             self._auto_pending_stop_intent = None

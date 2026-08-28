@@ -1700,6 +1700,68 @@ def test_reconnected_reenables_start(app):
     assert panel._auto_start_btn.isEnabled()
 
 
+def test_auto_start_waits_for_current_generation_descriptors_and_resumes(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+    descriptors = _install_descriptors(panel, ["Т1", "Т2"])
+    panel._latest_channel_descriptors.clear()
+    panel._latest_channel_descriptor_generations.clear()
+
+    panel._auto_start_btn.click()
+
+    assert panel.get_auto_state() == "reserving"
+    assert not panel._auto_start_btn.isEnabled()
+    assert "Ожидание идентичности каналов" in panel._auto_status_label.text()
+    assert panel._auto_descriptor_wait_timer.isActive()
+    assert panel._auto_descriptor_wait_timer.interval() == 10_000
+    assert _DeferredWorker.all_instances == []
+
+    for reading, descriptor in (
+        (_temp_reading("Т1", 110.0), descriptors["Т1"]),
+        (_temp_reading("Т2", 100.0), descriptors["Т2"]),
+        (_power_reading(0.012), descriptors["Keithley_1/smua/power"]),
+    ):
+        panel.on_descriptor_reading(reading, descriptor)
+        app.processEvents()
+
+    target = _DeferredWorker.instances[-1]
+    assert target.cmd["cmd"] == "keithley_set_target"
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel.is_auto_sweep_active() is True
+    assert panel._auto_bound_power_channel == "Keithley_1/smua/power"
+    assert panel._auto_bound_temperature_channels == ("Т1", "Т2")
+    assert set(panel._auto_bound_descriptors) == {
+        "Т1",
+        "Т2",
+        "Keithley_1/smua/power",
+    }
+    assert not panel._auto_descriptor_wait_timer.isActive()
+
+
+def test_auto_start_descriptor_wait_times_out_and_allows_retry(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._latest_channel_descriptors.clear()
+    panel._latest_channel_descriptor_generations.clear()
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._auto_start_btn.click()
+    assert panel._auto_descriptor_wait_timer.isActive()
+    panel._auto_descriptor_wait_timer.timeout.emit()
+
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_start_btn.isEnabled()
+    assert _DeferredWorker.all_instances == []
+    assert "время ожидания идентичности каналов истекло" in panel._auto_status_label.text()
+
+
 def test_restart_invalidates_cached_descriptors_until_new_generation_readings(app, monkeypatch) -> None:
     monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
     panel = ConductivityPanel()
@@ -1725,10 +1787,11 @@ def test_restart_invalidates_cached_descriptors_until_new_generation_readings(ap
     panel.set_connected(True)
     panel._on_auto_start()
 
-    assert panel.get_auto_state() == "idle"
+    assert panel.get_auto_state() == "reserving"
     assert panel._auto_run_path is None
     assert _DeferredWorker.all_instances == []
-    assert "нет подтверждённых дескрипторов" in panel._banner_label.text()
+    assert "Ожидание идентичности каналов" in panel._auto_status_label.text()
+    panel._auto_descriptor_wait_timer.stop()
 
 
 def test_connection_drop_mid_sweep_retains_active_unknown_until_live_stop(app, monkeypatch):
