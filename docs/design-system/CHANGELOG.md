@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.2.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.2.0] — 2026-08-28
+
+### Changed
+
+- `KeithleyPanel` now documents the additive typed `SafetyGateCause` variant.
+  Missing, UNKNOWN, stale, disconnected, transport-qualified, or mismatched
+  Safety authority disables normal source controls. The typed snapshot path
+  requires a current LIVE `ReadinessTruth.BLOCKED` cut with known lifecycle and
+  non-transport blocker evidence for the warning-permissive
+  `AUTHORITATIVE_NOT_READY` cause; a fresh bound SAFE_OFF observation may only
+  preserve that cause while revoking a previously accepted typed cut.
+- The canonical warning and `operator_warning_choice` Start receipt use the
+  authoritative readiness-blocker text rather than the generic readiness
+  summary label. Focused production-path tests cover UNKNOWN authority, stale
+  lazy-open replay, visible blocker text, and receipt content.
+
+### Corrected
+
+- `cryodaq-primitives/keithley-panel.md` now distinguishes live producer
+  observations from retained `replay_source_state` presentation. Retained
+  channel state is valid only within one uninterrupted measurement-flow epoch;
+  after a gap, a new per-channel observation or a newer typed READY cut with
+  the contract's verified-OFF authority must resynchronize the badges and
+  controls. The five-field operator-impact record and executable documentation
+  guard ship in the same slice.
+- The source-state correction is included in the v4.2.0 additive gate-cause
+  release; no token or visual-layout contract changed.
 
 ## [4.1.0] — 2026-08-05
 
