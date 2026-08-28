@@ -290,11 +290,10 @@ class SensorCell(QFrame):
     def refresh_from_buffer(self) -> None:
         """Pull latest value from the buffer on the bounded presentation tick.
 
-        Buffer stores only (timestamp, value) — no ChannelStatus.
-        This path tracks staleness by data age; full status comes
-        through the update_value() push path.
+        The buffer keeps timestamp, value, and ChannelStatus as one latest
+        sample so a presentation tick cannot resurrect an unusable raw value.
         """
-        last = self._buffer.get_last(self._channel_id)
+        last = self._buffer.get_last_with_status(self._channel_id)
         if last is None:
             if not self._data_stale:
                 self._value_widget.setText("\u2014")
@@ -306,7 +305,7 @@ class SensorCell(QFrame):
                 self._data_stale = True
             return
 
-        timestamp_epoch, value = last
+        timestamp_epoch, value, status = last
         age = time.time() - timestamp_epoch
         if age > _STALE_THRESHOLD_S:
             if not self._data_stale:
@@ -320,12 +319,15 @@ class SensorCell(QFrame):
                     self._apply_identity_state(stale=True)
             return
 
-        if isinstance(value, (int, float)) and not math.isnan(value):
+        self._source_status = status
+        if status is ChannelStatus.OK and isinstance(value, (int, float)) and math.isfinite(value):
             if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
                 text = f"{value:.2e}"
             else:
                 text = f"{value:.2f}"
             self._value_widget.setText(text)
+        else:
+            self._value_widget.setText("\u2014")
         self._data_stale = False
         if self._source_identity is not IdentityStatus.AUTHORITATIVE:
             self._apply_identity_state(stale=False)

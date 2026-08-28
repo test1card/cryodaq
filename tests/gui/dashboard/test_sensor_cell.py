@@ -78,6 +78,29 @@ def test_sensor_cell_names_faulted_channel_and_instrument_reason(app, mock_chann
     assert operator_text in cell.accessibleDescription()
 
 
+def test_non_ok_status_survives_buffer_refresh(app, mock_channel_mgr, buffer_store):
+    observed_at = datetime.now(UTC)
+    reading = Reading(
+        channel="Т2 Криостат",
+        value=380.0,
+        unit="K",
+        timestamp=observed_at,
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+    )
+    buffer_store.append("Т2", observed_at.timestamp(), reading.value, reading.status)
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+    assert cell._value_widget.text() == "—"
+
+    cell.refresh_from_buffer()
+
+    assert cell._value_widget.text() == "—"
+    assert cell._source_status is ChannelStatus.SENSOR_ERROR
+    assert "Ошибка датчика" in cell._status_hint_widget.text()
+    assert theme.STATUS_FAULT in cell.styleSheet()
+
+
 # HIGH: assert dash value, empty unit, stale text + stale style token
 def test_sensor_cell_refresh_from_empty_buffer_marks_stale(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("Т1", mock_channel_mgr, buffer_store)

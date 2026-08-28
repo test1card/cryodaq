@@ -267,10 +267,14 @@ async def test_instrument_confirmed_sensor_fault_does_not_disable_start():
             value=reading.value,
             reading=reading,
         )
-        assert settled is True
+        assert settled is False
         assert "mature_dead_interlock_channel" not in {
             blocker.code for blocker in mgr.snapshot_operator_safety().blockers
         }
+        assert any(
+            fact.reason_code == "interlock_guard_blind" and reading.channel in fact.display_name
+            for fact in mgr.snapshot_operator_safety().plant_health
+        )
 
         result = await mgr.request_run(0.5, 40.0, 1.0)
         assert result["ok"] is True, result

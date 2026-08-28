@@ -263,11 +263,11 @@ class DashboardView(QScrollArea):
 
         if channel.startswith("\u0422"):  # cyrillic Т
             short_id = channel.split(" ")[0]
-            self._buffer_store.append(short_id, timestamp_epoch, float(value))
+            self._buffer_store.append(short_id, timestamp_epoch, float(value), reading.status)
             if self._sensor_grid is not None:
                 self._sensor_grid.dispatch_reading(reading, identity_status)
         elif channel.endswith("/pressure"):
-            self._buffer_store.append(channel, timestamp_epoch, float(value))
+            self._buffer_store.append(channel, timestamp_epoch, float(value), reading.status)
 
         # B.5.5: route analytics readings to phase widget
         if channel.startswith("analytics/") and self._phase_widget is not None:

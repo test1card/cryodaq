@@ -176,6 +176,122 @@ async def test_lost_instrument_fault_evidence_reopens_generic_escalation() -> No
     assert escalations == [("sensor_units_over_range",), ()]
 
 
+async def test_persistent_instrument_fault_escalates_without_settling_or_revoking_controls() -> None:
+    """A protected guard-blind episode stays visible, recorded, and retryable."""
+    broker = SafetyBroker()
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        broker,
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    mgr._config.require_keithley_for_run = False
+    mgr._config.critical_channels = []
+    await mgr.start()
+    try:
+        await broker.publish(Reading.now("Т1 верх", 4.5, "K", instrument_id="test"))
+        await asyncio.sleep(1.5)
+        started = await mgr.request_run(0.5, 40.0, 1.0)
+        assert started["ok"] is True
+        assert mgr.state is SafetyState.RUNNING
+
+        async def handler(condition, reading):
+            return await mgr.on_interlock_dead_channel(
+                condition.name,
+                reading.channel,
+                value=reading.value,
+                reading=reading,
+            )
+
+        engine = _make_engine(handler=handler, min_samples=5, min_duration_s=10.0)
+        metadata = {
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        }
+        for offset_s in (0.0, 3.0, 6.0, 9.0, 12.0):
+            await engine._process_reading(_reading(offset_s=offset_s, metadata=metadata))
+
+        window = engine._nonusable_windows[_CHANNEL_ID]
+        assert window.escalated is False, "an advisory must not settle a still-blind guard window"
+        assert mgr.state is SafetyState.RUNNING, "warning about blindness must not remove operator controls"
+
+        blind_facts = [
+            fact for fact in mgr.snapshot_operator_safety().plant_health if fact.reason_code == "interlock_guard_blind"
+        ]
+        assert len(blind_facts) == 1
+        assert _CHANNEL_ID in blind_facts[0].display_name
+        assert "sensor_units_over_range" in blind_facts[0].display_name
+
+        assert len(run_records) == 1
+        assert run_records[0]["source"] == "interlock_guard_blind"
+        assert run_records[0]["channel"] == _CHANNEL_ID
+        assert _CHANNEL_ID in str(run_records[0]["message"])
+        assert "sensor_units_over_range" in str(run_records[0]["message"])
+
+        await engine._process_reading(_reading(offset_s=15.0, metadata=metadata))
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is False
+        assert len(run_records) == 1, "retrying the safety decision must not duplicate the durable run record"
+    finally:
+        await mgr.stop()
+
+
+async def test_instrument_fault_operator_fact_names_blind_channel_and_reason() -> None:
+    """The mature advisory is explicit in the operator safety owner cut."""
+    mgr = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    blind_facts = [
+        fact for fact in mgr.snapshot_operator_safety().plant_health if fact.reason_code == "interlock_guard_blind"
+    ]
+    assert len(blind_facts) == 1
+    assert _CHANNEL_ID in blind_facts[0].display_name
+    assert "sensor_units_over_range" in blind_facts[0].display_name
+
+
+async def test_instrument_fault_blind_guard_is_recorded_once() -> None:
+    """Repeated advisory retries do not duplicate the durable run record."""
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    for _ in range(2):
+        await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    assert len(run_records) == 1
+    assert run_records[0]["source"] == "interlock_guard_blind"
+    assert run_records[0]["channel"] == _CHANNEL_ID
+    assert _CHANNEL_ID in str(run_records[0]["message"])
+    assert "sensor_units_over_range" in str(run_records[0]["message"])
+
+
 # ---------------------------------------------------------------------------
 # (b-integration) persistence while RUNNING → real SafetyManager FAULT_LATCHED
 # ---------------------------------------------------------------------------

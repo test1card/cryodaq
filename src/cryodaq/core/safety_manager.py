@@ -248,6 +248,10 @@ class SafetyManager:
         # matured. SafetyManager owns this RUN blocker; only a later usable
         # sample accepted by InterlockEngine may clear the exact channel.
         self._mature_dead_interlock_channels: dict[str, str] = {}
+        # Mature instrument-status faults are guard-blind advisories, not RUN
+        # blockers.  The final flag records successful durable operator-log
+        # delivery for this exact interlock/channel/reason episode.
+        self._blind_interlock_guards: dict[str, tuple[str, tuple[str, ...], bool]] = {}
         # Instruments whose synthetic failed-poll samples could not obtain
         # persistence-backed publication authority. Acknowledgment clears the
         # fault latch, not this RUN blocker; only Scheduler-observed committed
@@ -2889,6 +2893,19 @@ class SafetyManager:
                     "Restore a usable persisted sample on every named protected channel",
                 )
             )
+        elif self._blind_interlock_guards:
+            details = "; ".join(
+                f"{channel} ({interlock_name}: {', '.join(reasons)})"
+                for channel, (interlock_name, reasons, _recorded) in sorted(self._blind_interlock_guards.items())
+            )
+            plant.append(
+                PlantHealthFact(
+                    "interlock_channels",
+                    f"Слепые защиты: {details}",
+                    OperatorPresentationState.FAULT,
+                    "interlock_guard_blind",
+                )
+            )
         else:
             plant.append(
                 PlantHealthFact(
@@ -4039,8 +4056,8 @@ class SafetyManager:
         enough. SafetyManager is the sole authority for the active source lifecycle:
 
         - exact instrument-register fault evidence is advisory: retain the
-          faulted Reading for persistence/operator display, but do not block
-          RUN or command OFF;
+          faulted Reading for persistence/operator display, report the blind
+          guard durably, but do not block RUN or command OFF;
 
         - state in {RUN_PERMITTED, RUNNING}: latch FAULT_LATCHED +
           emergency_off. RUN_PERMITTED includes the in-flight OUTPUT_ON
@@ -4054,27 +4071,51 @@ class SafetyManager:
         Returns
         -------
         bool
-            ``True`` iff this mature episode is settled, either as an explicit
-            instrument-fault advisory or a latched fault. ``False`` iff generic
-            escalation was declined outside RUN_PERMITTED/RUNNING. A ``False``
-            leaves the window un-escalated so the next generic non-usable sample
-            retries.
+            ``True`` iff a generic mature episode latched a fault. ``False``
+            leaves the window un-escalated so a still-blind instrument-status
+            guard or declined generic escalation is retried.
         """
         instrument_fault_reasons = () if reading is None else reading.instrument_status_fault_reasons()
         if instrument_fault_reasons:
             removed = self._mature_dead_interlock_channels.pop(channel, None)
-            if removed is not None:
+            reasons = tuple(instrument_fault_reasons)
+            previous = self._blind_interlock_guards.get(channel)
+            episode = (interlock_name, reasons)
+            recorded = previous is not None and previous[:2] == episode and previous[2]
+            self._blind_interlock_guards[channel] = (*episode, recorded)
+            if removed is not None or previous is None or previous[:2] != episode:
                 self._refresh_operator_safety_snapshot()
             logger.warning(
                 "Интерлок-канал %s: прибор сообщает неисправность датчика (%s); "
                 "температурное действие не выполнено, RUN не блокируется.",
                 channel,
-                ", ".join(instrument_fault_reasons),
+                ", ".join(reasons),
             )
-            return True
+            if not recorded and self._fault_log_callback is not None:
+                message = (
+                    f"Слепая защита: интерлок-канал {channel} ('{interlock_name}') "
+                    f"непригоден по статусу прибора: {', '.join(reasons)}"
+                )
+                log_task = asyncio.create_task(
+                    self._fault_log_callback(
+                        source="interlock_guard_blind",
+                        message=message,
+                        channel=channel,
+                        value=value,
+                    )
+                )
+                _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
+                if error is None:
+                    self._blind_interlock_guards[channel] = (*episode, True)
+                else:
+                    logger.error("Failed to record blind interlock guard: %s", error)
+                if cancelled is not None:
+                    raise cancelled
+            return False
+        blind_guard = self._blind_interlock_guards.pop(channel, None)
         previous_interlock = self._mature_dead_interlock_channels.get(channel)
         self._mature_dead_interlock_channels[channel] = interlock_name
-        if previous_interlock != interlock_name:
+        if blind_guard is not None or previous_interlock != interlock_name:
             self._refresh_operator_safety_snapshot()
 
         if self._state == SafetyState.FAULT_LATCHED:
@@ -4097,16 +4138,19 @@ class SafetyManager:
         return True
 
     def on_interlock_channel_recovered(self, interlock_name: str, channel: str) -> None:
-        """Clear one mature canonical blocker after InterlockEngine sees recovery."""
+        """Clear one mature blocker or blind-guard advisory after recovery."""
         recorded_interlock = self._mature_dead_interlock_channels.get(channel)
-        if recorded_interlock is None:
+        blind_guard = self._blind_interlock_guards.pop(channel, None)
+        if recorded_interlock is None and blind_guard is None:
             return
-        del self._mature_dead_interlock_channels[channel]
+        if recorded_interlock is not None:
+            del self._mature_dead_interlock_channels[channel]
+        registered_interlock = recorded_interlock if recorded_interlock is not None else blind_guard[0]
         logger.warning(
             "Интерлок-канал %s снова пригоден (блокировка %s, зарегистрирована %s).",
             channel,
             interlock_name,
-            recorded_interlock,
+            registered_interlock,
         )
         self._refresh_operator_safety_snapshot()
 
