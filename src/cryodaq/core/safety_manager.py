@@ -9,7 +9,7 @@ import math
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -87,15 +87,6 @@ class _RunAuthorityRevocation:
     reason: str
     full_shutdown: bool
     fault_required: bool
-
-
-@dataclass(frozen=True, slots=True)
-class RunWarningRequirement:
-    """Safety-owner cut that the command boundary must receipt before RUN."""
-
-    revision: int
-    warning: str | None
-    _authority: object = field(repr=False, compare=False)
 
 
 @dataclass
@@ -198,7 +189,6 @@ class SafetyManager:
                 SAFETY_MANAGER_SOURCE_STATE_PUBLISHER,
                 tuple(f"analytics/keithley_channel_state/{channel}" for channel in SMU_CHANNELS),
             )
-        self._run_warning_authority = object()
         self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
@@ -263,19 +253,10 @@ class SafetyManager:
         # fault latch, not this RUN blocker; only Scheduler-observed committed
         # publication for the exact instrument clears it.
         self._failed_poll_persistence_blockers: dict[str, str] = {}
-        # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
-        # predictor model status, reported by a wired CooldownService via
-        # set_cooldown_predictor_status(). None = no subsystem has ever
-        # reported a status. Cooldown prediction is an optional, config-gated
-        # feature (engine cooldown.yaml `enabled: false` by default) and its
-        # absence must not block RUN for deployments that never construct or
-        # wire a CooldownService — that would be a new mandatory dependency
-        # this fix was not asked to introduce. False = a wired CooldownService
-        # reported its predictor model missing, malformed, or below the
-        # reviewed minimum curve count; this is consulted by
-        # _check_preconditions() and blocks request_run() and the
-        # SAFE_OFF -> READY auto-transition until a later True report clears
-        # it. Never consulted by any OFF/emergency-off path.
+        # Prediction is observational.  A wired CooldownService reports model
+        # health here so an unavailable predictor remains an operator-visible
+        # warning at RUN admission without becoming source authority or a RUN
+        # refusal.  None means no subsystem has reported a status.
         self._cooldown_predictor_available: bool | None = None
         self._cooldown_predictor_unavailable_reason: str = ""
         self._operator_safety_snapshot = OperatorSafetySnapshot(
@@ -322,6 +303,9 @@ class SafetyManager:
         # operator CLI) can race on request_run / request_stop / emergency_off.
         # See DEEP_AUDIT_CC.md I.1.
         self._cmd_lock = asyncio.Lock()
+        # Serialize RUN admissions while warning persistence happens outside
+        # _cmd_lock. OFF, stop, and faults never contend for this lock.
+        self._run_request_lock = asyncio.Lock()
 
         # Monotonic abort intent. Each abort increments before contending for
         # _cmd_lock. An in-flight request_run captures its entry generation and
@@ -948,15 +932,6 @@ class SafetyManager:
         self._observe_terminal_safety_children()
         return self._operator_safety_snapshot
 
-    def prepare_request_run_warning(self) -> RunWarningRequirement:
-        """Bind a command-side warning decision to the current Safety cut."""
-
-        snapshot = self.snapshot_operator_safety()
-        warning = None
-        if snapshot.readiness is ReadinessTruth.BLOCKED:
-            warning = "; ".join(dict.fromkeys(blocker.operator_text for blocker in snapshot.blockers))
-        return RunWarningRequirement(snapshot.revision, warning, self._run_warning_authority)
-
     def record_reviewed_source_connected(self, *, verified_off: bool) -> None:
         """Commit explicit simulator-only connection evidence.
 
@@ -1150,41 +1125,130 @@ class SafetyManager:
         i_comp: float,
         *,
         channel: str | None = None,
-        command_warning_requirement: RunWarningRequirement | None = None,
-        operator_warning_receipted: bool = False,
+        warning_choice_committer: Callable[
+            [list[dict[str, str]]],
+            Awaitable[dict[str, Any]],
+        ]
+        | None = None,
     ) -> dict[str, Any]:
+        """Admit RUN without letting warning persistence obstruct OFF.
+
+        The abort epochs are sampled at method admission, before this request
+        can wait behind another RUN at ``_run_request_lock``.  Consequently an
+        emergency OFF that occurs while this request is queued always changes
+        the epoch the queued request must present at both command-lock cuts.
+        """
+
         start_abort_generation = self._abort_generation
         start_full_abort_generation = self._full_abort_generation
+        async with self._run_request_lock:
+            preflight = await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                _preflight_only=True,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+            raw_warnings = preflight.pop("_operator_warnings", None)
+            if raw_warnings is None:
+                return preflight
+            operator_warnings = [dict(warning) for warning in raw_warnings]
+
+            warning_receipt: dict[str, Any] | None = None
+            if operator_warnings:
+                if warning_choice_committer is None:
+                    warning_receipt = self._unconfirmed_warning_choice_receipt(
+                        "persistence_unavailable",
+                    )
+                else:
+                    try:
+                        committed = await warning_choice_committer([dict(warning) for warning in operator_warnings])
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.error(
+                            "Operator warning-choice persistence failed on %s; "
+                            "RUN continues with an unconfirmed receipt",
+                            normalize_smu_channel(channel),
+                            exc_info=True,
+                        )
+                        warning_receipt = self._unconfirmed_warning_choice_receipt(
+                            "persistence_failed",
+                        )
+                    else:
+                        if type(committed) is dict and type(committed.get("committed")) is bool:
+                            warning_receipt = dict(committed)
+                        else:
+                            logger.error(
+                                "Operator warning-choice persistence returned an invalid receipt on %s; "
+                                "RUN continues with an unconfirmed receipt",
+                                normalize_smu_channel(channel),
+                            )
+                            warning_receipt = self._unconfirmed_warning_choice_receipt(
+                                "persistence_receipt_invalid",
+                            )
+
+            # OFF advances the generation synchronously before it waits for
+            # _cmd_lock, so a receipt write overlapped by OFF cannot reach ON.
+            if self._abort_generation != start_abort_generation:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": normalize_smu_channel(channel),
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
+                }
+
+            return await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                _expected_operator_warnings=operator_warnings,
+                _operator_warning_receipt=warning_receipt,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+
+    @staticmethod
+    def _unconfirmed_warning_choice_receipt(error_code: str) -> dict[str, Any]:
+        return {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": None,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": error_code,
+        }
+
+    async def _request_run_locked(
+        self,
+        p_target: float,
+        v_comp: float,
+        i_comp: float,
+        *,
+        channel: str | None = None,
+        _preflight_only: bool = False,
+        _expected_operator_warnings: list[dict[str, str]] | None = None,
+        _operator_warning_receipt: dict[str, Any] | None = None,
+        _expected_abort_generation: int,
+        _expected_full_abort_generation: int,
+    ) -> dict[str, Any]:
+        start_abort_generation = _expected_abort_generation
+        start_full_abort_generation = _expected_full_abort_generation
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 
-            if command_warning_requirement is not None:
-                current_warning = None
-                if self._operator_safety_snapshot.readiness is ReadinessTruth.BLOCKED:
-                    current_warning = "; ".join(
-                        dict.fromkeys(blocker.operator_text for blocker in self._operator_safety_snapshot.blockers)
-                    )
-                if (
-                    type(command_warning_requirement) is not RunWarningRequirement
-                    or command_warning_requirement._authority is not self._run_warning_authority
-                    or command_warning_requirement.revision != self._operator_safety_snapshot.revision
-                    or command_warning_requirement.warning != current_warning
-                ):
-                    return {
-                        "ok": False,
-                        "state": self._state.value,
-                        "channel": smu_channel,
-                        "error_code": "keithley_warning_requirement_changed",
-                        "error": "Safety warning authority changed before Start dispatch.",
-                    }
-                if current_warning is not None and operator_warning_receipted is not True:
-                    return {
-                        "ok": False,
-                        "state": self._state.value,
-                        "channel": smu_channel,
-                        "error_code": "keithley_warning_choice_required",
-                        "error": "Keithley Start requires a persisted operator warning choice.",
-                    }
+            if self._abort_generation != start_abort_generation:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
+                }
 
             if self._state == SafetyState.FAULT_LATCHED:
                 return {
@@ -1253,6 +1317,17 @@ class SafetyManager:
                     "channel": smu_channel,
                     "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
                 }
+
+            operator_warnings = self._cooldown_operator_warnings()
+            if _preflight_only:
+                return {"_operator_warnings": operator_warnings}
+            if _expected_operator_warnings is not None and operator_warnings != _expected_operator_warnings:
+                # A changing observational warning never vetoes RUN.  It does
+                # invalidate what the attempted receipt covered, so tell the
+                # operator that persistence was not confirmed for this cut.
+                _operator_warning_receipt = self._unconfirmed_warning_choice_receipt(
+                    "warning_changed_during_persistence",
+                )
 
             # A global OFF receipt cannot remain true while another channel is
             # intentionally sourcing. Before adding a second channel, obtain
@@ -1559,12 +1634,17 @@ class SafetyManager:
                     smu_channel=smu_channel,
                     revocation=revocation,
                 )
-            return {
+            result: dict[str, Any] = {
                 "ok": True,
                 "state": self._state.value,
                 "channel": smu_channel,
                 "active_channels": sorted(self._active_sources),
             }
+            if operator_warnings:
+                result["operator_warnings"] = operator_warnings
+            if _operator_warning_receipt is not None:
+                result["operator_warning_receipt"] = _operator_warning_receipt
+            return result
 
     def _current_unmanaged_output_hazard(self) -> tuple[SmuChannel | None, str] | None:
         """Consume only an exact current positive observation capability."""
@@ -2575,29 +2655,27 @@ class SafetyManager:
         flags (Phase 2a H.1). Called from acknowledge_fault."""
         self._persistence_failure_clear = callback
 
+    def _cooldown_operator_warnings(self) -> list[dict[str, str]]:
+        """Return observational cooldown cautions without granting control authority."""
+
+        if self._cooldown_predictor_available is not False:
+            return []
+        return [
+            {
+                "code": "cooldown_predictor_unavailable",
+                "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+                "consequence": "Расчёт ожидаемой траектории и времени до завершения не выполняется",
+                "reason": self._cooldown_predictor_unavailable_reason or "прогнозирование недоступно",
+            }
+        ]
+
     async def set_cooldown_predictor_status(self, available: bool, reason: str = "") -> None:
         """Record cooldown-predictor model health reported by a wired CooldownService.
 
-        P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): a cooldown model
-        with zero valid curves (all rejected, or none yet collected) must
-        never present as usable safety infrastructure. A wired caller
-        reports ``available=False`` with a diagnostic ``reason`` whenever its
-        predictor model is missing, malformed, or below the reviewed minimum
-        curve count. This is fed into the EXISTING ``_check_preconditions()``
-        gate — the same one ``request_run()`` already uses for reviewed-
-        source, critical-channel, and persistence facts — so it blocks
-        ``request_run()`` and the SAFE_OFF -> READY auto-transition without
-        creating a second source-authority path. It is also surfaced in
-        ``_refresh_operator_safety_snapshot()`` as a plant-health fact and
-        blocker so READY reporting and diagnostics stay truthful.
-
-        Never touches ``_active_sources``, ``_keithley``, or any OFF /
-        emergency-off path: this can only make RUN harder to reach, never
-        easier, and can never prevent commanding OFF.
-
-        No caller ever invoking this is a supported, unchanged configuration
-        (cooldown prediction is optional and config-gated) — the initial
-        ``None`` state is deliberately not a block.
+        The predictor is observational, so unavailability is a caution shown
+        at RUN admission and in the operator snapshot, never a source-control
+        prerequisite.  Missing data, stale safety authority, interlocks, and
+        all other genuine preconditions remain independently fail-closed.
         """
         if type(available) is not bool:
             raise TypeError("available must be an exact bool")
@@ -2867,26 +2945,15 @@ class SafetyManager:
                 )
             )
 
-        # P0 fail-open fix: surface cooldown-predictor unavailability as its
-        # own diagnostic fact/blocker (constraint 5: denying READY/RUN must
-        # not suppress diagnostics). `None` (never reported) and `True`
-        # (reported available) both present as OK/absent here — only an
-        # explicit `False` report blocks.
+        # Predictor health remains explicit operator truth, but the
+        # observational subsystem never contributes a RUN blocker.
         if self._cooldown_predictor_available is False:
             plant.append(
                 PlantHealthFact(
                     "cooldown_predictor",
-                    "Cooldown predictor",
-                    OperatorPresentationState.FAULT,
+                    "Прогноз траектории захолаживания НЕДОСТУПЕН — расчёт времени до завершения не выполняется",
+                    OperatorPresentationState.CAUTION,
                     "cooldown_predictor_unavailable",
-                )
-            )
-            blockers.append(
-                SafetyBlocker(
-                    "cooldown_predictor_unavailable",
-                    OperatorPresentationState.FAULT,
-                    f"Cooldown predictor model is unavailable: {self._cooldown_predictor_unavailable_reason}",
-                    "Restore a valid reviewed cooldown model meeting the minimum curve count",
                 )
             )
 
@@ -3001,7 +3068,10 @@ class SafetyManager:
             published_reason = self._fault_reason
         elif self._state is SafetyState.MANUAL_RECOVERY and not is_transition:
             recovery_ready, recovery_blocker = self._check_preconditions()
-            published_reason = "" if recovery_ready else recovery_blocker
+            if recovery_ready and self._cooldown_predictor_available is False:
+                published_reason = f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
+            else:
+                published_reason = "" if recovery_ready else recovery_blocker
         else:
             published_reason = reason
         reading = Reading.now(
@@ -3533,14 +3603,6 @@ class SafetyManager:
                 "Keithley watchdog has unconsumed prior-trip evidence — "
                 "verified OFF and explicit fault acknowledgment required before RUN"
             )
-
-        # P0 fail-open fix: a wired CooldownService that reported its
-        # predictor model unavailable (missing, malformed, or below the
-        # reviewed minimum curve count) blocks RUN here. `None` (no
-        # subsystem has ever reported) is deliberately not a block — see
-        # set_cooldown_predictor_status().
-        if self._cooldown_predictor_available is False:
-            return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
 
         if self._failed_poll_persistence_blockers:
             instruments = ", ".join(sorted(self._failed_poll_persistence_blockers))

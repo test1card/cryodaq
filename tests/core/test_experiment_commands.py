@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import threading
@@ -15,7 +14,7 @@ import yaml
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import RunWarningRequirement, SafetyManager, SafetyState
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
@@ -972,13 +971,14 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
 ) -> None:
     order: list[str] = []
     persisted: list[dict[str, object]] = []
-    warning = "Interlock stop_source: detector_warmup"
-    requirement = RunWarningRequirement(7, warning, object())
+    warning = {
+        "code": "cooldown_predictor_unavailable",
+        "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+        "consequence": "Расчёт времени до завершения не выполняется",
+        "reason": "injected unavailable predictor",
+    }
 
     class Safety:
-        def prepare_request_run_warning(self) -> RunWarningRequirement:
-            return requirement
-
         async def request_run(
             self,
             p_target: float,
@@ -986,29 +986,30 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
             i_comp: float,
             *,
             channel: str,
-            command_warning_requirement: RunWarningRequirement,
-            operator_warning_receipted: bool,
+            warning_choice_committer: object,
         ) -> dict[str, object]:
-            assert command_warning_requirement is requirement
-            assert operator_warning_receipted is True
+            assert callable(warning_choice_committer)
+            receipt = await warning_choice_committer([warning])
             order.append("request_run")
-            return {"ok": True, "channel": channel}
+            return {
+                "ok": True,
+                "channel": channel,
+                "operator_warnings": [warning],
+                "operator_warning_receipt": receipt,
+            }
 
     class Writer:
-        async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
+        async def append_operator_log(self, **kwargs: object) -> OperatorLogEntry:
             order.append("warning_receipt")
             persisted.append(kwargs)
-            return OperatorLogCommitResult(
-                OperatorLogEntry(
-                    id=17,
-                    timestamp=datetime.now(UTC),
-                    experiment_id=kwargs["experiment_id"],
-                    author=str(kwargs["author"]),
-                    source=str(kwargs["source"]),
-                    message=str(kwargs["message"]),
-                    tags=tuple(kwargs["tags"]),
-                ),
-                replayed=False,
+            return OperatorLogEntry(
+                id=17,
+                timestamp=datetime.now(UTC),
+                experiment_id=kwargs["experiment_id"],
+                author=str(kwargs["author"]),
+                source=str(kwargs["source"]),
+                message=str(kwargs["message"]),
+                tags=tuple(kwargs["tags"]),
             )
 
     context = _context(manager, writer=Writer())
@@ -1023,7 +1024,7 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
             "operator_warning_choice": {
                 "schema": "cryodaq.keithley_warning_choice.v1",
                 "request_id": "a" * 32,
-                "warning": warning,
+                "warning": warning["operator_text"],
                 "choice": "start",
             },
         }
@@ -1043,33 +1044,47 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
     }
     assert len(persisted) == 1
     record = persisted[0]
-    assert record["author"] == "operator"
-    assert record["source"] == "operator"
-    assert record["tags"] == ("keithley", "safety_warning", "operator_choice")
-    assert record["request_id"] == "a" * 32
-    payload = json.loads(str(record["message"]))
-    assert payload == {
-        "channel": "smua",
-        "choice": "start",
-        "event": "keithley_start_with_safety_warning",
-        "warning": warning,
-    }
+    assert record["author"] == "system"
+    assert record["source"] == "auto"
+    assert record["tags"] == (
+        "auto",
+        "keithley",
+        "start",
+        "operator_warning_choice",
+        "cooldown_predictor_unavailable",
+    )
+    assert "намерение запуска подтверждено" in str(record["message"])
+    assert warning["operator_text"] in str(record["message"])
 
 
 async def test_keithley_start_rejects_missing_required_warning_choice_before_dispatch(
     manager: ExperimentManager,
 ) -> None:
+    """Historical node: a missing durable receipt is visible and never vetoes RUN."""
+
     calls: list[str] = []
-    warning = "Interlock stop_source: detector_warmup"
-    requirement = RunWarningRequirement(8, warning, object())
+    warning = {
+        "code": "cooldown_predictor_unavailable",
+        "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+        "consequence": "Расчёт времени до завершения не выполняется",
+        "reason": "injected unavailable predictor",
+    }
 
     class Safety:
-        def prepare_request_run_warning(self) -> RunWarningRequirement:
-            return requirement
-
-        async def request_run(self, *args: object, **kwargs: object) -> dict[str, object]:
+        async def request_run(
+            self,
+            *args: object,
+            warning_choice_committer: object,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            assert callable(warning_choice_committer)
+            receipt = await warning_choice_committer([warning])
             calls.append("request_run")
-            return {"ok": True}
+            return {
+                "ok": True,
+                "operator_warnings": [warning],
+                "operator_warning_receipt": receipt,
+            }
 
     context = _context(manager)
     context.safety_manager = Safety()
@@ -1087,19 +1102,21 @@ async def test_keithley_start_rejects_missing_required_warning_choice_before_dis
         context=context,
     )
 
-    assert reply["ok"] is False
-    assert reply["error_code"] == "keithley_warning_choice_required"
-    assert calls == []
+    assert reply["ok"] is True
+    assert reply["operator_warning_receipt"]["committed"] is False
+    assert reply["operator_warning_receipt"]["error_code"] == "persistence_unavailable"
+    assert calls == ["request_run"]
 
 
 async def test_keithley_start_missing_warning_is_rejected_by_real_safety_owner(
     manager: ExperimentManager,
 ) -> None:
+    """Historical node: the real owner warns and accepts absent persistence."""
+
     safety = SafetyManager(SafetyBroker(), mock=True)
     await safety.start()
     try:
-        requirement = safety.prepare_request_run_warning()
-        assert requirement.warning == "Safety is OFF but readiness has not been committed"
+        await safety.set_cooldown_predictor_status(False, "injected unavailable predictor")
         context = _context(manager)
         context.safety_manager = safety
 
@@ -1116,9 +1133,11 @@ async def test_keithley_start_missing_warning_is_rejected_by_real_safety_owner(
             context=context,
         )
 
-        assert reply["ok"] is False
-        assert reply["error_code"] == "keithley_warning_choice_required"
-        assert safety._active_sources == set()
+        assert reply["ok"] is True
+        assert reply["operator_warning_receipt"]["committed"] is False
+        assert reply["operator_warning_receipt"]["error_code"] == "persistence_unavailable"
+        assert reply["operator_warnings"][0]["code"] == "cooldown_predictor_unavailable"
+        assert safety._active_sources == {"smua"}
     finally:
         await safety.stop()
 

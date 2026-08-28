@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.core.broker import DataBroker, PublisherAuthority
-from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
+from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
@@ -1594,7 +1594,7 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
     persistence_entered = asyncio.Event()
     persistence_cancelled = asyncio.Event()
 
-    async def persist_warning_choice(**_kwargs: object) -> OperatorLogCommitResult:
+    async def persist_warning_choice(**_kwargs: object) -> OperatorLogEntry:
         persistence_entered.set()
         try:
             await asyncio.Event().wait()
@@ -1604,11 +1604,11 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
     source = _ExactRunSource()
     manager, _broker = await _make_manager(mock=False, keithley=source)
     manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
-    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
     context = _engine_command_context(manager, event_logger, writer=writer)
-    warning = manager.prepare_request_run_warning().warning
-    assert warning is not None
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
     monkeypatch.setattr(
         "cryodaq.engine._KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S",
         0.01,
@@ -1639,7 +1639,7 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
         assert source.active_channels == ["smua"]
         assert manager._active_sources == {"smua"}
         assert manager.state is SafetyState.RUNNING
-        event_logger.log_event.assert_not_awaited()
+        event_logger.log_event.assert_awaited_once_with("keithley", "Keithley smua: запуск")
     finally:
         await manager.stop()
 
@@ -1648,10 +1648,10 @@ async def test_missing_warning_persistence_is_receipted_without_refusing_start()
     source = _ExactRunSource()
     manager, _broker = await _make_manager(mock=False, keithley=source)
     manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
     context = _engine_command_context(manager, event_logger)
-    warning = manager.prepare_request_run_warning().warning
-    assert warning is not None
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
 
     try:
         result = await _handle_gui_command(_start_command(warning=warning), context=context)
@@ -1668,7 +1668,7 @@ async def test_missing_warning_persistence_is_receipted_without_refusing_start()
         assert source.active_channels == ["smua"]
         assert manager._active_sources == {"smua"}
         assert manager.state is SafetyState.RUNNING
-        event_logger.log_event.assert_not_awaited()
+        event_logger.log_event.assert_awaited_once_with("keithley", "Keithley smua: запуск")
     finally:
         await manager.stop()
 
@@ -1699,26 +1699,23 @@ async def test_post_publication_authority_cut_revokes_run_receipt_and_start_audi
         data_broker=data_broker,
     )
     manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
 
-    async def persist_warning_choice(**kwargs: object) -> OperatorLogCommitResult:
-        return OperatorLogCommitResult(
-            OperatorLogEntry(
-                id=1,
-                timestamp=datetime.now(UTC),
-                experiment_id=None,
-                author=str(kwargs["author"]),
-                source=str(kwargs["source"]),
-                message=str(kwargs["message"]),
-                tags=tuple(kwargs["tags"]),
-            ),
-            replayed=False,
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogEntry:
+        return OperatorLogEntry(
+            id=1,
+            timestamp=datetime.now(UTC),
+            experiment_id=None,
+            author=str(kwargs["author"]),
+            source=str(kwargs["source"]),
+            message=str(kwargs["message"]),
+            tags=tuple(kwargs["tags"]),
         )
 
-    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
     context = _engine_command_context(manager, event_logger, writer=writer)
-    warning = manager.prepare_request_run_warning().warning
-    assert warning is not None
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
     run_task = asyncio.create_task(
         _handle_gui_command(_start_command(warning=warning), context=context),
     )
