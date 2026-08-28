@@ -7056,7 +7056,7 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
-      sha256: sha256:305b9c74d3d4eeda82903c00cc927ce18e9931e2de75956c167120821900a869
+      sha256: sha256:fc3810e188e5bcb5d8870879e9f28996f2e493f9b1b4a0c432e822925aa484bf
     green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     status: open

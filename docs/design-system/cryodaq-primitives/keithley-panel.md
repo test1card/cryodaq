@@ -156,6 +156,18 @@ Fixed at codebase level; UI code must not violate:
     resynchronize both channels to OFF, including when received before generic
     measurement recovery, because READY requires verified-OFF for both. No
     other aggregate Safety state may infer a channel badge.
+17. **Per-channel source state and manager safety state are separate truths.**
+    The channel badge reports the latest physical-source evidence. A fault
+    transition may publish `"fault"` immediately for the implicated channel,
+    but the persistent incident owner is `analytics/safety_state` plus its
+    reason. A periodic snapshot replaces a transition-only `"fault"` with
+    `"off"` when current OFF evidence exists or `"unknown"` when it does not.
+    Seeing `"off"` or `"unknown"` does not mean the manager fault was acknowledged
+    or that normal command authority returned; the independent Safety gate
+    remains closed while the manager is `fault_latched`.
+18. **Safety gate causes are typed, not inferred from identity alone.** `SafetyGateCause.AUTHORITY_UNAVAILABLE` is the fail-closed default for cold start, malformed/foreign evidence, `ReadinessTruth.UNKNOWN`, `SafetyLifecycle.UNKNOWN`, stale/disconnected transport, or an experiment/bridge binding mismatch. It disables Start, Stop, and parameter controls; emergency-off remains available only with a live connection.
+19. **Only a current authoritative blocker is warning-permissive.** On the typed snapshot path, `SafetyGateCause.AUTHORITATIVE_NOT_READY` requires a current LIVE `ReadinessTruth.BLOCKED` cut, a known non-ready lifecycle, at least one non-transport blocker, and the current bridge/experiment binding. A fresh `SafetyLifecycle.SAFE_OFF` negative telemetry observation may preserve that cause only when it revokes an already accepted typed cut whose bridge/experiment binding remains current; telemetry cannot create or restore authority. The blocker may stop a running source, but it does not disable Start or parameter controls for an authoritatively OFF channel; the engine and `SafetyManager` still decide whether a command is accepted.
+20. **Warnings and receipts use blocker evidence.** The visible warning and `operator_warning_choice.warning` use the authoritative `ReadinessBlocker.operator_text` values, not the generic readiness-summary label. A Start command issued under the warning carries schema `cryodaq.keithley_warning_choice.v1`, a fresh request ID, the warning text, and choice `start`.
 
 ## API
 
