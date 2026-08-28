@@ -72,8 +72,6 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
-from cryodaq.channels.descriptors import ChannelDescriptorV1
-from cryodaq.channels.persistence import PersistedChannelEnvelopeError, PersistedChannelEnvelopeV1
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -84,6 +82,11 @@ from cryodaq.gui.zmq_client import (
     gui_worker_delivery_is_current,
     record_gui_worker_delivery_disposition,
     start_gui_worker_with_ownership,
+)
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorProjection,
+    ChannelDescriptorStorageError,
+    project_channel_descriptor,
 )
 from cryodaq.storage.conductivity_run import (
     ConductivityRunFormatError,
@@ -334,11 +337,11 @@ class ConductivityPanel(QWidget):
         self._auto_run_id: str | None = None
         self._auto_run_started_at: datetime | None = None
         self._auto_run_parameters: dict[str, Any] | None = None
-        self._latest_channel_descriptors: dict[str, ChannelDescriptorV1] = {}
+        self._latest_channel_descriptors: dict[str, object] = {}
         self._latest_channel_descriptor_generations: dict[str, int] = {}
         self._auto_bound_power_channel: str | None = None
         self._auto_bound_temperature_channels: tuple[str, ...] = ()
-        self._auto_bound_descriptors: dict[str, ChannelDescriptorV1] = {}
+        self._auto_bound_descriptors: dict[str, ChannelDescriptorProjection] = {}
         self._auto_descriptor_parameters: dict[str, Any] | None = None
         self._auto_stabilization_threshold_pct: float | None = None
         self._auto_minimum_wait_s: float | None = None
@@ -1182,7 +1185,7 @@ class ConductivityPanel(QWidget):
 
         self._reading_signal.emit(reading, None)
 
-    def on_descriptor_reading(self, reading: Reading, descriptor: ChannelDescriptorV1) -> None:
+    def on_descriptor_reading(self, reading: Reading, descriptor: object) -> None:
         """Accept one authoritative reading and its immutable source identity."""
 
         self._reading_signal.emit(reading, descriptor)
@@ -1196,18 +1199,17 @@ class ConductivityPanel(QWidget):
         return None
 
     @Slot(object, object)
-    def _handle_reading(self, reading: Reading, descriptor: ChannelDescriptorV1 | None = None) -> None:
+    def _handle_reading(self, reading: Reading, descriptor: object | None = None) -> None:
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
         descriptor_was_supplied = descriptor is not None
         if descriptor is not None:
             try:
-                envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
-            except (TypeError, ValueError, PersistedChannelEnvelopeError):
+                verified = project_channel_descriptor(descriptor)
+            except ChannelDescriptorStorageError:
                 logger.warning("Conductivity reading descriptor was rejected for %s", ch)
                 descriptor = None
             else:
-                verified = envelope.descriptor
                 if (
                     verified.channel_id != ch
                     or verified.instrument_id != reading.instrument_id
@@ -1608,7 +1610,7 @@ class ConductivityPanel(QWidget):
                 power=power_descriptor,
                 temperatures=temperature_descriptors,
             )
-        except (ConductivityRunFormatError, TypeError, ValueError, PersistedChannelEnvelopeError) as exc:
+        except (ConductivityRunFormatError, TypeError, ValueError, ChannelDescriptorStorageError) as exc:
             logger.warning("Autosweep descriptor selection was rejected: %s", exc)
             self.show_warning("Автоизмерение не запущено: идентичность выбранных каналов не подтверждена.")
             return False
@@ -1622,12 +1624,18 @@ class ConductivityPanel(QWidget):
         self._auto_minimum_wait_s = float(self._min_wait_spin.value())
         return True
 
-    def _current_cached_descriptor(self, channel: str) -> ChannelDescriptorV1 | None:
+    def _current_cached_descriptor(self, channel: str) -> ChannelDescriptorProjection | None:
         """Return descriptor authority only from the current transport incarnation."""
 
         if self._latest_channel_descriptor_generations.get(channel) != self._auto_connection_generation:
             return None
-        return self._latest_channel_descriptors.get(channel)
+        candidate = self._latest_channel_descriptors.get(channel)
+        if candidate is None:
+            return None
+        try:
+            return project_channel_descriptor(candidate)
+        except ChannelDescriptorStorageError:
+            return None
 
     def _clear_auto_selection(self) -> None:
         self._auto_bound_power_channel = None
@@ -2248,9 +2256,15 @@ class ConductivityPanel(QWidget):
                 )
                 self._auto_binding_resolution = "unrequested"
                 if not is_ready_attachment and self._auto_run_writer is None:
+                    self._auto_state = "stabilizing"
+                    if self._auto_deferred_terminal_status is not None:
+                        if not self._begin_auto_writer_creation():
+                            self._auto_run_creation_failed = True
+                            self._auto_run_creation_error = "file creation was not queued"
+                            self._settle_prearm_creation_failure_after_off(self._auto_run_creation_error)
+                        return
                     self._auto_run_creation_failed = True
                     self._auto_run_creation_error = error
-                    self._auto_state = "stabilizing"
                 if self._persistence_completion_is_stopped():
                     return
                 self._latch_auto_outcome_unknown(

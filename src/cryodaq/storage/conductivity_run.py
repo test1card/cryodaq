@@ -18,11 +18,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
-from cryodaq.channels.persistence import (
-    PersistedChannelEnvelopeError,
-    PersistedChannelEnvelopeV1,
-    decode_persisted_channel_envelope,
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorProjection,
+    ChannelDescriptorStorageError,
+    project_channel_descriptor,
+    project_channel_descriptor_payload,
 )
 
 SCHEMA_VERSION = 1
@@ -69,53 +69,39 @@ class ConductivityRunSnapshot:
 class ConductivityDescriptorBinding:
     """Verified immutable measurement-source identity for one autosweep."""
 
-    power: ChannelDescriptorV1
-    temperatures: tuple[ChannelDescriptorV1, ...]
-
-
-def _descriptor_envelope_payload(descriptor: ChannelDescriptorV1) -> dict[str, Any]:
-    envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
-    payload = json.loads(envelope.canonical_json)
-    assert isinstance(payload, dict)
-    return payload
+    power: ChannelDescriptorProjection
+    temperatures: tuple[ChannelDescriptorProjection, ...]
 
 
 def build_conductivity_descriptor_parameters(
     *,
-    power: ChannelDescriptorV1,
-    temperatures: tuple[ChannelDescriptorV1, ...],
+    power: object,
+    temperatures: tuple[object, ...],
 ) -> dict[str, Any]:
     """Build the self-validating descriptor portion of autosweep parameters."""
 
+    try:
+        projected_power = project_channel_descriptor(power)
+        projected_temperatures = tuple(project_channel_descriptor(descriptor) for descriptor in temperatures)
+    except ChannelDescriptorStorageError as exc:
+        raise ConductivityRunFormatError(f"Autosweep descriptor is invalid: {exc}") from exc
     payload = {
-        "power_channel": power.channel_id,
-        "temperature_channels": [descriptor.channel_id for descriptor in temperatures],
+        "power_channel": projected_power.channel_id,
+        "temperature_channels": [descriptor.channel_id for descriptor in projected_temperatures],
         "bound_descriptors": {
-            "power": _descriptor_envelope_payload(power),
-            "temperatures": [_descriptor_envelope_payload(descriptor) for descriptor in temperatures],
+            "power": projected_power.envelope_payload(),
+            "temperatures": [descriptor.envelope_payload() for descriptor in projected_temperatures],
         },
     }
     validate_conductivity_descriptor_parameters(payload)
     return payload
 
 
-def _decode_descriptor_payload(payload: object) -> ChannelDescriptorV1:
-    if type(payload) is not dict:
-        raise ConductivityRunFormatError("Autosweep descriptor envelope must be an object.")
+def _decode_descriptor_payload(payload: object) -> ChannelDescriptorProjection:
     try:
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        envelope = decode_persisted_channel_envelope(encoded)
-    except (TypeError, ValueError, PersistedChannelEnvelopeError) as exc:
+        return project_channel_descriptor_payload(payload)
+    except ChannelDescriptorStorageError as exc:
         raise ConductivityRunFormatError(f"Autosweep descriptor envelope is invalid: {exc}") from exc
-    if encoded != envelope.canonical_json:
-        raise ConductivityRunFormatError("Autosweep descriptor envelope is not canonical.")
-    return envelope.descriptor
 
 
 def validate_conductivity_descriptor_parameters(parameters: object) -> ConductivityDescriptorBinding:
@@ -131,9 +117,9 @@ def validate_conductivity_descriptor_parameters(parameters: object) -> Conductiv
         raise ConductivityRunFormatError("Autosweep requires at least two bound temperature descriptors.")
     power = _decode_descriptor_payload(bound["power"])
     temperatures = tuple(_decode_descriptor_payload(payload) for payload in temperature_payloads)
-    if power.quantity is not ChannelQuantity.POWER:
+    if power.quantity != "power":
         raise ConductivityRunFormatError("Autosweep power descriptor quantity is not power.")
-    if any(descriptor.quantity is not ChannelQuantity.TEMPERATURE for descriptor in temperatures):
+    if any(descriptor.quantity != "temperature" for descriptor in temperatures):
         raise ConductivityRunFormatError("Autosweep temperature descriptor quantity is not temperature.")
     temperature_ids = [descriptor.channel_id for descriptor in temperatures]
     if len(set(temperature_ids)) != len(temperature_ids):
