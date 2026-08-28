@@ -82,6 +82,8 @@ _DEBOUNCE_MS = 300
 _REFRESH_MS = 500
 _STALE_AFTER_S = 5.0
 _BANNER_AUTO_CLEAR_MS = 4000
+_SOURCE_OBSERVATION_UNSPECIFIED = object()
+_MAX_SOURCE_OBSERVATION_REVISION = (1 << 63) - 1
 
 _STATE_LABELS: dict[str, str] = {
     "unknown": "НЕИЗВЕСТНО",
@@ -242,9 +244,10 @@ class _SmuChannelBlock(QFrame):
         self._safety_ready: bool = False
         self._read_only: bool = False
         self._connection_generation = 0
+        self._source_observation_generation = 0
         self._source_observation_revision = 0
         self._safety_observation_revision = 0
-        self._unknown_outcome_requires: tuple[int, int] | None = None
+        self._unknown_outcome_requires: tuple[int, int, int] | None = None
         self._normal_pending_token: int | None = None
         # IV.2 A.3: default to the longest per-block buffer so the
         # first tick before _apply_global_window lands renders the
@@ -764,24 +767,72 @@ class _SmuChannelBlock(QFrame):
     # Public state pushers
     # ------------------------------------------------------------------
 
-    def apply_state(self, state: str) -> None:
+    def apply_state(
+        self,
+        state: str,
+        source_observation_revision: object = _SOURCE_OBSERVATION_UNSPECIFIED,
+    ) -> None:
         """Apply one newly observed producer state."""
-        self._apply_state(state, observed=True)
+        self._apply_state(
+            state,
+            observed=True,
+            source_observation_revision=source_observation_revision,
+        )
 
     def replay_state(self, state: str) -> None:
-        """Present retained state without satisfying observation freshness."""
-        self._apply_state(state, observed=False)
+        """Present retained state without satisfying observation freshness.
 
-    def _apply_state(self, state: str, *, observed: bool) -> None:
+        A replay presents what is already known.  It must never advance the
+        observation revision, or a retained packet would satisfy a freshness
+        requirement that nothing new was observed for.
+        """
+        self._apply_state(
+            state,
+            observed=False,
+            source_observation_revision=_SOURCE_OBSERVATION_UNSPECIFIED,
+        )
+
+    def _apply_state(
+        self,
+        state: str,
+        *,
+        observed: bool,
+        source_observation_revision: object = _SOURCE_OBSERVATION_UNSPECIFIED,
+    ) -> None:
         normalized = state.strip().lower() if state else "unknown"
         if normalized not in _STATE_LABELS:
             normalized = "unknown"
-        if observed:
-            self._source_observation_revision += 1
         # A queued reading received after the host declared disconnect cannot
         # re-establish current truth. Keep it out of both current and confirmed
         # state until a live connection exists again.
         if self._connected:
+            observation_accepted = False
+            if not observed:
+                # replay: present the state, advance nothing
+                pass
+            elif source_observation_revision is _SOURCE_OBSERVATION_UNSPECIFIED:
+                # Direct in-process pushes are explicit observations.
+                # Production Reading ingress always supplies the owner
+                # revision below.
+                if self._source_observation_generation == self._connection_generation:
+                    self._source_observation_revision += 1
+                else:
+                    self._source_observation_revision = 1
+                observation_accepted = True
+            elif (
+                type(source_observation_revision) is int
+                and 1 <= source_observation_revision <= _MAX_SOURCE_OBSERVATION_REVISION
+            ):
+                if self._source_observation_generation == self._connection_generation:
+                    self._source_observation_revision = max(
+                        self._source_observation_revision,
+                        source_observation_revision,
+                    )
+                else:
+                    self._source_observation_revision = source_observation_revision
+                observation_accepted = True
+            if observation_accepted:
+                self._source_observation_generation = self._connection_generation
             self._channel_state = normalized
             if normalized in {"off", "on", "fault"}:
                 self._last_confirmed_state = normalized
@@ -870,6 +921,7 @@ class _SmuChannelBlock(QFrame):
 
     def _latch_unknown_outcome(self) -> None:
         self._unknown_outcome_requires = (
+            self._source_observation_generation,
             self._source_observation_revision + 1,
             self._safety_observation_revision + 1,
         )
@@ -879,8 +931,12 @@ class _SmuChannelBlock(QFrame):
         required = self._unknown_outcome_requires
         if required is None or not self._connected:
             return
-        source_required, safety_required = required
-        if self._source_observation_revision < source_required or self._safety_observation_revision < safety_required:
+        source_generation, source_required, safety_required = required
+        source_is_fresh = self._source_observation_generation > source_generation or (
+            self._source_observation_generation == source_generation
+            and self._source_observation_revision >= source_required
+        )
+        if not source_is_fresh or self._safety_observation_revision < safety_required:
             return
         self._unknown_outcome_requires = None
         self._update_control_enablement()
@@ -1365,7 +1421,10 @@ class KeithleyPanel(QWidget):
             block = self._blocks.get(key)
             if block is not None:
                 state = str(reading.metadata.get("state", "unknown"))
-                block.apply_state(state)
+                block.apply_state(
+                    state,
+                    source_observation_revision=reading.metadata.get("source_observation_revision"),
+                )
                 self._update_both_buttons_enablement()
             return
 

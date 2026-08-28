@@ -1373,6 +1373,37 @@ def test_operator_manual_matches_current_runtime_authority_boundaries() -> None:
     assert "authoritative alarm/snapshot wiring" not in tray
 
 
+def test_keithley_channel_state_contract_separates_physical_badge_from_manager_latch() -> None:
+    component = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/keithley-panel.md")
+    manual = _read(REPO_ROOT / "docs/operator_manual.md")
+    version = _read(REPO_ROOT / "docs/design-system/VERSION").strip()
+    changelog = _read(REPO_ROOT / "docs/design-system/CHANGELOG.md")
+    current_release = changelog.split(f"## [{version}]", 1)[1].split("\n## [", 1)[0]
+
+    for marker in (
+        "Per-channel source state and manager safety state are separate truths.",
+        'A periodic snapshot replaces a transition-only `"fault"`',
+        "does not mean the manager fault was acknowledged",
+    ):
+        assert marker in component
+
+    keithley = manual.split("### 4.2. Keithley 2604B", 1)[1].split("### 4.3. Тревоги", 1)[0]
+    for marker in (
+        "описывает физическое состояние выхода",
+        "`analytics/safety_state=fault_latched`",
+        "не означает, что авария Safety квитирована",
+    ):
+        assert marker in keithley
+
+    for marker in (
+        "cryodaq-primitives/keithley-panel.md",
+        "docs/operator_manual.md",
+        "physical source state",
+        "manager fault latch",
+    ):
+        assert marker in current_release
+
+
 def test_public_docs_keep_provider_machine_and_secret_boundaries() -> None:
     public_paths = (
         "README.md",

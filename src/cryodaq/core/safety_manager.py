@@ -189,6 +189,8 @@ class SafetyManager:
         self._fault_revision = 0
         self._recovery_reason = ""
         self._active_sources: set[SmuChannel] = set()
+        self._source_observation_revisions: dict[SmuChannel, int] = {channel: 0 for channel in SMU_CHANNELS}
+        self._source_observed_states: dict[SmuChannel, str | None] = {channel: None for channel in SMU_CHANNELS}
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[tuple[str, str], tuple[float, float, str]] = {}
@@ -988,6 +990,18 @@ class SafetyManager:
             if self._mock or isinstance(self._keithley, VerifiedOffSource)
             else SourceOffTier.COMMAND_ONLY
         )
+
+    @property
+    def _reviewed_source_off_evidence(self) -> SourceOffEvidence:
+        return self.__reviewed_source_off_evidence
+
+    @_reviewed_source_off_evidence.setter
+    def _reviewed_source_off_evidence(self, evidence: SourceOffEvidence) -> None:
+        if type(evidence) is not SourceOffEvidence:
+            raise TypeError("reviewed source OFF evidence must be an exact SourceOffEvidence")
+        self.__reviewed_source_off_evidence = evidence
+        self._reviewed_source_off_evidence_observed_at = datetime.now(UTC)
+        self._reviewed_source_off_evidence_observed_monotonic_s = time.monotonic()
 
     def _unknown_global_off_evidence(self) -> SourceOffEvidence:
         return SourceOffEvidence.from_global_result(
@@ -2122,7 +2136,12 @@ class SafetyManager:
                 "active_channels": sorted(self._active_sources),
                 "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
             }
-        publish_task = asyncio.create_task(self._publish_keithley_channel_states("emergency_off"))
+        publish_task = asyncio.create_task(
+            self._publish_keithley_channel_states(
+                "emergency_off",
+                observed_channels=channels,
+            )
+        )
         _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
         if publish_error is not None:
             logger.warning("Emergency-OFF state publish failed: %s", publish_error)
@@ -2917,12 +2936,24 @@ class SafetyManager:
     async def _publish_state(self, reason: str = "") -> None:
         if self._data_broker is None:
             return
+        is_transition = reason != "periodic"
+        if self._state is SafetyState.FAULT_LATCHED:
+            published_reason = self._fault_reason
+        elif self._state is SafetyState.MANUAL_RECOVERY and not is_transition:
+            recovery_ready, recovery_blocker = self._check_preconditions()
+            published_reason = "" if recovery_ready else recovery_blocker
+        else:
+            published_reason = reason
         reading = Reading.now(
             channel="analytics/safety_state",
             value=0.0,
             unit="",
             instrument_id="safety_manager",
-            metadata={"state": self._state.value, "reason": reason},
+            metadata={
+                "state": self._state.value,
+                "reason": published_reason,
+                "is_transition": is_transition,
+            },
         )
         try:
             await self._data_broker.publish(reading)
@@ -2934,12 +2965,19 @@ class SafetyManager:
         reason: str = "",
         *,
         fault_channel: str | None = None,
+        observed_channels: set[SmuChannel] | frozenset[SmuChannel] = frozenset(),
     ) -> None:
         if self._data_broker is None:
             return
 
+        is_transition = reason != "periodic"
         off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
+        observed_at = self._reviewed_source_off_evidence_observed_at
+        evidence_age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
+        published_at = datetime.now(UTC)
         for smu_channel in ("smua", "smub"):
+            reading_timestamp = published_at
+            published_evidence = self._reviewed_source_off_evidence
             if fault_channel == smu_channel:
                 state = KeithleySourceState.FAULT
                 value = -1.0
@@ -2947,13 +2985,28 @@ class SafetyManager:
                 state = KeithleySourceState.ON
                 value = 1.0
             elif off_results[smu_channel] is SourceOffResult.DEVICE_REPORTED_OFF:
-                state = KeithleySourceState.OFF
-                value = 0.0
+                if evidence_age_s > self._config.stale_timeout_s:
+                    # Retained OFF evidence has expired.  Unknown stays unknown:
+                    # a device that reported OFF long ago is not evidence it is
+                    # OFF now.  Typed per the enum this file publishes.
+                    state = KeithleySourceState.UNKNOWN
+                    value = math.nan
+                    published_evidence = self._unknown_global_off_evidence()
+                else:
+                    state = KeithleySourceState.OFF
+                    value = 0.0
+                    reading_timestamp = observed_at
             else:
                 state = KeithleySourceState.UNKNOWN
                 value = math.nan
 
-            reading = Reading.now(
+            if is_transition and (
+                state != self._source_observed_states[smu_channel] or smu_channel in observed_channels
+            ):
+                self._source_observation_revisions[smu_channel] += 1
+                self._source_observed_states[smu_channel] = state
+            reading = Reading(
+                timestamp=reading_timestamp,
                 channel=f"analytics/keithley_channel_state/{smu_channel}",
                 value=value,
                 unit="",
@@ -2962,7 +3015,9 @@ class SafetyManager:
                     "state": state.value,
                     "channel": smu_channel,
                     "reason": reason,
-                    "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                    "off_evidence": published_evidence.receipt_payload(),
+                    "is_transition": is_transition,
+                    "source_observation_revision": self._source_observation_revisions[smu_channel],
                 },
             )
             try:
@@ -3535,7 +3590,19 @@ class SafetyManager:
         try:
             while True:
                 await asyncio.sleep(_CHECK_INTERVAL_S)
+                fault_revision_before_checks = self._fault_revision
                 await self._run_checks()
+                # ZMQ PUB/SUB does not retain the initial state snapshot for a
+                # subscriber whose handshake completes later. Re-publish the
+                # manager state (including its exact latched reason) and
+                # re-derive channel state from the sole safety authority so a
+                # late observer eventually receives truth, including UNKNOWN.
+                await self._publish_state("periodic")
+                # A fault transition publishes its channel-specific cue inside
+                # _fault(). Do not overwrite that cue in the same monitor
+                # iteration; the next cadence resumes physical-state snapshots.
+                if self._fault_revision == fault_revision_before_checks:
+                    await self._publish_keithley_channel_states("periodic")
         except asyncio.CancelledError:
             raise
 
