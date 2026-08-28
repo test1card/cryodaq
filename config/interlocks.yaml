@@ -19,50 +19,49 @@ interlocks:
   # channel_id. Поэтому переименование идентификатора не отвяжет interlock от
   # датчика, а raw ADC-компаньоны не попадут в привязку.
   - name: "overheat_cryostat"
-    description: "Перегрев криостата — аварийное отключение нагревателя"
+    description: "Перегрев (Т11/Т12) — аварийное отключение нагревателя"
     channel_bindings:
-      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 350.0
     comparison: ">"
     action: "emergency_off"
     cooldown_s: 10.0
 
   # ─── Температурные блокировки компрессорной линии (каналы Т9–Т12) ───────────
-  - name: "overheat_compressor"
-    description: "Перегрев компрессорной линии"
+  # ─── ПАРКОВАН до подключения компрессора Sumitomo F-100 ─────────────────────
+  # Владелец, 2026-08-29: «overheat compressor does not concern lakeshore. this is
+  # an internal f-100 sumitomo sensor, for water, helium and other stuff» и «I want
+  # to wire up sumitomo compressor straight to the cryodaq, but it is postponed for
+  # now».
+  #
+  # Пока F-100 не подключён напрямую, эта блокировка НИЧЕГО НЕ ЗАЩИЩАЕТ: она
+  # смотрела на каналы теплообменников LakeShore, а не на компрессор, который
+  # защищает себя сам по своим датчикам воды и гелия.  При этом на 320 K она
+  # выдавала emergency_off на тех же каналах, где source_overtemp даёт постепенный
+  # stop_source, то есть молча отменяла ступенчатую реакцию.
+  #
+  # Строка сохранена, а не удалена: намерение подключить F-100 остаётся.
+#   - name: "overheat_compressor"
+#     description: "Перегрев теплообменников Т11/Т12"
+#     channel_bindings:
+#       - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
+#       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
+#     threshold: 320.0
+#     comparison: ">"
+#     action: "emergency_off"
+#     cooldown_s: 10.0
+
+#   # ─── Верхняя граница температуры при работе источника ────────────────────────
+#   # Та же полная физическая привязка LS218_1, что у аварийного overheat_cryostat.
+#   # Порог 320 K находится выше документированного допустимого диапазона Т1–Т7
+#   # и остаётся ниже аварийных 350 K. Условие допускается только при активном
+#   # жизненном цикле источника; в idle оно остаётся ARMED.
+  - name: "source_overtemp"
+    description: "Т11/Т12 выше 320 K — остановка источника"
     channel_bindings:
-      - {instrument_id: "LS218_2", source_key: "input.1.temperature"}
-      - {instrument_id: "LS218_2", source_key: "input.2.temperature"}
       - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
-    threshold: 320.0
-    comparison: ">"
-    action: "emergency_off"
-    cooldown_s: 10.0
-
-  # ─── Верхняя граница температуры при работе источника ────────────────────────
-  # Та же полная физическая привязка LS218_1, что у аварийного overheat_cryostat.
-  # Порог 320 K находится выше документированного допустимого диапазона Т1–Т7
-  # и остаётся ниже аварийных 350 K. Условие допускается только при активном
-  # жизненном цикле источника; в idle оно остаётся ARMED.
-  - name: "source_overtemp"
-    description: "Температура криостата выше 320 K — остановка источника"
-    channel_bindings:
-      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
     threshold: 320.0
     comparison: ">"
     action: "stop_source"

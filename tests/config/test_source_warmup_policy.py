@@ -149,7 +149,7 @@ async def test_cryostat_above_320_k_stops_source_without_emergency_off() -> None
     try:
         await _publish_bound(
             broker,
-            Reading.now("Т1 Криостат верх", 320.1, "K", instrument_id="LS218_1"),
+            Reading.now("Т11 Теплообменник 1", 320.1, "K", instrument_id="LS218_2"),
         )
         await asyncio.sleep(0.05)
         assert actions == ["stop_source"]
@@ -190,7 +190,7 @@ async def test_cryostat_above_350_k_keeps_emergency_off_tier() -> None:
     try:
         await _publish_bound(
             broker,
-            Reading.now("Т1 Криостат верх", 350.1, "K", instrument_id="LS218_1"),
+            Reading.now("Т11 Теплообменник 1", 350.1, "K", instrument_id="LS218_2"),
         )
         await asyncio.sleep(0.05)
         assert sorted(actions) == ["emergency_off", "stop_source"]

@@ -39,9 +39,15 @@ _INTERLOCK_POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
 
 # Canonical channel_ids each Т-interlock must protect post-F1 — mirrors the
 # pre-F1 raw-label coverage exactly (proof: interlock_canonical_fix.md).
+# Owner, 2026-08-29: "every other sensor except 11 and 12 are subject to change
+# after each cycle. all alarms must concern only t11 and t12 as before".  Only
+# T11 and T12 are fixed hardware, so every interlock binds them and nothing else.
+# overheat_compressor is parked in the config until the Sumitomo F-100 is wired
+# straight into CryoDAQ, because it watched LakeShore heat exchangers and never
+# the compressor, which guards itself.
 INTERLOCK_CHANNELS: dict[str, tuple[str, ...]] = {
-    "overheat_cryostat": ("Т1", "Т2", "Т3", "Т4", "Т5", "Т6", "Т7", "Т8"),
-    "overheat_compressor": ("Т9", "Т10", "Т11", "Т12"),
+    "overheat_cryostat": ("Т11", "Т12"),
+    "source_overtemp": ("Т11", "Т12"),
     "detector_warmup": ("Т12",),
 }
 
