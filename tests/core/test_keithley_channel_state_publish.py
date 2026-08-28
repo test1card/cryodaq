@@ -292,7 +292,7 @@ async def test_periodic_off_snapshot_preserves_evidence_age_then_expires_to_unkn
         await manager.stop()
 
 
-async def test_monitor_periodic_snapshot_preserves_latched_channel_fault_until_acknowledgment() -> None:
+async def test_periodic_snapshot_reports_physical_off_while_manager_fault_remains_latched() -> None:
     data_broker = DataBroker()
     queue = await data_broker.subscribe(
         "test_keithley_periodic_latched_fault",
@@ -305,6 +305,8 @@ async def test_monitor_periodic_snapshot_preserves_latched_channel_fault_until_a
         await _drain(queue)
         await manager._fault("latched channel fault", channel=SMU_CHANNELS[0])
         await _drain(queue)
+        assert manager.state.value == "fault_latched"
+        assert manager.fault_reason == "latched channel fault"
 
         async def collect_periodic() -> dict[str, Reading]:
             by_channel: dict[str, Reading] = {}
@@ -315,8 +317,7 @@ async def test_monitor_periodic_snapshot_preserves_latched_channel_fault_until_a
             return by_channel
 
         periodic = await asyncio.wait_for(collect_periodic(), timeout=2.5)
-        assert periodic[SMU_CHANNELS[0]].metadata["state"] == "fault"
-        assert periodic[SMU_CHANNELS[1]].metadata["state"] == "off"
+        assert all(reading.metadata["state"] == "off" for reading in periodic.values())
         assert all(reading.metadata["is_transition"] is False for reading in periodic.values())
 
         acknowledged = await manager.acknowledge_fault("fault inspected")

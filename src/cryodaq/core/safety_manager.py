@@ -185,7 +185,6 @@ class SafetyManager:
         self._fault_reason = ""
         self._fault_time = 0.0
         self._fault_activated_at = 0.0
-        self._latched_fault_channel: str | None = None
         # Presentation identity only; no recovery or output authority.
         self._fault_revision = 0
         self._recovery_reason = ""
@@ -2496,7 +2495,6 @@ class SafetyManager:
                 except Exception as exc:
                     logger.error("persistence_failure_clear callback failed: %s", exc)
             self._persistence_fault_active = False
-            self._latched_fault_channel = None
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
@@ -2950,13 +2948,10 @@ class SafetyManager:
         observed_at = self._reviewed_source_off_evidence_observed_at
         evidence_age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
         published_at = datetime.now(UTC)
-        retained_fault_channel = fault_channel
-        if retained_fault_channel is None and self._state is SafetyState.FAULT_LATCHED:
-            retained_fault_channel = self._latched_fault_channel
         for smu_channel in ("smua", "smub"):
             reading_timestamp = published_at
             published_evidence = self._reviewed_source_off_evidence
-            if retained_fault_channel == smu_channel:
+            if fault_channel == smu_channel:
                 state = "fault"
                 value = -1.0
             elif smu_channel in self._active_sources:
@@ -3110,7 +3105,6 @@ class SafetyManager:
         self._fault_reason = reason
         self._fault_time = time.monotonic()
         self._fault_activated_at = time.time()
-        self._latched_fault_channel = channel if channel in SMU_CHANNELS else None
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
         return True
 
