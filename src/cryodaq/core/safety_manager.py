@@ -189,6 +189,8 @@ class SafetyManager:
         self._fault_revision = 0
         self._recovery_reason = ""
         self._active_sources: set[SmuChannel] = set()
+        self._source_observation_revisions: dict[SmuChannel, int] = {channel: 0 for channel in SMU_CHANNELS}
+        self._source_observed_states: dict[SmuChannel, str | None] = {channel: None for channel in SMU_CHANNELS}
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[tuple[str, str], tuple[float, float, str]] = {}
@@ -2923,12 +2925,13 @@ class SafetyManager:
     async def _publish_state(self, reason: str = "") -> None:
         if self._data_broker is None:
             return
+        published_reason = self._fault_reason if self._state is SafetyState.FAULT_LATCHED else reason
         reading = Reading.now(
             channel="analytics/safety_state",
             value=0.0,
             unit="",
             instrument_id="safety_manager",
-            metadata={"state": self._state.value, "reason": reason},
+            metadata={"state": self._state.value, "reason": published_reason},
         )
         try:
             await self._data_broker.publish(reading)
@@ -2944,6 +2947,7 @@ class SafetyManager:
         if self._data_broker is None:
             return
 
+        is_transition = reason != "periodic"
         off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
         observed_at = self._reviewed_source_off_evidence_observed_at
         evidence_age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
@@ -2970,6 +2974,9 @@ class SafetyManager:
                 state = "unknown"
                 value = math.nan
 
+            if is_transition and state != self._source_observed_states[smu_channel]:
+                self._source_observation_revisions[smu_channel] += 1
+                self._source_observed_states[smu_channel] = state
             reading = Reading(
                 timestamp=reading_timestamp,
                 channel=f"analytics/keithley_channel_state/{smu_channel}",
@@ -2981,7 +2988,8 @@ class SafetyManager:
                     "channel": smu_channel,
                     "reason": reason,
                     "off_evidence": published_evidence.receipt_payload(),
-                    "is_transition": reason != "periodic",
+                    "is_transition": is_transition,
+                    "source_observation_revision": self._source_observation_revisions[smu_channel],
                 },
             )
             try:
@@ -3545,12 +3553,19 @@ class SafetyManager:
         try:
             while True:
                 await asyncio.sleep(_CHECK_INTERVAL_S)
+                fault_revision_before_checks = self._fault_revision
                 await self._run_checks()
                 # ZMQ PUB/SUB does not retain the initial state snapshot for a
-                # subscriber whose handshake completes later. Re-derive this
-                # bounded-cadence snapshot from the sole safety authority so a
+                # subscriber whose handshake completes later. Re-publish the
+                # manager state (including its exact latched reason) and
+                # re-derive channel state from the sole safety authority so a
                 # late observer eventually receives truth, including UNKNOWN.
-                await self._publish_keithley_channel_states("periodic")
+                await self._publish_state("periodic")
+                # A fault transition publishes its channel-specific cue inside
+                # _fault(). Do not overwrite that cue in the same monitor
+                # iteration; the next cadence resumes physical-state snapshots.
+                if self._fault_revision == fault_revision_before_checks:
+                    await self._publish_keithley_channel_states("periodic")
         except asyncio.CancelledError:
             raise
 

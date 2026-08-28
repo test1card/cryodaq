@@ -81,6 +81,8 @@ _DEBOUNCE_MS = 300
 _REFRESH_MS = 500
 _STALE_AFTER_S = 5.0
 _BANNER_AUTO_CLEAR_MS = 4000
+_SOURCE_OBSERVATION_UNSPECIFIED = object()
+_MAX_SOURCE_OBSERVATION_REVISION = (1 << 63) - 1
 
 _STATE_LABELS: dict[str, str] = {
     "unknown": "НЕИЗВЕСТНО",
@@ -763,11 +765,26 @@ class _SmuChannelBlock(QFrame):
     # Public state pushers
     # ------------------------------------------------------------------
 
-    def apply_state(self, state: str) -> None:
+    def apply_state(
+        self,
+        state: str,
+        source_observation_revision: object = _SOURCE_OBSERVATION_UNSPECIFIED,
+    ) -> None:
         normalized = state.strip().lower() if state else "unknown"
         if normalized not in _STATE_LABELS:
             normalized = "unknown"
-        self._source_observation_revision += 1
+        if source_observation_revision is _SOURCE_OBSERVATION_UNSPECIFIED:
+            # Direct in-process pushes are explicit observations. Production
+            # Reading ingress always supplies the owner revision below.
+            self._source_observation_revision += 1
+        elif (
+            type(source_observation_revision) is int
+            and 1 <= source_observation_revision <= _MAX_SOURCE_OBSERVATION_REVISION
+        ):
+            self._source_observation_revision = max(
+                self._source_observation_revision,
+                source_observation_revision,
+            )
         # A queued reading received after the host declared disconnect cannot
         # re-establish current truth. Keep it out of both current and confirmed
         # state until a live connection exists again.
@@ -1354,7 +1371,10 @@ class KeithleyPanel(QWidget):
             block = self._blocks.get(key)
             if block is not None:
                 state = str(reading.metadata.get("state", "unknown"))
-                block.apply_state(state)
+                block.apply_state(
+                    state,
+                    source_observation_revision=reading.metadata.get("source_observation_revision"),
+                )
                 self._update_both_buttons_enablement()
             return
 

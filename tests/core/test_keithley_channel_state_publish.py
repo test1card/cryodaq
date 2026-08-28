@@ -7,6 +7,7 @@ from typing import Any
 
 import zmq
 
+from cryodaq.core import safety_manager as safety_manager_module
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
@@ -327,6 +328,95 @@ async def test_periodic_snapshot_reports_physical_off_while_manager_fault_remain
         assert all(reading.metadata["state"] != "fault" for reading in after_ack)
     finally:
         await manager.stop()
+
+
+async def test_monitor_fault_cue_survives_the_iteration_that_detected_it(
+    monkeypatch,
+) -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_monitor_fault_cue_survives_detection_iteration",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    monitor_calls = 0
+
+    class MonitorIterationComplete(Exception):
+        pass
+
+    async def run_checks() -> None:
+        nonlocal monitor_calls
+        monitor_calls += 1
+        if monitor_calls == 1:
+            await manager._fault("unmanaged source observed on", channel=SMU_CHANNELS[0])
+            return
+        raise MonitorIterationComplete
+
+    monkeypatch.setattr(safety_manager_module, "_CHECK_INTERVAL_S", 0.0)
+    monkeypatch.setattr(manager, "_run_checks", run_checks)
+
+    try:
+        await manager._monitor_loop()
+    except MonitorIterationComplete:
+        pass
+
+    readings = await _drain(queue)
+    affected = [reading for reading in readings if reading.metadata.get("channel") == SMU_CHANNELS[0]]
+    assert affected
+    assert affected[-1].metadata["state"] == "fault"
+    assert affected[-1].metadata["reason"] == "unmanaged source observed on"
+
+
+async def test_late_transport_observer_receives_latched_safety_reason(
+    monkeypatch,
+) -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "late_fault_reason_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    fault_reason = "reviewed source exact active cut contains unmanaged smub"
+
+    class MonitorIterationComplete(Exception):
+        pass
+
+    monitor_calls = 0
+
+    async def run_checks() -> None:
+        nonlocal monitor_calls
+        monitor_calls += 1
+        if monitor_calls > 1:
+            raise MonitorIterationComplete
+
+    try:
+        await manager._fault(fault_reason, channel=SMU_CHANNELS[1])
+        if manager._pending_publishes:
+            await asyncio.gather(*manager._pending_publishes)
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+        assert socket.messages == []
+
+        socket.attached = True
+        monkeypatch.setattr(safety_manager_module, "_CHECK_INTERVAL_S", 0.0)
+        monkeypatch.setattr(manager, "_run_checks", run_checks)
+        try:
+            await manager._monitor_loop()
+        except MonitorIterationComplete:
+            pass
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        received = [_unpack_reading(frames[1]) for frames in socket.messages]
+        safety_states = [reading for reading in received if reading.channel == "analytics/safety_state"]
+        assert safety_states
+        assert safety_states[-1].metadata == {
+            "state": "fault_latched",
+            "reason": fault_reason,
+        }
+    finally:
+        await publisher.stop()
 
 
 async def test_command_tier_device_reported_off_publishes_off_without_verified_claim() -> None:
