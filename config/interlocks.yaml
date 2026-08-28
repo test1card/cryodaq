@@ -49,10 +49,11 @@ interlocks:
 
   # ─── Верхняя граница температуры при работе источника ────────────────────────
   # Та же полная физическая привязка LS218_1, что у аварийного overheat_cryostat.
-  # Порог 310 K оставляет запас над постоянно тёплым ambient-reference каналом
-  # (около 295 K в лаборатории, 300 K в mock), но остаётся ниже аварийных 350 K.
+  # Порог 320 K находится выше документированного допустимого диапазона Т1–Т7
+  # и остаётся ниже аварийных 350 K. Условие допускается только при активном
+  # жизненном цикле источника; в idle оно остаётся ARMED.
   - name: "source_overtemp"
-    description: "Температура криостата выше 310 K — остановка источника"
+    description: "Температура криостата выше 320 K — остановка источника"
     channel_bindings:
       - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
       - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
@@ -62,7 +63,7 @@ interlocks:
       - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
       - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
       - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
-    threshold: 310.0
+    threshold: 320.0
     comparison: ">"
     action: "stop_source"
     cooldown_s: 10.0
