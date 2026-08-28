@@ -76,12 +76,14 @@ be established.
   the history directory on every call.
 - Reads are bounded local-disk JSON globs of a single history directory; no
   engine round-trip.
-- The offscreen GUI module `tests/gui/test_cooldown_history_card.py` (25 tests,
+- The offscreen GUI module `tests/gui/test_cooldown_history_card.py` (26 tests,
   including corrupt, structurally invalid, and mixed-history fixtures) runs in
-  0.70 s. Bound receipt: `QT_QPA_PLATFORM=offscreen` with
-  `PYTHONPATH=/home/cryodaq/lanes/pr49-r-ed1a4525/src`,
+  0.62 s. Bound receipt, RE-MEASURED on 2026-08-28 because this round added a
+  test and a carried-over receipt would describe a different module:
+  `QT_QPA_PLATFORM=offscreen` with
+  `PYTHONPATH=/home/cryodaq/lanes/pr49-r-8811f48a/src`,
   `/home/cryodaq/miniforge3/envs/cryodaq-lab/bin/python -m pytest -q tests/gui/test_cooldown_history_card.py --durations=0`
-  → `25 passed in 0.70s`; Python 3.14.6, PySide6 6.11.0, pytest 9.0.3,
+  → `26 passed in 0.62s`; Python 3.14.6, PySide6 6.11.0, pytest 9.0.3,
   Ubuntu 22.04. Measured against test-file blob
   `82fdf7812bcc9a11e4bb2d8532912b2ba56830a9` and card-module blob
   `87dd114411b6fdfa7e4f661ea47428abaf0586e4`; any edit to either file
