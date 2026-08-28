@@ -236,19 +236,15 @@ class SafetyManager:
         # fault latch, not this RUN blocker; only Scheduler-observed committed
         # publication for the exact instrument clears it.
         self._failed_poll_persistence_blockers: dict[str, str] = {}
-        # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
-        # predictor model status, reported by a wired CooldownService via
+        # Cooldown predictor model status, reported by a wired CooldownService via
         # set_cooldown_predictor_status(). None = no subsystem has ever
         # reported a status. Cooldown prediction is an optional, config-gated
         # feature (engine cooldown.yaml `enabled: false` by default) and its
         # absence must not block RUN for deployments that never construct or
-        # wire a CooldownService — that would be a new mandatory dependency
-        # this fix was not asked to introduce. False = a wired CooldownService
-        # reported its predictor model missing, malformed, or below the
-        # reviewed minimum curve count; this is consulted by
-        # _check_preconditions() and blocks request_run() and the
-        # SAFE_OFF -> READY auto-transition until a later True report clears
-        # it. Never consulted by any OFF/emergency-off path.
+        # wire a CooldownService. False means a missing, malformed, or
+        # below-minimum model. It remains an operator-visible analytics warning
+        # and is attached to an accepted RUN receipt, but it is never a safety
+        # precondition and is never consulted by any OFF/emergency-off path.
         self._cooldown_predictor_available: bool | None = None
         self._cooldown_predictor_unavailable_reason: str = ""
         self._operator_safety_snapshot = OperatorSafetySnapshot(
@@ -1481,12 +1477,22 @@ class SafetyManager:
                     smu_channel=smu_channel,
                     revocation=revocation,
                 )
-            return {
+            result: dict[str, Any] = {
                 "ok": True,
                 "state": self._state.value,
                 "channel": smu_channel,
                 "active_channels": sorted(self._active_sources),
             }
+            if self._cooldown_predictor_available is False:
+                result["operator_warnings"] = [
+                    {
+                        "code": "cooldown_predictor_unavailable",
+                        "operator_text": "Cooldown trajectory prediction is UNAVAILABLE",
+                        "consequence": "The predictor-based trajectory alarm cannot fire",
+                        "reason": self._cooldown_predictor_unavailable_reason or "predictor model is unavailable",
+                    }
+                ]
+            return result
 
     def _current_unmanaged_output_hazard(self) -> tuple[SmuChannel | None, str] | None:
         """Consume only an exact current positive observation capability."""
@@ -2495,22 +2501,17 @@ class SafetyManager:
     async def set_cooldown_predictor_status(self, available: bool, reason: str = "") -> None:
         """Record cooldown-predictor model health reported by a wired CooldownService.
 
-        P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): a cooldown model
-        with zero valid curves (all rejected, or none yet collected) must
-        never present as usable safety infrastructure. A wired caller
+        A cooldown model with zero valid curves (all rejected, or none yet
+        collected) must never present as usable analytics. A wired caller
         reports ``available=False`` with a diagnostic ``reason`` whenever its
         predictor model is missing, malformed, or below the reviewed minimum
-        curve count. This is fed into the EXISTING ``_check_preconditions()``
-        gate — the same one ``request_run()`` already uses for reviewed-
-        source, critical-channel, and persistence facts — so it blocks
-        ``request_run()`` and the SAFE_OFF -> READY auto-transition without
-        creating a second source-authority path. It is also surfaced in
-        ``_refresh_operator_safety_snapshot()`` as a plant-health fact and
-        blocker so READY reporting and diagnostics stay truthful.
+        curve count. The condition is surfaced in the operator plant-health
+        view and in an accepted RUN result. It is deliberately not fed into
+        ``_check_preconditions()``: cooldown prediction is observational
+        analytics, not source authority or a physical safety prerequisite.
 
         Never touches ``_active_sources``, ``_keithley``, or any OFF /
-        emergency-off path: this can only make RUN harder to reach, never
-        easier, and can never prevent commanding OFF.
+        emergency-off path and can never prevent commanding OFF.
 
         No caller ever invoking this is a supported, unchanged configuration
         (cooldown prediction is optional and config-gated) — the initial
@@ -2782,26 +2783,17 @@ class SafetyManager:
                 )
             )
 
-        # P0 fail-open fix: surface cooldown-predictor unavailability as its
-        # own diagnostic fact/blocker (constraint 5: denying READY/RUN must
-        # not suppress diagnostics). `None` (never reported) and `True`
-        # (reported available) both present as OK/absent here — only an
-        # explicit `False` report blocks.
+        # Cooldown prediction is observational analytics. Keep an explicit
+        # operator warning without adding it to readiness blockers: refusing a
+        # legitimate source command because this model is absent encourages a
+        # bypass that removes CryoDAQ's observation, control, and recording.
         if self._cooldown_predictor_available is False:
             plant.append(
                 PlantHealthFact(
                     "cooldown_predictor",
-                    "Cooldown predictor",
-                    OperatorPresentationState.FAULT,
+                    "Cooldown trajectory prediction UNAVAILABLE — predictor-based trajectory alarm cannot fire",
+                    OperatorPresentationState.CAUTION,
                     "cooldown_predictor_unavailable",
-                )
-            )
-            blockers.append(
-                SafetyBlocker(
-                    "cooldown_predictor_unavailable",
-                    OperatorPresentationState.FAULT,
-                    f"Cooldown predictor model is unavailable: {self._cooldown_predictor_unavailable_reason}",
-                    "Restore a valid reviewed cooldown model meeting the minimum curve count",
                 )
             )
 
@@ -3409,14 +3401,6 @@ class SafetyManager:
                 "Keithley watchdog has unconsumed prior-trip evidence — "
                 "verified OFF and explicit fault acknowledgment required before RUN"
             )
-
-        # P0 fail-open fix: a wired CooldownService that reported its
-        # predictor model unavailable (missing, malformed, or below the
-        # reviewed minimum curve count) blocks RUN here. `None` (no
-        # subsystem has ever reported) is deliberately not a block — see
-        # set_cooldown_predictor_status().
-        if self._cooldown_predictor_available is False:
-            return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
 
         if self._failed_poll_persistence_blockers:
             instruments = ", ".join(sorted(self._failed_poll_persistence_blockers))
