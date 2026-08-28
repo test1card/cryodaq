@@ -3261,7 +3261,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: BASELINE-LF-GENERATION-001
-    guard: tests/governance/test_receipt_guard_eol.py::test_tracked_baseline_is_never_mutated_by_the_real_command
+    guard: tests/governance/test_receipt_guard_eol.py::test_baseline_generator_rejects_source_checkout_before_subprocess
     ci_partition: remaining
     red_evidence: the_first_generator_guard_executed_the_real_write_baseline_command_with_cwd_at_the_repository_root_and_the_passing_run_rewrote_governance_agent_preventions_baseline_json_measured_2026_08_15_git_status_0_modified_before_and_1_after
     green_evidence: pending

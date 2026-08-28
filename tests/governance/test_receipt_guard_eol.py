@@ -152,6 +152,17 @@ def test_baseline_generator_rejects_source_checkout_before_subprocess(monkeypatc
         _run_baseline_generator_in_clone(ROOT)
 
 
+def test_root_rejection_false_green_pair_uses_root_rejection_guard() -> None:
+    """The root-write coverage escape must retain its direct production-path guard."""
+    pair = next(
+        pair for pair in _registry()["false_green_pairs"] if pair["id"] == "BASELINE-LF-GENERATION-FALSE-GREEN-341"
+    )
+
+    assert pair["guard"] == (
+        "tests/governance/test_receipt_guard_eol.py::test_baseline_generator_rejects_source_checkout_before_subprocess"
+    )
+
+
 def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
     """The tracked derived baseline is LF-only and carries no byte-order mark."""
     raw = BASELINE_ARTIFACT.read_bytes()
@@ -186,11 +197,14 @@ def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -
         capture_output=True,
     )
     _overlay_baseline_generator_candidate(clone)
+    generated_path = clone / BASELINE_ARTIFACT.relative_to(ROOT)
+    generated_path.unlink()
+    assert not generated_path.exists(), "the clone must start without a baseline artifact"
 
     completed = _run_baseline_generator_in_clone(clone)
     assert completed.returncode == 0, completed.stderr
 
-    generated = (clone / "governance" / "agent_preventions_baseline.json").read_bytes()
+    generated = generated_path.read_bytes()
     assert generated, "the baseline generator produced an empty artifact"
     assert b"\r" not in generated, (
         "the real --write-baseline path generated carriage returns; the baseline must be LF-only"
