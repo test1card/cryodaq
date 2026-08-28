@@ -19,6 +19,7 @@ Panel-level:
 
 Public API (MainWindowV2 push points):
 - ``on_reading(reading)``  — route a single Reading into the overlay
+- ``replay_source_state(key, reading)`` — present retained state without freshness credit
 - ``set_connected(ok)``    — mark Keithley connection state
 - ``set_safety_ready(ok, reason="")`` — toggle safety gate
 
@@ -764,10 +765,19 @@ class _SmuChannelBlock(QFrame):
     # ------------------------------------------------------------------
 
     def apply_state(self, state: str) -> None:
+        """Apply one newly observed producer state."""
+        self._apply_state(state, observed=True)
+
+    def replay_state(self, state: str) -> None:
+        """Present retained state without satisfying observation freshness."""
+        self._apply_state(state, observed=False)
+
+    def _apply_state(self, state: str, *, observed: bool) -> None:
         normalized = state.strip().lower() if state else "unknown"
         if normalized not in _STATE_LABELS:
             normalized = "unknown"
-        self._source_observation_revision += 1
+        if observed:
+            self._source_observation_revision += 1
         # A queued reading received after the host declared disconnect cannot
         # re-establish current truth. Keep it out of both current and confirmed
         # state until a live connection exists again.
@@ -779,7 +789,8 @@ class _SmuChannelBlock(QFrame):
             self._channel_state = "unknown"
         self._apply_state_visuals()
         self._update_control_enablement()
-        self._maybe_reconcile_unknown_outcome()
+        if observed:
+            self._maybe_reconcile_unknown_outcome()
         # When not "on", clear stale styling — channel isn't expected to
         # publish live measurements.
         if self._channel_state != "on" and self._stale:
@@ -1365,6 +1376,15 @@ class KeithleyPanel(QWidget):
                 if channel.endswith(f"/{suffix}"):
                     block.handle_reading(suffix, reading)
                     return
+
+    def replay_source_state(self, key: str, reading: Reading) -> None:
+        """Present one retained source state without producer-observation credit."""
+        block = self._blocks.get(key)
+        if block is None:
+            return
+        state = str(reading.metadata.get("state", "unknown"))
+        block.replay_state(state)
+        self._update_both_buttons_enablement()
 
     def set_connected(self, connected: bool) -> None:
         self._connected = connected
