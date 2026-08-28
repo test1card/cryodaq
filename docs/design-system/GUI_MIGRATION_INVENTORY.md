@@ -1,14 +1,14 @@
 ---
 title: GUI v3 Migration Inventory
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.1
+last_updated: 2026-08-28
+version: 4.2.0
 references: README.md, governance/testing-strategy.md, governance/performance-budget.md, accessibility/wcag-baseline.md
 ---
 
 # GUI v4 migration inventory
 
-This is the auditable backlog for the design-system v4.1.1 corpus-wide
+This is the auditable backlog for the design-system v4.2.0 corpus-wide
 informative-and-beautiful composition contract. It inventories every
 operator-visible production surface under `src/cryodaq/gui`; non-visual state,
 transport, buffers, and package/bootstrap modules are covered through the

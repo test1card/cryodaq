@@ -248,6 +248,57 @@ def test_get_baseline_rejects_physically_impossible_metrics(tmp_path: Path, fiel
     assert unreadable == 1
 
 
+@pytest.mark.parametrize(
+    "time_to_50K_h, time_to_base_h",
+    [
+        (2.0, None),  # The 50 K milestone occurs after the 1 h cooldown ended.
+        (0.5, 2.0),  # The base milestone occurs after the 1 h cooldown ended.
+        (0.75, 0.5),  # Base temperature cannot precede the 50 K milestone.
+    ],
+)
+def test_get_baseline_rejects_milestones_outside_cooldown_or_chronology(
+    tmp_path: Path, time_to_50K_h: float, time_to_base_h: float | None
+) -> None:
+    payload = CooldownFingerprint(
+        fingerprint_id="cd_bad",
+        cooldown_start_ts=1.0,
+        duration_h=1.0,
+        T_cold_final=3.0,
+        time_to_base_h=time_to_base_h,
+        time_to_50K_h=time_to_50K_h,
+        ultimate_vacuum_mbar=1e-6,
+        n_points=4,
+    ).to_dict()
+    (tmp_path / "cd_bad.json").write_text(json.dumps(payload), encoding="utf-8")
+    set_baseline("cd_bad", tmp_path)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1
+
+
+def test_get_baseline_rejects_target_with_mismatched_embedded_id(tmp_path: Path) -> None:
+    alias_payload = CooldownFingerprint(
+        fingerprint_id="real",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=1.0,
+        time_to_50K_h=0.5,
+        ultimate_vacuum_mbar=1e-6,
+        n_points=4,
+    ).to_dict()
+    (tmp_path / "alias.json").write_text(json.dumps(alias_payload), encoding="utf-8")
+    (tmp_path / "real.json").write_text(json.dumps(alias_payload), encoding="utf-8")
+    set_baseline("alias", tmp_path)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1
+
+
 def test_get_baseline_returns_unreadable_when_pointer_access_is_denied(tmp_path: Path, monkeypatch) -> None:
     pointer = tmp_path / BASELINE_POINTER
     pointer.write_text("{}", encoding="utf-8")

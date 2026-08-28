@@ -1191,6 +1191,37 @@ def test_design_system_release_markers_are_one_version() -> None:
     assert f"Current v{version} state" in governance_rules
 
 
+def test_cooldown_history_performance_receipt_binds_live_gui_artifacts() -> None:
+    """The receipt must go stale when its measured GUI artifacts change."""
+
+    design_root = REPO_ROOT / "docs" / "design-system"
+    receipt = _read(design_root / "README.md")
+    gui_test = REPO_ROOT / "tests" / "gui" / "test_cooldown_history_card.py"
+    card_module = REPO_ROOT / "src" / "cryodaq" / "gui" / "shell" / "overlays" / "cooldown_baseline_card.py"
+    gui_test_tree = ast.parse(_read(gui_test), filename=str(gui_test))
+    test_count = sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test_") for node in gui_test_tree.body)
+
+    assert f"({test_count} tests," in receipt
+    for path in (gui_test, card_module):
+        blob = subprocess.run(
+            ["git", "hash-object", str(path.relative_to(REPO_ROOT))],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert blob in receipt
+
+
+def test_cooldown_history_presentation_contract_uses_minor_release() -> None:
+    """The added unreadable-baseline variant is a MINOR design-system release."""
+
+    design_root = REPO_ROOT / "docs" / "design-system"
+    current_version = tuple(int(part) for part in _read(design_root / "VERSION").strip().split("."))
+    assert current_version >= (4, 2, 0)
+    assert "## [4.2.0]" in _read(design_root / "CHANGELOG.md")
+
+
 def test_canonical_design_system_artifacts_and_markdown_references_are_tracked() -> None:
     tracked = set(_tracked_files())
     design_root = REPO_ROOT / "docs" / "design-system"

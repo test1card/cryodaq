@@ -3,14 +3,14 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-08-16
+last_updated: 2026-08-28
 status: canonical
-version: 4.1.1
+version: 4.2.0
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.1.1`
+**Current design-system version:** `4.2.0`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -66,7 +66,7 @@ be established.
   stale cue is therefore never the sole signal — the badge/cell label and the
   card's sentence messages carry the meaning.
 
-**Performance evidence** (measured 2026-08-18):
+**Performance evidence** (measured 2026-08-28):
 
 - The card defers its first directory glob+parse to the first `showEvent`,
   keeping the read off the shell-construction path and off operators who never
@@ -76,14 +76,14 @@ be established.
   the history directory on every call.
 - Reads are bounded local-disk JSON globs of a single history directory; no
   engine round-trip.
-- The offscreen GUI module `tests/gui/test_cooldown_history_card.py` (23 tests,
+- The offscreen GUI module `tests/gui/test_cooldown_history_card.py` (25 tests,
   including corrupt, structurally invalid, and mixed-history fixtures) runs in
-  0.77 s. Bound receipt: `QT_QPA_PLATFORM=offscreen` with
-  `PYTHONPATH='<worktree>\src'` (single-quoted),
-  `python -m pytest -q tests/gui/test_cooldown_history_card.py --durations=0`
-  → `23 passed in 0.77s`; Python 3.14.3 (MSC v.1944 AMD64), PySide6 6.11.0,
-  pytest 9.0.2, Windows 11. Measured against test-file blob
-  `e425baa04df417d999c7ec1be2a7695f843603d3` and card-module blob
+  0.70 s. Bound receipt: `QT_QPA_PLATFORM=offscreen` with
+  `PYTHONPATH=/home/cryodaq/lanes/pr49-r-ed1a4525/src`,
+  `/home/cryodaq/miniforge3/envs/cryodaq-lab/bin/python -m pytest -q tests/gui/test_cooldown_history_card.py --durations=0`
+  → `25 passed in 0.70s`; Python 3.14.6, PySide6 6.11.0, pytest 9.0.3,
+  Ubuntu 22.04. Measured against test-file blob
+  `82fdf7812bcc9a11e4bb2d8532912b2ba56830a9` and card-module blob
   `87dd114411b6fdfa7e4f661ea47428abaf0586e4`; any edit to either file
   invalidates this receipt.
 

@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.1
+last_updated: 2026-08-28
+version: 4.2.0
 ---
 
 # Design System Changelog
@@ -13,7 +13,7 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
-## [4.1.1] — 2026-08-13
+## [4.2.0] — 2026-08-28
 
 ### Added
 
@@ -23,6 +23,13 @@ the design-system-specific definitions of "breaking" from
   multi-channel cues, no optimistic green), and performance evidence (deferred
   card read, 5 s badge read throttle, measured offscreen suite time) for the
   changed cooldown states.
+
+### Corrected
+
+- Cooldown fingerprints now reject milestones after the recorded duration and
+  out-of-order 50 K/base milestones; a baseline pointer also rejects a target
+  whose embedded ID does not match its requested filename. These unreadable
+  records resolve to unavailable state rather than an optimistic comparison.
 
 ## [4.1.0] — 2026-08-05
 

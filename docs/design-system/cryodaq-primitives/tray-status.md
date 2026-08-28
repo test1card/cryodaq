@@ -3,8 +3,8 @@ title: Tray Status
 keywords: tray, status, coarse, non-authoritative, alarm, unknown, provenance, shutdown
 applies_to: system tray icon and tooltip
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.1
+last_updated: 2026-08-28
+version: 4.2.0
 references: patterns/operator-evidence-and-retention.md, patterns/state-visualization.md, cryodaq-primitives/alarm-panel.md
 ---
 

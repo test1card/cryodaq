@@ -81,6 +81,12 @@ def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
         d["duration_h"] < 0
         or d["T_cold_final"] < 0
         or any(d.get(field) is not None and d[field] < 0 for field in ("time_to_base_h", "time_to_50K_h"))
+        or any(d.get(field) is not None and d[field] > d["duration_h"] for field in ("time_to_base_h", "time_to_50K_h"))
+        or (
+            d.get("time_to_50K_h") is not None
+            and d.get("time_to_base_h") is not None
+            and d["time_to_50K_h"] > d["time_to_base_h"]
+        )
         or (d.get("ultimate_vacuum_mbar") is not None and d["ultimate_vacuum_mbar"] <= 0)
         or d["n_points"] <= 0
     ):
@@ -200,12 +206,15 @@ def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
         fid = data.get("fingerprint_id")
     except (OSError, ValueError, AttributeError):
         return None, 1
-    if not fid:
+    if not isinstance(fid, str) or not fid:
         return None, 1
     fp_path = Path(history_dir) / f"{fid}.json"
     if not fp_path.exists():
         return None, 1
     try:
-        return load_fingerprint(fp_path), 0
+        fingerprint = load_fingerprint(fp_path)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return None, 1
+    if fingerprint.fingerprint_id != fid:
+        return None, 1
+    return fingerprint, 0

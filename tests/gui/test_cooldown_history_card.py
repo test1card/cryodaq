@@ -68,7 +68,7 @@ def _fp(
 def _seed(history_dir: Path) -> None:
     save_fingerprint(_fp("cd_1000", ts=1000.0, time_to_base_h=10.0), history_dir)
     # Latest is markedly worse (>+30% time-to-base) → degraded vs baseline.
-    save_fingerprint(_fp("cd_2000", ts=2000.0, time_to_base_h=20.0), history_dir)
+    save_fingerprint(_fp("cd_2000", ts=2000.0, duration_h=24.0, time_to_base_h=20.0), history_dir)
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +194,22 @@ def test_badge_unknown_when_latest_fingerprint_has_impossible_metric(tmp_path: P
     latest_path = tmp_path / "cd_2000.json"
     payload = json.loads(latest_path.read_text(encoding="utf-8"))
     payload["time_to_base_h"] = -1.0
+    latest_path.write_text(json.dumps(payload), encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
+
+
+def test_badge_unknown_when_latest_milestone_exceeds_cooldown_duration(tmp_path: Path) -> None:
+    _app()
+    save_fingerprint(_fp("cd_1000", ts=1000.0, time_to_base_h=10.0), tmp_path)
+    save_fingerprint(_fp("cd_2000", ts=2000.0, time_to_base_h=11.0), tmp_path)
+    latest_path = tmp_path / "cd_2000.json"
+    payload = json.loads(latest_path.read_text(encoding="utf-8"))
+    payload.update(duration_h=1.0, time_to_base_h=11.0, time_to_50K_h=12.0)
     latest_path.write_text(json.dumps(payload), encoding="utf-8")
     set_baseline("cd_1000", tmp_path)
 
