@@ -1036,8 +1036,10 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
     assert reply["operator_warning_receipt"] == {
         "schema": "cryodaq.keithley_warning_choice_receipt.v1",
         "request_id": "a" * 32,
+        "committed": True,
         "operator_log_id": 17,
         "replayed": False,
+        "error_code": None,
     }
     assert len(persisted) == 1
     record = persisted[0]

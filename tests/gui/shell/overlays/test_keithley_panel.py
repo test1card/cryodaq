@@ -363,6 +363,35 @@ def test_start_and_stop_success_banners_are_unchanged(app, command, expected):
     assert panel._banner_label.text() == expected
 
 
+def test_successful_start_surfaces_unconfirmed_warning_persistence(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_start", "channel": "smua"}
+    warning = (
+        "Долговременная запись выбора оператора после предупреждения Safety не подтверждена; запрос Start продолжен."
+    )
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+
+        block._on_command_result(
+            1,
+            command,
+            {"ok": True, "warning": warning},
+            generation,
+            dispatched.workers[0],
+        )
+
+        text = panel._banner_label.text()
+        assert text == f"Запуск канала А: Engine подтвердил выполнение. {warning}"
+        assert panel._banner_label.accessibleName() == text
+        assert not panel._banner_timer.isActive()
+    finally:
+        _restore_spy(block)
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)

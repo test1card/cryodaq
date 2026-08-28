@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.core.broker import DataBroker
+from cryodaq.core.broker import DataBroker, PublisherAuthority
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
@@ -98,6 +100,7 @@ class _RunPublicationGate(DataBroker):
         *,
         persistence_authoritative: bool = False,
         descriptor_envelope: bytes | None = None,
+        publisher_authority: PublisherAuthority | None = None,
     ) -> None:
         if (
             not self._gated
@@ -111,6 +114,7 @@ class _RunPublicationGate(DataBroker):
             reading,
             persistence_authoritative=persistence_authoritative,
             descriptor_envelope=descriptor_envelope,
+            publisher_authority=publisher_authority,
         )
 
 
@@ -172,6 +176,8 @@ class _ExactRunSource:
 def _engine_command_context(
     manager: SafetyManager,
     event_logger: AsyncMock,
+    *,
+    writer: object | None = None,
 ) -> EngineCommandContext:
     return EngineCommandContext(
         safety_manager=manager,
@@ -190,7 +196,7 @@ def _engine_command_context(
         vacuum_guard=None,
         alarm_dispatch_tasks=set(),
         calibration_store=None,
-        writer=None,
+        writer=writer,
         drivers_by_name={},
         sensor_diag=None,
         vacuum_trend=None,
@@ -201,13 +207,19 @@ def _engine_command_context(
     )
 
 
-def _start_command() -> dict[str, object]:
+def _start_command(*, warning: str) -> dict[str, object]:
     return {
         "cmd": "keithley_start",
         "channel": "smua",
         "p_target": 0.1,
         "v_comp": 1.0,
         "i_comp": 0.1,
+        "operator_warning_choice": {
+            "schema": "cryodaq.keithley_warning_choice.v1",
+            "request_id": "a" * 32,
+            "warning": warning,
+            "choice": "start",
+        },
         "protocol_major": 1,
         "mutation_capability": "cryodaq_mutation_v1",
         "capability_token": "test-mutation-token-1",
@@ -1576,6 +1588,91 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
         await manager.stop()
 
 
+async def test_stalled_warning_persistence_does_not_block_operator_requested_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persistence_entered = asyncio.Event()
+    persistence_cancelled = asyncio.Event()
+
+    async def persist_warning_choice(**_kwargs: object) -> OperatorLogCommitResult:
+        persistence_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            persistence_cancelled.set()
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    event_logger = AsyncMock()
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager.prepare_request_run_warning().warning
+    assert warning is not None
+    monkeypatch.setattr(
+        "cryodaq.engine._KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S",
+        0.01,
+        raising=False,
+    )
+
+    try:
+        result = await asyncio.wait_for(
+            _handle_gui_command(_start_command(warning=warning), context=context),
+            timeout=1.0,
+        )
+
+        assert persistence_entered.is_set()
+        await asyncio.wait_for(persistence_cancelled.wait(), timeout=1.0)
+        assert result["ok"] is True
+        assert result["warning"] == (
+            "Долговременная запись выбора оператора после предупреждения Safety "
+            "не подтверждена; запрос Start продолжен."
+        )
+        assert result["operator_warning_receipt"] == {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": "a" * 32,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": "persistence_timeout",
+        }
+        assert source.active_channels == ["smua"]
+        assert manager._active_sources == {"smua"}
+        assert manager.state is SafetyState.RUNNING
+        event_logger.log_event.assert_not_awaited()
+    finally:
+        await manager.stop()
+
+
+async def test_missing_warning_persistence_is_receipted_without_refusing_start() -> None:
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    event_logger = AsyncMock()
+    context = _engine_command_context(manager, event_logger)
+    warning = manager.prepare_request_run_warning().warning
+    assert warning is not None
+
+    try:
+        result = await _handle_gui_command(_start_command(warning=warning), context=context)
+
+        assert result["ok"] is True
+        assert result["operator_warning_receipt"] == {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": "a" * 32,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": "persistence_unavailable",
+        }
+        assert source.active_channels == ["smua"]
+        assert manager._active_sources == {"smua"}
+        assert manager.state is SafetyState.RUNNING
+        event_logger.log_event.assert_not_awaited()
+    finally:
+        await manager.stop()
+
+
 @pytest.mark.parametrize(
     "revocation",
     (
@@ -1603,8 +1700,28 @@ async def test_post_publication_authority_cut_revokes_run_receipt_and_start_audi
     )
     manager._config.critical_channels = []
     event_logger = AsyncMock()
-    context = _engine_command_context(manager, event_logger)
-    run_task = asyncio.create_task(_handle_gui_command(_start_command(), context=context))
+
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogCommitResult:
+        return OperatorLogCommitResult(
+            OperatorLogEntry(
+                id=1,
+                timestamp=datetime.now(UTC),
+                experiment_id=None,
+                author=str(kwargs["author"]),
+                source=str(kwargs["source"]),
+                message=str(kwargs["message"]),
+                tags=tuple(kwargs["tags"]),
+            ),
+            replayed=False,
+        )
+
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager.prepare_request_run_warning().warning
+    assert warning is not None
+    run_task = asyncio.create_task(
+        _handle_gui_command(_start_command(warning=warning), context=context),
+    )
     competing_task: asyncio.Task[object] | None = None
     try:
         await data_broker.entered.wait()

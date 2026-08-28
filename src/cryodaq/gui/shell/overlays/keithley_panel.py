@@ -749,7 +749,11 @@ class _SmuChannelBlock(QFrame):
             self.command_finished.emit(self._key, token, command_name, "unknown", error)
             return
 
-        error = str(result.get("error") or "") if isinstance(result, dict) else "некорректный ответ Engine"
+        error = (
+            str(result.get("error") or result.get("warning") or "")
+            if isinstance(result, dict)
+            else "некорректный ответ Engine"
+        )
         if isinstance(result, dict) and result.get("ok") is True:
             outcome = "ok"
         elif self._result_outcome_unknown(result):
@@ -1272,6 +1276,14 @@ class KeithleyPanel(QWidget):
             self._update_both_buttons_enablement()
             return
         if self._command_error_latched or self._unresolved_outcomes:
+            self._update_both_buttons_enablement()
+            return
+        if error.strip():
+            self._set_banner(
+                f"{description}: Engine подтвердил выполнение. {error.strip()}",
+                theme.STATUS_CAUTION,
+                auto_clear=False,
+            )
             self._update_both_buttons_enablement()
             return
         if self._pending_commands:
