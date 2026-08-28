@@ -10,14 +10,78 @@ differentiates the two actions.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
+from cryodaq.core.broker import DataBroker
+from cryodaq.core.event_bus import EventBus
+from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
-from cryodaq.drivers.contracts import SourceOffResult
+from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    SourceOffResult,
+    _issue_registry_runtime_binding,
+)
+from cryodaq.engine import (
+    _interlock_trip_handler,
+    _InterlockHandlerContext,
+    _persist_keithley_warning_choice_intent,
+    _safety_fault_log_callback,
+    _SafetyFaultLogContext,
+)
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+
+
+ROOT = Path(__file__).resolve().parents[2]
+INTERLOCKS_PATH = ROOT / "config" / "interlocks.yaml"
+DESCRIPTORS_PATH = ROOT / "config" / "channel_descriptors.yaml"
+POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
+
+
+class _OperatorLogProbe:
+    def __init__(self) -> None:
+        self.entries: list[OperatorLogEntry] = []
+
+    async def append_operator_log(self, **kwargs: object) -> OperatorLogEntry:
+        entry = OperatorLogEntry(
+            id=len(self.entries) + 1,
+            timestamp=datetime.now(UTC),
+            experiment_id=kwargs.get("experiment_id") if isinstance(kwargs.get("experiment_id"), str) else None,
+            author=str(kwargs["author"]),
+            source=str(kwargs["source"]),
+            message=str(kwargs["message"]),
+            tags=tuple(kwargs.get("tags", ())),
+        )
+        self.entries.append(entry)
+        return entry
+
+
+async def _publish_bound_interlock_reading(broker: DataBroker, value: float) -> None:
+    catalog = load_live_channel_descriptor_catalog(DESCRIPTORS_PATH)
+    bound = catalog.bind(
+        Reading.now(
+            "Т11 Теплообменник 1",
+            value,
+            "K",
+            instrument_id="LS218_2",
+        )
+    )
+    await broker.publish(
+        bound.reading,
+        persistence_authoritative=True,
+        descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(bound.descriptor).canonical_json,
+    )
 
 
 @pytest.fixture
@@ -56,6 +120,140 @@ async def test_emergency_off_interlock_latches_fault(mgr):
 
 
 @pytest.mark.asyncio
+async def test_shipped_emergency_interlock_cuts_warns_records_and_deliberate_start_proceeds() -> None:
+    """The shipped hard alarm keeps its cut but cannot become a Start lockout."""
+
+    operator_log = _OperatorLogProbe()
+    event_bus = EventBus()
+    alarm_queue = await event_bus.subscribe("latched-interlock-start")
+    experiment = SimpleNamespace(active_experiment_id="thermal-run")
+    alarm_dispatch_tasks: set[asyncio.Task[object]] = set()
+    fault_context = _SafetyFaultLogContext(
+        writer=operator_log,
+        broker=DataBroker(),
+        alarm_dispatch_tasks=alarm_dispatch_tasks,
+        event_bus=event_bus,
+        experiment_manager=experiment,
+    )
+
+    source = MagicMock()
+    source.mock = True
+    source.connected = True
+    source.output_state_unverified = False
+    source.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    source.start_source = AsyncMock()
+    source.stop_source = AsyncMock()
+    runtime_binding = _issue_registry_runtime_binding(
+        driver=source,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:latched-interlock-start",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        simulation=True,
+    )
+    manager = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=source,
+        reviewed_source_runtime_binding=runtime_binding,
+        mock=True,
+        fault_log_callback=functools.partial(
+            _safety_fault_log_callback,
+            context=fault_context,
+        ),
+    )
+    manager._config.critical_channels = []
+    manager._config.require_reason = False
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+
+    broker = DataBroker()
+
+    async def noop() -> None:
+        return None
+
+    interlock_context = _InterlockHandlerContext(
+        safety_manager=manager,
+        alarm_dispatch_tasks=alarm_dispatch_tasks,
+        dead_channel_alarm_sent=set(),
+    )
+    interlocks = InterlockEngine(
+        broker,
+        actions={"emergency_off": noop, "stop_source": noop},
+        trip_handler=functools.partial(
+            _interlock_trip_handler,
+            context=interlock_context,
+        ),
+    )
+    interlocks.load_config(
+        INTERLOCKS_PATH,
+        descriptor_catalog=load_live_channel_descriptor_catalog(DESCRIPTORS_PATH),
+        poll_intervals_s_by_instrument=POLL_INTERVALS,
+    )
+    await interlocks.start()
+    offered_warnings: list[dict[str, str]] = []
+    try:
+        await _publish_bound_interlock_reading(broker, 350.1)
+        alarm = await asyncio.wait_for(alarm_queue.get(), timeout=1.0)
+        for _ in range(100):
+            if source.emergency_off.await_count >= 2:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("the shipped source_overtemp soft cut did not settle after the hard interlock")
+        await asyncio.sleep(0)
+
+        assert manager.state is SafetyState.FAULT_LATCHED
+        assert manager._active_sources == set()
+        source.emergency_off.assert_awaited()
+        assert alarm.event_type == "alarm_fired"
+        assert alarm.payload["alarm_id"].startswith("safety_fault_")
+        assert alarm.payload["level"] == "CRITICAL"
+        assert any(
+            event.interlock_name == "overheat_cryostat"
+            and event.action_taken == "emergency_off"
+            and event.value == pytest.approx(350.1)
+            for event in interlocks.get_events()
+        )
+        assert operator_log.entries[0].source == "machine"
+        assert operator_log.entries[0].tags == ("safety_fault", "Т11")
+
+        async def persist_start_offer(warnings: list[dict[str, str]]) -> dict[str, object]:
+            offered_warnings.extend(dict(warning) for warning in warnings)
+            return await _persist_keithley_warning_choice_intent(
+                warnings,
+                cmd={"channel": "smua"},
+                writer=operator_log,
+                experiment_manager=experiment,
+            )
+
+        result = await manager.request_run(
+            0.1,
+            1.0,
+            0.1,
+            channel="smua",
+            warning_choice_committer=persist_start_offer,
+        )
+
+        assert offered_warnings, result
+        assert offered_warnings[0]["code"] == "latched_interlock_start"
+        assert "overheat_cryostat" in offered_warnings[0]["operator_text"]
+        assert result["ok"] is True
+        assert result["state"] == "running"
+        assert manager.state is SafetyState.RUNNING
+        assert manager._active_sources == {"smua"}
+        assert manager._latched_fault_abort_generation is None
+        source.start_source.assert_awaited_once_with("smua", 0.1, 1.0, 0.1)
+        start_record = operator_log.entries[-1]
+        assert "latched_interlock_start" in start_record.tags
+        assert "overheat_cryostat" in start_record.message
+        assert result["operator_warning_receipt"]["committed"] is True
+        assert result["operator_warning_receipt"]["operator_log_id"] == start_record.id
+    finally:
+        await interlocks.stop()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_stop_source_interlock_does_not_latch(mgr):
     await mgr.on_interlock_trip(
         interlock_name="detector_warmup",
@@ -68,6 +266,60 @@ async def test_stop_source_interlock_does_not_latch(mgr):
     assert mgr.state == SafetyState.SAFE_OFF
     mgr._keithley.emergency_off.assert_awaited()
     assert mgr._active_sources == set()
+
+
+@pytest.mark.asyncio
+async def test_shipped_source_overtemp_soft_stop_stays_safe_off_without_latch(mgr):
+    await mgr.on_interlock_trip(
+        interlock_name="source_overtemp",
+        channel="Т11",
+        value=320.1,
+        action="stop_source",
+    )
+
+    assert mgr.state is SafetyState.SAFE_OFF
+    assert mgr._latched_fault_abort_generation is None
+    assert mgr._active_sources == set()
+    mgr._keithley.emergency_off.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persistence_latch_still_refuses_deliberate_start(mgr):
+    persistence_clear = MagicMock()
+    mgr.set_persistence_failure_clear(persistence_clear)
+    mgr._keithley.start_source.reset_mock()
+
+    await mgr.on_persistence_failure("disk full")
+    result = await mgr.request_run(
+        p_target=0.1,
+        v_comp=1.0,
+        i_comp=0.1,
+        channel="smua",
+    )
+
+    assert mgr.state is SafetyState.FAULT_LATCHED
+    assert result["ok"] is False
+    assert result["error"].startswith("FAULT: Persistence failure:")
+    mgr._keithley.start_source.assert_not_awaited()
+    persistence_clear.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_latch_origins_record_interlock_and_joined_persistence_cause(mgr):
+    await mgr.on_interlock_trip(
+        interlock_name="overheat_cryostat",
+        channel="Т11",
+        value=350.1,
+        action="emergency_off",
+    )
+    assert mgr._fault_sources == {"interlock"}
+
+    await mgr.on_persistence_failure("disk full after interlock")
+
+    assert mgr._fault_sources == {"interlock", "persistence"}
+    result = await mgr.request_run(0.1, 1.0, 0.1, channel="smua")
+    assert result["ok"] is False
+    assert mgr.state is SafetyState.FAULT_LATCHED
 
 
 @pytest.mark.asyncio

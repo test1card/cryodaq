@@ -194,6 +194,11 @@ class SafetyManager:
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
         self._fault_reason = ""
+        # A latch can receive a second, independent cause before its first
+        # settlement completes.  Keep every observed origin so an interlock
+        # latch is restartable only when it is still exclusively an interlock
+        # decision, never after persistence or safety-authority loss joined it.
+        self._fault_sources: set[str] = set()
         self._fault_time = 0.0
         self._fault_activated_at = 0.0
         # Presentation identity only; no recovery or output authority.
@@ -319,6 +324,7 @@ class SafetyManager:
         self._abort_generation = 0
         self._full_abort_generation = 0
         self._latched_fault_abort_generation: int | None = None
+        self._pending_interlock_start_warning: tuple[int, dict[str, str]] | None = None
 
         # A global OFF is one physical operation for one exact driver/source
         # generation and abort epoch. Concurrent callers share this retained
@@ -1254,13 +1260,44 @@ class SafetyManager:
                     "error": "Safety authority changed before source start",
                 }
 
+            interlock_warning: dict[str, str] | None = None
+            pending_interlock_warning = self._pending_interlock_start_warning
+            if pending_interlock_warning is not None:
+                pending_generation, pending_warning = pending_interlock_warning
+                if pending_generation == start_abort_generation:
+                    interlock_warning = dict(pending_warning)
+                else:
+                    self._pending_interlock_start_warning = None
+
             if self._state == SafetyState.FAULT_LATCHED:
-                return {
-                    "ok": False,
-                    "state": self._state.value,
-                    "channel": smu_channel,
-                    "error": f"FAULT: {self._fault_reason}",
+                if self._fault_sources != {"interlock"}:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": f"FAULT: {self._fault_reason}",
+                    }
+
+                interlock_warning = {
+                    "code": "latched_interlock_start",
+                    "operator_text": f"ИНТЕРЛОК БЫЛ ЗАЩЁЛКНУТ: {self._fault_reason}",
+                    "consequence": "Источник был аварийно отключён; оператор намеренно продолжает запуск",
+                    "reason": self._fault_reason,
                 }
+                self._pending_interlock_start_warning = (
+                    start_abort_generation,
+                    dict(interlock_warning),
+                )
+                self._recovery_reason = "Operator requested Start under a latched interlock"
+                self._latched_fault_abort_generation = None
+                self._fault_sources.clear()
+                self._transition(
+                    SafetyState.SAFE_OFF,
+                    "Operator requested Start under a latched interlock",
+                )
+
+            if not _preflight_only and interlock_warning is not None:
+                self._pending_interlock_start_warning = None
 
             if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
                 return {
@@ -1323,6 +1360,8 @@ class SafetyManager:
                 }
 
             operator_warnings = self._cooldown_operator_warnings()
+            if interlock_warning is not None:
+                operator_warnings.insert(0, interlock_warning)
             if _preflight_only:
                 return {"_operator_warnings": operator_warnings}
             if _expected_operator_warnings is not None and operator_warnings != _expected_operator_warnings:
@@ -3231,9 +3270,10 @@ class SafetyManager:
         """Public entry point to latch FAULT_LATCHED.
 
         Triggers ``emergency_off``, latches the safety FSM in
-        ``FAULT_LATCHED``, blocks future ``request_run()`` until the
-        operator acknowledges. Use ТОЛЬКО for verified safety events
-        (sensor disconnect, threshold breach, alarm CRITICAL).
+        ``FAULT_LATCHED``. A latch whose only recorded origin is an interlock
+        may be consumed by a deliberate, warning-recorded Start; every other
+        origin still requires explicit fault recovery. Use ТОЛЬКО for verified
+        safety events (sensor disconnect, threshold breach, alarm CRITICAL).
 
         Args:
             reason: Human-readable description for audit log + Telegram
@@ -3262,7 +3302,6 @@ class SafetyManager:
         value: float = 0.0,
         source: str = "safety_manager",
     ) -> bool:
-        del source
         # Early-return guard: ignore concurrent re-entries while already latched.
         # Multiple call sites (SafetyBroker overflow, monitoring loop, channel
         # faults, start_source failure) can fire in the same tick. Without
@@ -3272,10 +3311,12 @@ class SafetyManager:
         # mutated synchronously below before any await, so a later call sees
         # FAULT_LATCHED and exits.
         if self._state == SafetyState.FAULT_LATCHED:
+            self._fault_sources.add(source)
             logger.info(
-                "_fault() re-entry ignored (already latched); new reason=%s channel=%s",
+                "_fault() re-entry ignored (already latched); new reason=%s channel=%s source=%s",
                 reason,
                 channel or "-",
+                source,
             )
             return False
 
@@ -3284,6 +3325,8 @@ class SafetyManager:
         # after monitor/rate/persistence faults that do not originate in an
         # operator command.
         self._latched_fault_abort_generation = self._register_abort_intent(full=True)
+        self._pending_interlock_start_warning = None
+        self._fault_sources = {source}
         self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
@@ -3935,8 +3978,9 @@ class SafetyManager:
         """Handle an interlock trip from InterlockEngine.
 
         ``action="emergency_off"`` (default, backwards-compatible):
-            Full fault latch — outputs off, FAULT_LATCHED, operator must
-            acknowledge_fault to recover.
+            Full fault latch — outputs off and FAULT_LATCHED. A later
+            deliberate Start records that this interlock had fired before it
+            consumes this latch; non-interlock latches remain blocking.
 
         ``action="stop_source"``:
             Soft stop — outputs off, transition to SAFE_OFF, no fault latch.
@@ -3951,7 +3995,12 @@ class SafetyManager:
 
         if action == "emergency_off":
             logger.critical("INTERLOCK emergency_off: %s", reason)
-            await self._fault(reason, channel=channel, value=value)
+            await self._fault(
+                reason,
+                channel=channel,
+                value=value,
+                source="interlock",
+            )
             return
 
         if action == "stop_source":
@@ -4188,4 +4237,5 @@ class SafetyManager:
             f"Persistence failure: {reason}",
             channel="",
             value=0.0,
+            source="persistence",
         )
