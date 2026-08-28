@@ -314,6 +314,35 @@ def test_start_and_stop_success_banners_are_unchanged(app, command, expected):
     assert panel._banner_label.text() == expected
 
 
+def test_start_success_surfaces_engine_operator_warning_on_source_screen(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.command_started.emit("smua", 1, "keithley_start")
+
+    block._on_command_result(
+        1,
+        {"cmd": "keithley_start", "channel": "smua"},
+        {
+            "ok": True,
+            "operator_warnings": [
+                {
+                    "code": "cooldown_alarm_model_unavailable",
+                    "operator_text": "Предикторная тревога траектории захолаживания НЕДОСТУПНА",
+                    "consequence": "Тревога отклонения от ожидаемой траектории не сработает",
+                }
+            ],
+        },
+    )
+
+    text = panel._banner_label.text()
+    assert "ВНИМАНИЕ" in text
+    assert "Engine подтвердил запуск источника" in text
+    assert "Предикторная тревога траектории захолаживания НЕДОСТУПНА" in text
+    assert "не сработает" in text
+    assert not panel._banner_timer.isActive(), "source warning must remain visible at the action point"
+    assert panel._banner_label.accessibleName() == text
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)

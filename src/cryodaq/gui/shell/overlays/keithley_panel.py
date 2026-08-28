@@ -253,6 +253,7 @@ class _SmuChannelBlock(QFrame):
         self._workers: list[ZmqCommandWorker] = []
         self._command_sequence = 0
         self._settled_command_tokens: set[int] = set()
+        self._settled_operator_warnings: dict[int, tuple[str, ...]] = {}
         self._buffers: dict[str, deque[tuple[float, float]]] = {m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS}
         self._value_labels: dict[str, QLabel] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
@@ -739,6 +740,21 @@ class _SmuChannelBlock(QFrame):
             self._latch_unknown_outcome()
         else:
             outcome = "failed"
+        if outcome == "ok" and command_name == "keithley_start" and isinstance(result, dict):
+            rendered_warnings: list[str] = []
+            raw_warnings = result.get("operator_warnings")
+            if isinstance(raw_warnings, list):
+                for warning in raw_warnings:
+                    if not isinstance(warning, dict):
+                        continue
+                    operator_text = warning.get("operator_text")
+                    consequence = warning.get("consequence")
+                    if isinstance(operator_text, str) and operator_text.strip():
+                        text = operator_text.strip()
+                        if isinstance(consequence, str) and consequence.strip():
+                            text = f"{text}. {consequence.strip()}."
+                        rendered_warnings.append(text)
+            self._settled_operator_warnings[token] = tuple(rendered_warnings)
         if outcome != "ok":
             logger.warning(
                 "Keithley command %s on %s: %s",
@@ -754,6 +770,11 @@ class _SmuChannelBlock(QFrame):
             outcome,
             error,
         )
+
+    def take_operator_warnings(self, token: int) -> tuple[str, ...]:
+        """Transfer one settled reply's validated operator warnings to the panel."""
+
+        return self._settled_operator_warnings.pop(token, ())
 
     @staticmethod
     def _result_outcome_unknown(result: object) -> bool:
@@ -1012,6 +1033,7 @@ class KeithleyPanel(QWidget):
         self._read_only: bool = False
         self._pending_commands: dict[tuple[str, int], str] = {}
         self._unresolved_outcomes: dict[str, str] = {}
+        self._standing_operator_warnings: dict[str, tuple[str, ...]] = {}
         self._command_error_latched = False
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
@@ -1211,6 +1233,7 @@ class KeithleyPanel(QWidget):
     ) -> None:
         self._pending_commands.pop((channel, token), None)
         description = self._command_description(channel, command)
+        operator_warnings = self._blocks[channel].take_operator_warnings(token)
         if outcome == "unknown":
             self._unresolved_outcomes[channel] = description
             self._command_error_latched = True
@@ -1231,7 +1254,25 @@ class KeithleyPanel(QWidget):
             self.show_error(f"{description} отклонена: {cause}.")
             self._update_both_buttons_enablement()
             return
+        if command == "keithley_start":
+            if operator_warnings:
+                self._standing_operator_warnings[channel] = operator_warnings
+            else:
+                self._standing_operator_warnings.pop(channel, None)
+        elif command in {"keithley_stop", "keithley_emergency_off"}:
+            self._standing_operator_warnings.pop(channel, None)
         if self._command_error_latched or self._unresolved_outcomes:
+            self._update_both_buttons_enablement()
+            return
+        if self._standing_operator_warnings:
+            warnings = [
+                warning for warning_group in self._standing_operator_warnings.values() for warning in warning_group
+            ]
+            self._set_banner(
+                "ВНИМАНИЕ — Engine подтвердил запуск источника. " + " ".join(warnings),
+                theme.STATUS_CAUTION,
+                auto_clear=False,
+            )
             self._update_both_buttons_enablement()
             return
         if self._pending_commands:

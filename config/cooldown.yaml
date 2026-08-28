@@ -5,8 +5,9 @@
 # docs/lab_verification_checklist.md. Other Т* channels are treated as
 # mobile per-experiment and are not declared for these roles here.
 cooldown:
-  # Optional local analytics: activate only after this stand has a validated
-  # model at model_dir. A fresh clone intentionally starts without one.
+  # Optional local prediction: activate only after this stand has a validated
+  # model at model_dir. The model-independent detector, baseline artifacts,
+  # auto-ingest, and cooldown_end publication stay active when this is false.
   enabled: false
   channel_cold: "Т12"
   channel_warm: "Т11"

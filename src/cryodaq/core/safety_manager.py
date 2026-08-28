@@ -9,7 +9,7 @@ import math
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -236,17 +236,13 @@ class SafetyManager:
         # fault latch, not this RUN blocker; only Scheduler-observed committed
         # publication for the exact instrument clears it.
         self._failed_poll_persistence_blockers: dict[str, str] = {}
-        # Cooldown predictor model status, reported by a wired CooldownService via
-        # set_cooldown_predictor_status(). None = no subsystem has ever
-        # reported a status. Cooldown prediction is an optional, config-gated
-        # feature (engine cooldown.yaml `enabled: false` by default) and its
-        # absence must not block RUN for deployments that never construct or
-        # wire a CooldownService. False means a missing, malformed, or
-        # below-minimum model. It remains an operator-visible analytics warning
-        # and is attached to an accepted RUN receipt, but it is never a safety
-        # precondition and is never consulted by any OFF/emergency-off path.
+        # Prediction service health and the trajectory-alarm model are separate
+        # observational facts.  Either can be unavailable without becoming a
+        # RUN precondition, but both remain visible at the action point.
         self._cooldown_predictor_available: bool | None = None
         self._cooldown_predictor_unavailable_reason: str = ""
+        self._cooldown_alarm_model_available: bool | None = None
+        self._cooldown_alarm_model_unavailable_reason: str = ""
         self._operator_safety_snapshot = OperatorSafetySnapshot(
             revision=1,
             observed_monotonic_s=observed,
@@ -1098,6 +1094,7 @@ class SafetyManager:
         i_comp: float,
         *,
         channel: str | None = None,
+        warning_choice_committer: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         start_abort_generation = self._abort_generation
         start_full_abort_generation = self._full_abort_generation
@@ -1171,6 +1168,34 @@ class SafetyManager:
                     "channel": smu_channel,
                     "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
                 }
+
+            operator_warnings = self._cooldown_operator_warnings()
+            if operator_warnings:
+                if warning_choice_committer is None:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error_code": "operator_warning_choice_not_committed",
+                        "error": "Operator warning choice was not durably committed before RUN.",
+                    }
+                try:
+                    await warning_choice_committer(operator_warnings)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error(
+                        "RUN refused on %s: operator warning choice could not be persisted",
+                        smu_channel,
+                        exc_info=True,
+                    )
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error_code": "operator_warning_choice_not_committed",
+                        "error": "Operator warning choice could not be durably committed before RUN.",
+                    }
 
             # A global OFF receipt cannot remain true while another channel is
             # intentionally sourcing. Before adding a second channel, obtain
@@ -1483,15 +1508,8 @@ class SafetyManager:
                 "channel": smu_channel,
                 "active_channels": sorted(self._active_sources),
             }
-            if self._cooldown_predictor_available is False:
-                result["operator_warnings"] = [
-                    {
-                        "code": "cooldown_predictor_unavailable",
-                        "operator_text": "Cooldown trajectory prediction is UNAVAILABLE",
-                        "consequence": "The predictor-based trajectory alarm cannot fire",
-                        "reason": self._cooldown_predictor_unavailable_reason or "predictor model is unavailable",
-                    }
-                ]
+            if operator_warnings:
+                result["operator_warnings"] = operator_warnings
             return result
 
     def _current_unmanaged_output_hazard(self) -> tuple[SmuChannel | None, str] | None:
@@ -2498,7 +2516,38 @@ class SafetyManager:
         flags (Phase 2a H.1). Called from acknowledge_fault."""
         self._persistence_failure_clear = callback
 
-    async def set_cooldown_predictor_status(self, available: bool, reason: str = "") -> None:
+    def _cooldown_operator_warnings(self) -> list[dict[str, str]]:
+        """Return canonical Russian cautions for each unavailable analytics fact."""
+
+        warnings: list[dict[str, str]] = []
+        if self._cooldown_predictor_available is False:
+            warnings.append(
+                {
+                    "code": "cooldown_predictor_unavailable",
+                    "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+                    "consequence": "Расчёт ожидаемой траектории и времени до завершения не выполняется",
+                    "reason": self._cooldown_predictor_unavailable_reason or "прогнозирование недоступно",
+                }
+            )
+        if self._cooldown_alarm_model_available is False:
+            warnings.append(
+                {
+                    "code": "cooldown_alarm_model_unavailable",
+                    "operator_text": "Предикторная тревога траектории захолаживания НЕДОСТУПНА",
+                    "consequence": "Тревога отклонения от ожидаемой траектории не сработает",
+                    "reason": self._cooldown_alarm_model_unavailable_reason or "модель тревоги недоступна",
+                }
+            )
+        return warnings
+
+    async def set_cooldown_predictor_status(
+        self,
+        available: bool,
+        reason: str = "",
+        *,
+        alarm_available: bool | None = None,
+        alarm_reason: str = "",
+    ) -> None:
         """Record cooldown-predictor model health reported by a wired CooldownService.
 
         A cooldown model with zero valid curves (all rejected, or none yet
@@ -2521,9 +2570,16 @@ class SafetyManager:
             raise TypeError("available must be an exact bool")
         if type(reason) is not str:
             raise TypeError("reason must be an exact str")
+        if alarm_available is not None and type(alarm_available) is not bool:
+            raise TypeError("alarm_available must be an exact bool or None")
+        if type(alarm_reason) is not str:
+            raise TypeError("alarm_reason must be an exact str")
         async with self._cmd_lock:
             self._cooldown_predictor_available = available
             self._cooldown_predictor_unavailable_reason = "" if available else reason
+            if alarm_available is not None:
+                self._cooldown_alarm_model_available = alarm_available
+                self._cooldown_alarm_model_unavailable_reason = "" if alarm_available else alarm_reason
             self._refresh_operator_safety_snapshot()
 
     def _critical_input_requirements(
@@ -2791,9 +2847,18 @@ class SafetyManager:
             plant.append(
                 PlantHealthFact(
                     "cooldown_predictor",
-                    "Cooldown trajectory prediction UNAVAILABLE — predictor-based trajectory alarm cannot fire",
+                    "Прогноз траектории захолаживания НЕДОСТУПЕН — расчёт времени до завершения не выполняется",
                     OperatorPresentationState.CAUTION,
                     "cooldown_predictor_unavailable",
+                )
+            )
+        if self._cooldown_alarm_model_available is False:
+            plant.append(
+                PlantHealthFact(
+                    "cooldown_alarm_model",
+                    "Предикторная тревога траектории захолаживания НЕДОСТУПНА — тревога отклонения не сработает",
+                    OperatorPresentationState.CAUTION,
+                    "cooldown_alarm_model_unavailable",
                 )
             )
 

@@ -125,7 +125,10 @@ from cryodaq.core.scheduler import (
     Scheduler,
 )
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
-from cryodaq.core.shutdown_settlement import ShutdownOwnerSettledError, await_executor_owner
+from cryodaq.core.shutdown_settlement import (
+    ShutdownOwnerSettledError,
+    await_executor_owner,
+)
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.zmq_bridge import (
@@ -466,6 +469,8 @@ async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
     safety_manager: SafetyManager,
+    *,
+    warning_choice_committer: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Dispatch channel-scoped Keithley commands to SafetyManager."""
     channel = cmd.get("channel")
@@ -483,7 +488,15 @@ async def _run_keithley_command(
                 "error_code": "keithley_parameters_invalid",
                 "error": "Keithley command parameters are invalid.",
             }
-        return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        if warning_choice_committer is None:
+            return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        return await safety_manager.request_run(
+            p,
+            v,
+            i,
+            channel=smu_channel,
+            warning_choice_committer=warning_choice_committer,
+        )
 
     if action == "keithley_stop":
         smu_channel = normalize_smu_channel(channel)
@@ -533,28 +546,10 @@ async def _log_successful_keithley_command(
     result: dict[str, Any],
     event_logger: Any,
 ) -> None:
-    """Persist the successful command, including any standing warning choice."""
+    """Persist the successful command after SafetyManager settles it."""
 
     channel = cmd.get("channel", "?")
     if action == "keithley_start":
-        warnings = result.get("operator_warnings")
-        if isinstance(warnings, list) and warnings:
-            warning = warnings[0]
-            if isinstance(warning, dict):
-                await event_logger.log_event(
-                    "keithley",
-                    (
-                        f"Keithley {channel}: запуск; operator proceeded with warning: "
-                        f"{warning.get('operator_text', 'prediction UNAVAILABLE')}; "
-                        f"{warning.get('consequence', 'trajectory alarm cannot fire')}"
-                    ),
-                    extra_tags=[
-                        "start",
-                        "operator_warning_choice",
-                        str(warning.get("code", "analytics_warning")),
-                    ],
-                )
-                return
         await event_logger.log_event("keithley", f"Keithley {channel}: запуск")
     elif action == "keithley_stop":
         await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
@@ -2355,22 +2350,110 @@ def _load_cooldown_config(path: Path) -> tuple[dict[str, Any], PhysicalPolicyRec
     return raw, receipt_for_applied_policy("cooldown", path, snapshot)
 
 
-async def _report_disabled_cooldown_predictor_model_status(
+def _load_cooldown_model_for_status(model_dir: Path) -> None:
+    """Validate the same model contract used by live prediction and arming."""
+
+    from cryodaq.analytics.cooldown_predictor import load_model
+
+    load_model(model_dir)
+
+
+async def _report_cooldown_predictor_model_status(
     cooldown_config: dict[str, Any],
+    alarm_config: dict[str, Any],
     project_root: Path,
     safety_manager: SafetyManager,
 ) -> None:
-    """Keep a missing first-run model visible when the optional service is disabled."""
+    """Report prediction enablement and alarm-model usability independently."""
 
-    if cooldown_config.get("enabled", False):
-        return
-    model_dir = project_root / cooldown_config.get("model_dir", "data/cooldown_model")
-    model_file = model_dir / "predictor_model.json"
-    if not model_file.is_file():
-        await safety_manager.set_cooldown_predictor_status(
-            False,
-            f"predictor model file not found: {model_file}",
+    predictor_enabled = cooldown_config.get("enabled", False) is True
+    predictor_available = False
+    predictor_reason = "cooldown trajectory prediction is disabled by configuration"
+    if predictor_enabled:
+        model_dir = project_root / cooldown_config.get("model_dir", "data/cooldown_model")
+        try:
+            await asyncio.to_thread(_load_cooldown_model_for_status, model_dir)
+        except Exception as exc:
+            predictor_reason = f"{type(exc).__name__}: {exc}"
+        else:
+            predictor_available = True
+            predictor_reason = ""
+
+    alarm_available = False
+    alarm_reason = "predictor-based cooldown alarm is disabled by configuration"
+    if alarm_config.get("enabled", True) is True:
+        alarm_model_path = Path(
+            alarm_config.get(
+                "predictor_model_path",
+                project_root / "data/cooldown_model/predictor_model.json",
+            )
         )
+        if not alarm_model_path.is_absolute():
+            alarm_model_path = project_root / alarm_model_path
+        try:
+            await asyncio.to_thread(_load_cooldown_model_for_status, alarm_model_path.parent)
+        except Exception as exc:
+            alarm_reason = f"{type(exc).__name__}: {exc}"
+        else:
+            alarm_available = True
+            alarm_reason = ""
+
+    await safety_manager.set_cooldown_predictor_status(
+        predictor_available,
+        predictor_reason,
+        alarm_available=alarm_available,
+        alarm_reason=alarm_reason,
+    )
+
+
+def _build_live_cooldown_service(
+    cooldown_config: dict[str, Any],
+    *,
+    broker: DataBroker,
+    project_root: Path,
+    event_bus: EventBus,
+    reader: Any,
+) -> Any:
+    """Construct the model-independent live cooldown lifecycle by default."""
+
+    if cooldown_config.get("service_enabled", True) is False:
+        return None
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    return CooldownService(
+        broker=broker,
+        config=cooldown_config,
+        model_dir=project_root / cooldown_config.get("model_dir", "data/cooldown_model"),
+        event_bus=event_bus,
+        reader=reader,
+        # Engine owns the combined prediction/alarm-model status report.
+        safety_manager=None,
+    )
+
+
+async def _persist_keithley_warning_choice_intent(
+    warnings: list[dict[str, str]],
+    *,
+    cmd: dict[str, Any],
+    writer: Any,
+    experiment_manager: Any,
+) -> None:
+    """Commit the operator's warning-bearing RUN intent before source mutation."""
+
+    if writer is None:
+        raise RuntimeError("operator journal is unavailable")
+    codes = [warning.get("code", "analytics_warning") for warning in warnings]
+    details = "; ".join(
+        f"{warning.get('operator_text', 'Предупреждение недоступно')}: {warning.get('consequence', '')}"
+        for warning in warnings
+    )
+    await writer.append_operator_log(
+        message=(f"Keithley {cmd.get('channel', '?')}: намерение запуска подтверждено при предупреждении: {details}"),
+        author="system",
+        source="auto",
+        experiment_id=getattr(experiment_manager, "active_experiment_id", None),
+        tags=["auto", "keithley", "start", "operator_warning_choice", *codes],
+    )
 
 
 async def _load_live_descriptor_authority(
@@ -5287,7 +5370,20 @@ async def _handle_gui_command(
             "keithley_set_target",
             "keithley_set_limits",
         }:
-            result = await _run_keithley_command(action, cmd, safety_manager)
+            warning_choice_committer = None
+            if action == "keithley_start":
+                warning_choice_committer = functools.partial(
+                    _persist_keithley_warning_choice_intent,
+                    cmd=cmd,
+                    writer=writer,
+                    experiment_manager=experiment_manager,
+                )
+            result = await _run_keithley_command(
+                action,
+                cmd,
+                safety_manager,
+                warning_choice_committer=warning_choice_committer,
+            )
             if result.get("ok"):
                 await _log_successful_keithley_command(action, cmd, result, event_logger)
                 if action == "keithley_emergency_off" and escalation_service is not None:
@@ -7109,23 +7205,18 @@ async def _run_engine(
             _applied_cold_channel = _cd_cfg.get("channel_cold")
             if isinstance(_applied_cold_channel, str) and _applied_cold_channel.strip():
                 zmq_pub.configure_applied_cold_stage_channel(_applied_cold_channel)
-            if _cd_cfg.get("enabled", False):
-                from cryodaq.analytics.cooldown_service import CooldownService
-
-                cooldown_service = CooldownService(
-                    broker=broker,
-                    config=_cd_cfg,
-                    model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
-                    # A1: cooldown-end push event on the engine EventBus.
-                    event_bus=event_bus,
-                    # A2: read-only history reader for ultimate_vacuum enrichment.
-                    reader=writer,
-                    # The same SafetyManager instance remains the engine's sole
-                    # source authority. CooldownService reports model health to
-                    # its operator snapshot, but the observational predictor
-                    # never becomes a RUN/readiness prerequisite.
-                    safety_manager=safety_manager,
-                )
+            # The detector, baseline capture/ingest, and cooldown_end event are
+            # model-independent dataset owners.  The legacy ``enabled`` flag
+            # now gates only prediction inside CooldownService; an explicit
+            # service_enabled=false is the only lifecycle opt-out.
+            cooldown_service = _build_live_cooldown_service(
+                _cd_cfg,
+                broker=broker,
+                project_root=_PROJECT_ROOT,
+                event_bus=event_bus,
+                reader=writer,
+            )
+            if cooldown_service is not None:
                 logger.info("CooldownService создан")
                 # v0.55.4 A2: hand the cooldown_service-owned
                 # SteadyStatePredictor to CooldownAlarm so its WATCHING
@@ -7133,11 +7224,13 @@ async def _run_engine(
                 if _cooldown_alarm is not None:
                     _cooldown_alarm.set_steady_state_predictor(cooldown_service._ss_predictor)
             else:
-                await _report_disabled_cooldown_predictor_model_status(
-                    _cd_cfg,
-                    _PROJECT_ROOT,
-                    safety_manager,
-                )
+                logger.info("CooldownService отключён явным service_enabled=false")
+            await _report_cooldown_predictor_model_status(
+                _cd_cfg,
+                _cooldown_cfg,
+                _PROJECT_ROOT,
+                safety_manager,
+            )
         except Exception as exc:
             logger.error(
                 "Engine boot degraded: owner=cooldown_service exception=%s",

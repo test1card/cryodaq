@@ -229,6 +229,10 @@ class CooldownService:
         self._rate_window_h: float = float(config.get("rate_window_h", 1.5))
         self._auto_ingest: bool = bool(config.get("auto_ingest", True))
         self._min_cooldown_hours: float = float(config.get("min_cooldown_hours", 10.0))
+        # ``enabled`` is the legacy prediction toggle, not lifecycle
+        # authority.  Detection, cooldown-end publication, baseline capture,
+        # and optional ingest remain live without a model.
+        self._predictor_enabled: bool = config.get("enabled", True) is True
 
         # Detector config
         det_cfg = config.get("detect", {})
@@ -479,45 +483,53 @@ class CooldownService:
         # so the operator sees that trajectory prediction and its alarm are
         # unavailable. This fact never enters the RUN/readiness gate and never
         # touches OFF/emergency-off authority.
-        try:
-            model_file = self._model_dir / "predictor_model.json"
-            if model_file.exists():
-                loaded_model = await self._run_owned_executor(load_model, self._model_dir)
-                if not self._executor_admission_open:
-                    return
-                if loaded_model.n_curves < MIN_COOLDOWN_MODEL_CURVES:
-                    # Defense in depth (item 2, third enforcement point):
-                    # load_model()/_require_model_capacity() already reject a
-                    # below-minimum on-disk model before this line can be
-                    # reached, but this call site — the one that actually
-                    # adopts a model as self._model — is re-checked
-                    # explicitly so it can never adopt one by any other path
-                    # or future refactor of load_model().
-                    raise ValueError(
-                        f"loaded cooldown model has {loaded_model.n_curves} curve(s), "
-                        f"below the reviewed minimum {MIN_COOLDOWN_MODEL_CURVES}"
+        if not self._predictor_enabled:
+            self._model = None
+            self.model_status = CooldownModelStatus(
+                available=False,
+                reason="cooldown trajectory prediction is disabled by configuration",
+            )
+            logger.warning("Прогнозирование захолаживания отключено; детектор и артефакты цикла остаются активны")
+        else:
+            try:
+                model_file = self._model_dir / "predictor_model.json"
+                if model_file.exists():
+                    loaded_model = await self._run_owned_executor(load_model, self._model_dir)
+                    if not self._executor_admission_open:
+                        return
+                    if loaded_model.n_curves < MIN_COOLDOWN_MODEL_CURVES:
+                        # Defense in depth (item 2, third enforcement point):
+                        # load_model()/_require_model_capacity() already reject a
+                        # below-minimum on-disk model before this line can be
+                        # reached, but this call site — the one that actually
+                        # adopts a model as self._model — is re-checked
+                        # explicitly so it can never adopt one by any other path
+                        # or future refactor of load_model().
+                        raise ValueError(
+                            f"loaded cooldown model has {loaded_model.n_curves} curve(s), "
+                            f"below the reviewed minimum {MIN_COOLDOWN_MODEL_CURVES}"
+                        )
+                    self._model = loaded_model
+                    self.model_status = CooldownModelStatus(available=True)
+                    logger.info(
+                        "Модель охлаждения загружена: %d кривых, %.1f +/- %.1f ч",
+                        self._model.n_curves,
+                        self._model.duration_mean,
+                        self._model.duration_std,
                     )
-                self._model = loaded_model
-                self.model_status = CooldownModelStatus(available=True)
-                logger.info(
-                    "Модель охлаждения загружена: %d кривых, %.1f +/- %.1f ч",
-                    self._model.n_curves,
-                    self._model.duration_mean,
-                    self._model.duration_std,
-                )
-            else:
-                reason = f"predictor model file not found: {model_file}"
-                logger.warning(
-                    "Файл модели не найден: %s — прогнозирование недоступно",
-                    model_file,
-                )
+                else:
+                    reason = f"predictor model file not found: {model_file}"
+                    logger.warning(
+                        "Файл модели не найден: %s — прогнозирование недоступно",
+                        model_file,
+                    )
+                    self.model_status = CooldownModelStatus(available=False, reason=reason)
+            except Exception as exc:
+                if isinstance(exc.__cause__, asyncio.CancelledError):
+                    raise
+                reason = f"{type(exc).__name__}: {exc}"
+                logger.error("Ошибка загрузки модели охлаждения: %s", exc)
                 self.model_status = CooldownModelStatus(available=False, reason=reason)
-        except Exception as exc:
-            if isinstance(exc.__cause__, asyncio.CancelledError):
-                raise
-            reason = f"{type(exc).__name__}: {exc}"
-            logger.error("Ошибка загрузки модели охлаждения: %s", exc)
-            self.model_status = CooldownModelStatus(available=False, reason=reason)
 
         if self._safety_manager is not None and self.model_status is not None:
             await self._safety_manager.set_cooldown_predictor_status(
