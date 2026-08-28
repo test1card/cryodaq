@@ -905,8 +905,8 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ),
         (f"The exact {inventory_size}-path", f"The exact {inventory_size - 1}-path"),
         (
+            "all 11 tracked workflow-referenced CI/governance runner modules",
             "all 10 tracked workflow-referenced CI/governance runner modules",
-            "all 9 tracked workflow-referenced CI/governance runner modules",
         ),
         (
             "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
@@ -947,9 +947,9 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     with pytest.raises(AssertionError):
         assert_current(text, [path for path in tracked if path != "tools/check_python_compile.py"], contents)
     registry_claim = text.replace(
-        "all 10 tracked workflow-referenced CI/governance runner modules were swept",
+        "all 11 tracked workflow-referenced CI/governance runner modules were swept",
         (
-            "all 10 tracked workflow-referenced CI/governance runner modules were swept, "
+            "all 11 tracked workflow-referenced CI/governance runner modules were swept, "
             "and the registry/config references were swept"
         ),
         1,
