@@ -35,7 +35,9 @@ class CalibrationAcquisitionService:
         self._descriptor_catalog = descriptor_catalog
         self._active = False
         self._reference_channel: str | None = None
+        self._reference_instrument_id: str | None = None
         self._target_channels: list[str] = []
+        self._target_bindings: tuple[tuple[str | None, str], ...] = ()
         self._point_count = 0
         self._t_min: float | None = None
         self._t_max: float | None = None
@@ -56,29 +58,47 @@ class CalibrationAcquisitionService:
         reject the whole KRDG/SRDG batch at the first calibration poll
         instead of being caught here.
         """
+        reference_instrument_id, reference_channel = self._split_instrument_channel(reference_channel)
+        target_bindings = [self._split_instrument_channel(target) for target in target_channels]
         if self._channel_manager is not None:
             reference_channel = self._resolve(reference_channel)
-            target_channels = [self._resolve(t) for t in target_channels]
+            target_bindings = [(instrument_id, self._resolve(channel)) for instrument_id, channel in target_bindings]
         if self._descriptor_catalog is not None:
-            self._require_calibration_raw_coverage(target_channels)
+            self._require_calibration_raw_coverage(target_bindings)
         self._active = True
         self._reference_channel = reference_channel
-        self._target_channels = list(target_channels)
+        self._reference_instrument_id = reference_instrument_id
+        self._target_bindings = tuple(target_bindings)
+        self._target_channels = [channel for _, channel in target_bindings]
         self._point_count = 0
         self._t_min = None
         self._t_max = None
         logger.info(
             "Calibration acquisition activated: ref=%s targets=%s",
             reference_channel,
-            target_channels,
+            self._target_bindings,
         )
 
-    def _require_calibration_raw_coverage(self, target_channels: list[str]) -> None:
+    @staticmethod
+    def _split_instrument_channel(channel_reference: str) -> tuple[str | None, str]:
+        """Separate an optional ``instrument_id:emitted_channel`` reference."""
+        instrument_id, separator, channel = channel_reference.partition(":")
+        if not separator:
+            return (None, channel_reference)
+        instrument_id = instrument_id.strip()
+        channel = channel.strip()
+        if not instrument_id or not channel:
+            raise CalibrationCommandError("instrument-qualified calibration channel is malformed")
+        return (instrument_id, channel)
+
+    def _require_calibration_raw_coverage(self, target_bindings: list[tuple[str | None, str]]) -> None:
         """Reject activation when a target's ``_raw`` channel is undeclared."""
-        if not target_channels:
+        if not target_bindings:
             return
+        if any(instrument_id is None for instrument_id, _ in target_bindings):
+            raise CalibrationCommandError("calibration targets must identify their instrument")
         try:
-            self._descriptor_catalog.require_calibration_raw_channels(tuple(target_channels))
+            self._descriptor_catalog.require_calibration_raw_channels(tuple(target_bindings))
         except Exception as exc:
             raise CalibrationCommandError(f"calibration activation rejected: {exc}") from exc
 
@@ -130,7 +150,11 @@ class CalibrationAcquisitionService:
         # Compute pending t_min/t_max WITHOUT applying yet
         pending: dict[str, float] = {}
         for r in krdg:
-            if r.channel == self._reference_channel and r.status == ChannelStatus.OK:
+            if (
+                r.channel == self._reference_channel
+                and (self._reference_instrument_id is None or r.instrument_id == self._reference_instrument_id)
+                and r.status == ChannelStatus.OK
+            ):
                 t = r.value
                 if not math.isfinite(t) or t < 1.0:
                     continue
@@ -144,7 +168,10 @@ class CalibrationAcquisitionService:
         # Build SRDG readings for target channels
         to_write: list[Reading] = []
         for reading in srdg:
-            if reading.channel not in self._target_channels:
+            if not any(
+                reading.channel == channel and (instrument_id is None or reading.instrument_id == instrument_id)
+                for instrument_id, channel in self._target_bindings
+            ):
                 continue
             if reading.status != ChannelStatus.OK:
                 continue

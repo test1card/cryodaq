@@ -1330,8 +1330,8 @@ class CalibrationPanel(QWidget):
                 "title": name,
                 "operator": "",
                 "custom_fields": {
-                    "reference_channel": _strip_instrument_prefix(reference),
-                    "target_channels": ", ".join(_strip_instrument_prefix(t) for t in targets),
+                    "reference_channel": reference,
+                    "target_channels": ", ".join(targets),
                 },
             },
             parent=self,

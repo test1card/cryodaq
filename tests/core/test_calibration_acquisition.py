@@ -23,10 +23,10 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 
 
-def _reading(channel: str, value: float, unit: str = "K") -> Reading:
+def _reading(channel: str, value: float, unit: str = "K", instrument_id: str = "ls218") -> Reading:
     return Reading(
         timestamp=datetime.now(UTC),
-        instrument_id="ls218",
+        instrument_id=instrument_id,
         channel=channel,
         value=value,
         unit=unit,
@@ -36,10 +36,10 @@ def _reading(channel: str, value: float, unit: str = "K") -> Reading:
     )
 
 
-def _srdg_reading(channel: str, value: float) -> Reading:
+def _srdg_reading(channel: str, value: float, instrument_id: str = "ls218") -> Reading:
     return Reading(
         timestamp=datetime.now(UTC),
-        instrument_id="ls218",
+        instrument_id=instrument_id,
         channel=channel,
         value=value,
         unit="sensor_unit",
@@ -293,11 +293,18 @@ def test_activate_rejects_empty_reference():
         service.activate("", ["Т2"])
 
 
-def _catalog_descriptor(channel_id: str, *, quantity: object, unit: str, role: object) -> ChannelDescriptorV1:
+def _catalog_descriptor(
+    channel_id: str,
+    *,
+    quantity: object,
+    unit: str,
+    role: object,
+    instrument_id: str = "ls218",
+) -> ChannelDescriptorV1:
     return ChannelDescriptorV1(
         schema_version=1,
         channel_id=channel_id,
-        instrument_id="ls218",
+        instrument_id=instrument_id,
         source_key=f"input.{channel_id}",
         quantity=quantity,
         unit=unit,
@@ -331,7 +338,7 @@ def test_activate_validates_selected_raw_labels_against_descriptor_catalog() -> 
     writer = AsyncMock()
     service = CalibrationAcquisitionService(writer, descriptor_catalog=_catalog_missing_raw_binding())
     with pytest.raises(CalibrationCommandError, match="calibration activation rejected"):
-        service.activate("Т1", ["Т2 Криостат низ"])
+        service.activate("ls218:Т1", ["ls218:Т2 Криостат низ"])
     assert not service.is_active
 
 
@@ -358,9 +365,54 @@ def test_activate_accepts_targets_with_bound_raw_labels() -> None:
     )
     writer = AsyncMock()
     service = CalibrationAcquisitionService(writer, descriptor_catalog=catalog)
-    service.activate("Т1", ["Т2 Криостат низ"])
+    service.activate("ls218:Т1", ["ls218:Т2 Криостат низ"])
     assert service.is_active
     assert service.stats["target_channels"] == ["Т2 Криостат низ"]
+
+
+def test_activate_scopes_srdg_to_the_qualified_target_instrument() -> None:
+    """A duplicate emitted label on another instrument cannot block or leak into calibration."""
+    base = _catalog_descriptor(
+        "ls218.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+    )
+    raw = _catalog_descriptor(
+        "ls218.raw",
+        quantity=ChannelQuantity.RAW_SENSOR,
+        unit="sensor_unit",
+        role=ChannelRole.REFERENCE_MEASUREMENT,
+    )
+    other = _catalog_descriptor(
+        "asc.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        instrument_id="asc",
+    )
+    catalog = LiveChannelDescriptorCatalog(
+        ChannelCatalog([base, raw, other]),
+        bindings={
+            ("ls218", "shared target"): "ls218.temperature",
+            ("ls218", "shared target_raw"): "ls218.raw",
+            ("asc", "shared target"): "asc.temperature",
+        },
+    )
+    service = CalibrationAcquisitionService(AsyncMock(), descriptor_catalog=catalog)
+
+    service.activate("ls218:reference", ["ls218:shared target"])
+    raw_readings, _ = service.prepare_srdg_readings(
+        [_reading("reference", 4.2, instrument_id="ls218")],
+        [
+            _srdg_reading("shared target", 12.0, instrument_id="ls218"),
+            _srdg_reading("shared target", 99.0, instrument_id="asc"),
+        ],
+    )
+
+    assert [(item.instrument_id, item.channel, item.value) for item in raw_readings] == [
+        ("ls218", "shared target_raw", 12.0)
+    ]
 
 
 def test_activate_without_descriptor_catalog_keeps_legacy_behavior() -> None:

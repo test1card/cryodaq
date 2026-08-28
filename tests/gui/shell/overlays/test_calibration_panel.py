@@ -188,10 +188,10 @@ def test_setup_start_dispatches_experiment_start(app):
     cf = cmd["custom_fields"]
     assert "reference_channel" in cf
     assert "target_channels" in cf
-    # reference_channel must be stripped (no instrument prefix).
-    assert ":" not in cf["reference_channel"]
-    # target_channels is a comma-joined string of stripped sensor IDs.
-    assert ":" not in cf["target_channels"]
+    # Calibration activation needs the exact instrument identity because the
+    # same emitted label may exist on another instrument.
+    assert cf["reference_channel"].startswith("LS218_")
+    assert "LS218_" in cf["target_channels"]
 
 
 # ----------------------------------------------------------------------

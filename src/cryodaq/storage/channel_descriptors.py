@@ -865,12 +865,14 @@ class LiveChannelDescriptorCatalog:
         if missing:
             raise ChannelDescriptorStorageError(f"live descriptor manifest channel mismatch (missing={missing})")
 
-    def require_calibration_raw_channels(self, emitted_channels: object) -> None:
+    def require_calibration_raw_channels(self, targets: object) -> None:
         """Fail calibration activation unless every target's _raw channel is bound.
 
         Calibration acquisition republishes each SRDG reading under a derived
         ``<label>_raw`` emitted channel on the same instrument that emits
         ``<label>`` (CalibrationAcquisitionService.prepare_srdg_readings).
+        Each target must therefore carry its exact ``(instrument_id, label)``
+        identity; emitted labels are not globally unique.
         A manifest that binds the base temperature label but not the derived
         raw label passes the startup completeness check yet rejects the atomic
         KRDG/SRDG batch at the first calibration poll, silencing the whole
@@ -878,21 +880,26 @@ class LiveChannelDescriptorCatalog:
         before acquisition instead of silent and mid-publish.
         """
 
-        if type(emitted_channels) not in (tuple, list, frozenset, set):
+        if type(targets) not in (tuple, list, frozenset, set):
             raise TypeError("calibration target channels must be an explicit finite collection")
         bound = frozenset(self._bindings)
         missing: list[str] = []
-        for emitted in emitted_channels:
-            if type(emitted) is not str or not emitted:
-                raise ChannelDescriptorStorageError("calibration target channels must be non-empty strings")
-            instruments = sorted({instrument for (instrument, channel) in bound if channel == emitted})
-            if not instruments:
-                missing.append(f"{emitted}_raw")
-                continue
-            for instrument in instruments:
-                raw = f"{emitted}_raw"
-                if (instrument, raw) not in bound:
-                    missing.append(f"{instrument}/{raw}")
+        for target in targets:
+            if (
+                type(target) is not tuple
+                or len(target) != 2
+                or type(target[0]) is not str
+                or not target[0]
+                or type(target[1]) is not str
+                or not target[1]
+            ):
+                raise ChannelDescriptorStorageError(
+                    "calibration target channels must be exact instrument/channel pairs"
+                )
+            instrument, emitted = target
+            raw = f"{emitted}_raw"
+            if (instrument, raw) not in bound:
+                missing.append(f"{instrument}/{raw}")
         if missing:
             raise ChannelDescriptorStorageError(
                 f"live descriptor manifest lacks calibration raw bindings (missing={missing})"

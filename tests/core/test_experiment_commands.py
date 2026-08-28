@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from cryodaq.core.calibration_acquisition import CalibrationCommandError
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
@@ -24,6 +25,7 @@ from cryodaq.drivers.contracts import (
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.engine import (
     EngineCommandContext,
+    _attempt_experiment_reconciliation_async,
     _drain_experiment_command_tasks,
     _handle_gui_command,
     _is_mutating_command,
@@ -31,6 +33,7 @@ from cryodaq.engine import (
     _owned_operator_log_done,
     _run_experiment_command,
     _run_keithley_command,
+    _try_activate_calibration_acquisition,
 )
 from cryodaq.storage.sqlite_writer import OperatorLogPublicationOutboxRecord, SQLiteWriter
 
@@ -821,6 +824,60 @@ async def test_post_commit_failure_is_explicit_and_does_not_skip_later_steps(
     assert calibration.deactivations == 1
     assert len(event_logger.events) == 1
     assert len(event_bus.events) == 1
+
+
+def test_calibration_activation_rejection_is_reported_as_reconciliation_failure(
+    tmp_path: Path,
+) -> None:
+    templates_dir = tmp_path / "experiment_templates"
+    templates_dir.mkdir()
+    (templates_dir / "calibration.yaml").write_text(
+        yaml.dump(
+            {
+                "id": "calibration",
+                "name": "Calibration",
+                "calibration_acquisition": True,
+                "sections": ["setup"],
+                "report_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = SimpleNamespace(
+        _templates_dir=templates_dir,
+        get_template=lambda template_id: object(),
+    )
+
+    class RejectingCalibration:
+        def activate(self, reference: str, targets: list[str]) -> None:
+            raise CalibrationCommandError("raw descriptor binding is missing")
+
+    failures: list[str] = []
+
+    async def reconcile_activation() -> None:
+        async def activate() -> None:
+            _try_activate_calibration_acquisition(
+                RejectingCalibration(),
+                manager,
+                {
+                    "template_id": "calibration",
+                    "custom_fields": {
+                        "reference_channel": "LS218_1:Т1",
+                        "target_channels": "LS218_1:Т2",
+                    },
+                },
+            )
+
+        await _attempt_experiment_reconciliation_async(
+            failures,
+            "calibration_acquisition_activate",
+            activate,
+        )
+
+    asyncio.run(reconcile_activation())
+
+    assert failures == ["calibration_acquisition_activate"]
 
 
 async def test_commit_receipt_failure_cannot_hide_committed_state(

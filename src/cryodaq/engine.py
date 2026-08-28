@@ -1608,6 +1608,7 @@ def _try_activate_calibration_acquisition(
             "Calibration activation rejected: exception=%s",
             type(exc).__name__,
         )
+        raise
     except Exception as exc:
         logger.warning(
             "Calibration activation failed: exception=%s",

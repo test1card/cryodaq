@@ -359,8 +359,8 @@ def test_require_calibration_raw_channels_accepts_bound_raw_labels() -> None:
         },
     )
 
-    owner.require_calibration_raw_channels(("Т2 Криостат низ",))
-    owner.require_calibration_raw_channels(["Т2 Криостат низ"])
+    owner.require_calibration_raw_channels((("ls218", "Т2 Криостат низ"),))
+    owner.require_calibration_raw_channels([("ls218", "Т2 Криостат низ")])
 
 
 def test_require_calibration_raw_channels_rejects_missing_raw_binding() -> None:
@@ -376,7 +376,7 @@ def test_require_calibration_raw_channels_rejects_missing_raw_binding() -> None:
     )
 
     with pytest.raises(ChannelDescriptorStorageError, match="ls218/Т2 Криостат низ_raw"):
-        owner.require_calibration_raw_channels(("Т2 Криостат низ",))
+        owner.require_calibration_raw_channels((("ls218", "Т2 Криостат низ"),))
 
 
 def test_require_calibration_raw_channels_rejects_unbound_base_label() -> None:
@@ -393,8 +393,8 @@ def test_require_calibration_raw_channels_rejects_unbound_base_label() -> None:
         )
     )
 
-    with pytest.raises(ChannelDescriptorStorageError, match="Т99_raw"):
-        owner.require_calibration_raw_channels(("Т99",))
+    with pytest.raises(ChannelDescriptorStorageError, match="ls218/Т99_raw"):
+        owner.require_calibration_raw_channels((("ls218", "Т99"),))
 
 
 def test_require_calibration_raw_channels_rejects_non_collection_input() -> None:
