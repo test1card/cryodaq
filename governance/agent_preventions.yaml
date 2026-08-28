@@ -268,7 +268,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
-    guard: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_prose_only_target
     ci_partition: remaining
     red_evidence: roadmap_md_carried_the_phase_1_status_token_twice_the_real_marker_reading_IN_PROGRESS_and_the_comment_beneath_it_spelling_the_completed_value_so_ob_002_marker_trigger_fired_on_prose_while_the_descriptor_spine_was_unmerged_and_the_planned_ob_010_gate_would_have_reddened_for_a_sentence_with_the_cheap_repair_recording_a_phase_completion_that_never_happened_2026_08_14_pending_immutable_capture
     green_evidence: pending
@@ -287,6 +287,30 @@ false_green_pairs:
     guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value
     ci_partition: remaining
     red_evidence: changing_OB_002s_Trigger_value_from_DONE_to_IN_PROGRESS_makes_the_terminal_value_guard_red_while_the_vocabulary_only_predecessor_stayed_green_2026_08_15_pending_immutable_capture
+    green_evidence: pending
+  - id: OBLIGATION-TRIGGER-DUPLICATE-ROW-FALSE-GREEN-342
+    status: open
+    scope: repository
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_duplicate_register_rows
+    ci_partition: remaining
+    red_evidence: appending_a_second_OB_002_row_with_a_different_trigger_left_the_first_row_selected_by_the_predecessor_and_the_marker_suite_green_while_the_planned_evaluator_had_no_unique_registered_trigger_2026_08_28_pending_immutable_capture
+    green_evidence: pending
+  - id: OBLIGATION-TRIGGER-TRAILING-TEXT-FALSE-GREEN-343
+    status: open
+    scope: repository
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_trailing_text
+    ci_partition: remaining
+    red_evidence: suffixing_the_OB_002_trigger_cell_with_trailing_text_left_a_prefix_only_parser_green_while_the_registered_trigger_was_not_one_complete_marker_expression_2026_08_28_pending_immutable_capture
+    green_evidence: pending
+  - id: OBLIGATION-TRIGGER-SUFFIXED-TARGET-VALUE-FALSE-GREEN-344
+    status: open
+    scope: repository
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_suffixed_target_value
+    ci_partition: remaining
+    red_evidence: suffixing_the_target_marker_value_with_bang_left_the_predecessors_prefix_capture_green_while_the_target_value_was_outside_the_declared_vocabulary_2026_08_28_pending_immutable_capture
     green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
@@ -3451,17 +3475,25 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A marker token that also appears in prose, or a trigger keyed to a value the marker can never carry, makes the trigger answer a question about the text rather than about the work. On 2026-08-14 ROADMAP.md carried phase-1-status twice - the real marker reading IN_PROGRESS and the comment beneath it spelling the completed value - so OB-002 evaluated true while the descriptor spine was unmerged. The planned register guard turns a fired trigger on a PENDING row into a red docs gate, so this would have reddened for a sentence, and the cheap repair of flipping the row to DUE would have recorded a phase completion that never happened.
-    invariant: 'A marker trigger is resolvable from the register alone: the guard parses the file, token and expected value out of the Trigger cell rather than hardcoding them, the expected value belongs to the declared vocabulary, and the target file carries that token exactly once. A second occurrence fails whatever its value, because the ambiguity is the defect and a prose mention is how it returns.'
+    consequence: A marker token that also appears in prose, a trigger keyed to a value the marker can never carry, or a trigger keyed to the valid but nonterminal IN_PROGRESS value makes the trigger answer a question about the text or incomplete work rather than about a completed phase. On 2026-08-14 ROADMAP.md carried phase-1-status twice - the real marker reading IN_PROGRESS and the comment beneath it spelling the completed value - so OB-002 evaluated true while the descriptor spine was unmerged. The planned register guard turns a fired trigger on a PENDING row into a red docs gate, so this would have reddened for a sentence, and the cheap repair of flipping the row to DUE would have recorded a phase completion that never happened.
+    invariant: 'A marker trigger is resolvable from the register alone: the guard parses the file, token and expected value out of the Trigger cell rather than hardcoding them; OB-002''s expected terminal value is exactly DONE, not merely any declared vocabulary value; and the target file carries that token exactly once as the designated marker assignment. A second occurrence fails whatever its value, because the ambiguity is the defect and a prose mention is how it returns.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
         ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_prose_only_target
+        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_retargeted_token
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_duplicate_register_rows
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_trailing_text
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_suffixed_target_value
         ci_partition: remaining
     red_evidence: restoring_the_prose_mention_of_the_completed_value_turns_the_guard_red_with_two_occurrences_2026_08_14_pending_immutable_capture
     green_evidence: pending

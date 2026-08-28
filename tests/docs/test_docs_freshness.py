@@ -2941,6 +2941,32 @@ def test_ob_002_marker_trigger_rejects_suffixed_target_value(monkeypatch: pytest
         test_roadmap_phase_marker_has_exactly_one_occurrence()
 
 
+def test_ob_002_marker_trigger_rejects_prose_only_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sole target occurrence must occupy the designated marker assignment.
+
+    Searching for the token anywhere is not enough.  If an editor removes the
+    ``<!-- phase-1-status=... :`` assignment but leaves a sentence that happens
+    to spell ``phase-1-status=DONE``, the trigger-shaped prose must not satisfy
+    the guard that protects the evaluator from firing on prose.
+    """
+
+    original_read = _read
+
+    def _read_with_prose_only_target(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "ROADMAP.md":
+            return text.replace(
+                "<!-- phase-1-status=IN_PROGRESS :",
+                "<!-- explanatory prose says phase-1-status=DONE but is not a marker assignment:",
+                1,
+            )
+        return text
+
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_prose_only_target)
+    with pytest.raises(AssertionError, match="designated marker assignment"):
+        test_roadmap_phase_marker_has_exactly_one_occurrence()
+
+
 def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     """OB-002's trigger token must be a MARKER, not a string that also appears in prose.
 
@@ -2973,6 +2999,15 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
         f"{len(occurrences)} occurrences with values {occurrences}. A second mention makes "
         "OB-002's marker trigger unresolvable, and a trigger that fires on prose puts the "
         "obligation register into a state its evidence does not support."
+    )
+    marker_assignments = re.findall(
+        rf"(?m)^<!--\s*{re.escape(token)}=(\S+?)\s*:",
+        target,
+    )
+    assert len(marker_assignments) == 1, (
+        f"{marker_file} must carry its sole {token} occurrence as exactly one designated "
+        f"marker assignment; found {len(marker_assignments)}. A prose occurrence does not "
+        "establish the marker state the evaluator reads."
     )
     assert occurrences[0] in _PHASE_MARKER_VALUES, (
         f"{token} carries the unknown value {occurrences[0]!r}; OB-002 keys its trigger to "

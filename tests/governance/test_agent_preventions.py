@@ -748,6 +748,60 @@ def test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_gu
         assert pair.get("platform") == runtime_guard.get("platform")
 
 
+def test_obligation_marker_runtime_requires_done_as_its_terminal_value() -> None:
+    """A vocabulary-valid IN_PROGRESS trigger must not describe OB-002 as safe."""
+
+    payload = validate_registry(_registry())
+    runtime = next(record for record in payload["records"] if record["id"] == "OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339")
+
+    assert "valid but nonterminal IN_PROGRESS" in runtime["consequence"]
+    assert "expected terminal value is exactly DONE" in runtime["invariant"]
+
+
+def test_obligation_marker_runtime_registers_each_correction_level_false_green_guard() -> None:
+    """Every confirmed OB-002 escape needs its own runtime-linked prevention."""
+
+    payload = validate_registry(_registry())
+    runtime = next(record for record in payload["records"] if record["id"] == "OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339")
+    expected_guards = {
+        "tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_duplicate_register_rows",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_prose_only_target",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_retargeted_token",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_suffixed_target_value",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value",
+        "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_trailing_text",
+    }
+    assert {guard["node"] for guard in runtime["guards"]} == expected_guards
+
+    expected_pairs = {
+        "OBLIGATION-MARKER-TRIGGER-FIRES-ON-PROSE-FALSE-GREEN-337": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_prose_only_target"
+        ),
+        "OBLIGATION-TRIGGER-DUPLICATE-ROW-FALSE-GREEN-342": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_duplicate_register_rows"
+        ),
+        "OBLIGATION-TRIGGER-RETARGET-FALSE-GREEN-340": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_retargeted_token"
+        ),
+        "OBLIGATION-TRIGGER-SUFFIXED-TARGET-VALUE-FALSE-GREEN-344": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_suffixed_target_value"
+        ),
+        "OBLIGATION-TRIGGER-TERMINAL-VALUE-FALSE-GREEN-341": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value"
+        ),
+        "OBLIGATION-TRIGGER-TRAILING-TEXT-FALSE-GREEN-343": (
+            "tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_trailing_text"
+        ),
+    }
+    pairs = {
+        pair["id"]: pair["guard"]
+        for pair in payload["false_green_pairs"]
+        if pair["runtime_prevention_id"] == runtime["id"]
+    }
+    assert pairs == expected_pairs
+
+
 def test_registry_guard_partitions_match_candidate_runner_selection() -> None:
     payload = validate_registry(_registry())
     assignments = [(pair["guard"], pair["ci_partition"]) for pair in payload["false_green_pairs"]]
