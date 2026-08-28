@@ -172,6 +172,47 @@ def test_point_row_and_checkpoint_have_separate_fsync_boundaries(tmp_path, monke
     )
     assert snapshot.terminal is not None
     assert snapshot.terminal["status"] == "COMPLETED"
+    assert snapshot.finished_at == datetime(2026, 8, 27, 12, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        (None, "finished_at is invalid"),
+        ("not-a-time", "finished_at is invalid"),
+        ("2026-08-27T11:59:59+00:00", "finished_at precedes started_at"),
+    ],
+)
+def test_terminal_finished_at_is_required_parseable_and_ordered(
+    tmp_path,
+    replacement: str | None,
+    message: str,
+) -> None:
+    path = tmp_path / "terminal-time.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="run-1",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters={},
+    )
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    lines = path.read_text(encoding="utf-8").splitlines()
+    terminal_index = next(index for index, line in enumerate(lines) if "conductivity_run_terminal" in line)
+    terminal = json.loads(lines[terminal_index][len(module._COMMENT_PREFIX) :])
+    if replacement is None:
+        terminal.pop("finished_at")
+    else:
+        terminal["finished_at"] = replacement
+    lines[terminal_index] = module._COMMENT_PREFIX + json.dumps(
+        terminal,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ConductivityRunFormatError, match=message):
+        read_conductivity_run(path)
 
 
 def test_durable_file_without_terminal_exposes_recoverable_checkpoint_prefix(tmp_path) -> None:
@@ -507,8 +548,12 @@ def _autosweep_record(
     experiment_id: str = "experiment-a",
     parameters: dict[str, object] | None = None,
     started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    historical_legacy: bool = False,
 ) -> RunRecord:
     summary = {} if point_count is None else {"point_count": point_count}
+    if historical_legacy:
+        summary["artifact_format"] = "legacy_csv"
     return RunRecord(
         record_id=record_id,
         source_run_id=source_run_id,
@@ -517,8 +562,14 @@ def _autosweep_record(
         run_type="autosweep",
         status=status,
         started_at=started_at or datetime(2026, 8, 27, 12, tzinfo=UTC),
-        finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC),
-        parameters=dict(_bound_parameters() if parameters is None else parameters),
+        finished_at=finished_at or datetime(2026, 8, 27, 12, 1, tzinfo=UTC),
+        parameters=dict(
+            {}
+            if historical_legacy and parameters is None
+            else _bound_parameters()
+            if parameters is None
+            else parameters
+        ),
         result_summary=summary,
         artifact_paths=(str(path),),
         experiment_context={"experiment_id": experiment_id},
@@ -704,6 +755,7 @@ def test_manager_contains_oversized_metadata_integer_and_collects_other_artifact
         status="COMPLETED",
         point_count=1,
         record_id="experiment:valid-legacy",
+        historical_legacy=True,
     )
 
     assert manager._collect_conductivity_rows([corrupt_record, valid_record]) == [
@@ -741,6 +793,34 @@ def test_manager_requires_durable_run_start_to_match_run_record(tmp_path) -> Non
     )
 
     assert read_conductivity_run(path).started_at == artifact_started_at
+    assert manager._collect_conductivity_rows([mismatched]) == []
+
+
+def test_manager_requires_terminal_finished_at_to_match_run_record(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    path = tmp_path / "finish-mismatch.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="finish-mismatch",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters=_bound_parameters(),
+    )
+    writer.append_binding("experiment-a")
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    mismatched = _autosweep_record(
+        path,
+        source_run_id="finish-mismatch",
+        status="COMPLETED",
+        point_count=1,
+        finished_at=datetime(2026, 8, 27, 12, 2, tzinfo=UTC),
+    )
+
+    assert read_conductivity_run(path).finished_at == datetime(2026, 8, 27, 12, 1, tzinfo=UTC)
     assert manager._collect_conductivity_rows([mismatched]) == []
 
 
@@ -870,6 +950,7 @@ def test_manager_legacy_csv_rule_is_finite_rows_with_resolved_path_dedupe(tmp_pa
         source_run_id="legacy-identity-is-not-asserted",
         status="COMPLETED",
         point_count=99,
+        historical_legacy=True,
     )
     expected = [
         {
@@ -880,6 +961,28 @@ def test_manager_legacy_csv_rule_is_finite_rows_with_resolved_path_dedupe(tmp_pa
     ]
     assert manager._collect_conductivity_rows([legacy]) == expected
     assert manager._collect_conductivity_rows([legacy, legacy]) == expected
+
+
+def test_manager_rejects_legacy_artifact_for_current_descriptor_record(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    path = tmp_path / "replaced-current.csv"
+    path.write_text(
+        "T_avg_K,G_WK,R_KW\n105.0,0.0012,833.3333333333334\n",
+        encoding="utf-8",
+    )
+    current = _autosweep_record(
+        path,
+        source_run_id="current-run",
+        status="COMPLETED",
+        point_count=1,
+    )
+
+    assert "bound_descriptors" in current.parameters
+    assert manager._collect_conductivity_rows([current]) == []
 
 
 def test_checkpoint_before_its_row_is_not_a_recoverable_prefix(tmp_path) -> None:

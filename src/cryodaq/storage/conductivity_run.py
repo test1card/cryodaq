@@ -53,6 +53,7 @@ class ConductivityRunSnapshot:
     raw_row_count: int
     run_id: str | None
     started_at: datetime | None
+    finished_at: datetime | None
     parameters: dict[str, Any]
     status: str
     accepted_point_count: int
@@ -164,6 +165,22 @@ def _durable_started_at(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise ConductivityRunFormatError("Autosweep start started_at must include a timezone.")
     return parsed.astimezone(UTC)
+
+
+def _durable_finished_at(value: object, *, started_at: datetime) -> datetime:
+    if type(value) is not str or not value:
+        raise ConductivityRunFormatError("Autosweep terminal finished_at is invalid.")
+    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ConductivityRunFormatError("Autosweep terminal finished_at is invalid.") from exc
+    if parsed.tzinfo is None:
+        raise ConductivityRunFormatError("Autosweep terminal finished_at must include a timezone.")
+    finished_at = parsed.astimezone(UTC)
+    if finished_at < started_at:
+        raise ConductivityRunFormatError("Autosweep terminal finished_at precedes started_at.")
+    return finished_at
 
 
 def _json_comment(payload: dict[str, Any]) -> str:
@@ -423,19 +440,20 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
             raise ConductivityRunFormatError("Durable autosweep header has no start authority.")
         legacy_rows = tuple(row for row in parsed_rows if row is not None)
         return ConductivityRunSnapshot(
-            legacy_rows,
-            len(parsed_rows),
-            None,
-            None,
-            {},
-            "LEGACY",
-            len(legacy_rows),
-            0,
-            False,
-            False,
-            None,
-            None,
-            False,
+            rows=legacy_rows,
+            raw_row_count=len(parsed_rows),
+            run_id=None,
+            started_at=None,
+            finished_at=None,
+            parameters={},
+            status="LEGACY",
+            accepted_point_count=len(legacy_rows),
+            checkpoint_count=0,
+            recovery_required=False,
+            binding_recorded=False,
+            bound_experiment_id=None,
+            terminal=None,
+            durable_format=False,
         )
     if len(starts) != 1 or starts[0].get("schema_version") != SCHEMA_VERSION:
         raise ConductivityRunFormatError("Autosweep start authority is missing or ambiguous.")
@@ -485,19 +503,20 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
     if not terminals:
         published = tuple(row for row in parsed_rows[:contiguous] if row is not None)
         return ConductivityRunSnapshot(
-            published,
-            len(parsed_rows),
-            run_id,
-            started_at,
-            dict(parameters),
-            "RUNNING",
-            contiguous,
-            contiguous,
-            True,
-            bool(bindings),
-            bound_experiment_id,
-            None,
-            True,
+            rows=published,
+            raw_row_count=len(parsed_rows),
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=None,
+            parameters=dict(parameters),
+            status="RUNNING",
+            accepted_point_count=contiguous,
+            checkpoint_count=contiguous,
+            recovery_required=True,
+            binding_recorded=bool(bindings),
+            bound_experiment_id=bound_experiment_id,
+            terminal=None,
+            durable_format=True,
         )
     if len(terminals) != 1:
         raise ConductivityRunFormatError("Autosweep terminal authority is ambiguous.")
@@ -507,6 +526,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
     status = str(terminal.get("status", "")).upper()
     if status not in _TERMINAL_STATUSES:
         raise ConductivityRunFormatError("Autosweep terminal status is invalid.")
+    finished_at = _durable_finished_at(terminal.get("finished_at"), started_at=started_at)
     accepted = terminal.get("accepted_point_count")
     if type(accepted) is not int or accepted < 0 or accepted > len(parsed_rows):
         raise ConductivityRunFormatError("Autosweep terminal accepted_point_count is invalid.")
@@ -530,17 +550,70 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
 
     published_rows = tuple(row for row in accepted_rows if row is not None)
     return ConductivityRunSnapshot(
-        published_rows,
-        len(parsed_rows),
-        run_id,
-        started_at,
-        dict(parameters),
-        status,
-        accepted,
-        contiguous,
-        False,
-        bool(bindings),
-        bound_experiment_id,
-        terminal,
-        True,
+        rows=published_rows,
+        raw_row_count=len(parsed_rows),
+        run_id=run_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        parameters=dict(parameters),
+        status=status,
+        accepted_point_count=accepted,
+        checkpoint_count=contiguous,
+        recovery_required=False,
+        binding_recorded=bool(bindings),
+        bound_experiment_id=bound_experiment_id,
+        terminal=terminal,
+        durable_format=True,
     )
+
+
+def recover_conductivity_run_after_verified_off(
+    path: Path,
+    *,
+    finished_at: datetime,
+) -> ConductivityRunSnapshot:
+    """Terminalize one restart-orphaned durable prefix after external OFF proof.
+
+    The caller owns the verified-OFF decision. This function owns only the
+    append-only artifact reconciliation and refuses legacy, unbound, replaced,
+    or structurally inconsistent files.
+    """
+
+    target = Path(path)
+    expected_identity = target.stat()
+    snapshot = read_conductivity_run(target)
+    if not snapshot.durable_format or snapshot.run_id is None or snapshot.started_at is None:
+        raise ConductivityRunFormatError("Only a durable autosweep can be recovered.")
+    if not snapshot.binding_recorded or snapshot.bound_experiment_id is None:
+        raise ConductivityRunFormatError("A restart autosweep recovery requires a durable experiment binding.")
+    if snapshot.terminal is not None:
+        return snapshot
+    terminal_time = finished_at.astimezone(UTC) if finished_at.tzinfo is not None else finished_at.replace(tzinfo=UTC)
+    if terminal_time < snapshot.started_at:
+        raise ConductivityRunFormatError("Autosweep recovery finished_at precedes started_at.")
+    trailing = snapshot.raw_row_count - snapshot.accepted_point_count
+    if trailing not in {0, 1}:
+        raise ConductivityRunFormatError("Autosweep recovery has ambiguous trailing rows.")
+    status = "FAILED" if trailing else "ABORTED"
+    terminal: dict[str, Any] = {
+        "record_type": "conductivity_run_terminal",
+        "schema_version": SCHEMA_VERSION,
+        "run_id": snapshot.run_id,
+        "status": status,
+        "accepted_point_count": snapshot.accepted_point_count,
+        "finished_at": _utc_text(terminal_time),
+        "error": "recovered_after_restart",
+    }
+    if trailing:
+        terminal["trailing_write_outcome"] = "indeterminate"
+    with target.open("r+", encoding="utf-8", newline="") as handle:
+        if not os.path.samestat(expected_identity, os.fstat(handle.fileno())):
+            raise ConductivityRunFormatError("Autosweep artifact identity changed during recovery.")
+        handle.seek(0, os.SEEK_END)
+        handle.write("\n" + _json_comment(terminal))
+        handle.flush()
+        os.fsync(handle.fileno())
+    recovered = read_conductivity_run(target)
+    if recovered.terminal != terminal:
+        raise ConductivityRunFormatError("Autosweep terminal recovery did not verify after append.")
+    return recovered

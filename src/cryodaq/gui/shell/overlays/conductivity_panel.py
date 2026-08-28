@@ -2,7 +2,7 @@
 
 Supersedes the v1 widget at ``src/cryodaq/gui/widgets/conductivity_panel.py``.
 Aligned with the canonical design-system tokens. Preserves the three public
-auto-sweep guard-state values and the flight-recorder CSV schema while adding
+auto-sweep guard-state contract and the flight-recorder CSV schema while adding
 generation-bound command settlement, explicit outcome-unknown retention, and a
 successful current-generation SafetyManager Stop reply before operator Stop or
 completion is published.
@@ -20,9 +20,10 @@ Public API (host push points):
   ``/smu*/power`` readings per existing shell routing contract.
 - ``set_connected(bool)`` — gates auto-sweep Start + shows banner.
   Chain selection / CSV export stay enabled (local work).
-- ``get_auto_state() -> str`` — returns ``"idle"`` / ``"stabilizing"`` /
-  ``"done"``. ``"stabilizing"`` is conservative: it also covers target
-  settlement, Stop-confirmation, and outcome-unknown substates.
+- ``get_auto_state() -> str`` — returns ``"idle"`` / ``"reserving"`` /
+  ``"stabilizing"`` / ``"done"``. ``"reserving"`` cannot dispatch a source
+  target; ``"stabilizing"`` also covers target settlement, Stop confirmation,
+  and outcome-unknown substates.
 - ``is_auto_sweep_active() -> bool`` — finalize-guard predicate; ``True``
   does not imply that the auto timer is running or command outcome is known.
 
@@ -332,6 +333,7 @@ class ConductivityPanel(QWidget):
         self._auto_run_path: Path | None = None
         self._auto_run_id: str | None = None
         self._auto_run_started_at: datetime | None = None
+        self._auto_run_parameters: dict[str, Any] | None = None
         self._latest_channel_descriptors: dict[str, ChannelDescriptorV1] = {}
         self._latest_channel_descriptor_generations: dict[str, int] = {}
         self._auto_bound_power_channel: str | None = None
@@ -343,6 +345,7 @@ class ConductivityPanel(QWidget):
         self._auto_persistence_error: str | None = None
         self._auto_trailing_write_outcome: str | None = None
         self._auto_experiment_id: str | None = None
+        self._auto_expected_experiment_id: str | None = None
         self._auto_experiment_binding_known = False
         # Engine attachment settlement and durable file binding are separate
         # authorities: only the latter permits terminal publication.
@@ -366,6 +369,7 @@ class ConductivityPanel(QWidget):
         # Once a point write fails, a later generic Stop retry must not
         # downgrade the terminal record from FAILED to ABORTED.
         self._auto_terminal_failure_required = False
+        self._auto_power_target_dispatched = False
         # Activity and command outcome are independent truth axes.  A lost
         # reply must retain the last-known ACTIVE state so external finalize
         # guards cannot be cleared by GUI inference.
@@ -1112,7 +1116,7 @@ class ConductivityPanel(QWidget):
 
     def _on_channels_changed(self) -> None:
         new_channels = _get_temperature_channels()
-        active = self._auto_state == "stabilizing"
+        active = self._auto_state in {"reserving", "stabilizing"}
         bound_channels = self._auto_bound_temperature_channels if active else ()
         if bound_channels:
             display_names = dict(self._all_channels)
@@ -1634,7 +1638,7 @@ class ConductivityPanel(QWidget):
         self._auto_minimum_wait_s = None
 
     def _begin_auto_run_async(self, powers: list[float], data_dir: Path) -> bool:
-        """Create the run file off-thread before any source target can change."""
+        """Resolve experiment authority before creating a file or changing power."""
 
         started_at = datetime.now(UTC)
         run_id = f"conductivity-{started_at.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:12]}"
@@ -1654,7 +1658,9 @@ class ConductivityPanel(QWidget):
         self._auto_run_path = path
         self._auto_run_id = run_id
         self._auto_run_started_at = started_at
+        self._auto_run_parameters = parameters
         self._auto_experiment_id = None
+        self._auto_expected_experiment_id = None
         self._auto_experiment_binding_known = False
         self._auto_binding_resolution = "unrequested"
         self._auto_persistence_error = None
@@ -1662,6 +1668,23 @@ class ConductivityPanel(QWidget):
         self._auto_terminal_failure_required = False
         self._auto_run_creation_failed = False
         self._auto_run_creation_error = None
+        command = self._attachment_command(
+            status="RUNNING",
+            terminal=None,
+            finished_at=None,
+            reservation_state="reserved",
+        )
+        return command is not None and self._send_auto_cmd(command)
+
+    def _begin_auto_writer_creation(self) -> bool:
+        """Create the engine-reserved artifact off-thread."""
+
+        path = self._auto_run_path
+        run_id = self._auto_run_id
+        started_at = self._auto_run_started_at
+        parameters = self._auto_run_parameters
+        if path is None or run_id is None or started_at is None or parameters is None:
+            return False
         return self._dispatch_persistence(
             lambda: ConductivityRunWriter(
                 path,
@@ -1687,6 +1710,9 @@ class ConductivityPanel(QWidget):
                 )
                 self._update_control_enablement()
                 return
+            if self._auto_experiment_id is not None:
+                self._terminalize_reserved_prearm_failure(reason)
+                return
             self._auto_state = "idle"
             self._auto_outcome_unknown = False
             self._auto_status_label.setText(f"Автоизмерение не запущено: файл данных не создан ({reason[:160]})")
@@ -1694,16 +1720,21 @@ class ConductivityPanel(QWidget):
             self._update_control_enablement()
             return
         self._auto_run_writer = result["value"]
-        if self._persist_explicit_unbound_while_stopping():
-            return
-        if self._persistence_completion_is_stopped():
-            return
-        command = self._attachment_command(status="RUNNING", terminal=None, finished_at=None)
-        if command is None or not self._send_auto_cmd(command):
-            self._latch_auto_outcome_unknown("Начальная RUNNING-привязка не отправлена; мощность не изменена.")
+        self._persist_auto_binding_then_arm(self._auto_experiment_id)
 
     def _settle_prearm_creation_failure_after_off(self, reason: str) -> None:
         """Release a run that never acquired a file only after verified OFF."""
+
+        if self._auto_experiment_id is not None:
+            self._auto_pending_stop_intent = None
+            self._auto_deferred_terminal_status = None
+            self._terminalize_reserved_prearm_failure(reason)
+            return
+
+        self._release_prearm_creation_failure(reason)
+
+    def _release_prearm_creation_failure(self, reason: str) -> None:
+        """Return an unarmed failed creation to idle after metadata settlement."""
 
         self._auto_state = "idle"
         self._auto_outcome_unknown = False
@@ -1719,21 +1750,49 @@ class ConductivityPanel(QWidget):
         self._clear_auto_selection()
         self._on_channels_changed()
 
+    def _terminalize_reserved_prearm_failure(self, reason: str) -> None:
+        """Replace a durable reservation when its file never became writable."""
+
+        finished_at = datetime.now(UTC)
+        self._auto_persistence_error = reason
+        command = self._attachment_command(
+            status="FAILED",
+            terminal={"accepted_point_count": 0},
+            finished_at=finished_at,
+            reservation_state="failed_prearm",
+        )
+        if command is None:
+            self._block_after_terminal_attachment_failure("резервирование потеряло идентичность")
+            return
+        self._auto_terminal_attachment_command = command
+        self._auto_terminal_publication_status = "FAILED"
+        if not self._dispatch_pending_terminal_attachment():
+            self._block_after_terminal_attachment_failure("FAILED-привязка не отправлена")
+
     def _attachment_command(
         self,
         *,
         status: str,
         terminal: dict[str, Any] | None,
         finished_at: datetime | None,
+        reservation_state: str | None = None,
     ) -> dict[str, Any] | None:
-        writer = self._auto_run_writer
         path = self._auto_run_path
         run_id = self._auto_run_id
         started_at = self._auto_run_started_at
-        if writer is None or path is None or run_id is None or started_at is None:
+        parameters = self._auto_run_parameters
+        if path is None or run_id is None or started_at is None or parameters is None:
             return None
         if status != "RUNNING" and self._auto_experiment_id is None:
             return None
+        result_summary = {
+            "artifact_format": "conductivity_run_v1",
+            "point_count": 0 if terminal is None else terminal["accepted_point_count"],
+            "recovery_required": terminal is None,
+            "persistence_error": self._auto_persistence_error,
+        }
+        if reservation_state is not None:
+            result_summary["reservation_state"] = reservation_state
         command: dict[str, Any] = {
             "cmd": "experiment_attach_run_record",
             "source_tab": "conductivity",
@@ -1742,16 +1801,13 @@ class ConductivityPanel(QWidget):
             "status": status,
             "source_run_id": run_id,
             "started_at": started_at.isoformat(),
-            "parameters": dict(writer.parameters),
-            "result_summary": {
-                "point_count": 0 if terminal is None else terminal["accepted_point_count"],
-                "recovery_required": terminal is None,
-                "persistence_error": self._auto_persistence_error,
-            },
-            "artifact_paths": [str(path)],
+            "parameters": dict(parameters),
+            "result_summary": result_summary,
+            "artifact_paths": [] if self._auto_run_writer is None and status != "RUNNING" else [str(path)],
         }
-        if self._auto_experiment_id is not None:
-            command["experiment_id"] = self._auto_experiment_id
+        experiment_id = self._auto_experiment_id or self._auto_expected_experiment_id
+        if experiment_id is not None:
+            command["experiment_id"] = experiment_id
         if finished_at is not None:
             command["finished_at"] = finished_at.isoformat()
         return command
@@ -1817,8 +1873,23 @@ class ConductivityPanel(QWidget):
             return
         self._auto_experiment_binding_known = True
         self._auto_binding_resolution = "durable"
-        if not self._persistence_completion_is_stopped():
+        if self._persistence_completion_is_stopped():
+            return
+        if self._auto_experiment_id is None:
             self._dispatch_first_auto_target()
+            return
+        command = self._attachment_command(
+            status="RUNNING",
+            terminal=None,
+            finished_at=None,
+            reservation_state="artifact_ready",
+        )
+        if command is None:
+            self._latch_auto_outcome_unknown("Готовность файла потеряна; мощность не изменена.")
+            return
+        self._auto_binding_resolution = "artifact_attachment_pending"
+        if not self._send_auto_cmd(command):
+            self._latch_auto_outcome_unknown("Готовность файла не прикреплена; мощность не изменена.")
 
     def _dispatch_first_auto_target(self) -> None:
         if not self._auto_power_list:
@@ -1831,6 +1902,7 @@ class ConductivityPanel(QWidget):
             return
         self._auto_step_power_channel = power_channel
         self._auto_step_temperature_channels = temperature_channels
+        self._auto_power_target_dispatched = True
         if not self._send_auto_cmd(
             {
                 "cmd": "keithley_set_target",
@@ -1840,6 +1912,7 @@ class ConductivityPanel(QWidget):
             evidence_power_channel=power_channel,
             evidence_temperature_channels=temperature_channels,
         ):
+            self._auto_power_target_dispatched = False
             self._latch_auto_outcome_unknown("Начальная команда мощности не отправлена.")
             return
         self._auto_timer.start()
@@ -1871,6 +1944,15 @@ class ConductivityPanel(QWidget):
 
         if self._auto_terminal_failure_required:
             status = "FAILED"
+        if self._auto_run_writer is None and self._auto_binding_resolution in {
+            "reservation_pending",
+            "reserved",
+        }:
+            self._auto_deferred_terminal_status = status
+            return
+        if self._auto_run_writer is None and self._auto_run_creation_failed:
+            self._settle_prearm_creation_failure_after_off(self._auto_run_creation_error or "файл данных не создан")
+            return
         if not self._auto_experiment_binding_known:
             self._auto_deferred_terminal_status = status
             if self._persist_explicit_unbound_while_stopping():
@@ -1914,7 +1996,10 @@ class ConductivityPanel(QWidget):
         if status == "COMPLETED":
             self._publish_auto_complete()
         elif status == "FAILED":
-            self._publish_auto_failure()
+            if self._auto_run_creation_failed and not self._auto_power_target_dispatched:
+                self._release_prearm_creation_failure(self._auto_run_creation_error or "файл данных не создан")
+            else:
+                self._publish_auto_failure()
         else:
             self._publish_auto_stop()
 
@@ -1937,7 +2022,10 @@ class ConductivityPanel(QWidget):
         command = self._auto_terminal_attachment_command
         if command is None or self._auto_terminal_attachment_inflight:
             return False
-        if self._auto_verified_off_connection_generation != self._auto_connection_generation:
+        if (
+            self._auto_power_target_dispatched
+            and self._auto_verified_off_connection_generation != self._auto_connection_generation
+        ):
             self._update_control_enablement()
             return False
         self._auto_terminal_attachment_inflight = True
@@ -2009,7 +2097,8 @@ class ConductivityPanel(QWidget):
         """Dispatch one generation-bound command while live authority exists."""
 
         if not self._connected:
-            if self._auto_state == "stabilizing":
+            if self._auto_state in {"reserving", "stabilizing"}:
+                self._auto_state = "stabilizing"
                 self._latch_auto_outcome_unknown("Нет живой связи с Engine; команда не отправлена.")
             return False
 
@@ -2048,7 +2137,10 @@ class ConductivityPanel(QWidget):
         if cmd.get("cmd") == "keithley_set_target":
             self._auto_verified_off_connection_generation = None
         if cmd.get("cmd") == "experiment_attach_run_record" and cmd.get("status") == "RUNNING":
-            self._auto_binding_resolution = "attachment_pending"
+            reservation_state = (cmd.get("result_summary") or {}).get("reservation_state")
+            self._auto_binding_resolution = (
+                "artifact_attachment_pending" if reservation_state == "artifact_ready" else "reservation_pending"
+            )
         worker.start()
         return True
 
@@ -2075,9 +2167,14 @@ class ConductivityPanel(QWidget):
         is_start_attachment = (
             command.get("cmd") == "experiment_attach_run_record" and command.get("status") == "RUNNING"
         )
-        reconcile_start_attachment = is_start_attachment and self._auto_binding_resolution == "attachment_pending"
+        is_ready_attachment = (
+            is_start_attachment and (command.get("result_summary") or {}).get("reservation_state") == "artifact_ready"
+        )
+        reconcile_prearm = (
+            is_start_attachment and not is_ready_attachment and self._auto_binding_resolution == "reservation_pending"
+        ) or (is_ready_attachment and self._auto_binding_resolution == "artifact_attachment_pending")
         pending_token = self._auto_pending_token
-        if pending_token is not None and token != pending_token and not reconcile_start_attachment:
+        if pending_token is not None and token != pending_token and not reconcile_prearm:
             logger.warning(
                 "Ответ вытесненной авто-команды проигнорирован: %s, token=%s, current=%s",
                 command.get("cmd", "?"),
@@ -2089,7 +2186,7 @@ class ConductivityPanel(QWidget):
             self._auto_pending_token = None
 
         if expected_operation_generation != self._auto_operation_generation or (
-            not reconcile_start_attachment
+            not reconcile_prearm
             and (expected_connection_generation != self._auto_connection_generation or not self._connected)
         ):
             logger.warning(
@@ -2129,7 +2226,10 @@ class ConductivityPanel(QWidget):
                 if status is None or status != command.get("status"):
                     self._block_after_terminal_attachment_failure("идентичность терминального состояния потеряна")
                     return
-                if self._auto_verified_off_connection_generation != self._auto_connection_generation:
+                if (
+                    self._auto_power_target_dispatched
+                    and self._auto_verified_off_connection_generation != self._auto_connection_generation
+                ):
                     self._block_after_terminal_attachment_failure("подтверждение отключения источника устарело")
                     return
                 self._auto_terminal_attachment_command = None
@@ -2137,7 +2237,7 @@ class ConductivityPanel(QWidget):
                 self._auto_outcome_unknown = False
                 self._publish_terminal_status(status)
                 return
-            if not reconcile_start_attachment:
+            if not reconcile_prearm:
                 logger.warning("Повторный ответ RUNNING-привязки проигнорирован после разрешения привязки.")
                 return
             if not isinstance(result, dict) or result.get("ok") is not True:
@@ -2147,6 +2247,10 @@ class ConductivityPanel(QWidget):
                     else "некорректный ответ Engine"
                 )
                 self._auto_binding_resolution = "unrequested"
+                if not is_ready_attachment and self._auto_run_writer is None:
+                    self._auto_run_creation_failed = True
+                    self._auto_run_creation_error = error
+                    self._auto_state = "stabilizing"
                 if self._persistence_completion_is_stopped():
                     return
                 self._latch_auto_outcome_unknown(
@@ -2154,10 +2258,13 @@ class ConductivityPanel(QWidget):
                 )
                 return
             if result.get("attached") is False:
-                logger.info("Файл автоизмерения сохранён без привязки: активного эксперимента нет.")
-                self._auto_binding_resolution = "unbound"
-                self._persist_auto_binding_then_arm(None)
+                self._auto_run_creation_failed = True
+                self._auto_run_creation_error = "активный эксперимент отсутствует"
+                self._auto_binding_resolution = "unrequested"
+                self._release_prearm_creation_failure(self._auto_run_creation_error)
                 return
+            if not is_ready_attachment:
+                self._auto_state = "stabilizing"
             record = result.get("run_record")
             context = record.get("experiment_context") if isinstance(record, dict) else None
             experiment_id = context.get("experiment_id") if isinstance(context, dict) else None
@@ -2165,15 +2272,29 @@ class ConductivityPanel(QWidget):
                 not isinstance(record, dict)
                 or record.get("source_run_id") != self._auto_run_id
                 or record.get("status") != "RUNNING"
+                or record.get("parameters") != command.get("parameters")
+                or record.get("result_summary") != command.get("result_summary")
+                or record.get("artifact_paths") != command.get("artifact_paths")
                 or type(experiment_id) is not str
                 or not experiment_id
+                or (is_ready_attachment and experiment_id != self._auto_expected_experiment_id)
             ):
                 self._latch_auto_outcome_unknown(
                     "RUNNING-привязка вернула несогласованную идентичность; мощность не изменена."
                 )
                 return
-            self._auto_binding_resolution = "attached"
-            self._persist_auto_binding_then_arm(experiment_id)
+            self._auto_experiment_id = experiment_id
+            if is_ready_attachment:
+                self._auto_binding_resolution = "durable"
+                if not self._persistence_completion_is_stopped():
+                    self._dispatch_first_auto_target()
+                return
+            self._auto_expected_experiment_id = experiment_id
+            self._auto_binding_resolution = "reserved"
+            if not self._begin_auto_writer_creation():
+                self._latch_auto_outcome_unknown(
+                    "Создание зарезервированного файла не поставлено в очередь; мощность не изменена."
+                )
             return
 
         if not isinstance(result, dict) or result.get("ok") is not True:
@@ -2256,7 +2377,7 @@ class ConductivityPanel(QWidget):
         # live-authority check so direct/queued invocation cannot bypass it.
         if (
             not self._connected
-            or self._auto_state == "stabilizing"
+            or self._auto_state in {"reserving", "stabilizing"}
             or self._auto_outcome_unknown
             or self._auto_pending_token is not None
         ):
@@ -2286,7 +2407,7 @@ class ConductivityPanel(QWidget):
         self._auto_power_list = powers
         self._auto_step = 0
         self._auto_results = []
-        self._auto_state = "stabilizing"
+        self._auto_state = "reserving"
         self._auto_operation_generation += 1
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
@@ -2298,6 +2419,7 @@ class ConductivityPanel(QWidget):
         self._auto_terminal_attachment_inflight = False
         self._auto_verified_off_connection_generation = None
         self._auto_terminal_failure_required = False
+        self._auto_power_target_dispatched = False
         self._invalidate_auto_step_evidence()
 
         self._auto_start_btn.setEnabled(False)
@@ -2315,8 +2437,9 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _on_auto_stop(self) -> None:
-        if self._auto_state != "stabilizing":
+        if self._auto_state not in {"reserving", "stabilizing"}:
             return
+        self._auto_state = "stabilizing"
         terminal_attachment_pending = self._auto_terminal_attachment_command is not None
         if (
             terminal_attachment_pending
@@ -2365,6 +2488,7 @@ class ConductivityPanel(QWidget):
         self._auto_state = "idle"
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._auto_power_target_dispatched = False
         self._auto_timer.stop()
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
@@ -2386,6 +2510,7 @@ class ConductivityPanel(QWidget):
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
         self._auto_terminal_failure_required = False
+        self._auto_power_target_dispatched = False
         self._auto_timer.stop()
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
@@ -2604,6 +2729,7 @@ class ConductivityPanel(QWidget):
         self._auto_state = "done"
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._auto_power_target_dispatched = False
         self._auto_progress.setValue(100)
         self._clear_auto_selection()
         self._on_channels_changed()
@@ -2827,7 +2953,8 @@ class ConductivityPanel(QWidget):
             self._latest_channel_descriptors.clear()
             self._latest_channel_descriptor_generations.clear()
             self._auto_verified_off_connection_generation = None
-        if not connected and self._auto_state == "stabilizing":
+        if not connected and self._auto_state in {"reserving", "stabilizing"}:
+            self._auto_state = "stabilizing"
             self._auto_pending_token = None
             self._auto_pending_stop_intent = None
             self._auto_terminal_attachment_inflight = False
@@ -2842,7 +2969,7 @@ class ConductivityPanel(QWidget):
         # Handler-level authority checks mirror these presentation gates.
         # Stop is the safe direction, but a GUI without a live Engine link has
         # no authority to claim it was delivered.
-        active = self._auto_state == "stabilizing"
+        active = self._auto_state in {"reserving", "stabilizing"}
         start_ok = (
             self._connected and not active and not self._auto_outcome_unknown and self._auto_pending_token is None
         )
@@ -2866,7 +2993,10 @@ class ConductivityPanel(QWidget):
     def get_auto_state(self) -> str:
         """Return the conservative public auto-sweep guard state.
 
-        Values are ``"idle"``, ``"stabilizing"``, and ``"done"``.
+        Values are ``"idle"``, ``"reserving"``, ``"stabilizing"``, and ``"done"``.
+        ``"reserving"`` is not yet an active sweep: no file exists and no
+        source target can be dispatched until the engine commits its RUNNING
+        reservation.
         ``"stabilizing"`` includes normal settling, target-command settlement,
         Stop confirmation, and outcome-unknown retention. External finalize
         guards must block for every ``"stabilizing"`` substate.

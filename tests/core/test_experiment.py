@@ -472,7 +472,11 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
         finished_at="2026-03-16T12:02:00+00:00",
         source_run_id="autosweep-001",
         parameters={"power_start_w": 0.1, "power_end_w": 1.0},
-        result_summary={"point_count": 2, "avg_temperature_k": 4.6},
+        result_summary={
+            "point_count": 2,
+            "avg_temperature_k": 4.6,
+            "artifact_format": "legacy_csv",
+        },
         artifact_paths=[str(sweep_csv), str(sweep_png)],
     )
 

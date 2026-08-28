@@ -185,8 +185,8 @@ class _DeferredWorker:
         )
         if (
             not self._is_running_attachment
-            or self.__class__.defer_running_attachment
-            or self.__class__.defer_terminal_attachment
+            or (self._is_running_attachment and self.__class__.defer_running_attachment)
+            or (self._is_terminal_attachment and self.__class__.defer_terminal_attachment)
         ):
             self.__class__.instances.append(self)
 
@@ -204,6 +204,9 @@ class _DeferredWorker:
                         "run_record": {
                             "source_run_id": self.cmd["source_run_id"],
                             "status": "RUNNING",
+                            "parameters": self.cmd["parameters"],
+                            "result_summary": self.cmd["result_summary"],
+                            "artifact_paths": self.cmd["artifact_paths"],
                             "experiment_context": {"experiment_id": experiment_id},
                         },
                     }
@@ -756,6 +759,9 @@ def test_auto_start_generates_power_list(app, monkeypatch):
                         "run_record": {
                             "source_run_id": self._cmd["source_run_id"],
                             "status": "RUNNING",
+                            "parameters": self._cmd["parameters"],
+                            "result_summary": self._cmd["result_summary"],
+                            "artifact_paths": self._cmd["artifact_paths"],
                             "experiment_context": {"experiment_id": "experiment-a"},
                         },
                     }
@@ -2018,8 +2024,8 @@ def test_get_auto_state_after_start(app, monkeypatch):
     # Connect so Start button is enabled, then drive via button click.
     panel.set_connected(True)
     panel._auto_start_btn.click()
-    assert panel.get_auto_state() == "stabilizing"
-    assert panel.is_auto_sweep_active() is True
+    assert panel.get_auto_state() == "reserving"
+    assert panel.is_auto_sweep_active() is False
     panel._auto_timer.stop()  # cleanup
 
 
@@ -2224,15 +2230,155 @@ def test_running_attachment_and_binding_precede_first_target_without_source_star
     commands = [worker.cmd for worker in _DeferredWorker.all_instances]
     assert [command["cmd"] for command in commands] == [
         "experiment_attach_run_record",
+        "experiment_attach_run_record",
         "keithley_set_target",
     ]
-    assert commands[0]["status"] == "RUNNING"
+    assert commands[0]["result_summary"]["reservation_state"] == "reserved"
+    assert commands[1]["result_summary"]["reservation_state"] == "artifact_ready"
     assert all(command["cmd"] != "keithley_start" for command in commands)
     assert panel._auto_run_path is not None
     snapshot = read_conductivity_run(panel._auto_run_path)
     assert snapshot.binding_recorded is True
     assert snapshot.bound_experiment_id == "experiment-a"
     panel._auto_timer.stop()
+
+
+def test_active_experiment_is_reserved_before_writer_creation_can_finish(
+    app,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    experiment = manager.create_experiment("Reservation race", "Operator")
+
+    class _ManagerWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            del parent
+            self.cmd = dict(cmd)
+            self.finished = _DeferredSignal()
+
+        def start(self) -> None:
+            if self.cmd["cmd"] == "experiment_attach_run_record":
+                record = manager.attach_run_record(
+                    source_tab=self.cmd["source_tab"],
+                    source_module=self.cmd["source_module"],
+                    run_type=self.cmd["run_type"],
+                    status=self.cmd["status"],
+                    source_run_id=self.cmd["source_run_id"],
+                    started_at=self.cmd["started_at"],
+                    parameters=self.cmd["parameters"],
+                    result_summary=self.cmd["result_summary"],
+                    artifact_paths=self.cmd["artifact_paths"],
+                    experiment_id=self.cmd.get("experiment_id"),
+                )
+                self.finished.emit(
+                    {
+                        "ok": True,
+                        "attached": record is not None,
+                        "run_record": None if record is None else record.to_payload(),
+                    }
+                )
+                return
+            raise AssertionError(f"source command escaped before reservation: {self.cmd}")
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ControllablePersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _ManagerWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+
+    records = manager.list_run_records(experiment_id=experiment.experiment_id)
+    assert len(records) == 1
+    assert records[0].status == "RUNNING"
+    assert records[0].result_summary["reservation_state"] == "reserved"
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel.is_auto_sweep_active() is True
+    assert panel._auto_run_writer is None
+    assert len(_ControllablePersistenceWorker.instances) == 1
+    with pytest.raises(RuntimeError, match="автоизмерение теплопроводности ещё активно"):
+        manager.finalize_experiment(experiment.experiment_id)
+    panel._auto_timer.stop()
+
+
+def test_finalize_that_wins_before_reservation_cannot_leave_an_unbound_sweep(
+    app,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    experiment = manager.create_experiment("Reservation ordering", "Operator")
+    pending_workers = []
+
+    class _QueuedManagerWorker:
+        def __init__(self, cmd, *, parent=None) -> None:
+            del parent
+            self.cmd = dict(cmd)
+            self.finished = _DeferredSignal()
+            pending_workers.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def finish(self) -> None:
+            record = manager.attach_run_record(
+                source_tab=self.cmd["source_tab"],
+                source_module=self.cmd["source_module"],
+                run_type=self.cmd["run_type"],
+                status=self.cmd["status"],
+                source_run_id=self.cmd["source_run_id"],
+                started_at=self.cmd["started_at"],
+                parameters=self.cmd["parameters"],
+                result_summary=self.cmd["result_summary"],
+                artifact_paths=self.cmd["artifact_paths"],
+                experiment_id=self.cmd.get("experiment_id"),
+            )
+            self.finished.emit(
+                {
+                    "ok": True,
+                    "attached": record is not None,
+                    "run_record": None if record is None else record.to_payload(),
+                }
+            )
+
+        def isRunning(self) -> bool:
+            return False
+
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _QueuedManagerWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+
+    assert panel.get_auto_state() == "reserving"
+    assert panel.is_auto_sweep_active() is False
+    assert len(pending_workers) == 1
+    finalized = manager.finalize_experiment(experiment.experiment_id)
+    assert finalized.status.value == "COMPLETED"
+
+    pending_workers[0].finish()
+
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_run_path is not None
+    assert not panel._auto_run_path.exists()
+    assert len(pending_workers) == 1
 
 
 def test_outcome_unknown_blocks_binding_completion_after_quick_reconnect(app, monkeypatch) -> None:
@@ -2380,7 +2526,9 @@ def test_start_freezes_and_persists_acceptance_settings(app, monkeypatch) -> Non
     assert writer is not None
     assert writer.parameters["stabilization_threshold_pct"] == 96.0
     assert writer.parameters["minimum_wait_s"] == 42.0
-    running_attachment = _DeferredWorker.all_instances[0]
+    running_attachment = next(
+        worker for worker in _DeferredWorker.all_instances if worker.cmd.get("cmd") == "experiment_attach_run_record"
+    )
     assert running_attachment.cmd["parameters"] == writer.parameters
     assert panel._settled_pct_spin.isEnabled() is False
     assert panel._min_wait_spin.isEnabled() is False
@@ -2508,6 +2656,9 @@ def test_writer_creation_failure_waits_for_pending_stop_then_settles_idle(app, m
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
     assert panel._auto_run_writer is None
+    terminal_attachment = _DeferredWorker.all_instances[-1].cmd
+    assert terminal_attachment["status"] == "FAILED"
+    assert terminal_attachment["artifact_paths"] == []
 
 
 def test_start_data_directory_failure_never_leaves_sweep_active(app, monkeypatch) -> None:
@@ -2536,7 +2687,7 @@ def test_start_data_directory_failure_never_leaves_sweep_active(app, monkeypatch
     assert "файл данных не создан" in panel._auto_status_label.text()
 
 
-def test_stop_during_writer_creation_persists_explicit_unbound_before_terminal(app, monkeypatch) -> None:
+def test_stop_during_writer_creation_persists_reserved_binding_before_terminal(app, monkeypatch) -> None:
     class _DeferredPersistenceWorker:
         instances: list[_DeferredPersistenceWorker] = []
 
@@ -2601,9 +2752,13 @@ def test_stop_during_writer_creation_persists_explicit_unbound_before_terminal(a
     assert snapshot.status == "ABORTED"
     assert snapshot.accepted_point_count == 0
     assert snapshot.binding_recorded is True
-    assert snapshot.bound_experiment_id is None
+    assert snapshot.bound_experiment_id == "experiment-a"
     assert panel.get_auto_state() == "idle"
-    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == ["keithley_stop"]
+    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == [
+        "experiment_attach_run_record",
+        "keithley_stop",
+        "experiment_attach_run_record",
+    ]
 
 
 def test_stop_during_pending_running_attachment_persists_unbound_before_terminal(app, monkeypatch) -> None:
@@ -2650,21 +2805,34 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
     panel.set_connected(True)
 
     panel._on_auto_start()
-    create_worker = _DeferredPersistenceWorker.instances[-1]
-    create_worker.finish()
-
     attachment_worker = _DeferredWorker.instances[-1]
     assert attachment_worker.cmd["cmd"] == "experiment_attach_run_record"
     assert attachment_worker.cmd["status"] == "RUNNING"
+    assert _DeferredPersistenceWorker.instances == []
 
     panel._on_auto_stop()
     stop_worker = _DeferredWorker.instances[-1]
     assert stop_worker is not attachment_worker
     assert stop_worker.cmd["cmd"] == "keithley_stop"
     stop_worker.finish({"ok": True})
-    assert _DeferredPersistenceWorker.instances == [create_worker]
+    assert _DeferredPersistenceWorker.instances == []
 
-    attachment_worker.finish({"ok": True, "attached": False, "run_record": None})
+    attachment_worker.finish(
+        {
+            "ok": True,
+            "attached": True,
+            "run_record": {
+                "source_run_id": attachment_worker.cmd["source_run_id"],
+                "status": "RUNNING",
+                "parameters": attachment_worker.cmd["parameters"],
+                "result_summary": attachment_worker.cmd["result_summary"],
+                "artifact_paths": attachment_worker.cmd["artifact_paths"],
+                "experiment_context": {"experiment_id": "experiment-a"},
+            },
+        }
+    )
+    create_worker = _DeferredPersistenceWorker.instances[-1]
+    create_worker.finish()
     binding_worker = _DeferredPersistenceWorker.instances[-1]
     assert binding_worker is not create_worker
 
@@ -2678,12 +2846,13 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
     assert snapshot.status == "ABORTED"
     assert snapshot.accepted_point_count == 0
     assert snapshot.binding_recorded is True
-    assert snapshot.bound_experiment_id is None
+    assert snapshot.bound_experiment_id == "experiment-a"
     assert panel.get_auto_state() == "idle"
 
     assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == [
         "experiment_attach_run_record",
         "keithley_stop",
+        "experiment_attach_run_record",
     ]
     assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
 
@@ -2711,6 +2880,9 @@ def test_reconnect_retires_stale_running_attachment_before_fresh_stop(app, monke
             "run_record": {
                 "source_run_id": stale_attachment.cmd["source_run_id"],
                 "status": "RUNNING",
+                "parameters": stale_attachment.cmd["parameters"],
+                "result_summary": stale_attachment.cmd["result_summary"],
+                "artifact_paths": stale_attachment.cmd["artifact_paths"],
                 "experiment_context": {"experiment_id": "experiment-a"},
             },
         }
@@ -2746,8 +2918,6 @@ def test_stop_reconciles_superseded_running_attachment_before_terminal(app, monk
     panel.set_connected(True)
 
     panel._on_auto_start()
-    create_worker = _ControllablePersistenceWorker.instances[-1]
-    create_worker.finish()
     attachment_worker = _DeferredWorker.instances[-1]
     assert attachment_worker.cmd["status"] == "RUNNING"
 
@@ -2755,7 +2925,7 @@ def test_stop_reconciles_superseded_running_attachment_before_terminal(app, monk
     stop_worker = _DeferredWorker.instances[-1]
     stop_worker.finish({"ok": True})
 
-    assert _ControllablePersistenceWorker.instances == [create_worker]
+    assert _ControllablePersistenceWorker.instances == []
     attachment_worker.finish(
         {
             "ok": True,
@@ -2763,10 +2933,15 @@ def test_stop_reconciles_superseded_running_attachment_before_terminal(app, monk
             "run_record": {
                 "source_run_id": attachment_worker.cmd["source_run_id"],
                 "status": "RUNNING",
+                "parameters": attachment_worker.cmd["parameters"],
+                "result_summary": attachment_worker.cmd["result_summary"],
+                "artifact_paths": attachment_worker.cmd["artifact_paths"],
                 "experiment_context": {"experiment_id": "experiment-a"},
             },
         }
     )
+    create_worker = _ControllablePersistenceWorker.instances[-1]
+    create_worker.finish()
     binding_worker = _ControllablePersistenceWorker.instances[-1]
     assert binding_worker is not create_worker
     binding_worker.finish()
@@ -2901,7 +3076,7 @@ def test_failed_running_attachment_never_changes_source_target(app, monkeypatch)
     assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.all_instances)
     assert panel._auto_outcome_unknown is True
     assert panel._auto_run_path is not None
-    assert read_conductivity_run(panel._auto_run_path).binding_recorded is False
+    assert not panel._auto_run_path.exists()
 
 
 def test_failed_running_attachment_is_retired_before_verified_stop_terminalizes(app, monkeypatch) -> None:
@@ -2924,10 +3099,7 @@ def test_failed_running_attachment_is_retired_before_verified_stop_terminalizes(
     stop_worker.finish({"ok": True})
 
     assert panel._auto_run_path is not None
-    snapshot = read_conductivity_run(panel._auto_run_path)
-    assert snapshot.status == "ABORTED"
-    assert snapshot.binding_recorded is True
-    assert snapshot.bound_experiment_id is None
+    assert not panel._auto_run_path.exists()
     assert panel.get_auto_state() == "idle"
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
@@ -3020,22 +3192,20 @@ def test_terminal_effect_order_and_captured_experiment_binding(app, monkeypatch)
 
 def test_run_started_without_experiment_never_attaches_to_a_later_experiment(app, monkeypatch) -> None:
     _DeferredWorker.running_experiment_id = None
-    panel, target_worker = _start_bound_autosweep(monkeypatch)
-    target_worker.finish({"ok": True})
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+
+    assert panel.get_auto_state() == "idle"
     assert panel._auto_run_path is not None
-    snapshot = read_conductivity_run(panel._auto_run_path)
-    assert snapshot.binding_recorded is True
-    assert snapshot.bound_experiment_id is None
-
-    panel._auto_complete()
-    stop_worker = _DeferredWorker.instances[-1]
-    stop_worker.finish({"ok": True})
-
-    assert _DeferredWorker.instances[-1] is stop_worker
-    assert not any(
-        worker.cmd.get("cmd") == "experiment_attach_run_record" and worker.cmd.get("status") != "RUNNING"
-        for worker in _DeferredWorker.all_instances
-    )
+    assert not panel._auto_run_path.exists()
+    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == ["experiment_attach_run_record"]
+    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
 
 
 def test_real_persistence_worker_keeps_gui_thread_responsive(app) -> None:

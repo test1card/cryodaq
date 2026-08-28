@@ -37,6 +37,7 @@ from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.conductivity_run import (
     ConductivityRunFormatError,
     read_conductivity_run,
+    recover_conductivity_run_after_verified_off,
     validate_conductivity_descriptor_parameters,
 )
 
@@ -514,6 +515,7 @@ class ExperimentManager:
         self._mutation_lock = threading.RLock()
         self._durable_mutation_id: str | None = None
         self._manager_incarnation = uuid.uuid4().hex
+        self._restart_recoverable_conductivity_record_ids: set[str] = set()
         self._state_revision = 0
         self._last_transition_receipt: dict[str, Any] | None = None
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
@@ -523,6 +525,11 @@ class ExperimentManager:
             self._load_state()
         if self._active is not None:
             self._operator_phase = self.get_current_phase()
+            self._restart_recoverable_conductivity_record_ids = {
+                record.record_id
+                for record in self.list_run_records(active_only=True)
+                if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+            }
         self._refresh_operator_snapshot(force=True)
 
     @property
@@ -950,6 +957,124 @@ class ExperimentManager:
         records = [RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)]
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
+
+    def has_restart_recoverable_conductivity_runs(self, experiment_id: str | None = None) -> bool:
+        """Return whether every active autosweep guard was inherited at startup."""
+
+        active = self._require_active(experiment_id)
+        running = [
+            record
+            for record in self.list_run_records(experiment_id=active.experiment_id)
+            if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+        ]
+        return bool(running) and all(
+            record.record_id in self._restart_recoverable_conductivity_record_ids for record in running
+        )
+
+    @_serialized_lifecycle_mutation
+    def recover_conductivity_runs_after_verified_off(
+        self,
+        experiment_id: str | None = None,
+        *,
+        verified_off: bool,
+        finished_at: datetime | str | None = None,
+    ) -> list[RunRecord]:
+        """Reconcile restart-inherited RUNNING autosweeps after exact OFF proof."""
+
+        self._assert_mutation_available()
+        if verified_off is not True:
+            raise RuntimeError("Restart autosweep recovery requires verified OFF.")
+        active = self._require_active(experiment_id)
+        records = self.list_run_records(experiment_id=active.experiment_id)
+        running = [
+            record
+            for record in records
+            if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+        ]
+        if not running:
+            return []
+        if any(record.record_id not in self._restart_recoverable_conductivity_record_ids for record in running):
+            raise RuntimeError("A live autosweep cannot be recovered as a restart orphan.")
+        recovery_time = _parse_time(finished_at) or datetime.now(UTC)
+        replacements: dict[str, RunRecord] = {}
+        for record in running:
+            existing_csv_paths = [
+                Path(path)
+                for path in record.artifact_paths
+                if Path(path).suffix.lower() == ".csv" and Path(path).exists()
+            ]
+            if not existing_csv_paths:
+                reservation_only = (
+                    record.result_summary.get("reservation_state") == "reserved"
+                    and record.result_summary.get("point_count") == 0
+                )
+                if not reservation_only:
+                    raise ConductivityRunFormatError(f"Restart autosweep artifact is missing: {record.source_run_id}")
+                replacements[record.record_id] = RunRecord(
+                    record_id=record.record_id,
+                    source_run_id=record.source_run_id,
+                    source_tab=record.source_tab,
+                    source_module=record.source_module,
+                    run_type=record.run_type,
+                    status="FAILED",
+                    started_at=record.started_at,
+                    finished_at=max(recovery_time, record.started_at),
+                    parameters=dict(record.parameters),
+                    result_summary={
+                        **record.result_summary,
+                        "artifact_format": "conductivity_run_v1",
+                        "persistence_error": "writer_creation_interrupted_by_restart",
+                        "point_count": 0,
+                        "recovery_required": False,
+                        "reservation_state": "failed_prearm",
+                    },
+                    artifact_paths=(),
+                    experiment_context=dict(record.experiment_context),
+                )
+                continue
+            if len(existing_csv_paths) != 1:
+                raise ConductivityRunFormatError("Restart autosweep artifact identity is ambiguous.")
+            snapshot = read_conductivity_run(existing_csv_paths[0])
+            if (
+                not snapshot.durable_format
+                or snapshot.run_id != record.source_run_id
+                or snapshot.started_at != record.started_at
+                or not snapshot.binding_recorded
+                or snapshot.bound_experiment_id != active.experiment_id
+                or _canonical_json_bytes(snapshot.parameters) != _canonical_json_bytes(record.parameters)
+            ):
+                raise ConductivityRunFormatError("Restart autosweep artifact does not match its run record.")
+            if snapshot.terminal is None:
+                snapshot = recover_conductivity_run_after_verified_off(
+                    existing_csv_paths[0],
+                    finished_at=max(recovery_time, record.started_at),
+                )
+            if snapshot.finished_at is None:
+                raise ConductivityRunFormatError("Recovered autosweep has no terminal completion time.")
+            replacements[record.record_id] = RunRecord(
+                record_id=record.record_id,
+                source_run_id=record.source_run_id,
+                source_tab=record.source_tab,
+                source_module=record.source_module,
+                run_type=record.run_type,
+                status=snapshot.status,
+                started_at=record.started_at,
+                finished_at=snapshot.finished_at,
+                parameters=dict(record.parameters),
+                result_summary={
+                    **record.result_summary,
+                    "artifact_format": "conductivity_run_v1",
+                    "point_count": snapshot.accepted_point_count,
+                    "recovery_required": False,
+                    "reservation_state": "recovered",
+                },
+                artifact_paths=record.artifact_paths,
+                experiment_context=dict(record.experiment_context),
+            )
+        updated = [replacements.get(record.record_id, record) for record in records]
+        self._write_artifact(active, run_records=updated)
+        self._restart_recoverable_conductivity_record_ids.difference_update(replacements)
+        return list(replacements.values())
 
     @_serialized_lifecycle_mutation
     def create_experiment(
@@ -2899,10 +3024,16 @@ class ExperimentManager:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
                     continue
                 if not snapshot.durable_format:
-                    # Historical plain CSV has no embedded identity or status.
-                    # Its compatibility rule is path de-duplication plus the
-                    # legacy finite-row parser; durable assertions are not
-                    # invented retroactively.
+                    historical = (
+                        record.result_summary.get("artifact_format") == "legacy_csv"
+                        and "bound_descriptors" not in record.parameters
+                    )
+                    if not historical:
+                        logger.warning(
+                            "Ignoring legacy autosweep artifact %s: run record is not explicitly historical",
+                            resolved,
+                        )
+                        continue
                     rows.extend(snapshot.rows)
                     continue
                 if snapshot.run_id != record.source_run_id:
@@ -2971,6 +3102,14 @@ class ExperimentManager:
                     )
                     continue
                 if snapshot.terminal is not None:
+                    if snapshot.finished_at != record.finished_at:
+                        logger.warning(
+                            "Ignoring autosweep artifact %s: finished_at mismatch (%s != %s)",
+                            resolved,
+                            snapshot.finished_at,
+                            record.finished_at,
+                        )
+                        continue
                     recorded_count = record.result_summary.get("point_count")
                     if type(recorded_count) is not int or recorded_count != snapshot.accepted_point_count:
                         logger.warning(
