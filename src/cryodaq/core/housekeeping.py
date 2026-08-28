@@ -322,7 +322,8 @@ class AdaptiveThrottle:
             self._active_alarm_count = max(0, int(round(reading.value)))
             return
         if channel.startswith("analytics/keithley_channel_state/"):
-            self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
+            if reading.metadata.get("is_transition") is not False:
+                self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()

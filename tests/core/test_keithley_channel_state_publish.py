@@ -5,12 +5,14 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
+import zmq
+
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.smu_channel import SMU_CHANNELS
-from cryodaq.core.zmq_bridge import ZMQPublisher, _unpack_reading
+from cryodaq.core.zmq_bridge import ZMQPublisher, ZMQSubscriber, _unpack_reading
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import SourceOffEvidence, SourceOffResult, SourceOffTier
 
@@ -207,6 +209,123 @@ async def test_late_transport_observer_preserves_genuinely_unknown_source_state(
     finally:
         await manager.stop()
         await publisher.stop()
+
+
+async def test_real_loopback_subscribers_repeatedly_attach_after_startup_and_receive_source_state() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher = ZMQPublisher("tcp://127.0.0.1:*")
+    await publisher.start(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager.start()
+    try:
+        result = await manager.request_run(0.5, 40.0, 1.0, channel=SMU_CHANNELS[0])
+        assert result["ok"] is True
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        assert publisher._socket is not None
+        endpoint = publisher._socket.getsockopt_string(zmq.LAST_ENDPOINT)
+        for _attachment in range(3):
+            received: dict[str, Reading] = {}
+            complete = asyncio.Event()
+
+            def on_reading(reading: Reading) -> None:
+                if reading.instrument_id != "safety_manager":
+                    return
+                channel = reading.metadata.get("channel")
+                if channel in SMU_CHANNELS:
+                    received[str(channel)] = reading
+                if set(received) == set(SMU_CHANNELS):
+                    complete.set()
+
+            subscriber = ZMQSubscriber(endpoint, callback=on_reading)
+            await subscriber.start()
+            try:
+                await asyncio.wait_for(complete.wait(), timeout=3.5)
+            finally:
+                await subscriber.stop()
+
+            assert {channel: reading.metadata["state"] for channel, reading in received.items()} == {
+                SMU_CHANNELS[0]: "on",
+                SMU_CHANNELS[1]: "unknown",
+            }
+            assert all(reading.metadata["reason"] == "periodic" for reading in received.values())
+            assert all(reading.metadata["is_transition"] is False for reading in received.values())
+    finally:
+        await manager.stop()
+        await publisher.stop()
+
+
+async def test_periodic_off_snapshot_preserves_evidence_age_then_expires_to_unknown() -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_keithley_periodic_off_age",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager, _safety_broker = await _make_manager(data_broker=data_broker)
+    try:
+        initial = await _drain(queue)
+        observed_at = initial[0].timestamp
+        assert {reading.timestamp for reading in initial} == {observed_at}
+
+        await manager._publish_keithley_channel_states("periodic")
+        retained = await _drain(queue)
+        assert {reading.timestamp for reading in retained} == {observed_at}
+        assert all(reading.metadata["state"] == "off" for reading in retained)
+
+        manager._config.stale_timeout_s = 0.0
+        await manager._publish_keithley_channel_states("periodic")
+        expired = await _drain(queue)
+        assert all(reading.metadata["state"] == "unknown" for reading in expired)
+        assert all(math.isnan(reading.value) for reading in expired)
+        assert all(
+            reading.metadata["off_evidence"]["channel_off_results"][channel]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+            for channel, reading in ((reading.metadata["channel"], reading) for reading in expired)
+        )
+    finally:
+        await manager.stop()
+
+
+async def test_monitor_periodic_snapshot_preserves_latched_channel_fault_until_acknowledgment() -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_keithley_periodic_latched_fault",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager, _safety_broker = await _make_manager(data_broker=data_broker)
+    manager._config.cooldown_before_rearm_s = 0.0
+    try:
+        await _drain(queue)
+        await manager._fault("latched channel fault", channel=SMU_CHANNELS[0])
+        await _drain(queue)
+
+        async def collect_periodic() -> dict[str, Reading]:
+            by_channel: dict[str, Reading] = {}
+            while set(by_channel) != set(SMU_CHANNELS):
+                reading = await queue.get()
+                if reading.metadata.get("reason") == "periodic":
+                    by_channel[reading.metadata["channel"]] = reading
+            return by_channel
+
+        periodic = await asyncio.wait_for(collect_periodic(), timeout=2.5)
+        assert periodic[SMU_CHANNELS[0]].metadata["state"] == "fault"
+        assert periodic[SMU_CHANNELS[1]].metadata["state"] == "off"
+        assert all(reading.metadata["is_transition"] is False for reading in periodic.values())
+
+        acknowledged = await manager.acknowledge_fault("fault inspected")
+        assert acknowledged["ok"] is True
+        await manager._publish_keithley_channel_states("periodic")
+        after_ack = await _drain(queue)
+        assert all(reading.metadata["state"] != "fault" for reading in after_ack)
+    finally:
+        await manager.stop()
 
 
 async def test_command_tier_device_reported_off_publishes_off_without_verified_claim() -> None:

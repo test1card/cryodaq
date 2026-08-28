@@ -185,6 +185,7 @@ class SafetyManager:
         self._fault_reason = ""
         self._fault_time = 0.0
         self._fault_activated_at = 0.0
+        self._latched_fault_channel: str | None = None
         # Presentation identity only; no recovery or output authority.
         self._fault_revision = 0
         self._recovery_reason = ""
@@ -984,6 +985,18 @@ class SafetyManager:
             if self._mock or isinstance(self._keithley, VerifiedOffSource)
             else SourceOffTier.COMMAND_ONLY
         )
+
+    @property
+    def _reviewed_source_off_evidence(self) -> SourceOffEvidence:
+        return self.__reviewed_source_off_evidence
+
+    @_reviewed_source_off_evidence.setter
+    def _reviewed_source_off_evidence(self, evidence: SourceOffEvidence) -> None:
+        if type(evidence) is not SourceOffEvidence:
+            raise TypeError("reviewed source OFF evidence must be an exact SourceOffEvidence")
+        self.__reviewed_source_off_evidence = evidence
+        self._reviewed_source_off_evidence_observed_at = datetime.now(UTC)
+        self._reviewed_source_off_evidence_observed_monotonic_s = time.monotonic()
 
     def _unknown_global_off_evidence(self) -> SourceOffEvidence:
         return SourceOffEvidence.from_global_result(
@@ -2483,6 +2496,7 @@ class SafetyManager:
                 except Exception as exc:
                     logger.error("persistence_failure_clear callback failed: %s", exc)
             self._persistence_fault_active = False
+            self._latched_fault_channel = None
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
@@ -2933,21 +2947,36 @@ class SafetyManager:
             return
 
         off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
+        observed_at = self._reviewed_source_off_evidence_observed_at
+        evidence_age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
+        published_at = datetime.now(UTC)
+        retained_fault_channel = fault_channel
+        if retained_fault_channel is None and self._state is SafetyState.FAULT_LATCHED:
+            retained_fault_channel = self._latched_fault_channel
         for smu_channel in ("smua", "smub"):
-            if fault_channel == smu_channel:
+            reading_timestamp = published_at
+            published_evidence = self._reviewed_source_off_evidence
+            if retained_fault_channel == smu_channel:
                 state = "fault"
                 value = -1.0
             elif smu_channel in self._active_sources:
                 state = "on"
                 value = 1.0
             elif off_results[smu_channel] is SourceOffResult.DEVICE_REPORTED_OFF:
-                state = "off"
-                value = 0.0
+                if evidence_age_s > self._config.stale_timeout_s:
+                    state = "unknown"
+                    value = math.nan
+                    published_evidence = self._unknown_global_off_evidence()
+                else:
+                    state = "off"
+                    value = 0.0
+                    reading_timestamp = observed_at
             else:
                 state = "unknown"
                 value = math.nan
 
-            reading = Reading.now(
+            reading = Reading(
+                timestamp=reading_timestamp,
                 channel=f"analytics/keithley_channel_state/{smu_channel}",
                 value=value,
                 unit="",
@@ -2956,7 +2985,8 @@ class SafetyManager:
                     "state": state,
                     "channel": smu_channel,
                     "reason": reason,
-                    "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                    "off_evidence": published_evidence.receipt_payload(),
+                    "is_transition": reason != "periodic",
                 },
             )
             try:
@@ -3080,6 +3110,7 @@ class SafetyManager:
         self._fault_reason = reason
         self._fault_time = time.monotonic()
         self._fault_activated_at = time.time()
+        self._latched_fault_channel = channel if channel in SMU_CHANNELS else None
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
         return True
 

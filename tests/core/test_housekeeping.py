@@ -224,6 +224,36 @@ def test_adaptive_throttle_holds_full_rate_during_transition() -> None:
     assert len(filtered) == 2
 
 
+def test_periodic_channel_state_snapshot_does_not_extend_transition_holdoff() -> None:
+    throttle = AdaptiveThrottle(
+        {
+            "enabled": True,
+            "include_patterns": ["TEMP_A"],
+            "stable_duration_s": 0.0,
+            "max_interval_s": 100.0,
+            "absolute_delta": {"default": 0.5},
+            "transition_holdoff_s": 60.0,
+        }
+    )
+    base = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+    throttle.observe_runtime_signal(
+        Reading(
+            timestamp=base,
+            instrument_id="safety_manager",
+            channel="analytics/keithley_channel_state/smua",
+            value=0.0,
+            unit="",
+            status=ChannelStatus.OK,
+            metadata={"state": "off", "is_transition": False},
+        )
+    )
+
+    first = Reading(base + timedelta(seconds=1), "mock", "TEMP_A", 4.0, "K")
+    second = Reading(base + timedelta(seconds=2), "mock", "TEMP_A", 4.0, "K")
+
+    assert throttle.filter_for_archive([first, second]) == [first]
+
+
 def test_housekeeping_retention_plan_skips_experiment_linked_db(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     artifacts = data_dir / "experiments"
