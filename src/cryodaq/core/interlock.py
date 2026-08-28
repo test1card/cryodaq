@@ -9,7 +9,9 @@
      физические привязки разрешены в Reading.channel.
   3. При срабатывании условия: состояние → TRIPPED, вызывается action-коллбэк,
      событие записывается в лог и историю.
-  4. TRIPPED-блокировка не срабатывает повторно до явного acknowledge().
+  4. Защитная TRIPPED-блокировка не срабатывает повторно до явного
+     acknowledge(); наблюдательное warning автоматически re-arm после
+     подтверждённого восстановления условия.
 """
 
 from __future__ import annotations
@@ -140,7 +142,10 @@ class InterlockCondition:
         Оператор сравнения: ``">"`` (больше) или ``"<"`` (меньше).
     action:
         Имя действия из словаря actions, переданного в InterlockEngine.
-        Например: ``"emergency_off"`` или ``"stop_source"``.
+        Например: ``"emergency_off"`` или ``"stop_source"``. Наблюдательное
+        действие ``"warning"`` встроено: оно не вызывает защитный callable,
+        но передаёт полный контекст production ``trip_handler`` для видимого
+        операторского предупреждения.
     cooldown_s:
         Минимальный интервал в секундах между громкими УВЕДОМЛЕНИЯМИ о повторном
         срабатывании одной и той же блокировки. Защитное действие выполняется при
@@ -284,6 +289,8 @@ class InterlockEngine:
         alarm_publisher: Any | None = None,
         dead_channel_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
         dead_channel_recovery_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
+        trip_admission: Callable[[InterlockCondition, Reading], Any] | None = None,
+        warning_recovery_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
     ) -> None:
         """Initialize.
 
@@ -317,6 +324,15 @@ class InterlockEngine:
             Optional async/sync callback invoked only after a usable reading is
             observed for the same canonical protected channel. A callback error
             leaves the debounce window intact so recovery fails closed.
+        trip_admission:
+            Optional async/sync predicate evaluated immediately before a
+            threshold trip. ``False`` leaves the condition ARMED so an idle
+            reading cannot consume a lifecycle-scoped protective guard.
+            Predicate failures admit the trip (fail closed).
+        warning_recovery_handler:
+            Optional async/sync callback invoked when a tripped observational
+            warning receives a usable reading on the safe side of its threshold.
+            The warning is re-armed only after this callback succeeds.
         """
         self._broker = broker
         self._actions = actions
@@ -324,6 +340,8 @@ class InterlockEngine:
         self._alarm_publisher = alarm_publisher
         self._dead_channel_handler = dead_channel_handler
         self._dead_channel_recovery_handler = dead_channel_recovery_handler
+        self._trip_admission = trip_admission
+        self._warning_recovery_handler = warning_recovery_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[PublishedReading] | None = None
@@ -534,11 +552,12 @@ class InterlockEngine:
         """
         if condition.name in self._interlocks:
             raise ValueError(f"Блокировка '{condition.name}' уже зарегистрирована.")
-        if condition.action not in self._actions:
+        if condition.action != "warning" and condition.action not in self._actions:
+            available_actions = [*self._actions.keys(), "warning"]
             raise ValueError(
                 f"Блокировка '{condition.name}': неизвестное действие "
                 f"'{condition.action}'. Доступные действия: "
-                f"{list(self._actions.keys())}."
+                f"{available_actions}."
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
@@ -621,7 +640,7 @@ class InterlockEngine:
             raise
 
     async def _process_reading(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
-        """Проверить показание против всех подходящих ARMED-блокировок."""
+        """Проверить показание против всех подходящих блокировок."""
         # ARMED-блокировки, чьи объявленные привязки совпали с каналом показания.
         matching = [
             record
@@ -654,6 +673,8 @@ class InterlockEngine:
 
             # Проверяем условие срабатывания
             if condition.is_triggered(reading.value):
+                if not await self._trip_is_admitted(condition, reading):
+                    continue
                 # Кулдаун подавляет ТОЛЬКО дублирующее уведомление, но НЕ само
                 # защитное действие. Блокировки латчащие (TRIPPED → ARMED только
                 # через acknowledge оператора); если после acknowledge нарушение
@@ -667,6 +688,66 @@ class InterlockEngine:
                     and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
+
+        if reading.is_usable():
+            for record in protected_matching:
+                if (
+                    record.condition.action == "warning"
+                    and record.state == InterlockState.TRIPPED
+                    and not record.condition.is_triggered(reading.value)
+                ):
+                    await self._recover_warning(record, reading)
+
+    async def _trip_is_admitted(self, condition: InterlockCondition, reading: Reading) -> bool:
+        """Apply the production lifecycle gate without weakening fail-closed trips."""
+        if self._trip_admission is None:
+            return True
+        try:
+            result = self._trip_admission(condition, reading)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result is not False
+        except Exception as exc:
+            logger.critical(
+                "trip_admission failed for interlock '%s': %s; admitting protective trip",
+                condition.name,
+                exc,
+                exc_info=True,
+            )
+            return True
+
+    async def _recover_warning(self, record: _InterlockRecord, reading: Reading) -> None:
+        """Clear and re-arm one observational warning after safe-side evidence."""
+        condition = record.condition
+        if condition.cooldown_s > 0 and record.last_trip_time is not None:
+            elapsed_s = (datetime.now(UTC) - record.last_trip_time).total_seconds()
+            if elapsed_s < condition.cooldown_s:
+                logger.debug(
+                    "Observational interlock warning '%s' remains active for %.3f s "
+                    "until its recovery cooldown expires.",
+                    condition.name,
+                    condition.cooldown_s - elapsed_s,
+                )
+                return
+        if self._warning_recovery_handler is not None:
+            try:
+                result = self._warning_recovery_handler(condition, reading)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.error(
+                    "warning_recovery_handler failed for interlock '%s': %s",
+                    condition.name,
+                    exc,
+                    exc_info=True,
+                )
+                return
+        record.state = InterlockState.ARMED
+        logger.info(
+            "Observational interlock warning '%s' recovered and re-armed on channel '%s'.",
+            condition.name,
+            reading.channel,
+        )
 
     async def _handle_usable(self, reading: Reading, condition: InterlockCondition) -> None:
         """Clear dead-channel state only after recovery authority accepts this sample."""
@@ -780,8 +861,8 @@ class InterlockEngine:
     ) -> None:
         """Выполнить срабатывание блокировки.
 
-        Устанавливает состояние TRIPPED, вызывает защитное действие,
-        записывает событие и логирует CRITICAL.
+        Устанавливает состояние TRIPPED, вызывает защитное действие (кроме
+        наблюдательного ``warning``), записывает событие и логирует нарушение.
 
         ``suppress_notification=True`` — повторное срабатывание в окне кулдауна:
         защитное действие выполняется как обычно, но громкое CRITICAL-уведомление
@@ -818,13 +899,17 @@ class InterlockEngine:
             )
         else:
             record.last_trip_time = now
-            # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
-            logger.critical(
-                "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
+            # Защитные действия остаются CRITICAL; наблюдательный warning не
+            # должен заявлять, что источник был заблокирован.
+            log = logger.warning if condition.action == "warning" else logger.critical
+            announcement = "ПРЕДУПРЕЖДЕНИЕ" if condition.action == "warning" else "БЛОКИРОВКА СРАБОТАЛА"
+            log(
+                "!!! %s !!! "
                 "Имя: '%s' | Описание: %s | "
                 "Канал: '%s' | Значение: %.4g | "
                 "Порог: %s %.4g | Действие: '%s' | "
                 "Время: %s | Всего срабатываний: %d",
+                announcement,
                 condition.name,
                 condition.description,
                 reading.channel,
@@ -836,30 +921,33 @@ class InterlockEngine:
                 record.trip_count,
             )
 
-        # Вызов защитного действия
-        action_callable = self._actions[condition.action]
-        try:
-            await action_callable()
-            logger.info(
-                "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
-                "авторитетный результат защиты не подтверждён.",
-                condition.action,
-                condition.name,
-            )
-        except Exception as exc:
-            # Ошибка действия не должна прерывать цикл, но логируется как CRITICAL
-            logger.critical(
-                "ОШИБКА выполнения действия '%s' для блокировки '%s': %s. "
-                "Требуется немедленное вмешательство оператора!",
-                condition.action,
-                condition.name,
-                exc,
-                exc_info=True,
-            )
+        # Вызов защитного действия. ``warning`` намеренно не получает
+        # actuator callable: production trip_handler публикует его на штатный
+        # operator-facing alarm path без передачи в SafetyManager.
+        if condition.action != "warning":
+            action_callable = self._actions[condition.action]
+            try:
+                await action_callable()
+                logger.info(
+                    "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
+                    "авторитетный результат защиты не подтверждён.",
+                    condition.action,
+                    condition.name,
+                )
+            except Exception as exc:
+                # Ошибка действия не должна прерывать цикл, но логируется как CRITICAL
+                logger.critical(
+                    "ОШИБКА выполнения действия '%s' для блокировки '%s': %s. "
+                    "Требуется немедленное вмешательство оператора!",
+                    condition.action,
+                    condition.name,
+                    exc,
+                    exc_info=True,
+                )
 
         # Phase 2a I.1: notify the optional trip_handler with FULL
-        # context. SafetyManager uses this to differentiate "stop_source"
-        # (soft stop, no fault latch) from "emergency_off" (full latch).
+        # context. Production routing sends warning to the operator alarm path,
+        # stop_source to a soft stop, and emergency_off to a full latch.
         # The handler is called even if the actions-dict callable above
         # raised — both paths run independently.
         if self._trip_handler is not None:

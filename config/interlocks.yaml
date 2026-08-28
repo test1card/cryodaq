@@ -9,7 +9,7 @@
 #   channel_bindings — объявленные физические привязки (instrument_id + source_key)
 #   threshold       — пороговое значение
 #   comparison      — оператор: ">" (больше) или "<" (меньше)
-#   action          — имя защитного действия: "emergency_off" или "stop_source"
+#   action          — действие: "emergency_off", "stop_source" или операторское "warning"
 #   cooldown_s      — минимальный интервал между повторными срабатываниями (секунды)
 
 interlocks:
@@ -47,18 +47,38 @@ interlocks:
     action: "emergency_off"
     cooldown_s: 10.0
 
-  # ─── Защита детектора ────────────────────────────────────────────────────────
-  # Примечание: фазовое условие (только в фазе measurement при активном источнике)
-  # обеспечивается Alarm Engine v2 (detector_warmup_interlock в alarms_v3.yaml).
-  # Данный интерлок — аппаратная страховка для любой фазы при Т12 > 10 K.
+  # ─── Верхняя граница температуры при работе источника ────────────────────────
+  # Та же полная физическая привязка LS218_1, что у аварийного overheat_cryostat.
+  # Порог 320 K находится выше документированного допустимого диапазона Т1–Т7
+  # и остаётся ниже аварийных 350 K. Условие допускается только при активном
+  # жизненном цикле источника; в idle оно остаётся ARMED.
+  - name: "source_overtemp"
+    description: "Температура криостата выше 320 K — остановка источника"
+    channel_bindings:
+      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
+    threshold: 320.0
+    comparison: ">"
+    action: "stop_source"
+    cooldown_s: 10.0
+
+  # ─── Предупреждение о рабочей температуре детектора ─────────────────────────
+  # Это операторское предупреждение о качестве измерений, а не аппаратная
+  # страховка: источник не отключается при Т12 > 10 K.
   # Т12 — 2-я ступень GM-cooler, на которой смонтирован детектор.
   - name: "detector_warmup"
-    description: "Нагрев 2-й ступени (Т12) выше рабочей температуры — остановка источника"
+    description: "2-я ступень (Т12) выше рабочей температуры — данные измерения могут быть недостоверны"
     channel_bindings:
       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 10.0
     comparison: ">"
-    action: "stop_source"
+    action: "warning"
     cooldown_s: 5.0
 
   # undercool_shield (Т5 < 50 K) — УДАЛЁН: ложное срабатывание при штатном cooldown.
