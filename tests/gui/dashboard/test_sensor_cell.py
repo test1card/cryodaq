@@ -54,6 +54,30 @@ def test_sensor_cell_update_value_with_reading(app, mock_channel_mgr, buffer_sto
     assert cell._last_status == ChannelStatus.OK
 
 
+def test_sensor_cell_names_faulted_channel_and_instrument_reason(app, mock_channel_mgr, buffer_store):
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+    reading = Reading(
+        channel="Т2 Криостат",
+        value=float("nan"),
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+
+    operator_text = cell._status_hint_widget.text()
+    assert cell._value_widget.text() == "—"
+    assert "Т2" in operator_text
+    assert "обрыв" in operator_text.lower()
+    assert operator_text in cell.accessibleDescription()
+
+
 # HIGH: assert dash value, empty unit, stale text + stale style token
 def test_sensor_cell_refresh_from_empty_buffer_marks_stale(app, mock_channel_mgr, buffer_store):
     cell = SensorCell("Т1", mock_channel_mgr, buffer_store)

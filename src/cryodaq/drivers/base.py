@@ -8,8 +8,23 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
+
+INSTRUMENT_STATUS_FAULT_REASONS_KEY = "instrument_status_fault_reasons"
+INSTRUMENT_STATUS_REGISTER_KEY = "instrument_status_register"
+LAKESHORE_218_RDGST_REGISTER = "LakeShore 218 RDGST"
+INSTRUMENT_STATUS_REGISTER_VALUES = frozenset({LAKESHORE_218_RDGST_REGISTER})
+
+
+class InstrumentStatusFaultReason(StrEnum):
+    """Stable reason vocabulary for instrument-register fault metadata."""
+
+    INVALID_READING = "invalid_reading"
+    TEMPERATURE_UNDER_RANGE = "temperature_under_range"
+    TEMPERATURE_OVER_RANGE = "temperature_over_range"
+    SENSOR_UNITS_OVER_RANGE = "sensor_units_over_range"
+    SENSOR_UNITS_ZERO = "sensor_units_zero"
 
 
 class ChannelStatus(Enum):
@@ -58,6 +73,24 @@ class Reading:
             return self.status is ChannelStatus.OK and math.isfinite(self.value)
         except TypeError:
             return False
+
+    def instrument_status_fault_reasons(self) -> tuple[str, ...]:
+        """Return exact instrument-register fault evidence carried by this reading.
+
+        A non-OK status alone is deliberately insufficient: parser errors,
+        timeouts, replay data, and sources without a status register retain the
+        existing fail-closed doctrine.  Drivers set both metadata fields only
+        after a successful per-input status query.
+        """
+        if self.status is ChannelStatus.OK or type(self.metadata) is not dict:
+            return ()
+        register = self.metadata.get(INSTRUMENT_STATUS_REGISTER_KEY)
+        reasons = self.metadata.get(INSTRUMENT_STATUS_FAULT_REASONS_KEY)
+        if register not in INSTRUMENT_STATUS_REGISTER_VALUES or type(reasons) is not list or not reasons:
+            return ()
+        if len(reasons) > 8 or any(type(reason) is not str or not reason for reason in reasons):
+            return ()
+        return tuple(reasons)
 
     @staticmethod
     def now(channel: str, value: float, unit: str, *, instrument_id: str = "", **kwargs: Any) -> Reading:

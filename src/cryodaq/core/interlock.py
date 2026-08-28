@@ -237,11 +237,15 @@ class _NonUsableWindow:
     непригодных показаний подряд (сбрасывается годным показанием).
     ``escalated`` — эскалация в SafetyManager уже выполнена для этого окна
     (не дублируем на каждом последующем непригодном показании).
+    ``instrument_status_fault`` distinguishes an advisory device-register
+    episode from a generic unusable episode; changing class starts a new
+    window so advisory settlement cannot suppress fail-closed escalation.
     """
 
     first_ts: datetime
     count: int = 0
     escalated: bool = False
+    instrument_status_fault: bool = False
 
 
 class InterlockEngine:
@@ -635,27 +639,15 @@ class InterlockEngine:
         # False (IEEE-754), поэтому без этой ветки блокировка молча слепнет на
         # мёртвом датчике (fail-open на нагреваемой зоне — Т1–Т10 защищены
         # ТОЛЬКО интерлоками). Годное показание сбрасывает дебаунс; непригодное
-        # обрабатывается и НЕ идёт в пороговое сравнение (иначе ±inf ложно
-        # сработало бы как реальное превышение).
+        # обрабатывается и НЕ идёт в пороговое сравнение: статус прибора
+        # различает неисправный датчик и реальную температуру, а ±inf либо
+        # конечный потолок с non-OK статусом не являются температурой.
         if reading.is_usable():
             if protected_matching:
                 await self._handle_usable(reading, protected_matching[0].condition)
         elif protected_matching:
-            if math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
-                # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
-                # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
-                # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
-                # That is direct evidence of the guarded hazard — fall through to
-                # the normal threshold-trip loop (is_triggered trips at once), do
-                # NOT wait out the non-usable debounce. NaN (is_triggered False
-                # both ways) and finite-value+error-status carry no direction and
-                # keep the debounce path below. -inf on a '>' interlock (or +inf on
-                # a '<' interlock) is the SAFE side → also debounce. Reset the
-                # window so a prior blip series does not linger past this trip.
-                self._nonusable_windows.pop(reading.channel, None)
-            else:
-                await self._handle_nonusable(reading, protected_matching[0].condition)
-                return
+            await self._handle_nonusable(reading, protected_matching[0].condition)
+            return
 
         for record in matching:
             condition = record.condition
@@ -704,9 +696,13 @@ class InterlockEngine:
         измерения) → эскалация в SafetyManager (``dead_channel_handler``),
         который сам решает, латчить ли fault (в RUN_PERMITTED или RUNNING).
         """
+        instrument_status_fault = bool(reading.instrument_status_fault_reasons())
         window = self._nonusable_windows.get(reading.channel)
-        if window is None:
-            window = _NonUsableWindow(first_ts=reading.timestamp)
+        if window is None or window.instrument_status_fault != instrument_status_fault:
+            window = _NonUsableWindow(
+                first_ts=reading.timestamp,
+                instrument_status_fault=instrument_status_fault,
+            )
             self._nonusable_windows[reading.channel] = window
         window.count += 1
         span_s = (reading.timestamp - window.first_ts).total_seconds()

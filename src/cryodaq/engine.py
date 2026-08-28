@@ -2450,6 +2450,7 @@ async def _interlock_dead_channel_handler(
             condition.name,
             reading.channel,
             value=float(reading.value) if reading.value is not None else float("nan"),
+            reading=reading,
         )
     except Exception as exc:
         logger.critical(

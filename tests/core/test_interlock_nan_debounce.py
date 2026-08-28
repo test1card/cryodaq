@@ -51,6 +51,7 @@ def _reading(
     offset_s: float = 0.0,
     status: ChannelStatus = ChannelStatus.SENSOR_ERROR,
     unit: str = "K",
+    metadata: dict | None = None,
 ) -> Reading:
     return Reading(
         timestamp=_BASE + timedelta(seconds=offset_s),
@@ -59,6 +60,7 @@ def _reading(
         value=value,
         unit=unit,
         status=status,
+        metadata={} if metadata is None else metadata,
     )
 
 
@@ -149,6 +151,29 @@ async def test_persistent_nonusable_escalates() -> None:
     # Further non-usable samples do NOT re-escalate (window already escalated).
     await engine._process_reading(_reading(value=float("nan"), offset_s=15.0))
     assert len(escalations) == 1, "escalation must fire at most once per window"
+
+
+async def test_lost_instrument_fault_evidence_reopens_generic_escalation() -> None:
+    """An advisory window cannot suppress later non-instrument failure."""
+    escalations: list[tuple[str, ...]] = []
+
+    async def handler(_condition, reading):
+        reasons = reading.instrument_status_fault_reasons()
+        escalations.append(reasons)
+        return True
+
+    engine = _make_engine(handler=handler, min_samples=1, min_duration_s=0.0)
+    await engine._process_reading(
+        _reading(
+            metadata={
+                "instrument_status_register": "LakeShore 218 RDGST",
+                "instrument_status_fault_reasons": ["sensor_units_over_range"],
+            }
+        )
+    )
+    await engine._process_reading(_reading(offset_s=1.0))
+
+    assert escalations == [("sensor_units_over_range",), ()]
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +441,8 @@ async def test_nonusable_window_matures_for_sibling_after_condition_trips() -> N
 
 
 # ---------------------------------------------------------------------------
-# S2 (HIGH): +inf overrange on an above-threshold interlock is direct evidence
-# of the guarded hazard — insta-trip, do NOT wait out the non-usable debounce.
+# Instrument/range status is a quality discriminator, not temperature evidence.
+# Every non-usable reading follows the existing debounce regardless of direction.
 # ---------------------------------------------------------------------------
 
 
@@ -445,20 +470,20 @@ def _trip_engine(*, comparison: str, threshold: float, handler=None) -> tuple[In
     return engine, tripped
 
 
-async def test_positive_inf_overrange_insta_trips_above_threshold() -> None:
+async def test_positive_inf_overrange_debounces_above_threshold() -> None:
     engine, tripped = _trip_engine(comparison=">", threshold=350.0)
-    # A normal below-threshold reading, then +inf/OVERRANGE (sensor pegged HIGH).
     await engine._process_reading(_reading(value=300.0, offset_s=0.0, status=ChannelStatus.OK))
     assert tripped == [], "below-threshold reading must not trip"
     await engine._process_reading(_reading(value=float("inf"), offset_s=0.5, status=ChannelStatus.OVERRANGE))
-    assert tripped == [True], "+inf on an above-threshold interlock must trip at once, not wait for debounce"
+    assert tripped == [], "a range-fault status must not be compared as temperature"
+    assert engine._nonusable_windows[_CHANNEL_ID].count == 1
 
 
-async def test_negative_inf_insta_trips_below_threshold() -> None:
+async def test_negative_inf_underrange_debounces_below_threshold() -> None:
     engine, tripped = _trip_engine(comparison="<", threshold=1.0)
-    # -inf (pegged LOW) on a below-threshold interlock is the dangerous side.
     await engine._process_reading(_reading(value=float("-inf"), offset_s=0.0, status=ChannelStatus.UNDERRANGE))
-    assert tripped == [True], "-inf on a below-threshold interlock must insta-trip (symmetric)"
+    assert tripped == [], "a range-fault status must not be compared as temperature"
+    assert engine._nonusable_windows[_CHANNEL_ID].count == 1
 
 
 async def test_positive_inf_safe_side_debounces() -> None:

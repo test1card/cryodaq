@@ -192,6 +192,10 @@ class SafetyManager:
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[tuple[str, str], tuple[float, float, str]] = {}
+        # Current per-input instrument-register faults remain explicit reading
+        # evidence but do not grant temperature authority or revoke RUN.  A
+        # later reading without exact register evidence clears the advisory.
+        self._instrument_status_faults: dict[tuple[str, str], tuple[str, ...]] = {}
         # HI-1: the gate is the elapsed data SPAN (min_span_s=30), not a raw
         # point count. The deployed LakeShore poll is 2.0 s
         # (config/instruments.yaml), so the 120 s window holds only ~61
@@ -2564,7 +2568,7 @@ class SafetyManager:
                         "Restore a current valid critical-channel reading",
                     ),
                 )
-            for (_instrument_id, _channel), (observed, value, status) in matches:
+            for identity, (observed, value, status) in matches:
                 if now - observed > self._config.stale_timeout_s:
                     return (
                         PlantHealthFact(
@@ -2580,6 +2584,8 @@ class SafetyManager:
                             "Restore fresh critical-channel readings",
                         ),
                     )
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok" or not math.isfinite(value):
                     return (
                         PlantHealthFact(
@@ -3427,10 +3433,13 @@ class SafetyManager:
             return False, f"Persistently unusable interlock channel(s): {channels}"
 
         for declared, matches in self._critical_input_requirements():
-            for (_instrument_id, ch), (ts, value, status) in matches:
+            for identity, (ts, value, status) in matches:
+                ch = identity[1]
                 age = now - ts
                 if age > self._config.stale_timeout_s:
                     return False, f"Stale data: {ch} ({age:.1f}s)"
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok":
                     return False, f"Channel {ch} status={status}"
                 if math.isnan(value) or math.isinf(value):
@@ -3492,8 +3501,14 @@ class SafetyManager:
                     reading.value,
                     reading.status.value,
                 )
+                identity = (reading.instrument_id, reading.channel)
+                instrument_fault_reasons = reading.instrument_status_fault_reasons()
+                if instrument_fault_reasons:
+                    self._instrument_status_faults[identity] = instrument_fault_reasons
+                else:
+                    self._instrument_status_faults.pop(identity, None)
                 self._refresh_operator_safety_snapshot()
-                critical_identity = (reading.instrument_id, reading.channel)
+                critical_identity = identity
                 rate_identity_accepted = (
                     self._critical_input_bindings is None and self._mock
                 ) or critical_identity in (self._critical_input_bindings or {})
@@ -3580,10 +3595,13 @@ class SafetyManager:
             if not matches and not self._mock:
                 await self._fault(f"No data for critical channel {declared}", channel=declared)
                 return
-            for (_instrument_id, ch), (ts, value, status) in matches:
+            for identity, (ts, value, status) in matches:
+                ch = identity[1]
                 if now - ts > self._config.stale_timeout_s:
                     await self._fault(f"Устаревшие данные канала {ch}", channel=ch)
                     return
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok":
                     await self._fault(f"Channel {ch} status={status}", channel=ch, value=value)
                     return
@@ -3820,12 +3838,17 @@ class SafetyManager:
         channel: str,
         *,
         value: float = float("nan"),
+        reading: Reading | None = None,
     ) -> bool:
         """Escalation for a PERSISTENTLY non-usable interlock channel (P2-5).
 
         Called by InterlockEngine once a channel it protects has been
         non-usable (NaN / error-status) for ``nonusable_escalation`` long
         enough. SafetyManager is the sole authority for the active source lifecycle:
+
+        - exact instrument-register fault evidence is advisory: retain the
+          faulted Reading for persistence/operator display, but do not block
+          RUN or command OFF;
 
         - state in {RUN_PERMITTED, RUNNING}: latch FAULT_LATCHED +
           emergency_off. RUN_PERMITTED includes the in-flight OUTPUT_ON
@@ -3839,15 +3862,24 @@ class SafetyManager:
         Returns
         -------
         bool
-            ``True`` iff a fault is now latched (this call latched it, or the
-            state was already FAULT_LATCHED). ``False`` iff escalation was
-            declined because the state is outside RUN_PERMITTED/RUNNING. S1
-            fail-closed contract: InterlockEngine marks the debounce window
-            ``escalated`` ONLY on ``True``. A ``False`` leaves the window
-            un-escalated so the next non-usable sample retries — the first
-            sample after an active source lifecycle begins then faults, instead
-            of the dead channel leaking through forever.
+            ``True`` iff this mature episode is settled, either as an explicit
+            instrument-fault advisory or a latched fault. ``False`` iff generic
+            escalation was declined outside RUN_PERMITTED/RUNNING. A ``False``
+            leaves the window un-escalated so the next generic non-usable sample
+            retries.
         """
+        instrument_fault_reasons = () if reading is None else reading.instrument_status_fault_reasons()
+        if instrument_fault_reasons:
+            removed = self._mature_dead_interlock_channels.pop(channel, None)
+            if removed is not None:
+                self._refresh_operator_safety_snapshot()
+            logger.warning(
+                "Интерлок-канал %s: прибор сообщает неисправность датчика (%s); "
+                "температурное действие не выполнено, RUN не блокируется.",
+                channel,
+                ", ".join(instrument_fault_reasons),
+            )
+            return True
         previous_interlock = self._mature_dead_interlock_channels.get(channel)
         self._mature_dead_interlock_channels[channel] = interlock_name
         if previous_interlock != interlock_name:

@@ -7313,8 +7313,8 @@ class SQLiteWriter:
         (_write_batch) folds this per-day result into the per-call return
         of write_immediate().
 
-        NaN-доктрина (P2-2): a non-finite value paired with a non-OK status is
-        persisted as the finite ``sentinel.SENTINEL`` value carrying that status,
+        NaN-доктрина (P2-2): a non-finite value or any value paired with a
+        non-OK status is persisted as the finite ``sentinel.SENTINEL`` carrying that status,
         so the invariant «if the DataBroker has a reading, SQLite has it» holds
         even for error states (SQLite cannot store NaN — it maps NaN to NULL,
         violating NOT NULL). The status column, not the float value, is the

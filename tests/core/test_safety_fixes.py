@@ -82,8 +82,16 @@ async def _feed(
     value=4.5,
     unit="K",
     status=ChannelStatus.OK,
+    metadata=None,
 ):
-    r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test", status=status)
+    r = Reading.now(
+        channel=channel,
+        value=value,
+        unit=unit,
+        instrument_id="test",
+        status=status,
+        metadata={} if metadata is None else metadata,
+    )
     await broker.publish(r)
     await asyncio.sleep(0.02)
 
@@ -231,6 +239,42 @@ async def test_error_status_blocks_run():
         # The error message should mention the channel status or the channel name
         error_text = result.get("error", "")
         assert error_text, "Should provide an error message"
+    finally:
+        await mgr.stop()
+
+
+async def test_instrument_confirmed_sensor_fault_does_not_disable_start():
+    """The operator keeps RUN authority while the bad channel stays explicit."""
+    mgr, broker = await _make_manager()
+    mgr._config.critical_channels = [re.compile("Т1.*")]
+    reading = Reading.now(
+        channel="Т1 Криостат верх",
+        value=float("nan"),
+        unit="K",
+        instrument_id="test",
+        status=ChannelStatus.SENSOR_ERROR,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+    try:
+        await broker.publish(reading)
+        await asyncio.sleep(0.05)
+        settled = await mgr.on_interlock_dead_channel(
+            "overheat_cryostat",
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+        assert settled is True
+        assert "mature_dead_interlock_channel" not in {
+            blocker.code for blocker in mgr.snapshot_operator_safety().blockers
+        }
+
+        result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert result["ok"] is True, result
+        assert mgr.state is SafetyState.RUNNING
     finally:
         await mgr.stop()
 
