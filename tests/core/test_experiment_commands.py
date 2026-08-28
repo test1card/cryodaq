@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
@@ -964,6 +965,84 @@ async def test_emergency_off_omitted_channel_dispatches_once_to_global_scope(
 
     assert reply == {"ok": True, "channel": None}
     assert calls == [None]
+
+
+async def test_keithley_start_persists_warning_choice_before_request_run(
+    manager: ExperimentManager,
+) -> None:
+    order: list[str] = []
+    persisted: list[dict[str, object]] = []
+
+    class Safety:
+        async def request_run(
+            self,
+            p_target: float,
+            v_comp: float,
+            i_comp: float,
+            *,
+            channel: str,
+        ) -> dict[str, object]:
+            order.append("request_run")
+            return {"ok": True, "channel": channel}
+
+    class Writer:
+        async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
+            order.append("warning_receipt")
+            persisted.append(kwargs)
+            return OperatorLogCommitResult(
+                OperatorLogEntry(
+                    id=17,
+                    timestamp=datetime.now(UTC),
+                    experiment_id=kwargs["experiment_id"],
+                    author=str(kwargs["author"]),
+                    source=str(kwargs["source"]),
+                    message=str(kwargs["message"]),
+                    tags=tuple(kwargs["tags"]),
+                ),
+                replayed=False,
+            )
+
+    context = _context(manager, writer=Writer())
+    context.safety_manager = Safety()
+    command = _mutation(
+        {
+            "cmd": "keithley_start",
+            "channel": "smua",
+            "p_target": 0.5,
+            "v_comp": 40.0,
+            "i_comp": 1.0,
+            "operator_warning_choice": {
+                "schema": "cryodaq.keithley_warning_choice.v1",
+                "request_id": "a" * 32,
+                "warning": "Interlock stop_source: detector_warmup",
+                "choice": "start",
+            },
+        }
+    )
+
+    reply = await _handle_gui_command(command, context=context)
+
+    assert order == ["warning_receipt", "request_run"]
+    assert reply["ok"] is True
+    assert reply["operator_warning_receipt"] == {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": "a" * 32,
+        "operator_log_id": 17,
+        "replayed": False,
+    }
+    assert len(persisted) == 1
+    record = persisted[0]
+    assert record["author"] == "operator"
+    assert record["source"] == "operator"
+    assert record["tags"] == ("keithley", "safety_warning", "operator_choice")
+    assert record["request_id"] == "a" * 32
+    payload = json.loads(str(record["message"]))
+    assert payload == {
+        "channel": "smua",
+        "choice": "start",
+        "event": "keithley_start_with_safety_warning",
+        "warning": "Interlock stop_source: detector_warmup",
+    }
 
 
 @pytest.mark.parametrize(

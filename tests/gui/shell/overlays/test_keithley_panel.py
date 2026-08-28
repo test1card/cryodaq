@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from datetime import UTC, datetime
 
@@ -18,6 +19,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.keithley_panel import (
     KeithleyPanel,
+    SafetyGateCause,
     _SmuChannelBlock,
 )
 
@@ -225,19 +227,66 @@ def test_connected_off_state_enables_spins_and_start(app):
 # ----------------------------------------------------------------------
 
 
-def test_safety_not_ready_disables_controls_except_emergency(app):
+def _panel_with_authoritative_safety_warning() -> KeithleyPanel:
     panel = KeithleyPanel()
     _connect_authorized(panel)
-    panel.set_safety_ready(False, reason="fault_latched: канал Т11")
-    assert not panel._smua_block._start_btn.isEnabled()
-    assert not panel._smua_block._p_spin.isEnabled()
+    panel.set_safety_ready(
+        False,
+        reason="Interlock stop_source: detector_warmup",
+        cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+    )
+    return panel
+
+
+def test_authoritative_safety_condition_leaves_start_enabled(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    assert panel._safety_ready is False
+    assert panel._smua_block._start_btn.isEnabled()
+
+
+def test_authoritative_safety_condition_leaves_parameter_spins_enabled(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    assert panel._smua_block._p_spin.isEnabled()
+    assert panel._smua_block._v_spin.isEnabled()
+    assert panel._smua_block._i_spin.isEnabled()
+
+
+def test_authoritative_safety_condition_shows_visible_warning(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    # Use isHidden() — offscreen Qt reports isVisible()=False for unparented widgets.
+    assert not panel._gate_reason_label.isHidden()
+    assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+    assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+    assert "работающий источник" in panel._gate_reason_label.text()
+    assert "заблокировано" not in panel._gate_reason_label.text()
+
+
+def test_emergency_off_stays_enabled_during_authoritative_safety_warning(app):
+    panel = _panel_with_authoritative_safety_warning()
+
     # Emergency is the escape hatch and stays enabled while connected.
     assert panel._smua_block._emergency_btn.isEnabled()
     assert panel._emergency_both_btn.isEnabled()
-    # Use isHidden() — offscreen Qt reports isVisible()=False for unparented widgets.
-    assert not panel._gate_reason_label.isHidden()
+
+
+def test_missing_safety_authority_still_disables_controls_except_emergency(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+
+    panel.set_safety_ready(False, reason="Нет авторитетного состояния Safety")
+
+    assert panel._safety_ready is False
+    assert not panel._smua_block._start_btn.isEnabled()
+    assert not panel._smua_block._p_spin.isEnabled()
+    assert not panel._smua_block._v_spin.isEnabled()
+    assert not panel._smua_block._i_spin.isEnabled()
+    assert panel._smua_block._emergency_btn.isEnabled()
+    assert panel._emergency_both_btn.isEnabled()
     assert "Управление заблокировано" in panel._gate_reason_label.text()
-    assert "fault_latched" in panel._gate_reason_label.text()
+    assert "Нет авторитетного состояния Safety" in panel._gate_reason_label.text()
 
 
 def test_safety_ready_restores_controls(app):
@@ -330,6 +379,28 @@ def test_start_click_emits_signal_with_default_spin_values(app):
         ]
         # SAFETY: ZmqCommandWorker.start() must have been called (worker actually launched).
         assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
+
+
+def test_start_with_safety_warning_dispatches_operator_choice_receipt(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    panel.set_safety_ready(
+        False,
+        reason="Interlock stop_source: detector_warmup",
+        cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+    )
+    dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._start_btn.click()
+
+        assert len(dispatched) == 1
+        receipt = dispatched[0]["operator_warning_choice"]
+        assert receipt["schema"] == "cryodaq.keithley_warning_choice.v1"
+        assert re.fullmatch(r"[0-9a-f]{32}", receipt["request_id"])
+        assert receipt["warning"] == "Interlock stop_source: detector_warmup"
+        assert receipt["choice"] == "start"
     finally:
         _restore_spy(panel._smua_block)
 

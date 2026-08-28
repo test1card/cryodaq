@@ -435,6 +435,19 @@ def _consume_engine_launch_authority(
         raise
 
 
+def _requires_launcher_fd2_isolation(
+    engine_instance_id: str,
+    shutdown_capability: str,
+    engine_ready_nonce: str,
+    engine_ready_channel_fd: int | None,
+) -> bool:
+    """True only for a launcher-owned POSIX engine child, before any descendant spawn."""
+
+    return sys.platform != "win32" and bool(
+        engine_instance_id and shutdown_capability and engine_ready_nonce and type(engine_ready_channel_fd) is int
+    )
+
+
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     """Coerce a command setpoint to ``float`` and reject non-finite values.
 
@@ -447,6 +460,86 @@ def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     if not math.isfinite(value):
         raise ValueError(f"Non-finite setpoint {name}={raw!r} rejected")
     return value
+
+
+def _keithley_warning_choice(raw: object) -> tuple[str, str] | None:
+    """Validate the exact GUI receipt request without interpreting warning prose."""
+
+    if raw is None:
+        return None
+    if type(raw) is not dict or set(raw) != {"schema", "request_id", "warning", "choice"}:
+        raise ValueError("warning choice must use the exact supported schema")
+    if raw.get("schema") != "cryodaq.keithley_warning_choice.v1" or raw.get("choice") != "start":
+        raise ValueError("warning choice schema or decision is invalid")
+    request_id = raw.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(character not in "0123456789abcdef" for character in request_id)
+    ):
+        raise ValueError("warning choice request identity is invalid")
+    warning = raw.get("warning")
+    if (
+        type(warning) is not str
+        or not warning
+        or warning != warning.strip()
+        or not warning.isprintable()
+        or len(warning.encode("utf-8")) > 2048
+    ):
+        raise ValueError("warning choice text is invalid")
+    return request_id, warning
+
+
+async def _persist_keithley_warning_choice(
+    *,
+    writer: Any,
+    experiment_id: str | None,
+    channel: str,
+    request_id: str,
+    warning: str,
+) -> dict[str, Any]:
+    payload = {
+        "channel": channel,
+        "choice": "start",
+        "event": "keithley_start_with_safety_warning",
+        "warning": warning,
+    }
+    message = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    fingerprint = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    commit = await writer.append_operator_log_idempotent(
+        message=message,
+        author="operator",
+        source="operator",
+        experiment_id=experiment_id,
+        tags=("keithley", "safety_warning", "operator_choice"),
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    if (
+        type(commit) is not OperatorLogCommitResult
+        or type(commit.entry) is not OperatorLogEntry
+        or type(commit.entry.id) is not int
+        or commit.entry.id <= 0
+        or type(commit.replayed) is not bool
+        or commit.entry.message != message
+        or commit.entry.author != "operator"
+        or commit.entry.source != "operator"
+        or commit.entry.experiment_id != experiment_id
+        or commit.entry.tags != ("keithley", "safety_warning", "operator_choice")
+    ):
+        raise RuntimeError("warning choice persistence returned an invalid receipt")
+    return {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": request_id,
+        "operator_log_id": commit.entry.id,
+        "replayed": commit.replayed,
+    }
 
 
 async def _run_keithley_command(
@@ -5221,7 +5314,45 @@ async def _handle_gui_command(
             "keithley_set_target",
             "keithley_set_limits",
         }:
+            warning_receipt = None
+            raw_warning_choice = cmd.get("operator_warning_choice")
+            try:
+                warning_choice = _keithley_warning_choice(raw_warning_choice)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_invalid",
+                    "error": "Keithley warning choice receipt request is invalid.",
+                }
+            if warning_choice is not None:
+                if action != "keithley_start" or writer is None:
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_choice_invalid",
+                        "error": "Keithley warning choice is valid only for Start.",
+                    }
+                request_id, warning = warning_choice
+                try:
+                    warning_receipt = await _persist_keithley_warning_choice(
+                        writer=writer,
+                        experiment_id=getattr(experiment_manager, "active_experiment_id", None),
+                        channel=normalize_smu_channel(cmd.get("channel")),
+                        request_id=request_id,
+                        warning=warning,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Keithley warning-choice persistence failed: exception=%s",
+                        type(exc).__name__,
+                    )
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_choice_persistence_failed",
+                        "error": "Keithley Start was not sent because its warning choice was not recorded.",
+                    }
             result = await _run_keithley_command(action, cmd, safety_manager)
+            if warning_receipt is not None:
+                result = {**result, "operator_warning_receipt": warning_receipt}
             if result.get("ok"):
                 ch = cmd.get("channel", "?")
                 if action == "keithley_start":
@@ -7901,6 +8032,15 @@ def main() -> None:
     engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd = (
         _consume_engine_launch_authority()
     )
+    if _requires_launcher_fd2_isolation(
+        engine_instance_id,
+        shutdown_capability,
+        engine_ready_nonce,
+        engine_ready_channel_fd,
+    ):
+        from cryodaq._fd2_bootstrap import isolate_launcher_stderr_fd2
+
+        isolate_launcher_stderr_fd2()
     import argparse
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")

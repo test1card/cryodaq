@@ -22,7 +22,7 @@ from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_appl
 from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
+from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     DriverRuntimeBinding,
@@ -2935,16 +2935,16 @@ class SafetyManager:
         off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
         for smu_channel in ("smua", "smub"):
             if fault_channel == smu_channel:
-                state = "fault"
+                state = KeithleySourceState.FAULT
                 value = -1.0
             elif smu_channel in self._active_sources:
-                state = "on"
+                state = KeithleySourceState.ON
                 value = 1.0
             elif off_results[smu_channel] is SourceOffResult.DEVICE_REPORTED_OFF:
-                state = "off"
+                state = KeithleySourceState.OFF
                 value = 0.0
             else:
-                state = "unknown"
+                state = KeithleySourceState.UNKNOWN
                 value = math.nan
 
             reading = Reading.now(
@@ -2953,7 +2953,7 @@ class SafetyManager:
                 unit="",
                 instrument_id="safety_manager",
                 metadata={
-                    "state": state,
+                    "state": state.value,
                     "channel": smu_channel,
                     "reason": reason,
                     "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),

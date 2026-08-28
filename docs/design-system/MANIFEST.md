@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.2.0
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.1.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-08-28
+**Session:** v4.2.0 typed Keithley Safety gate-cause and source-state freshness contracts
+**Scope:** Design system v4.2.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -216,10 +216,10 @@ Batch 6 — accessibility + governance:
     requires implementation, discoverability, tests, and hazard review before
     becoming canonical.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v4.0.3 line** — the v2.0.0
+62. **Design system remains flat-token in the current v4.2.0 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v4.0.3 line** — neither
+63. **STONE_* remains deprecated/read-only in the current v4.2.0 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -248,7 +248,7 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+**Design system v4.2.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, the supplemental atomic briefing, and the typed Keithley Safety gate-cause contract are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
 ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
 remain open.
