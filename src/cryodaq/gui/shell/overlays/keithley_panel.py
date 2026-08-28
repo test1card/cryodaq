@@ -20,7 +20,7 @@ Panel-level:
 Public API (MainWindowV2 push points):
 - ``on_reading(reading)``  — route a single Reading into the overlay
 - ``set_connected(ok)``    — mark Keithley connection state
-- ``set_safety_ready(ok, reason="")`` — toggle safety gate
+- ``set_safety_ready(ok, reason="", cause=...)`` — apply the typed safety gate
 
 Out of scope (tracked as follow-ups):
 - FU.4: K4 custom-command popup

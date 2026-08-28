@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.shell.overlays.keithley_panel import SafetyGateCause
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.operator_snapshot import (
@@ -151,7 +152,7 @@ def _typed_interlock_snapshot(*, revision: int = 43) -> OperatorSnapshot:
         1.0,
         0.0,
         ("readiness_not_ready",),
-        "Interlock stop_source: detector_warmup",
+        "Backend readiness authority",
     )
     readiness = ReadinessSummary(
         snapshot.cut,
@@ -166,6 +167,24 @@ def _typed_interlock_snapshot(*, revision: int = 43) -> OperatorSnapshot:
             ),
         ),
         SafetyLifecycle.SAFE_OFF,
+    )
+    return replace(snapshot, readiness=readiness)
+
+
+def _typed_unknown_snapshot(*, revision: int = 44) -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot(revision=revision)
+    readiness = ReadinessSummary(
+        snapshot.cut,
+        SummaryStatus(
+            OperatorPresentationState.CAUTION,
+            1.0,
+            0.0,
+            ("readiness_not_ready",),
+            "Backend readiness authority",
+        ),
+        ReadinessTruth.UNKNOWN,
+        (),
+        SafetyLifecycle.UNKNOWN,
     )
     return replace(snapshot, readiness=readiness)
 
@@ -256,6 +275,101 @@ def test_current_typed_interlock_is_warning_only_on_lazy_open(
         assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
         assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
         assert "заблокировано" not in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_unknown_typed_safety_authority_disables_start_and_parameters(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_unknown_snapshot())
+
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert not panel._smua_block._p_spin.isEnabled()
+        assert not panel._smua_block._v_spin.isEnabled()
+        assert not panel._smua_block._i_spin.isEnabled()
+        assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_transport_stale_typed_safety_stays_unavailable_on_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        store.accept_snapshot(_typed_ready_snapshot())
+        stale = store.observe_transport(connected=True, transport_age_s=11.0, stale_after_s=10.0)
+        w.render_operator_snapshot(stale)
+        assert w._keithley_panel is None
+
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert not panel._smua_block._p_spin.isEnabled()
+        assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_composer_shaped_interlock_uses_blocker_text_in_warning_and_start_receipt(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    captured: list[dict] = []
+
+    class _FakeSignal:
+        def connect(self, _slot) -> None:  # noqa: ANN001
+            pass
+
+    class _FakeWorker:
+        def __init__(self, command: dict, parent=None) -> None:  # noqa: ANN001
+            captured.append(command)
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            pass
+
+    import cryodaq.gui.shell.overlays.keithley_panel as panel_module
+
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _FakeWorker)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+        panel._smua_block._start_btn.click()
+
+        actual_blocker = "Interlock stop_source: detector_warmup"
+        assert actual_blocker in panel._gate_reason_label.text()
+        assert "Backend readiness authority" not in panel._gate_reason_label.text()
+        assert len(captured) == 1
+        assert captured[0]["operator_warning_choice"]["warning"] == actual_blocker
     finally:
         _stop_timers(w)
 
