@@ -2822,6 +2822,21 @@ def _ob_002_marker_trigger() -> tuple[str, str, str]:
     return trigger.groups()
 
 
+def _ob_002_live_marker_assignment(target: str, token: str) -> re.Match[str]:
+    """Parse the one marker assignment from the candidate target text."""
+
+    assignments = list(
+        re.finditer(
+            rf"(?m)^<!--\s*{re.escape(token)}=(?P<value>\S+?)\s*:",
+            target,
+        )
+    )
+    assert len(assignments) == 1, (
+        f"candidate target must carry exactly one designated {token} assignment; found {len(assignments)}"
+    )
+    return assignments[0]
+
+
 def test_ob_002_marker_trigger_rejects_duplicate_register_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """OB-002 must occupy exactly one register row.
 
@@ -2914,7 +2929,10 @@ def test_ob_002_marker_trigger_requires_terminal_value(monkeypatch: pytest.Monke
         test_roadmap_phase_marker_has_exactly_one_occurrence()
 
 
-def test_ob_002_marker_trigger_rejects_suffixed_target_value(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("marker_value", sorted(_PHASE_MARKER_VALUES))
+def test_ob_002_marker_trigger_rejects_suffixed_target_value(
+    monkeypatch: pytest.MonkeyPatch, marker_value: str
+) -> None:
     """A target marker whose value carries a suffix must not match the vocabulary.
 
     The target-file regex previously captured `[A-Za-z_]+`, which accepted a valid
@@ -2924,16 +2942,17 @@ def test_ob_002_marker_trigger_rejects_suffixed_target_value(monkeypatch: pytest
     `DONE!` and `IN_PROGRESS!` reach the vocabulary assertion and fail it.
     """
 
+    marker_file, token, _expected = _ob_002_marker_trigger()
+    marker_path = REPO_ROOT / marker_file
     original_read = _read
 
     def _read_with_suffixed_target(path: Path) -> str:
         text = original_read(path)
-        if path == REPO_ROOT / "ROADMAP.md":
-            return text.replace(
-                "phase-1-status=IN_PROGRESS",
-                "phase-1-status=IN_PROGRESS!",
-                1,
-            )
+        if path == marker_path:
+            assignment = _ob_002_live_marker_assignment(text, token)
+            text = text[: assignment.start("value")] + marker_value + text[assignment.end("value") :]
+            assignment = _ob_002_live_marker_assignment(text, token)
+            return text[: assignment.end("value")] + "!" + text[assignment.end("value") :]
         return text
 
     monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_suffixed_target)
@@ -2941,7 +2960,8 @@ def test_ob_002_marker_trigger_rejects_suffixed_target_value(monkeypatch: pytest
         test_roadmap_phase_marker_has_exactly_one_occurrence()
 
 
-def test_ob_002_marker_trigger_rejects_prose_only_target(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("marker_value", sorted(_PHASE_MARKER_VALUES))
+def test_ob_002_marker_trigger_rejects_prose_only_target(monkeypatch: pytest.MonkeyPatch, marker_value: str) -> None:
     """The sole target occurrence must occupy the designated marker assignment.
 
     Searching for the token anywhere is not enough.  If an editor removes the
@@ -2950,16 +2970,19 @@ def test_ob_002_marker_trigger_rejects_prose_only_target(monkeypatch: pytest.Mon
     the guard that protects the evaluator from firing on prose.
     """
 
+    marker_file, token, _expected = _ob_002_marker_trigger()
+    marker_path = REPO_ROOT / marker_file
     original_read = _read
 
     def _read_with_prose_only_target(path: Path) -> str:
         text = original_read(path)
-        if path == REPO_ROOT / "ROADMAP.md":
-            return text.replace(
-                "<!-- phase-1-status=IN_PROGRESS :",
-                "<!-- explanatory prose says phase-1-status=DONE but is not a marker assignment:",
-                1,
-            )
+        if path == marker_path:
+            assignment = _ob_002_live_marker_assignment(text, token)
+            text = text[: assignment.start("value")] + marker_value + text[assignment.end("value") :]
+            assignment = _ob_002_live_marker_assignment(text, token)
+            live_value = assignment.group("value")
+            prose = f"<!-- explanatory prose says {token}={live_value} but is not a marker assignment:"
+            return text[: assignment.start()] + prose + text[assignment.end() :]
         return text
 
     monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_prose_only_target)
