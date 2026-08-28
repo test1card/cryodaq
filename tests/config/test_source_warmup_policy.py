@@ -537,6 +537,10 @@ async def test_detector_warning_rearms_and_refires_after_cold_recovery() -> None
         await asyncio.sleep(0.05)
         assert engine.get_state()["detector_warmup"] is InterlockState.ARMED
         assert "detector_warmup" not in alarm_state_manager.get_active()
+        cleared = queue.get_nowait()
+        assert cleared.event_type == "alarm_cleared"
+        assert cleared.payload == {"alarm_id": "detector_warmup"}
+        assert cleared.experiment_id == "measurement-1"
 
         await _publish_bound_sensor(broker, catalog, warm)
         await asyncio.sleep(0.05)

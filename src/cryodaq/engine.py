@@ -2492,18 +2492,28 @@ def _interlock_trip_admission(
     return True
 
 
-def _interlock_warning_recovery_handler(
+async def _interlock_warning_recovery_handler(
     condition: Any,
     _reading: Any,
     *,
     context: _InterlockHandlerContext,
 ) -> None:
-    """Remove a recovered warning from authoritative alarm state."""
+    """Remove a recovered warning and publish its clear transition."""
     if condition.action != "warning":
         return
-    if context.alarm_state_manager is None:
+    if context.alarm_state_manager is None or context.event_bus is None or context.experiment_manager is None:
         raise RuntimeError("interlock warning recovery path is unavailable")
-    context.alarm_state_manager.process(condition.name, None, {})
+    transition = context.alarm_state_manager.process(condition.name, None, {})
+    if transition != "CLEARED":
+        return
+    await context.event_bus.publish(
+        EngineEvent(
+            event_type="alarm_cleared",
+            timestamp=datetime.now(UTC),
+            payload={"alarm_id": condition.name},
+            experiment_id=context.experiment_manager.active_experiment_id,
+        )
+    )
 
 
 async def _interlock_dead_channel_handler(
