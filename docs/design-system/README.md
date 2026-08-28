@@ -85,8 +85,8 @@ be established.
   `/home/cryodaq/miniforge3/envs/cryodaq-lab/bin/python -m pytest -q tests/gui/test_cooldown_history_card.py --durations=0`
   → `26 passed in 0.62s`; Python 3.14.6, PySide6 6.11.0, pytest 9.0.3,
   Ubuntu 22.04. Measured against test-file blob
-  `82fdf7812bcc9a11e4bb2d8532912b2ba56830a9` and card-module blob
-  `87dd114411b6fdfa7e4f661ea47428abaf0586e4`; any edit to either file
+  `a4a47a7c673d38f0ea505b30b3fb0a51cb44620f` and card-module blob
+  `6702eb5e9ea584a65d9341dfb719718437a2f3a0`; any edit to either file
   invalidates this receipt.
 
 The primary operating surface MUST preserve panoramic observability: current
