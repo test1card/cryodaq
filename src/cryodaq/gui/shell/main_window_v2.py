@@ -285,6 +285,8 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        self._conductivity_snapshot: dict[str, tuple[Reading, ChannelDescriptorV1]] = {}
+        self._conductivity_snapshot_binding: tuple[str, str | None] | None = None
         # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
         # opened after readings start arriving still gets a populated
@@ -524,6 +526,10 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
+            current_binding = self._current_conductivity_snapshot_binding()
+            if current_binding is not None and self._conductivity_snapshot_binding == current_binding:
+                for reading, descriptor in self._conductivity_snapshot.values():
+                    widget.on_descriptor_reading(reading, descriptor)
         # v0.55.6: replay connection state into MultiLine overlay. Same
         # contract as the other measurement overlays.
         if name == "multiline":
@@ -629,6 +635,26 @@ class MainWindowV2(QMainWindow):
             if callable(fn):
                 fn(*args)
 
+    def _current_conductivity_snapshot_binding(self) -> tuple[str, str | None] | None:
+        bridge_instance_id = self._current_bridge_instance_id()
+        if bridge_instance_id is None:
+            return None
+        return bridge_instance_id, self._active_experiment_id()
+
+    def _cache_conductivity_reading(
+        self,
+        reading: Reading,
+        descriptor: ChannelDescriptorV1,
+    ) -> None:
+        binding = self._current_conductivity_snapshot_binding()
+        metadata = reading.metadata
+        if binding is None or type(metadata) is not dict or metadata.get("bridge_instance_id") != binding[0]:
+            return
+        if self._conductivity_snapshot_binding != binding:
+            self._conductivity_snapshot.clear()
+            self._conductivity_snapshot_binding = binding
+        self._conductivity_snapshot[descriptor.channel_id] = (reading, descriptor)
+
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
@@ -690,6 +716,8 @@ class MainWindowV2(QMainWindow):
         descriptor_store = getattr(self, "_descriptor_store", None)
         if descriptor_store is not None:
             descriptor_store.invalidate_transport()
+        self._conductivity_snapshot.clear()
+        self._conductivity_snapshot_binding = None
         annunciation_controller = getattr(self, "_annunciation_controller", None)
         if annunciation_controller is not None:
             annunciation_controller.invalidate_transport()
@@ -959,6 +987,7 @@ class MainWindowV2(QMainWindow):
             self._calibration_panel.on_reading(reading)
 
         if quantity is ChannelQuantity.TEMPERATURE:
+            self._cache_conductivity_reading(reading, descriptor)
             if self._conductivity_panel is not None:
                 self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             self._analytics_temperature_snapshot[descriptor.channel_id] = reading
@@ -976,6 +1005,8 @@ class MainWindowV2(QMainWindow):
                 self._keithley_panel.on_reading(reading)
             if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
                 self._conductivity_panel.on_descriptor_reading(reading, descriptor)
+            if quantity is ChannelQuantity.POWER:
+                self._cache_conductivity_reading(reading, descriptor)
             if quantity in {
                 ChannelQuantity.VOLTAGE,
                 ChannelQuantity.CURRENT,
@@ -1449,6 +1480,9 @@ class MainWindowV2(QMainWindow):
         # so a newly-opened AnalyticsView does not replay stale data.
         active = status.get("active_experiment")
         new_exp_id = active.get("experiment_id") if isinstance(active, dict) else None
+        if new_exp_id != previous_exp_id:
+            self._conductivity_snapshot.clear()
+            self._conductivity_snapshot_binding = None
         if (
             self._accepted_safety_bridge_instance_id is not None
             and new_exp_id != self._accepted_safety_experiment_id

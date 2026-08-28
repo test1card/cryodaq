@@ -2254,12 +2254,22 @@ class ConductivityPanel(QWidget):
     def _on_auto_start(self) -> None:
         # Button enablement is presentation only.  The handler owns the final
         # live-authority check so direct/queued invocation cannot bypass it.
-        if (
-            not self._connected
-            or self._auto_state == "stabilizing"
-            or self._auto_outcome_unknown
-            or self._auto_pending_token is not None
-        ):
+        if not self._connected:
+            self.show_warning("Автоизмерение не запущено: нет связи с Engine. Дождитесь восстановления связи.")
+            return
+        if self._auto_outcome_unknown:
+            self.show_warning(
+                "Автоизмерение не запущено: исход предыдущей команды неизвестен. "
+                "Нажмите «Стоп» для проверки отключения."
+            )
+            return
+        if self._auto_pending_token is not None:
+            self.show_warning(
+                "Автоизмерение не запущено: выполняется команда управления мощностью. Дождитесь подтверждения."
+            )
+            return
+        if self._auto_state == "stabilizing":
+            self.show_warning("Автоизмерение уже выполняется. Дождитесь завершения или нажмите «Стоп».")
             return
         if len(self._chain) < 2:
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
