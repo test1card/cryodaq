@@ -113,9 +113,7 @@ def test_returns_value_during_cooling(tmp_path: Path) -> None:
 
     # Out-of-horizon query → None.
     assert svc.expected_value("T_cold", ts_monotonic=1000.0 - 1.0) is None
-    assert (
-        svc.expected_value("T_cold", ts_monotonic=1000.0 + 5.0 * 3600.0) is None
-    )
+    assert svc.expected_value("T_cold", ts_monotonic=1000.0 + 5.0 * 3600.0) is None
 
     # Unknown channel → None even with cached prediction.
     assert svc.expected_value("UnknownChannel", ts_monotonic=1000.0 + 7200.0) is None
@@ -150,9 +148,5 @@ def test_returns_none_for_warm_channel_when_no_warm_arrays(tmp_path: Path) -> No
     svc._last_prediction_raw = pred
 
     # Cold side resolves; warm side returns None because arrays are missing.
-    assert (
-        svc.expected_value("T_cold", ts_monotonic=1000.0 + 3600.0) is not None
-    )
-    assert (
-        svc.expected_value("T_warm", ts_monotonic=1000.0 + 3600.0) is None
-    )
+    assert svc.expected_value("T_cold", ts_monotonic=1000.0 + 3600.0) is not None
+    assert svc.expected_value("T_warm", ts_monotonic=1000.0 + 3600.0) is None
