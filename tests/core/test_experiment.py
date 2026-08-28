@@ -209,6 +209,55 @@ async def test_finalize_persists_metadata_and_sqlite(manager: ExperimentManager,
     assert Path(row["artifact_dir"]).name == exp_id
 
 
+async def test_finalize_rejects_running_conductivity_sweep_until_terminal_attachment(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Thermal sweep",
+        title="Thermal sweep",
+        operator="Petrov",
+        template_id="thermal_conductivity",
+    )
+    started_at = datetime(2026, 8, 28, 12, tzinfo=UTC)
+    manager.attach_run_record(
+        experiment_id=exp_id,
+        source_tab="conductivity",
+        source_module="conductivity_panel",
+        run_type="autosweep",
+        status="RUNNING",
+        source_run_id="autosweep-001",
+        started_at=started_at,
+        result_summary={"point_count": 1, "recovery_required": True},
+    )
+
+    with pytest.raises(RuntimeError, match="автоизмерение теплопроводности"):
+        manager.finalize_experiment(exp_id)
+
+    assert manager.active_experiment_id == exp_id
+    metadata_path = tmp_path / "experiments" / exp_id / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["experiment"]["status"] == "RUNNING"
+    assert metadata["run_records"][0]["status"] == "RUNNING"
+    assert not (tmp_path / "experiments" / exp_id / "archive").exists()
+
+    manager.attach_run_record(
+        experiment_id=exp_id,
+        source_tab="conductivity",
+        source_module="conductivity_panel",
+        run_type="autosweep",
+        status="ABORTED",
+        source_run_id="autosweep-001",
+        started_at=started_at,
+        finished_at=started_at,
+        result_summary={"point_count": 1, "recovery_required": False},
+    )
+    finished = manager.finalize_experiment(exp_id)
+
+    assert finished.status is ExperimentStatus.COMPLETED
+    assert manager.active_experiment_id is None
+
+
 async def test_update_preserves_existing_fields_after_save(
     manager: ExperimentManager,
     tmp_path: Path,

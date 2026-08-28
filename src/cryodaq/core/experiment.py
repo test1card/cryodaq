@@ -1200,6 +1200,15 @@ class ExperimentManager:
         self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
+        run_records = self.list_run_records(experiment_id=active.experiment_id)
+        if any(
+            record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+            for record in run_records
+        ):
+            raise RuntimeError(
+                "Нельзя завершить эксперимент: автоизмерение теплопроводности ещё активно. "
+                "Сначала остановите автоизмерение и дождитесь подтверждения сохранения."
+            )
 
         finished_at = _parse_time(end_time) or datetime.now(UTC)
         if finished_at < active.start_time:
@@ -1230,7 +1239,6 @@ class ExperimentManager:
             retroactive=active.retroactive,
         )
 
-        run_records = self.list_run_records(experiment_id=finished.experiment_id)
         archive_snapshot = self._build_archive_snapshot(finished, run_records)
         self._commit_transition(
             "finalize",
