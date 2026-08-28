@@ -216,6 +216,7 @@ NAVIGATION_SECTIONS: Final[tuple[NavigationSection, ...]] = (
             NavigationDestination("summary", NavigationGroup.MORE, "Сводка смены"),
             NavigationDestination("calibration", NavigationGroup.MORE, "Калибровка"),
             NavigationDestination("knowledge_base", NavigationGroup.MORE, "База знаний"),
+            NavigationDestination("interlocks", NavigationGroup.MORE, "Блокировки"),
             NavigationDestination("settings", NavigationGroup.MORE, "Настройки"),
             NavigationDestination("web_panel", NavigationGroup.MORE, "Web-панель"),
             NavigationDestination("restart_engine", NavigationGroup.MORE, "Перезапуск Engine"),
