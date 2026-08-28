@@ -183,14 +183,20 @@ def test_bridge_watchdogs_invalidate_before_every_turnover(state: dict[str, bool
 
 def test_manual_engine_restart_invalidates_before_fallible_teardown() -> None:
     calls: list[str] = []
+    scheduled: list[tuple[int, object]] = []
     timer = SimpleNamespace(stop=lambda: calls.append("timer.stop"), start=lambda: calls.append("timer.start"))
     launcher = SimpleNamespace(
         _restart_giving_up=True,
         _restart_attempts=2,
         _config_error_modal_shown=True,
         _restart_pending=True,
+        _restart_generation=0,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
+        _runtime_engine_readiness_state=None,
         _engine_unsettled_incarnation=None,
         _engine_external=False,
+        _replay_source=None,
         _invalidate_engine_producer=lambda: calls.append("invalidate"),
         _bridge=_Bridge(calls),
         _data_timer=timer,
@@ -198,10 +204,22 @@ def test_manual_engine_restart_invalidates_before_fallible_teardown() -> None:
         _clear_engine_down_banner=lambda: calls.append("clear"),
         _invalidate_descriptor_transport=lambda: calls.append("invalidate"),
         _stop_engine=lambda: calls.append("stop_engine"),
-        _start_engine=lambda: calls.append("start_engine"),
+        _start_engine=lambda **_kwargs: calls.append("start_engine"),
+        _wait_engine_ready=lambda: calls.append("ready"),
     )
-    with patch("cryodaq.launcher.time.sleep"):
+    with (
+        patch("cryodaq.launcher.time.sleep"),
+        patch(
+            "cryodaq.launcher.QTimer.singleShot",
+            side_effect=lambda delay_ms, callback: scheduled.append((delay_ms, callback)),
+        ),
+    ):
         LauncherWindow._restart_engine(launcher)
+        state = launcher._runtime_engine_readiness_state
+        assert type(state) is dict
+        state["worker"].join(timeout=1.0)
+        assert not state["worker"].is_alive()
+        scheduled.pop(0)[1]()
     for later in ("timer.stop", "shutdown", "stop_engine", "start_engine", "start"):
         assert calls.index("invalidate") < calls.index(later)
     assert calls.index("stop_engine") < calls.index("shutdown")
@@ -531,7 +549,7 @@ def test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold() -> No
     launcher._data_timer = MagicMock()
     launcher._health_timer = MagicMock()
 
-    def _failing_start() -> None:
+    def _failing_start(**_kwargs) -> None:
         calls.append("start_engine")
         raise RuntimeError("replacement never reported ready")
 
