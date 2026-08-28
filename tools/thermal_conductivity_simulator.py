@@ -2,6 +2,15 @@
 
 The process owns the thermal model and its ground truth. CryoDAQ receives only
 ordinary Lake Shore 218 query replies plus a mock-only heater-power command.
+
+Truth-history contract: the plant retains only the most recent
+``TRUTH_HISTORY_MAX_POINTS`` commanded heater points; every truth payload
+reports how many older points were dropped (``commanded_points_dropped``) and
+how many were ever commanded (``commanded_points_total``), so truncation is
+always visible. ``MOCK:TRUTH?`` replies are serialized to a single ASCII line
+that never exceeds ``TRUTH_LINE_MAX_BYTES`` bytes including its newline, which
+keeps the reply readable for clients that read one line through asyncio's
+default 64 KiB stream-reader limit.
 """
 
 from __future__ import annotations
@@ -14,8 +23,19 @@ import signal
 import socketserver
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
+
+#: Most recent commanded heater points retained for ground-truth correlation;
+#: anything older is reported as dropped rather than growing memory forever.
+TRUTH_HISTORY_MAX_POINTS = 128
+
+#: Byte budget (including the newline) for one ``MOCK:TRUTH?`` line; half of
+#: asyncio's default StreamReader limit, enforced mechanically when encoding.
+TRUTH_LINE_MAX_BYTES = 32768
+
+_LS218_CHANNEL_COUNT = 8
 
 
 class ThermalPlant:
@@ -49,7 +69,8 @@ class ThermalPlant:
         self._power_w = 0.0
         self._rise_k = 0.0
         self._last_update_s = time.monotonic()
-        self._history: list[dict[str, float]] = []
+        self._history: deque[dict[str, float]] = deque(maxlen=TRUTH_HISTORY_MAX_POINTS)
+        self._commanded_points_total = 0
         self._lock = threading.Lock()
 
     def _equilibrium_rise(self, power_w: float) -> float:
@@ -81,6 +102,7 @@ class ThermalPlant:
                     "expected_g_w_per_k": expected_g,
                 }
             )
+            self._commanded_points_total += 1
 
     def temperatures(self) -> tuple[float, ...]:
         with self._lock:
@@ -91,6 +113,7 @@ class ThermalPlant:
     def truth(self) -> dict[str, Any]:
         with self._lock:
             self._advance_locked()
+            retained = len(self._history)
             return {
                 "model": "nonlinear_thermal_link_v1",
                 "bath_temperature_k": self.bath_temperature_k,
@@ -98,11 +121,47 @@ class ThermalPlant:
                 "conductance_slope_w_per_k2": self.conductance_slope_w_per_k2,
                 "time_constant_s": self.time_constant_s,
                 "commanded_points": list(self._history),
+                "commanded_points_total": self._commanded_points_total,
+                "commanded_points_dropped": self._commanded_points_total - retained,
             }
 
 
 def _sensor_unit(temp_k: float) -> float:
     return (1600.0 / (temp_k + 15.0)) + 0.08
+
+
+def _channel_index(command_upper: str) -> int:
+    """Translate a validated ``<CMD>? <channel>`` operand into a 0-based index."""
+
+    operand = command_upper.split(maxsplit=1)[1]
+    try:
+        channel = int(operand)
+    except ValueError:
+        raise ValueError(f"invalid LS218 channel operand: {operand!r}") from None
+    if not 1 <= channel <= _LS218_CHANNEL_COUNT:
+        raise ValueError(f"LS218 channel {channel} outside valid range 1..{_LS218_CHANNEL_COUNT}")
+    return channel - 1
+
+
+def _truth_response_line(plant: ThermalPlant) -> str:
+    """Serialize truth as one ASCII line within :data:`TRUTH_LINE_MAX_BYTES`.
+
+    If even the retained points would not fit, the oldest points are dropped
+    from the reply only, and each drop is folded into
+    ``commanded_points_dropped`` so truncation is never silent.
+    """
+
+    payload = plant.truth()
+    points = list(payload.pop("commanded_points"))
+    dropped = int(payload.pop("commanded_points_dropped"))
+    while True:
+        payload["commanded_points"] = points
+        payload["commanded_points_dropped"] = dropped
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if len(line.encode("ascii")) + 1 <= TRUTH_LINE_MAX_BYTES or not points:
+            return line
+        points.pop(0)
+        dropped += 1
 
 
 class SimulatorServer(socketserver.ThreadingTCPServer):
@@ -121,22 +180,21 @@ class SimulatorServer(socketserver.ThreadingTCPServer):
         if upper == "KRDG?" or upper.startswith("KRDG? "):
             values = self.plant.temperatures()
             if upper != "KRDG?":
-                index = int(upper.split()[1]) - 1
-                return f"{values[index]:+.9E}"
+                return f"{values[_channel_index(upper)]:+.9E}"
             return ",".join(f"{value:+.9E}" for value in values)
         if upper == "SRDG?" or upper.startswith("SRDG? "):
             values = tuple(_sensor_unit(value) for value in self.plant.temperatures())
             if upper != "SRDG?":
-                index = int(upper.split()[1]) - 1
-                return f"{values[index]:+.9E}"
+                return f"{values[_channel_index(upper)]:+.9E}"
             return ",".join(f"{value:+.9E}" for value in values)
         if upper.startswith("RDGST? "):
+            _channel_index(upper)
             return "0"
         if upper.startswith("MOCK:POWER "):
             self.plant.set_power(float(text.split(maxsplit=1)[1]))
             return "OK"
         if upper == "MOCK:TRUTH?":
-            return json.dumps(self.plant.truth(), sort_keys=True, separators=(",", ":"))
+            return _truth_response_line(self.plant)
         if upper == "MOCK:SHUTDOWN":
             threading.Thread(target=self.shutdown, daemon=True).start()
             return "OK"
@@ -206,9 +264,9 @@ def main() -> int:
         server.serve_forever(poll_interval=0.05)
     finally:
         server.server_close()
-        _write_json(args.truth_output, plant.truth())
         if args.ready_file.is_file():
             args.ready_file.unlink()
+        _write_json(args.truth_output, plant.truth())
     return 0
 
 
