@@ -770,7 +770,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         self._update_body_stack_state()
         self._apply_ack_enabled()
         self._summary_label.setText(f"Данные тревог недоступны: {reason}")
-        self._summary_label.setToolTip("Показаны последние принятые данные; квитирование отключено.")
+        self._summary_label.setToolTip("Показаны последние полученные данные; подтвердить тревогу сейчас нельзя.")
         self._summary_label.setVisible(True)
 
     def get_active_v2_count(self) -> int:
@@ -900,10 +900,10 @@ class AlarmPanel(OverlayPanelBase, QWidget):
                 btn.setProperty("engineInstanceId", self._v2_engine_instance_id or "")
                 btn.setProperty("activationId", activation_id if type(activation_id) is str else "")
                 if not identity_available:
-                    btn.setToolTip("Квитирование недоступно: нет точной идентификации срабатывания")
+                    btn.setToolTip("Подтвердить нельзя: не удалось точно определить, какое это срабатывание")
                 elif retained_pending:
                     btn.setToolTip(
-                        "Повторить точную сохранённую команду и завершить обязательную публикацию квитирования"
+                        "Повторить сохранённую команду и завершить обязательную отправку подтверждения"
                     )
 
                 if retained_pending:
@@ -996,7 +996,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         available = any(key not in self._pending_ack_in_flight for key in self._pending_ack_commands)
         self._ack_settlement_button.setText(f"ЗАВЕРШИТЬ ПУБЛИКАЦИЮ ({count})")
         self._ack_settlement_button.setToolTip(
-            f"Незавершённых квитирований: {count}. "
+            f"Неотправленных подтверждений: {count}. "
             "Повторяется только точная сохранённая команда с тем же идентификатором запроса."
         )
         self._ack_settlement_button.setEnabled(
