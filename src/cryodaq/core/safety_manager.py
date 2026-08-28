@@ -3521,6 +3521,11 @@ class SafetyManager:
             while True:
                 await asyncio.sleep(_CHECK_INTERVAL_S)
                 await self._run_checks()
+                # ZMQ PUB/SUB does not retain the initial state snapshot for a
+                # subscriber whose handshake completes later. Re-derive this
+                # bounded-cadence snapshot from the sole safety authority so a
+                # late observer eventually receives truth, including UNKNOWN.
+                await self._publish_keithley_channel_states("periodic")
         except asyncio.CancelledError:
             raise
 

@@ -2,12 +2,63 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Sequence
+from typing import Any
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.smu_channel import SMU_CHANNELS
+from cryodaq.core.zmq_bridge import ZMQPublisher, _unpack_reading
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import SourceOffEvidence, SourceOffResult, SourceOffTier
+
+
+class _LateAttachingSocket:
+    """Non-retaining PUB transport whose observer attaches on demand."""
+
+    def __init__(self) -> None:
+        self.attached = False
+        self.messages: list[list[bytes]] = []
+
+    async def send_multipart(self, frames: Sequence[bytes]) -> None:
+        if self.attached:
+            self.messages.append(list(frames))
+
+    def close(self, *, linger: int) -> None:
+        del linger
+
+
+def _start_non_socket_publisher(
+    queue: asyncio.Queue[Any],
+) -> tuple[ZMQPublisher, _LateAttachingSocket]:
+    """Run the production drain/encoding loop without opening a socket."""
+
+    publisher = ZMQPublisher()
+    socket = _LateAttachingSocket()
+    publisher._queue = queue
+    publisher._session_id = "0" * 32
+    publisher._socket = socket  # type: ignore[assignment]
+    publisher._running = True
+    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
+    return publisher, socket
+
+
+async def _wait_for_channel_states(socket: _LateAttachingSocket) -> dict[str, Reading]:
+    async def collect() -> dict[str, Reading]:
+        while True:
+            readings = [_unpack_reading(frames[1]) for frames in socket.messages]
+            by_channel = {
+                reading.metadata["channel"]: reading
+                for reading in readings
+                if reading.instrument_id == "safety_manager" and reading.metadata.get("channel") in SMU_CHANNELS
+            }
+            if set(by_channel) == set(SMU_CHANNELS):
+                return by_channel
+            await asyncio.sleep(0)
+
+    return await asyncio.wait_for(collect(), timeout=2.5)
 
 
 async def _make_manager(*, data_broker: DataBroker):
@@ -69,6 +120,93 @@ async def test_initial_channel_state_with_device_reported_off_publishes_off_for_
         )
     finally:
         await manager.stop()
+
+
+async def test_late_transport_observer_receives_authoritative_states_without_interlock_trip() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    warning_calls: list[None] = []
+
+    async def warn_only() -> None:
+        warning_calls.append(None)
+
+    detector_guard = InterlockEngine(data_broker, actions={"warning": warn_only})
+    detector_guard.add_condition(
+        InterlockCondition(
+            name="detector_warmup",
+            description="test warning-only masking control",
+            channel_ids=frozenset({"test/detector_temperature"}),
+            threshold=10.0,
+            comparison=">",
+            action="warning",
+        )
+    )
+    await detector_guard.start()
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager.start()
+    try:
+        result = await manager.request_run(0.5, 40.0, 1.0, channel=SMU_CHANNELS[0])
+        assert result["ok"] is True
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        socket.attached = True
+        try:
+            by_channel = await _wait_for_channel_states(socket)
+        except TimeoutError as exc:
+            assert detector_guard.get_state()["detector_warmup"] is InterlockState.ARMED
+            assert warning_calls == []
+            raise AssertionError(
+                "late source-state publication timed out while the warning-only detector guard stayed uninvolved"
+            ) from exc
+
+        assert {channel: reading.metadata["state"] for channel, reading in by_channel.items()} == {
+            SMU_CHANNELS[0]: "on",
+            SMU_CHANNELS[1]: "unknown",
+        }
+        assert (
+            by_channel[SMU_CHANNELS[1]].metadata["off_evidence"]["channel_off_results"][SMU_CHANNELS[1]]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+        )
+        assert detector_guard.get_state()["detector_warmup"] is InterlockState.ARMED
+        assert warning_calls == []
+    finally:
+        await manager.stop()
+        await detector_guard.stop()
+        await publisher.stop()
+
+
+async def test_late_transport_observer_preserves_genuinely_unknown_source_state() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=False, data_broker=data_broker)
+    await manager.start()
+    try:
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        socket.attached = True
+        by_channel = await _wait_for_channel_states(socket)
+
+        assert set(by_channel) == set(SMU_CHANNELS)
+        assert all(reading.metadata["state"] == "unknown" for reading in by_channel.values())
+        assert all(math.isnan(reading.value) for reading in by_channel.values())
+        assert all(
+            reading.metadata["off_evidence"]["channel_off_results"][channel]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+            for channel, reading in by_channel.items()
+        )
+    finally:
+        await manager.stop()
+        await publisher.stop()
 
 
 async def test_command_tier_device_reported_off_publishes_off_without_verified_claim() -> None:
