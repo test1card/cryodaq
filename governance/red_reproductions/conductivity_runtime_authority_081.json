@@ -47,7 +47,7 @@
   "guard_blobs": {
     "tests/drivers/test_keithley_disconnect_verified_off.py": "eef9e8e46c05fcc233e7615b2f215e81ca4ca84d",
     "tests/drivers/test_lakeshore_218s.py": "9184eb5e6987a7ac7c314d0a9ab910acb201651b",
-    "tests/gui/shell/overlays/test_conductivity_panel.py": "dadd9f71546335bd9535fd5a1064a0223a649505"
+    "tests/gui/shell/overlays/test_conductivity_panel.py": "a47b9caef3aa11818a902b1649334c9443dedb98"
   },
   "guard_nodes": [
     "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only",

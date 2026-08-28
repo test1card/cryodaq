@@ -34,7 +34,7 @@
     ]
   },
   "guard_blobs": {
-    "tests/gui/shell/overlays/test_conductivity_panel.py": "dadd9f71546335bd9535fd5a1064a0223a649505"
+    "tests/gui/shell/overlays/test_conductivity_panel.py": "a47b9caef3aa11818a902b1649334c9443dedb98"
   },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds"
