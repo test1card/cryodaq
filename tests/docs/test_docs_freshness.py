@@ -1555,7 +1555,10 @@ def test_bottom_status_bar_spec_matches_live_setter_contract() -> None:
     spec = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/bottom-status-bar.md")
 
     assert set(setter_re.findall(spec)) == set(setter_re.findall(source))
-    for marker in ("Лаунчер", "Диск", "изм/с"):
+    current_contract = spec.split("## When to use", 1)[0]
+    assert "seven fields" in current_contract
+    assert "six fields" not in current_contract
+    for marker in ("Лаунчер", "Диск", "изм/с", "Количества: channels.yaml"):
         assert marker in spec
     assert "class StatusItem" not in spec
 

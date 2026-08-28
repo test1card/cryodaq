@@ -127,6 +127,10 @@ def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> N
 def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
     bar = _make_bar()
 
+    bar.set_safety_state("x" * 1_000, stale=True)
+    bar.set_data_rate(1e300)
+    bar.set_connected(False, "y" * 1_000)
+    assert bar.set_disk_evidence(1e300, source="disk_monitor", state="ok")
     bar.set_channel_authority_fallback(True)
 
     # The notice moved OFF _safety_label and onto its own label. That is the
@@ -134,10 +138,11 @@ def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
     # _safety_label, the next set_safety_state() call overwrote it and the
     # operator silently stopped being told that channel authority had fallen
     # back. The assertion below on survival is what makes the move load-bearing.
-    assert "fallback" in bar._channel_authority_label.text()
+    assert bar._channel_authority_label.text() == "Количества: channels.yaml"
+    assert "\u26a0" not in bar._channel_authority_label.text()
     assert "channels.yaml" in bar._channel_authority_label.toolTip()
     assert "расходиться" in bar._channel_authority_label.accessibleDescription()
-    return
+
     bar._start_time -= 10**12
     bar._tick()
     bar.resize(1280, bar.height())
@@ -147,17 +152,23 @@ def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
     assert bar.minimumSizeHint().width() <= 1280
     for label in (
         bar._safety_label,
+        bar._channel_authority_label,
         bar._uptime_label,
         bar._disk_label,
         bar._rate_label,
         bar._conn_label,
         bar._time_label,
     ):
+        assert label.isVisible()
+        assert label.width() > 0
+        assert label.geometry().left() >= bar.rect().left()
         assert label.geometry().right() <= bar.rect().right()
     assert "x" * 100 in bar._safety_label.accessibleDescription()
     assert "1e+300" in bar._disk_label.accessibleDescription()
     assert "y" * 100 in bar._conn_label.accessibleDescription()
     assert "д" in bar._uptime_label.accessibleDescription()
+    assert "channels.yaml" in bar._channel_authority_label.accessibleDescription()
+
 
 def test_bottom_bar_descriptor_fallback_survives_and_then_clears() -> None:
     """The fallback notice outlives a safety snapshot, and can still be cleared.
@@ -172,22 +183,20 @@ def test_bottom_bar_descriptor_fallback_survives_and_then_clears() -> None:
     bar = _make_bar()
 
     bar.set_channel_authority_fallback(True)
-    assert "fallback" in bar._channel_authority_label.text()
+    assert bar._channel_authority_label.text() == "Количества: channels.yaml"
 
     bar.set_safety_state("safe_off")
-    assert "fallback" in bar._channel_authority_label.text(), (
+    assert bar._channel_authority_label.text() == "Количества: channels.yaml", (
         "a safety-state update erased the channel-authority fallback notice"
     )
 
     bar.set_safety_state("fault_latched", stale=True)
-    assert "fallback" in bar._channel_authority_label.text(), (
+    assert bar._channel_authority_label.text() == "Количества: channels.yaml", (
         "a stale fault snapshot erased the channel-authority fallback notice"
     )
 
     bar.set_channel_authority_fallback(False)
-    assert bar._channel_authority_label.text() == "", (
-        "the fallback notice could not be cleared once it had been shown"
-    )
+    assert bar._channel_authority_label.text() == "", "the fallback notice could not be cleared once it had been shown"
     assert bar._channel_authority_label.toolTip() == ""
 
 

@@ -241,6 +241,10 @@ class MainWindowV2(QMainWindow):
         self._active_channel_descriptors = {} if _descriptor_authority is None else _descriptor_authority
         self._channel_authority_fallback_active = _descriptor_authority is None
         if _descriptor_authority is None:
+            # get_channel_manager() is process-global.  A reconstructed window
+            # must revoke a prior window's catalog before it truthfully reports
+            # that routing has returned to channels.yaml fallback authority.
+            self._channel_mgr.set_descriptor_authority(None)
             # PROCEED, and say exactly what is wrong and what it costs. Installing the failed load
             # as the authority would make `get_quantity` return None for every channel, emptying
             # the grid, plot, watch bar and conductivity selector -- a blank screen whose cause is

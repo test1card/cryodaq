@@ -4,7 +4,7 @@ keywords: status-bar, bottom-bar, connection, safety-state, uptime, disk, data-r
 applies_to: bottom chrome strip showing passive system-level evidence
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
-last_updated: 2026-07-20
+last_updated: 2026-08-28
 references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md, governance/change-impact.md
 ---
 
@@ -14,14 +14,16 @@ The shipped `BottomStatusBar` is the thin, persistent technical strip at the
 bottom of the v2 shell. Its active contract is the production implementation,
 not the older proposed Engine/Safety/ZMQ four-field mock-up.
 
-The bar presents six fields in this order:
+The bar presents seven fields in this order:
 
 1. current SafetyManager state supplied by the host;
-2. launcher/UI uptime measured from this widget's construction;
-3. free space for the configured data directory;
-4. the latest data rate supplied by the host;
-5. recent-reading connection evidence supplied by the host;
-6. the GUI host's current local time.
+2. whether channel quantity routing has fallen back to `channels.yaml` because
+   descriptor authority failed to load;
+3. launcher/UI uptime measured from this widget's construction;
+4. free space for the configured data directory;
+5. the latest data rate supplied by the host;
+6. recent-reading connection evidence supplied by the host;
+7. the GUI host's current local time.
 
 This is supporting evidence, not the primary alarm or verified-OFF surface.
 Nothing in the bar grants control authority.
@@ -40,13 +42,14 @@ acknowledgement, or any command.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ ● safety │ Лаунчер 00:00:00 │ Диск 120 ГБ │ 10 изм/с │ ● Подключено │ 14:32:15 │
+│ ● safety │ Количества: channels.yaml │ Лаунчер 00:00:00 │ Диск 120 ГБ │ 10 изм/с │ ● Подключено │ 14:32:15 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Part | Owner and provenance | Current presentation |
 |---|---|---|
 | Safety | `MainWindowV2` calls `set_safety_state` from backend state | lowercase state ID with a dot glyph |
+| Quantity authority | `MainWindowV2` calls `set_channel_authority_fallback` after descriptor-catalog loading | empty when descriptors load; textual `Количества: channels.yaml` caution when routing falls back |
 | Launcher uptime | widget-local monotonic clock | `Лаунчер HH:MM:SS` |
 | Data disk | `MainWindowV2` passes fresh, incarnation-bound `disk_monitor` evidence | `Диск N ГБ`; stale or disconnected history is marked explicitly |
 | Data rate | last value passed to `set_data_rate` | integer `изм/с` |
@@ -128,7 +131,10 @@ or `set_time` API. Documentation and tests must not imply otherwise.
 ## Update ownership and failure behavior
 
 - A one-second widget timer updates only uptime and local time.
-- Safety, rate, and connection change only through the public setters.
+- Safety, quantity-authority fallback, rate, and connection change only through
+  their public setters. `MainWindowV2` clears any prior process-global descriptor
+  catalog before asserting fallback, so the text never claims `channels.yaml`
+  authority while a previous window's descriptors still route selections.
 - Disk evidence is accepted only from the exact `disk_monitor` source when its
   typed state agrees with the numeric threshold. Invalid, negative, non-finite,
   foreign-source, or state/value-inconsistent input is rejected without
@@ -147,9 +153,11 @@ or `set_time` API. Documentation and tests must not imply otherwise.
 
 Better:
 
-- all six values stay visible in one fixed, quiet strip;
+- all seven values stay visible in one fixed, quiet strip at the supported
+  1280 px shell minimum, including the quantity-authority fallback cue;
 - lowercase safety text, Russian connection text, and dot glyphs provide
   non-color cues;
+- the fallback uses a Russian textual source cue, not an emoji or color alone;
 - activity no longer trains operators to interpret green as “running”;
 - caution and fault disk thresholds use the canonical three-rung safety
   language.
@@ -192,6 +200,9 @@ screen-reader, and operator-night-shift evidence remains open.
   run-permitted activity to `ACCENT`.
 - `test_disk_space_thresholds_use_canonical_safety_rungs` covers both disk
   boundaries.
+- `test_bottom_bar_keeps_descriptor_fallback_visible` covers the textual
+  no-emoji fallback cue and verifies all seven fields remain visible at the
+  supported 1280 px width.
 - fault-beep tests cover exact activation, immediate/repeating timer ownership,
   idempotent repeated updates, and stop-on-state-change behavior.
 - documentation freshness must assert that this setter list exactly matches the
@@ -205,7 +216,7 @@ screen-reader, and operator-night-shift evidence remains open.
 4. Clearing a retained value merely because freshness is unknown.
 5. Presenting a retained rate or disk number as current without adjacent
    freshness/connection truth.
-6. Adding a seventh field without checking the supported minimum-width truth
+6. Adding an eighth field without checking the supported minimum-width truth
    path.
 7. Claiming timezone, monospace clock, independent heartbeat, or stale markers
    before they are implemented and tested.
@@ -221,6 +232,9 @@ screen-reader, and operator-night-shift evidence remains open.
 
 ## Changelog
 
+- **2026-08-28** — reconciled the live seven-field anatomy, authority ownership,
+  accessibility, and 1280 px regression evidence for the descriptor-load
+  fallback cue; the cue is textual and has no emoji.
 - **2026-07-20 (v4.0.3)** — reconciled the active specification to the shipped
   six-field widget, removed the fictional `StatusItem`/four-setter API,
   documented activity and readiness colors, and recorded the open heartbeat,

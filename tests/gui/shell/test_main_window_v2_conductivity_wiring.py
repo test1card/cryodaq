@@ -8,18 +8,21 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+import cryodaq.gui.shell.main_window_v2 as main_window_v2
 from cryodaq.channels.descriptors import (
     ChannelDescriptorV1,
     ChannelQuantity,
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
@@ -35,6 +38,37 @@ def _stop_timers(w: MainWindowV2) -> None:
             timer.stop()
         except RuntimeError:
             pass
+
+
+def test_descriptor_load_fallback_clears_prior_singleton_authority(monkeypatch, tmp_path) -> None:
+    """A rebuilt shell must not retain a prior window's descriptor catalog."""
+    _app()
+    config_path = tmp_path / "channels.yaml"
+    config_path.write_text(
+        "default_quantity: temperature\nchannels:\n  declared-temperature:\n    name: test\n    visible: true\n",
+        encoding="utf-8",
+    )
+    manager = ChannelManager(config_path)
+    prior_catalog = {"declared-temperature": SimpleNamespace(quantity="pressure", unit="Pa")}
+    loads = iter((prior_catalog, None))
+    monkeypatch.setattr(main_window_v2, "get_channel_manager", lambda: manager)
+    monkeypatch.setattr(main_window_v2, "_load_channel_descriptor_authority", lambda: next(loads))
+
+    first = MainWindowV2()
+    try:
+        assert manager.get_quantity("declared-temperature") == "pressure"
+    finally:
+        _stop_timers(first)
+        first.close()
+
+    second = MainWindowV2()
+    try:
+        assert second._channel_authority_fallback_active is True
+        assert manager.get_quantity("declared-temperature") == "temperature"
+        assert second._bottom_bar._channel_authority_label.text() == "Количества: channels.yaml"
+    finally:
+        _stop_timers(second)
+        second.close()
 
 
 def _temp_reading(channel: str, value: float) -> Reading:

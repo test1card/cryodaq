@@ -353,8 +353,13 @@ class ChannelManager:
     # OC-030 — declared quantity, replacing role inference from spelling
     # ------------------------------------------------------------------
 
-    def set_descriptor_authority(self, descriptors: dict[str, Any]) -> None:
-        """Use the active descriptor catalog as the quantity/unit authority."""
+    def set_descriptor_authority(self, descriptors: dict[str, Any] | None) -> None:
+        """Install or clear the active descriptor catalog for quantity/unit lookup.
+
+        ``None`` deliberately restores the validated ``channels.yaml`` authority.
+        It is distinct from an empty mapping: an empty catalog is a successfully
+        loaded authority that declares no channels.
+        """
 
         self._descriptor_authority = descriptors
 

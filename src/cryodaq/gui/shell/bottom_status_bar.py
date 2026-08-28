@@ -223,7 +223,9 @@ class BottomStatusBar(QWidget):
     def set_channel_authority_fallback(self, active: bool) -> None:
         """Keep descriptor/catalog disagreement visible in the persistent chrome."""
         if active:
-            text = "⚠ Количества: fallback"
+            # DESIGN: RULE-COPY-005 — the textual source cue is the non-color
+            # fallback indicator; persistent chrome must not use emoji.
+            text = "Количества: channels.yaml"
             detail = (
                 "Каталог дескрипторов каналов недоступен; маршрутизация количеств использует channels.yaml. "
                 "Живые данные и каталог Engine могут расходиться."
