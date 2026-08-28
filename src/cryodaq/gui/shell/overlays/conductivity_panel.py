@@ -2409,16 +2409,34 @@ class ConductivityPanel(QWidget):
         self._auto_step_power_value = None
         self._auto_step_power_received_at = None
 
+    def _refuse_auto_start(self, reason: str) -> None:
+        """Say why an auto sweep did not start, and leave the operator able to retry.
+
+        A silent early return is the worst refusal this program can make: the
+        operator presses Start, nothing happens, and nothing is said.  Every exit
+        from _on_auto_start before dispatch goes through here.
+        """
+
+        logger.warning("Автоизмерение не запущено: %s", reason)
+        self._auto_status_label.setVisible(True)
+        self._auto_status_label.setText(f"Автоизмерение не запущено: {reason}")
+
     @Slot()
     def _on_auto_start(self) -> None:
         # Button enablement is presentation only.  The handler owns the final
         # live-authority check so direct/queued invocation cannot bypass it.
-        if (
-            not self._connected
-            or self._auto_state in {"reserving", "stabilizing"}
-            or self._auto_outcome_unknown
-            or self._auto_pending_token is not None
-        ):
+        # Each of these is a REFUSAL and must be spoken, never silent.
+        if not self._connected:
+            self._refuse_auto_start("нет связи с прибором")
+            return
+        if self._auto_state in {"reserving", "stabilizing"}:
+            self._refuse_auto_start(f"измерение уже идёт (состояние {self._auto_state})")
+            return
+        if self._auto_outcome_unknown:
+            self._refuse_auto_start("предыдущий результат не подтверждён; требуется сверка")
+            return
+        if self._auto_pending_token is not None:
+            self._refuse_auto_start("предыдущая команда ещё не подтверждена")
             return
         if len(self._chain) < 2:
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
@@ -2428,6 +2446,7 @@ class ConductivityPanel(QWidget):
             QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
             return
         if not self._snapshot_auto_selection():
+            self._refuse_auto_start("выбор каналов не зафиксирован")
             return
         from cryodaq.paths import get_data_dir
 
