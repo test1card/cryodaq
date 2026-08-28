@@ -59,6 +59,8 @@ EXECUTION_ROOTS = (
             "tests/governance/test_active_guard_execution.py::test_file_selected_guard_runs_only_from_git_index",
             "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent",
             "tests/governance/test_agent_formatter_gate.py::test_tracked_recipes_forbid_mutating_ruff_modes",
+            ("tests/governance/test_receipt_guard_eol.py::test_baseline_generator_pins_the_line_separator_explicitly"),
+            ("tests/governance/test_receipt_guard_eol.py::test_tracked_baseline_is_never_mutated_by_the_real_command"),
             (
                 "tests/governance/test_agent_preventions.py"
                 "::test_generated_candidate_and_test_evidence_prefixes_are_ignored"

@@ -2684,6 +2684,48 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
     print(summary.stdout, end="")
 
 
+def test_clone_based_receipt_eol_guards_run_only_from_exact_checkout(tmp_path: Path) -> None:
+    required_nodes = {
+        ("tests/governance/test_receipt_guard_eol.py::test_baseline_generator_pins_the_line_separator_explicitly"),
+        ("tests/governance/test_receipt_guard_eol.py::test_tracked_baseline_is_never_mutated_by_the_real_command"),
+    }
+    selection = checkout_execution_selection("remaining")
+    assert selection is not None and selection.execution_root == "git-index"
+    assert required_nodes <= set(selection.nodes)
+
+    platform = current_guard_platform()
+    exported_nodes = {
+        spec.node
+        for spec in ci_candidate_runner.active_guard_specs(
+            ROOT,
+            "remaining",
+            platform=platform,
+            execution_root="exported-commit",
+        )
+    }
+    checkout_nodes = {
+        spec.node
+        for spec in ci_candidate_runner.active_guard_specs(
+            ROOT,
+            "remaining",
+            platform=platform,
+            execution_root="git-index",
+        )
+    }
+    assert required_nodes.isdisjoint(exported_nodes)
+    assert required_nodes <= checkout_nodes
+
+    commands = ci_candidate_runner._suite_commands(
+        "remaining",
+        root=ROOT,
+        basetemp=tmp_path / "candidate-state",
+    )
+    assert len(commands) == 1
+    command = commands[0]
+    deselected_nodes = {command[index + 1] for index, argument in enumerate(command[:-1]) if argument == "--deselect"}
+    assert required_nodes <= deselected_nodes
+
+
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     assert payload["permissions"] == {"contents": "read"}
