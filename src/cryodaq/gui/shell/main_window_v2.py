@@ -218,6 +218,7 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_producer_id: str | None = None
         self._typed_safety_revision: int | None = None
         self._typed_safety_ready = False
+        self._latest_operator_snapshot: OperatorSnapshot | None = None
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
 
@@ -425,6 +426,7 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_producer_id = cut.producer_id
         self._typed_safety_revision = cut.revision
         self._typed_safety_ready = ready
+        self._latest_operator_snapshot = snapshot
         self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
         self._accepted_safety_bridge_instance_id = bridge_instance_id
         self._last_safety_state = readiness.lifecycle.value
@@ -437,6 +439,7 @@ class MainWindowV2(QMainWindow):
         if self._keithley_panel is not None:
             reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
             self._keithley_panel.set_safety_ready(ready, reason)
+            self._keithley_panel.set_operator_snapshot(snapshot)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -503,6 +506,8 @@ class MainWindowV2(QMainWindow):
             widget.set_connected(derived_connected)
             ready, reason_text = self._current_keithley_safety_gate()
             widget.set_safety_ready(ready, reason_text)
+            if self._latest_operator_snapshot is not None:
+                widget.set_operator_snapshot(self._latest_operator_snapshot)
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -1207,6 +1212,8 @@ class MainWindowV2(QMainWindow):
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
             self._keithley_panel.set_connected(connected)
+            if connected and self._latest_operator_snapshot is not None:
+                self._keithley_panel.set_operator_snapshot(self._latest_operator_snapshot)
         # Phase II.3: mirror to OperatorLog overlay (same contract).
         if self._operator_log_panel is not None:
             self._operator_log_panel.set_connected(connected)

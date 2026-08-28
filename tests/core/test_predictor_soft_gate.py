@@ -17,6 +17,12 @@ from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    SourceOffResult,
+    _issue_registry_runtime_binding,
+)
 from cryodaq.engine import EngineCommandContext, _handle_gui_command, _run_keithley_command
 from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -224,6 +230,86 @@ async def test_start_with_predictor_warning_refuses_run_when_choice_receipt_fail
     assert result["error_code"] == "operator_warning_choice_not_committed"
     assert manager_with_missing_predictor.state is SafetyState.READY
     assert manager_with_missing_predictor._active_sources == set()
+
+
+async def test_emergency_off_outruns_inflight_warning_receipt_and_prevents_start() -> None:
+    """A receipt wait cannot delay OFF or permit a post-OFF source start."""
+
+    commit_entered = asyncio.Event()
+    release_commit = asyncio.Event()
+    off_called = asyncio.Event()
+
+    async def blocked_commit(_warnings: list[dict[str, str]]) -> None:
+        commit_entered.set()
+        await release_commit.wait()
+
+    async def confirmed_global_off(_channel: str | None = None) -> object:
+        off_called.set()
+        return SourceOffResult.DEVICE_REPORTED_OFF
+
+    driver = SimpleNamespace(
+        connected=True,
+        mock=True,
+        output_state_unverified=False,
+        emergency_off=AsyncMock(side_effect=confirmed_global_off),
+        stop_source=AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF),
+        start_source=AsyncMock(),
+    )
+    binding = _issue_registry_runtime_binding(
+        driver=driver,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:predictor-warning-off-race",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        simulation=True,
+    )
+    manager = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=driver,
+        reviewed_source_runtime_binding=binding,
+        mock=True,
+    )
+    manager._config.critical_channels = []
+    manager._cooldown_predictor_available = False
+    manager._cooldown_predictor_unavailable_reason = "injected unavailable predictor"
+    manager._state = SafetyState.RUNNING
+    manager._active_sources = {"smua"}
+    manager._refresh_operator_safety_snapshot()
+
+    run_task = asyncio.create_task(
+        manager.request_run(
+            0.1,
+            1.0,
+            0.1,
+            channel="smub",
+            warning_choice_committer=blocked_commit,
+        )
+    )
+    off_task: asyncio.Task[dict[str, object]] | None = None
+    off_observer: asyncio.Task[bool] | None = None
+    try:
+        await asyncio.wait_for(commit_entered.wait(), timeout=1.0)
+        off_task = asyncio.create_task(manager.emergency_off())
+        off_observer = asyncio.create_task(off_called.wait())
+        completed, _pending = await asyncio.wait({off_observer}, timeout=0.1)
+        off_arrived_before_receipt_release = bool(completed)
+
+        release_commit.set()
+        run_result = await asyncio.wait_for(run_task, timeout=1.0)
+        off_result = await asyncio.wait_for(off_task, timeout=1.0)
+
+        assert (driver.start_source.await_count, off_arrived_before_receipt_release) == (0, True)
+        assert run_result["ok"] is False
+        assert off_result["ok"] is True
+        assert manager._active_sources == set()
+    finally:
+        release_commit.set()
+        for task in (run_task, off_task, off_observer):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (run_task, off_task, off_observer) if task is not None),
+            return_exceptions=True,
+        )
 
 
 async def test_missing_predictor_does_not_mask_genuine_interlock_precondition(

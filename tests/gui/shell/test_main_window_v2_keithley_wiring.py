@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -37,6 +38,7 @@ from cryodaq.operator_snapshot import (
     OperatorSnapshot,
     PlantHealthItem,
     PlantHealthSummary,
+    ReadinessBlocker,
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
@@ -139,6 +141,54 @@ def _typed_ready_snapshot(
         DataIntegritySummary(cut, status, 42, 41, 0, 0, availability),
         CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, ()),
         SupportBundleSummary(cut, status, availability, support_manifest),
+    )
+
+
+def _typed_running_warning_snapshot() -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot()
+    cut = snapshot.cut
+    running_status = SummaryStatus(
+        OperatorPresentationState.CAUTION,
+        1.0,
+        0.0,
+        ("source_running",),
+        "Источник активен",
+    )
+    plant_status = SummaryStatus(
+        OperatorPresentationState.CAUTION,
+        1.0,
+        0.0,
+        ("plant_health_attention",),
+        "Аналитическое покрытие неполно",
+    )
+    return replace(
+        snapshot,
+        readiness=ReadinessSummary(
+            cut,
+            running_status,
+            ReadinessTruth.BLOCKED,
+            (
+                ReadinessBlocker(
+                    "source_running",
+                    OperatorPresentationState.CAUTION,
+                    "Источник активен",
+                    "Подтверждённое отключение источника",
+                ),
+            ),
+            SafetyLifecycle.RUNNING,
+        ),
+        plant_health=PlantHealthSummary(
+            cut,
+            plant_status,
+            (
+                PlantHealthItem(
+                    "cooldown_alarm_model",
+                    "Предикторная тревога НЕДОСТУПНА — тревога отклонения не сработает",
+                    OperatorPresentationState.CAUTION,
+                    ("cooldown_alarm_model_unavailable",),
+                ),
+            ),
+        ),
     )
 
 
@@ -592,6 +642,40 @@ def test_keithley_overlay_safety_replay_on_lazy_open():
         assert w._keithley_panel is not None
         assert w._keithley_panel._safety_ready is False
         assert "stale sensor" in w._keithley_panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_running_source_caution_rehydrates_on_lazy_open_and_reconnect(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w.render_operator_snapshot(_typed_running_warning_snapshot())
+        assert w._keithley_panel is None
+
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        text = w._keithley_panel._banner_label.text()
+        assert "Предикторная тревога НЕДОСТУПНА" in text
+        assert "тревога отклонения не сработает" in text
+        assert not w._keithley_panel._banner_timer.isActive()
+
+        w._keithley_panel.clear_message()
+        w._last_reading_time = time.monotonic() - 100.0
+        w._tick_status()
+        w._last_reading_time = time.monotonic()
+        w._tick_status()
+
+        reconnected_text = w._keithley_panel._banner_label.text()
+        assert "Предикторная тревога НЕДОСТУПНА" in reconnected_text
+        assert "тревога отклонения не сработает" in reconnected_text
+        assert not w._keithley_panel._banner_timer.isActive()
+
+        w.render_operator_snapshot(_typed_ready_snapshot(revision=43))
+        assert "Предикторная тревога НЕДОСТУПНА" not in w._keithley_panel._banner_label.text()
     finally:
         _stop_timers(w)
 

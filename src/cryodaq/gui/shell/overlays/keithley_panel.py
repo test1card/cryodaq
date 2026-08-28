@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.safety_manager import COOLDOWN_OPERATOR_WARNING_REASON_CODES
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style
@@ -59,6 +60,7 @@ from cryodaq.gui.shell.overlays._base_panel import is_stale
 from cryodaq.gui.state.time_window import TimeWindow, get_time_window_controller
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.operator_snapshot import OperatorSnapshot, SafetyLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -1034,6 +1036,7 @@ class KeithleyPanel(QWidget):
         self._pending_commands: dict[tuple[str, int], str] = {}
         self._unresolved_outcomes: dict[str, str] = {}
         self._standing_operator_warnings: dict[str, tuple[str, ...]] = {}
+        self._snapshot_operator_warnings: tuple[str, ...] = ()
         self._command_error_latched = False
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
@@ -1217,7 +1220,7 @@ class KeithleyPanel(QWidget):
         self._pending_commands[(channel, token)] = command
         description = self._command_description(channel, command)
         self._set_banner(
-            f"{description}: команда отправлена, ожидается ответ Engine.",
+            self._with_standing_operator_caution(f"{description}: команда отправлена, ожидается ответ Engine."),
             theme.STATUS_INFO,
             auto_clear=False,
         )
@@ -1238,11 +1241,14 @@ class KeithleyPanel(QWidget):
             self._unresolved_outcomes[channel] = description
             self._command_error_latched = True
             cause = error.strip() or "Engine не подтвердил выполнение"
-            self._set_banner(
+            unknown_message = (
                 f"{description}: ИСХОД НЕИЗВЕСТЕН — {cause}. Не повторяйте команду "
                 "вслепую; обычное управление заблокировано до свежей сверки "
                 "состояния источника и Safety. Аварийное отключение остаётся доступно "
-                "при живой связи.",
+                "при живой связи."
+            )
+            self._set_banner(
+                self._with_standing_operator_caution(unknown_message),
                 theme.STATUS_CAUTION,
                 auto_clear=False,
             )
@@ -1251,7 +1257,8 @@ class KeithleyPanel(QWidget):
         if outcome != "ok":
             self._command_error_latched = True
             cause = error.strip() or "Engine отклонил команду"
-            self.show_error(f"{description} отклонена: {cause}.")
+            failure = f"{description} отклонена: {cause}."
+            self.show_error(self._with_standing_operator_caution(failure))
             self._update_both_buttons_enablement()
             return
         if command == "keithley_start":
@@ -1264,15 +1271,8 @@ class KeithleyPanel(QWidget):
         if self._command_error_latched or self._unresolved_outcomes:
             self._update_both_buttons_enablement()
             return
-        if self._standing_operator_warnings:
-            warnings = [
-                warning for warning_group in self._standing_operator_warnings.values() for warning in warning_group
-            ]
-            self._set_banner(
-                "ВНИМАНИЕ — Engine подтвердил запуск источника. " + " ".join(warnings),
-                theme.STATUS_CAUTION,
-                auto_clear=False,
-            )
+        if self._all_standing_operator_warnings():
+            self._render_standing_operator_caution("Engine подтвердил запуск источника")
             self._update_both_buttons_enablement()
             return
         if self._pending_commands:
@@ -1295,7 +1295,7 @@ class KeithleyPanel(QWidget):
     def _on_block_command_rejected(self, channel: str, command: str, reason: str) -> None:
         description = self._command_description(channel, command)
         self._set_banner(
-            f"{description} не отправлена: {reason}.",
+            self._with_standing_operator_caution(f"{description} не отправлена: {reason}."),
             theme.STATUS_CAUTION,
             auto_clear=False,
         )
@@ -1407,6 +1407,46 @@ class KeithleyPanel(QWidget):
                     block.handle_reading(suffix, reading)
                     return
 
+    def set_operator_snapshot(self, snapshot: OperatorSnapshot) -> None:
+        """Rehydrate active-source cautions from one authoritative typed cut."""
+
+        if type(snapshot) is not OperatorSnapshot:
+            raise TypeError("snapshot must be an exact OperatorSnapshot")
+        lifecycle = snapshot.readiness.lifecycle
+        had_standing_caution = bool(self._all_standing_operator_warnings())
+        if lifecycle is SafetyLifecycle.RUNNING:
+            # The typed cut supersedes command-reply memory.  Replies bridge the
+            # interval until the next cut; they never outvote current Engine
+            # plant-health truth or keep a recovered warning alive.
+            self._standing_operator_warnings.clear()
+            self._snapshot_operator_warnings = tuple(
+                item.display_name
+                for item in snapshot.plant_health.subsystems
+                if COOLDOWN_OPERATOR_WARNING_REASON_CODES.intersection(item.reason_codes)
+            )
+        elif lifecycle in {SafetyLifecycle.SAFE_OFF, SafetyLifecycle.READY}:
+            self._snapshot_operator_warnings = ()
+            self._standing_operator_warnings.clear()
+
+        if not self._snapshot_operator_warnings:
+            if (
+                had_standing_caution
+                and not self._all_standing_operator_warnings()
+                and not self._command_error_latched
+                and not self._pending_commands
+                and not self._unresolved_outcomes
+            ):
+                self.clear_message()
+            return
+        if self._command_error_latched and self._banner_label.text():
+            self._set_banner(
+                self._with_standing_operator_caution(self._banner_label.text()),
+                theme.STATUS_FAULT,
+                auto_clear=False,
+            )
+            return
+        self._render_standing_operator_caution("Текущий снимок Engine подтверждает активный источник")
+
     def set_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
@@ -1425,6 +1465,8 @@ class KeithleyPanel(QWidget):
             )
         for block in self._blocks.values():
             block.set_connected(connected)
+        if connected and self._snapshot_operator_warnings and not self._banner_label.text():
+            self._render_standing_operator_caution("Текущий снимок Engine подтверждает активный источник")
         self._update_both_buttons_enablement()
 
     def set_safety_ready(self, ready: bool, reason: str = "") -> None:
@@ -1471,6 +1513,30 @@ class KeithleyPanel(QWidget):
     # ------------------------------------------------------------------
     # Status banner
     # ------------------------------------------------------------------
+
+    def _all_standing_operator_warnings(self) -> tuple[str, ...]:
+        warnings = [
+            *self._snapshot_operator_warnings,
+            *(warning for warning_group in self._standing_operator_warnings.values() for warning in warning_group),
+        ]
+        return tuple(dict.fromkeys(warnings))
+
+    def _standing_operator_caution(self, intro: str) -> str:
+        warnings = self._all_standing_operator_warnings()
+        if not warnings:
+            return ""
+        return f"ВНИМАНИЕ — {intro}. " + " ".join(warnings)
+
+    def _with_standing_operator_caution(self, message: str) -> str:
+        caution = self._standing_operator_caution("источник остаётся активным")
+        if not caution or caution in message:
+            return message
+        return f"{message} {caution}"
+
+    def _render_standing_operator_caution(self, intro: str) -> None:
+        caution = self._standing_operator_caution(intro)
+        if caution:
+            self._set_banner(caution, theme.STATUS_CAUTION, auto_clear=False)
 
     def show_info(self, text: str) -> None:
         self._set_banner(text, theme.STATUS_INFO)

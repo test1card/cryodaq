@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,18 @@ class SafetyState(Enum):
     RUNNING = "running"
     FAULT_LATCHED = "fault_latched"
     MANUAL_RECOVERY = "manual_recovery"
+
+
+class CooldownOperatorWarningReasonCode(StrEnum):
+    """SafetyManager-owned identities for unavailable cooldown analytics."""
+
+    PREDICTOR_UNAVAILABLE = "cooldown_predictor_unavailable"
+    ALARM_MODEL_UNAVAILABLE = "cooldown_alarm_model_unavailable"
+
+
+COOLDOWN_OPERATOR_WARNING_REASON_CODES: frozenset[str] = frozenset(
+    reason_code.value for reason_code in CooldownOperatorWarningReasonCode
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +299,10 @@ class SafetyManager:
         # operator CLI) can race on request_run / request_stop / emergency_off.
         # See DEEP_AUDIT_CC.md I.1.
         self._cmd_lock = asyncio.Lock()
+        # Keep concurrent RUN admissions serialized even while the durable
+        # operator-warning receipt is committed outside ``_cmd_lock``.  OFF,
+        # stop, and fault authority never contend for this admission-only lock.
+        self._run_request_lock = asyncio.Lock()
 
         # Monotonic abort intent. Each abort increments before contending for
         # _cmd_lock. An in-flight request_run captures its entry generation and
@@ -1096,10 +1112,106 @@ class SafetyManager:
         channel: str | None = None,
         warning_choice_committer: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
-        start_abort_generation = self._abort_generation
-        start_full_abort_generation = self._full_abort_generation
+        """Persist any warning choice without placing persistence ahead of OFF."""
+
+        async with self._run_request_lock:
+            start_abort_generation = self._abort_generation
+            start_full_abort_generation = self._full_abort_generation
+            preflight = await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                _preflight_only=True,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+            raw_warnings = preflight.pop("_operator_warnings", None)
+            if raw_warnings is None:
+                return preflight
+            operator_warnings = [dict(warning) for warning in raw_warnings]
+
+            if operator_warnings:
+                if warning_choice_committer is None:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": normalize_smu_channel(channel),
+                        "error_code": "operator_warning_choice_not_committed",
+                        "error": "Operator warning choice was not durably committed before RUN.",
+                    }
+                try:
+                    await warning_choice_committer([dict(warning) for warning in operator_warnings])
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.error(
+                        "RUN refused on %s: operator warning choice could not be persisted",
+                        normalize_smu_channel(channel),
+                        exc_info=True,
+                    )
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": normalize_smu_channel(channel),
+                        "error_code": "operator_warning_choice_not_committed",
+                        "error": "Operator warning choice could not be durably committed before RUN.",
+                    }
+
+            # This is the first instruction after the awaited commit.  OFF
+            # advances the generation synchronously, so a persistence wait that
+            # overlapped OFF can never proceed to source mutation.
+            if self._abort_generation != start_abort_generation:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": normalize_smu_channel(channel),
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
+                }
+
+            async def verify_committed_warnings(current_warnings: list[dict[str, str]]) -> None:
+                if current_warnings != operator_warnings:
+                    raise RuntimeError("operator warnings changed after the durable choice receipt")
+
+            return await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                warning_choice_committer=verify_committed_warnings,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+
+    async def _request_run_locked(
+        self,
+        p_target: float,
+        v_comp: float,
+        i_comp: float,
+        *,
+        channel: str | None = None,
+        warning_choice_committer: Callable[[list[dict[str, str]]], Awaitable[None]] | None = None,
+        _preflight_only: bool = False,
+        _expected_abort_generation: int,
+        _expected_full_abort_generation: int,
+    ) -> dict[str, Any]:
+        start_abort_generation = _expected_abort_generation
+        start_full_abort_generation = _expected_full_abort_generation
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
+
+            # OFF can acquire ``_cmd_lock`` while the warning receipt is being
+            # persisted.  Re-check its synchronous generation cut immediately
+            # on re-entry, before any state transition or hardware call.
+            if self._abort_generation != start_abort_generation:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": smu_channel,
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
+                }
 
             if self._state == SafetyState.FAULT_LATCHED:
                 return {
@@ -1170,6 +1282,8 @@ class SafetyManager:
                 }
 
             operator_warnings = self._cooldown_operator_warnings()
+            if _preflight_only:
+                return {"_operator_warnings": operator_warnings}
             if operator_warnings:
                 if warning_choice_committer is None:
                     return {
@@ -2523,7 +2637,7 @@ class SafetyManager:
         if self._cooldown_predictor_available is False:
             warnings.append(
                 {
-                    "code": "cooldown_predictor_unavailable",
+                    "code": CooldownOperatorWarningReasonCode.PREDICTOR_UNAVAILABLE.value,
                     "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
                     "consequence": "Расчёт ожидаемой траектории и времени до завершения не выполняется",
                     "reason": self._cooldown_predictor_unavailable_reason or "прогнозирование недоступно",
@@ -2532,7 +2646,7 @@ class SafetyManager:
         if self._cooldown_alarm_model_available is False:
             warnings.append(
                 {
-                    "code": "cooldown_alarm_model_unavailable",
+                    "code": CooldownOperatorWarningReasonCode.ALARM_MODEL_UNAVAILABLE.value,
                     "operator_text": "Предикторная тревога траектории захолаживания НЕДОСТУПНА",
                     "consequence": "Тревога отклонения от ожидаемой траектории не сработает",
                     "reason": self._cooldown_alarm_model_unavailable_reason or "модель тревоги недоступна",
@@ -2849,7 +2963,7 @@ class SafetyManager:
                     "cooldown_predictor",
                     "Прогноз траектории захолаживания НЕДОСТУПЕН — расчёт времени до завершения не выполняется",
                     OperatorPresentationState.CAUTION,
-                    "cooldown_predictor_unavailable",
+                    CooldownOperatorWarningReasonCode.PREDICTOR_UNAVAILABLE.value,
                 )
             )
         if self._cooldown_alarm_model_available is False:
@@ -2858,7 +2972,7 @@ class SafetyManager:
                     "cooldown_alarm_model",
                     "Предикторная тревога траектории захолаживания НЕДОСТУПНА — тревога отклонения не сработает",
                     OperatorPresentationState.CAUTION,
-                    "cooldown_alarm_model_unavailable",
+                    CooldownOperatorWarningReasonCode.ALARM_MODEL_UNAVAILABLE.value,
                 )
             )
 

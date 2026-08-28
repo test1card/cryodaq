@@ -343,6 +343,38 @@ def test_start_success_surfaces_engine_operator_warning_on_source_screen(app):
     assert panel._banner_label.accessibleName() == text
 
 
+def test_failed_command_keeps_standing_warning_for_active_source(app):
+    panel = KeithleyPanel()
+    panel._smua_block.command_started.emit("smua", 1, "keithley_start")
+    panel._smua_block._on_command_result(
+        1,
+        {"cmd": "keithley_start", "channel": "smua"},
+        {
+            "ok": True,
+            "operator_warnings": [
+                {
+                    "operator_text": "Предикторная тревога НЕДОСТУПНА",
+                    "consequence": "Тревога отклонения не сработает",
+                }
+            ],
+        },
+    )
+    panel._smub_block.command_started.emit("smub", 1, "keithley_start")
+
+    panel._smub_block._on_command_result(
+        1,
+        {"cmd": "keithley_start", "channel": "smub"},
+        {"ok": False, "error": "введённый отказ запуска B"},
+    )
+
+    text = panel._banner_label.text()
+    assert "введённый отказ запуска B" in text
+    assert "Предикторная тревога НЕДОСТУПНА" in text
+    assert "Тревога отклонения не сработает" in text
+    assert not panel._banner_timer.isActive()
+    assert panel._banner_label.accessibleName() == text
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)
