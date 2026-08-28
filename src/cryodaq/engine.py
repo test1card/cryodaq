@@ -4920,6 +4920,33 @@ async def _execute_owned_experiment_command(
 
     async with context.experiment_command_lock:
         experiment_manager = context.experiment_manager
+        if action == "experiment_abort" and await asyncio.to_thread(
+            experiment_manager.has_restart_recoverable_conductivity_runs,
+            str(cmd.get("experiment_id", "")).strip() or None,
+        ):
+            off_result = await _run_keithley_command(
+                "keithley_emergency_off",
+                {"cmd": "keithley_emergency_off"},
+                context.safety_manager,
+            )
+            off_evidence = parse_global_off_evidence(off_result.get("off_evidence"))
+            if (
+                off_result.get("ok") is not True
+                or off_result.get("active_channels") != []
+                or off_evidence is None
+                or not off_evidence.verified_off
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "conductivity_recovery_global_off_unverified",
+                    "error": "restart autosweep recovery is held because exact global OFF was not verified",
+                    "retry_safe": True,
+                }
+            await asyncio.to_thread(
+                experiment_manager.recover_conductivity_runs_after_verified_off,
+                str(cmd.get("experiment_id", "")).strip() or None,
+                verified_off=True,
+            )
         experiment_call = asyncio.to_thread(
             _run_experiment_command,
             action,

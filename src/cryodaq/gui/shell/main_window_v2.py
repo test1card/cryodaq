@@ -1239,7 +1239,7 @@ class MainWindowV2(QMainWindow):
 
         if quantity is ChannelQuantity.TEMPERATURE:
             if self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             self._analytics_temperature_snapshot[descriptor.channel_id] = reading
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
@@ -1254,7 +1254,7 @@ class MainWindowV2(QMainWindow):
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
             if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             if quantity in {
                 ChannelQuantity.VOLTAGE,
                 ChannelQuantity.CURRENT,
