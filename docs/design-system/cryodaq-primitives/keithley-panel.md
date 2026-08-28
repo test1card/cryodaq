@@ -46,6 +46,18 @@ Operator overlay for controlling and monitoring the Keithley 2604B source-measur
 > overlay above is the only live Keithley presentation contract.
 > legacy cleanup. `MainWindowV2` imports the overlay from
 > `shell/overlays/keithley_panel.py` exclusively.
+>
+> **Source-state freshness correction (2026-08-28).** A live
+> `on_reading` call is a producer observation. A `replay_source_state` call is
+> retained presentation only: it restores a lazily opened panel within an
+> uninterrupted measurement-flow epoch, but does not earn observation
+> freshness or reconcile an unknown command outcome. A measurement-flow gap
+> revokes both retained channel states. Only a per-channel source observation
+> received after the last pre-gap measurement, or a typed READY operator
+> snapshot whose Safety observation crosses that boundary, may restore them;
+> the READY cut may arrive before generic measurement flow resumes. READY is
+> sufficient only because that snapshot contract requires current verified-OFF
+> evidence for both channels.
 
 **When to use:**
 - Dedicated Keithley overlay opened via ToolRail (slot «Источник», Ctrl+K).
@@ -140,6 +152,14 @@ Fixed at codebase level; UI code must not violate:
 16. **Safety gate causes are typed, not inferred from identity alone.** `SafetyGateCause.AUTHORITY_UNAVAILABLE` is the fail-closed default for cold start, malformed/foreign evidence, `ReadinessTruth.UNKNOWN`, `SafetyLifecycle.UNKNOWN`, stale/disconnected transport, or an experiment/bridge binding mismatch. It disables Start, Stop, and parameter controls; emergency-off remains available only with a live connection.
 17. **Only a current authoritative blocker is warning-permissive.** On the typed snapshot path, `SafetyGateCause.AUTHORITATIVE_NOT_READY` requires a current LIVE `ReadinessTruth.BLOCKED` cut, a known non-ready lifecycle, at least one non-transport blocker, and the current bridge/experiment binding. A fresh `SafetyLifecycle.SAFE_OFF` negative telemetry observation may preserve that cause only when it revokes an already accepted typed cut whose bridge/experiment binding remains current; telemetry cannot create or restore authority. The blocker may stop a running source, but it does not disable Start or parameter controls for an authoritatively OFF channel; the engine and `SafetyManager` still decide whether a command is accepted.
 18. **Warnings and receipts use blocker evidence.** The visible warning and `operator_warning_choice.warning` use the authoritative `ReadinessBlocker.operator_text` values, not the generic readiness-summary label. A Start command issued under the warning carries schema `cryodaq.keithley_warning_choice.v1`, a fresh request ID, the warning text, and choice `start`.
+19. **Retained source state is bound to one uninterrupted measurement-flow
+    epoch.** A data gap makes both badges unknown before the first recovered
+    generic measurement can restore connection chrome. Cached ON/OFF is not
+    current evidence across that boundary. A new channel-state observation
+    restores its channel; a post-gap newer typed READY cut may explicitly
+    resynchronize both channels to OFF, including when received before generic
+    measurement recovery, because READY requires verified-OFF for both. No
+    other aggregate Safety state may infer a channel badge.
 
 ## API
 
@@ -178,6 +198,7 @@ class KeithleyPanel(QWidget):
 
     # Public state pushers (called by MainWindowV2 / shell)
     def on_reading(self, reading: Reading) -> None: ...
+    def replay_source_state(self, key: str, reading: Reading) -> None: ...
     def set_connected(self, connected: bool) -> None: ...
     def set_safety_ready(
         self,
@@ -214,9 +235,23 @@ panel.set_safety_ready(
 
 **Signal semantics.** Per-channel signals are relays from the internal `_SmuChannelBlock` widgets — the panel exposes them so tests and shell code can observe every user intent without running a real ZMQ bridge. Production code path: each click handler also spawns a `ZmqCommandWorker` with the appropriate payload (`keithley_start`, `keithley_stop`, `keithley_emergency_off`, `keithley_set_target`, `keithley_set_limits`). Worker result is logged asynchronously; the UI thread does not block.
 
-**Reading routing.** `on_reading(Reading)` inspects `reading.channel`:
-- `analytics/keithley_channel_state/smua|smub` → `metadata["state"]` drives the channel's state badge and enable/disable logic.
+**Reading routing and replay.** `on_reading(Reading)` inspects
+`reading.channel`:
+- `analytics/keithley_channel_state/smua|smub` → `metadata["state"]` is a
+  producer observation that drives the channel's state badge and
+  enable/disable logic, advances observation freshness, and may reconcile an
+  unknown command outcome.
 - `<instrument>/smua|smub/{voltage|current|resistance|power}` → updates the matching readout label and appends `(timestamp, value)` to a per-measurement `deque(maxlen=3600)` for plot rendering.
+
+`replay_source_state(key, reading)` presents a shell-retained state to a
+newly opened or reconnected panel without advancing producer-observation
+freshness and without reconciling a pending unknown command outcome. The shell
+may call it only for evidence retained inside the current uninterrupted
+measurement-flow epoch, or for OFF derived from a newer post-gap typed READY
+snapshot. A READY Safety observation after the last pre-gap measurement remains
+fresh evidence if it arrives before generic measurement flow resumes. On a gap
+the shell first disconnects the panel, which makes the badge unknown and
+disables normal source controls; reconnect does not replay the pre-gap cache.
 
 A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — reading frequency from the driver is too high for per-event plot updates). Stale check: if state == "on" and `now - last_update_ts > 5 s`, apply STATUS_STALE border + «устар.» suffix.
 
@@ -233,6 +268,7 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 | Panel state | Treatment |
 |---|---|
 | **Disconnected** | All readouts «— В/А/Ом/Вт»; spins + start/stop disabled; emergency disabled (no link); «Нет связи» in STATUS_FAULT |
+| **Recovered measurement flow, source state pending** | Connection chrome may return, but both source badges remain unknown and Start/Stop/spins remain disabled until a new per-channel observation or a newer typed READY verified-OFF cut resynchronizes them |
 | **Connected, both off** | Controls enabled, readouts show last sampled (likely zero), state badges «ВЫКЛ» in MUTED_FOREGROUND |
 | **Channel "on"** | State badge «ВКЛ» with ACCENT outline and explicit text; start disabled, stop/emergency enabled; spins debounced-live against engine; health remains a separate fact |
 | **Channel "fault"** | State badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border on channel block; start/stop/spins disabled on the faulted channel; emergency still enabled; sibling channel unaffected |
@@ -260,6 +296,10 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 13. **Blocking the GUI thread on a command.** `ZmqCommandWorker` is a `QThread`. Click handlers must spawn a worker and wire its `finished` signal; never call `send_command()` directly from a UI slot.
 14. **Treating every not-ready snapshot as a warning.** Identity bindings do not prove current Safety authority. UNKNOWN, stale, disconnected, foreign, or transport-qualified cuts use `AUTHORITY_UNAVAILABLE`; the typed snapshot path requires the exact BLOCKED shape above, and bound SAFE_OFF telemetry may preserve but never create that cause.
 15. **Using the summary label as the warning condition.** Production summary text names the readiness authority, not the interlock. Render and receipt the bounded authoritative blocker text.
+16. **Replaying a pre-gap ON/OFF cache on generic measurement recovery.**
+    Engine identity does not prove that no source transition crossed the
+    outage. Revoke both channel states at the gap, then wait for a new channel
+    observation or a newer READY verified-OFF cut.
 
 ## Related components
 
@@ -273,6 +313,12 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 ## Changelog
 
 - **2026-08-28 (v4.2.0)** — documented the typed Safety gate-cause API. Missing, UNKNOWN, stale, disconnected, and mismatched authority remains fail-closed; the typed path requires a current BLOCKED cut, while bound SAFE_OFF telemetry may preserve but not create its warning cause. The warning and Start receipt use authoritative blocker evidence.
+- **2026-08-28 (v4.2.0)** — documented `replay_source_state` as retained
+  presentation rather than a producer observation; bound cached state to one
+  uninterrupted measurement-flow epoch; required post-gap per-channel
+  observation or newer typed READY verified-OFF resynchronization; named the
+  focused production-path regressions in
+  `tests/gui/shell/test_main_window_v2_keithley_wiring.py`.
 - **2026-07-12 (v1.2.0)** — source authority now defaults fail-closed until authoritative Safety truth. Documented the replay read-only gate, including the deliberate distinction: emergency-off remains reachable with a live link when Safety blocks normal live control, but replay removes all source command authority including emergency-off.
 - **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec and supersedes the removed v1 surface behind `MainWindowV2` Ctrl+K. Follow-up K4 custom-command work remains deferred; any alternative emergency gesture remains a separately reviewed hazard decision.
 - **2026-04-17 — Initial version.** Documented mode-based Keithley 2604B control panel (B.7 design). Superseded by 2026-04-18 rewrite; entry preserved for historical trace.

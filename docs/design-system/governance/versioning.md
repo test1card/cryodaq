@@ -23,7 +23,8 @@ Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `
 **Current version:** `4.2.0` — additive typed Keithley Safety gate-cause
 contract: missing/unknown authority stays fail-closed, while a current typed
 blocker is warning-permissive and supplies the warning/receipt evidence (see
-`CHANGELOG.md`).
+`CHANGELOG.md`); retained source-state presentation is bound to one
+uninterrupted measurement-flow epoch and requires fresh evidence after a gap.
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative

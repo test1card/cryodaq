@@ -46,7 +46,9 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Current version:** v4.2.0 (additive typed Keithley Safety gate-cause contract;
 missing/unknown authority remains fail-closed, while current typed blocker
-evidence drives the warning and Start receipt; flat tokens unchanged).
+evidence drives the warning and Start receipt; retained source-state
+presentation must be revalidated after a measurement-flow gap; flat tokens
+unchanged).
 
 ## RULE-GOV-003
 

@@ -29,6 +29,18 @@ the design-system-specific definitions of "breaking" from
   summary label. Focused production-path tests cover UNKNOWN authority, stale
   lazy-open replay, visible blocker text, and receipt content.
 
+### Corrected
+
+- `cryodaq-primitives/keithley-panel.md` now distinguishes live producer
+  observations from retained `replay_source_state` presentation. Retained
+  channel state is valid only within one uninterrupted measurement-flow epoch;
+  after a gap, a new per-channel observation or a newer typed READY cut with
+  the contract's verified-OFF authority must resynchronize the badges and
+  controls. The five-field operator-impact record and executable documentation
+  guard ship in the same slice.
+- The source-state correction is included in the v4.2.0 additive gate-cause
+  release; no token or visual-layout contract changed.
+
 ## [4.1.0] — 2026-08-05
 
 ### Added
