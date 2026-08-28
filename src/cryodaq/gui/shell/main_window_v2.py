@@ -50,7 +50,7 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
-from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
+from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel, SafetyGateCause
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
@@ -436,7 +436,20 @@ class MainWindowV2(QMainWindow):
         self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
         if self._keithley_panel is not None:
             reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
-            self._keithley_panel.set_safety_ready(ready, reason)
+            cause = (
+                SafetyGateCause.AUTHORITATIVE_NOT_READY
+                if (
+                    not ready
+                    and bridge_instance_id is not None
+                    and not transport_stale
+                    and (
+                        self._latest_experiment_status is None
+                        or snapshot.experiment.experiment_id == self._active_experiment_id()
+                    )
+                )
+                else SafetyGateCause.AUTHORITY_UNAVAILABLE
+            )
+            self._keithley_panel.set_safety_ready(ready, reason, cause=cause)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -502,7 +515,20 @@ class MainWindowV2(QMainWindow):
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
             ready, reason_text = self._current_keithley_safety_gate()
-            widget.set_safety_ready(ready, reason_text)
+            current_authority = (
+                self._accepted_safety_bridge_instance_id == self._current_bridge_instance_id()
+                and self._accepted_safety_bridge_instance_id is not None
+                and (
+                    self._latest_experiment_status is None
+                    or self._accepted_safety_experiment_id == self._active_experiment_id()
+                )
+            )
+            cause = (
+                SafetyGateCause.AUTHORITATIVE_NOT_READY
+                if not ready and current_authority
+                else SafetyGateCause.AUTHORITY_UNAVAILABLE
+            )
+            widget.set_safety_ready(ready, reason_text, cause=cause)
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -845,7 +871,27 @@ class MainWindowV2(QMainWindow):
                 self._last_safety_reason = str(reason) if reason else ""
                 self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
-                self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+                current_safe_off = (
+                    state_name == SafetyLifecycle.SAFE_OFF.value
+                    and self._accepted_safety_bridge_instance_id == self._current_bridge_instance_id()
+                    and self._accepted_safety_bridge_instance_id is not None
+                    and (
+                        self._latest_experiment_status is None
+                        or self._accepted_safety_experiment_id == self._active_experiment_id()
+                    )
+                )
+                if current_safe_off:
+                    # The negative observation revokes readiness, not the
+                    # still-current bridge/experiment identity binding.
+                    self._typed_safety_ready = False
+                    if self._keithley_panel is not None:
+                        self._keithley_panel.set_safety_ready(
+                            False,
+                            self._last_safety_reason or "Safety state is not ready",
+                            cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+                        )
+                else:
+                    self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
             return
 
         self._last_safety_state = state_name

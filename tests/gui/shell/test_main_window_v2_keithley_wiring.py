@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -37,6 +38,7 @@ from cryodaq.operator_snapshot import (
     OperatorSnapshot,
     PlantHealthItem,
     PlantHealthSummary,
+    ReadinessBlocker,
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
@@ -142,6 +144,32 @@ def _typed_ready_snapshot(
     )
 
 
+def _typed_interlock_snapshot(*, revision: int = 43) -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot(revision=revision)
+    status = SummaryStatus(
+        OperatorPresentationState.CAUTION,
+        1.0,
+        0.0,
+        ("readiness_not_ready",),
+        "Interlock stop_source: detector_warmup",
+    )
+    readiness = ReadinessSummary(
+        snapshot.cut,
+        status,
+        ReadinessTruth.BLOCKED,
+        (
+            ReadinessBlocker(
+                "safety_state_safe_off",
+                OperatorPresentationState.CAUTION,
+                "Interlock stop_source: detector_warmup",
+                "Review the active interlock before choosing Start",
+            ),
+        ),
+        SafetyLifecycle.SAFE_OFF,
+    )
+    return replace(snapshot, readiness=readiness)
+
+
 # ----------------------------------------------------------------------
 # Host wiring — connection state
 # ----------------------------------------------------------------------
@@ -198,6 +226,102 @@ def test_keithley_overlay_receives_connection_state_via_tick():
 # ----------------------------------------------------------------------
 # Host wiring — safety state
 # ----------------------------------------------------------------------
+
+
+def test_current_typed_interlock_is_warning_only_on_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+        assert w._keithley_panel is None
+
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+        panel._update_both_buttons_enablement()
+
+        assert w._current_keithley_safety_gate()[0] is False
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled()
+        assert panel._smua_block._p_spin.isEnabled()
+        assert panel._smua_block._v_spin.isEnabled()
+        assert panel._smua_block._i_spin.isEnabled()
+        assert panel._smua_block._emergency_btn.isEnabled()
+        assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+        assert "заблокировано" not in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize(
+    ("active_experiment", "start_enabled"),
+    (("exp-1", True), ("different-experiment", False)),
+)
+def test_typed_interlock_only_warns_for_current_experiment_binding(
+    active_experiment: str,
+    start_enabled: bool,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": active_experiment}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled() is start_enabled
+        if start_enabled:
+            assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        else:
+            assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_current_safe_off_telemetry_keeps_interlock_as_warning(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+
+        w._dispatch_reading(
+            _safety_reading(
+                SafetyLifecycle.SAFE_OFF.value,
+                "Interlock stop_source: detector_warmup",
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+
+        assert w._current_keithley_safety_gate()[0] is False
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled()
+        assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
 
 
 def test_keithley_overlay_receives_safety_state_via_dispatch():
