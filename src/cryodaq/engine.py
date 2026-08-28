@@ -527,6 +527,41 @@ async def _run_keithley_command(
     raise ValueError(f"Unsupported Keithley command: {action}")
 
 
+async def _log_successful_keithley_command(
+    action: str,
+    cmd: dict[str, Any],
+    result: dict[str, Any],
+    event_logger: Any,
+) -> None:
+    """Persist the successful command, including any standing warning choice."""
+
+    channel = cmd.get("channel", "?")
+    if action == "keithley_start":
+        warnings = result.get("operator_warnings")
+        if isinstance(warnings, list) and warnings:
+            warning = warnings[0]
+            if isinstance(warning, dict):
+                await event_logger.log_event(
+                    "keithley",
+                    (
+                        f"Keithley {channel}: запуск; operator proceeded with warning: "
+                        f"{warning.get('operator_text', 'prediction UNAVAILABLE')}; "
+                        f"{warning.get('consequence', 'trajectory alarm cannot fire')}"
+                    ),
+                    extra_tags=[
+                        "start",
+                        "operator_warning_choice",
+                        str(warning.get("code", "analytics_warning")),
+                    ],
+                )
+                return
+        await event_logger.log_event("keithley", f"Keithley {channel}: запуск")
+    elif action == "keithley_stop":
+        await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
+    elif action == "keithley_emergency_off":
+        await event_logger.log_event("keithley", f"\u26a0 Keithley {channel}: аварийное отключение")
+
+
 def _parse_log_time(raw: Any) -> datetime | None:
     if raw in (None, ""):
         return None
@@ -2318,6 +2353,24 @@ def _load_cooldown_config(path: Path) -> tuple[dict[str, Any], PhysicalPolicyRec
     if not isinstance(raw, dict):
         raise TypeError(f"cooldown.yaml at {path}: expected mapping, got {type(raw).__name__}")
     return raw, receipt_for_applied_policy("cooldown", path, snapshot)
+
+
+async def _report_disabled_cooldown_predictor_model_status(
+    cooldown_config: dict[str, Any],
+    project_root: Path,
+    safety_manager: SafetyManager,
+) -> None:
+    """Keep a missing first-run model visible when the optional service is disabled."""
+
+    if cooldown_config.get("enabled", False):
+        return
+    model_dir = project_root / cooldown_config.get("model_dir", "data/cooldown_model")
+    model_file = model_dir / "predictor_model.json"
+    if not model_file.is_file():
+        await safety_manager.set_cooldown_predictor_status(
+            False,
+            f"predictor model file not found: {model_file}",
+        )
 
 
 async def _load_live_descriptor_authority(
@@ -5236,18 +5289,13 @@ async def _handle_gui_command(
         }:
             result = await _run_keithley_command(action, cmd, safety_manager)
             if result.get("ok"):
-                ch = cmd.get("channel", "?")
-                if action == "keithley_start":
-                    await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
-                elif action == "keithley_stop":
-                    await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
-                elif action == "keithley_emergency_off":
-                    await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
-                    if escalation_service is not None:
-                        await escalation_service.escalate(
-                            "emergency",
-                            f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
-                        )
+                await _log_successful_keithley_command(action, cmd, result, event_logger)
+                if action == "keithley_emergency_off" and escalation_service is not None:
+                    ch = cmd.get("channel", "?")
+                    await escalation_service.escalate(
+                        "emergency",
+                        f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
+                    )
             return result
         if action == "safety_status":
             return {
@@ -7072,14 +7120,10 @@ async def _run_engine(
                     event_bus=event_bus,
                     # A2: read-only history reader for ultimate_vacuum enrichment.
                     reader=writer,
-                    # P0 fail-open fix (PR2-T3): the same SafetyManager instance
-                    # constructed above (line ~6414, "создаётся ПЕРВЫМ") and used
-                    # as the engine's sole source authority throughout this
-                    # function. CooldownService reports predictor model health
-                    # through it in _start_locked(), so a missing/malformed/
-                    # zero-curve model blocks request_run() via the existing
-                    # SafetyManager._check_preconditions() gate instead of
-                    # silently reporting available.
+                    # The same SafetyManager instance remains the engine's sole
+                    # source authority. CooldownService reports model health to
+                    # its operator snapshot, but the observational predictor
+                    # never becomes a RUN/readiness prerequisite.
                     safety_manager=safety_manager,
                 )
                 logger.info("CooldownService создан")
@@ -7088,6 +7132,12 @@ async def _run_engine(
                 # path can short-circuit when the system is quasi-steady.
                 if _cooldown_alarm is not None:
                     _cooldown_alarm.set_steady_state_predictor(cooldown_service._ss_predictor)
+            else:
+                await _report_disabled_cooldown_predictor_model_status(
+                    _cd_cfg,
+                    _PROJECT_ROOT,
+                    safety_manager,
+                )
         except Exception as exc:
             logger.error(
                 "Engine boot degraded: owner=cooldown_service exception=%s",

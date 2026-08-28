@@ -215,16 +215,12 @@ class CooldownService:
         # A2: read-only history reader (SQLiteWriter.read_readings_history)
         # for off-hot-path ultimate_vacuum enrichment at cooldown end.
         self._reader = reader
-        # P0 fail-open fix — optional SafetyManager handle (same pattern as
-        # CooldownAlarm's ``safety_manager``), so unit tests and headless
-        # paths can construct CooldownService without safety wiring. When
-        # set, _start_locked() reports predictor model health through
-        # SafetyManager.set_cooldown_predictor_status() so a missing,
-        # malformed, or below-minimum model blocks request_run() via the
-        # existing precondition gate instead of silently reporting
-        # available. NOT wired from engine.py yet in this candidate — see
-        # implementer report; that one-line construction-site change is
-        # outside this fix's writable surface.
+        # Optional SafetyManager handle (same pattern as CooldownAlarm's
+        # ``safety_manager``), so unit tests and headless paths can construct
+        # CooldownService without safety wiring. When set, _start_locked()
+        # reports predictor model health for the operator-facing analytics
+        # warning and accepted-RUN receipt. It does not grant or withhold
+        # source authority.
         self._safety_manager = safety_manager
 
         self._channel_cold: str = config.get("channel_cold", "")
@@ -475,17 +471,14 @@ class CooldownService:
 
         # Load model (in executor, may be slow).
         #
-        # P0 fail-open fix: a missing, malformed, or below-minimum-curve
-        # model must never present as usable safety infrastructure. Every
+        # A missing, malformed, or below-minimum-curve model must never
+        # present as usable analytics. Every
         # branch below sets self.model_status to a typed CooldownModelStatus
         # (never a bare None/bool) and, when a SafetyManager is wired in
         # (see __init__), reports it through set_cooldown_predictor_status()
-        # — the existing request_run() precondition gate
-        # (SafetyManager._check_preconditions()) then denies RUN and the
-        # SAFE_OFF -> READY auto-transition until a later available=True
-        # report clears it. This never touches OFF/emergency-off authority:
-        # SafetyManager remains the sole authority for source on/off, and
-        # this is a new *fact* fed into its existing gate, not a second one.
+        # so the operator sees that trajectory prediction and its alarm are
+        # unavailable. This fact never enters the RUN/readiness gate and never
+        # touches OFF/emergency-off authority.
         try:
             model_file = self._model_dir / "predictor_model.json"
             if model_file.exists():
