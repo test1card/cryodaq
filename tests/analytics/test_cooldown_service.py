@@ -39,6 +39,9 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 def _make_config(tmp_path: Path, **overrides) -> dict:
     """Return a minimal CooldownService config suitable for fast unit tests."""
     cfg = {
+        # Most legacy service tests exercise prediction explicitly. Production
+        # treats an omitted flag as disabled, so the fixture must name its intent.
+        "enabled": True,
         "channel_cold": "T_cold",
         "channel_warm": "T_warm",
         "model_dir": str(tmp_path / "model"),

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -176,16 +177,49 @@ async def test_start_with_predictor_warning_writes_durable_choice_receipt(
 async def test_start_with_predictor_warning_refuses_run_when_choice_receipt_fails(
     manager_with_missing_predictor: SafetyManager,
 ) -> None:
-    async def fail_commit(_warnings: list[dict[str, str]]) -> None:
-        raise OSError("injected journal failure")
-
-    result = await _run_keithley_command(
-        "keithley_start",
-        {"channel": "smua", "p_target": 0.1, "v_comp": 1.0, "i_comp": 0.1},
-        manager_with_missing_predictor,
-        warning_choice_committer=fail_commit,
+    failing_append = AsyncMock(side_effect=OSError("injected journal failure"))
+    context = EngineCommandContext(
+        safety_manager=manager_with_missing_predictor,
+        event_logger=SimpleNamespace(log_event=AsyncMock()),
+        sink_registry=SimpleNamespace(sinks=[]),
+        interlock_engine=None,
+        leak_rate_estimator=None,
+        leak_cfg={},
+        alarm_v2_state_mgr=None,
+        alarm_ring=None,
+        broker=None,
+        experiment_manager=SimpleNamespace(active_experiment_id="week-long-thermal-run"),
+        calibration_acquisition=None,
+        event_bus=None,
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=None,
+        writer=SimpleNamespace(append_operator_log=failing_append),
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=None,
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+        mutation_capability_token="predictor-soft-gate-token",
     )
 
+    result = await _handle_gui_command(
+        {
+            "cmd": "keithley_start",
+            "channel": "smua",
+            "p_target": 0.1,
+            "v_comp": 1.0,
+            "i_comp": 0.1,
+            "protocol_major": 1,
+            "mutation_capability": "cryodaq_mutation_v1",
+            "capability_token": "predictor-soft-gate-token",
+        },
+        context=context,
+    )
+
+    failing_append.assert_awaited_once()
     assert result["ok"] is False
     assert result["error_code"] == "operator_warning_choice_not_committed"
     assert manager_with_missing_predictor.state is SafetyState.READY
@@ -257,14 +291,128 @@ async def test_shipped_fresh_config_is_disabled_and_reports_missing_model_withou
     assert manager._check_preconditions() == (True, "")
 
 
+async def test_disabled_prediction_retains_valid_model_for_auto_ingest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.analytics.cooldown_service as cooldown_service_module
+    from cryodaq.analytics.cooldown_service import CooldownPhase, CooldownService
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "predictor_model.json").write_text("{}", encoding="utf-8")
+    loaded_model = SimpleNamespace(n_curves=1, duration_mean=12.0, duration_std=0.5, curves=[])
+    updated_model = SimpleNamespace(n_curves=2, duration_mean=11.5, duration_std=0.4, curves=[])
+    load = MagicMock(return_value=loaded_model)
+    ingest = MagicMock(return_value=(True, "committed", updated_model))
+    monkeypatch.setattr(cooldown_service_module, "load_model", load)
+    monkeypatch.setattr(cooldown_service_module, "ingest_from_raw_arrays", ingest)
+    service = CooldownService(
+        DataBroker(),
+        {
+            "enabled": False,
+            "channel_cold": "T_cold",
+            "channel_warm": "T_warm",
+            "auto_ingest": True,
+            "min_cooldown_hours": 0.0,
+        },
+        model_dir,
+    )
+
+    async def inline_owned_executor(function, /, *args):
+        return function(*args)
+
+    # The exact loader/ingest functions still run; inline ownership avoids the
+    # documented Python 3.14 default-executor teardown hang in this sandbox.
+    monkeypatch.setattr(service, "_run_owned_executor", inline_owned_executor)
+
+    await service.start()
+    try:
+        assert service.model_status.available is False
+        assert "disabled by configuration" in service.model_status.reason
+        assert service._model is loaded_model
+
+        service._detector._phase = CooldownPhase.COMPLETE
+        service._detector._cooldown_start_ts = 1_700_000_000.0
+        service._cooldown_wall_start = 1_700_000_000.0
+        service._buffer.extend([(0.0, 10.0, 20.0), (1.0, 4.2, 8.0)])
+        service._load_baseline_config = MagicMock(return_value={"enabled": False})
+        service._publish_cooldown_end_event = AsyncMock(return_value=True)
+
+        await service._on_cooldown_end()
+
+        load.assert_called_once_with(model_dir)
+        ingest.assert_called_once()
+        assert service._model is updated_model
+        service._publish_cooldown_end_event.assert_awaited_once()
+    finally:
+        await service.stop()
+
+
+async def test_omitted_prediction_flag_stays_disabled_in_service_and_status_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.analytics.cooldown_service as cooldown_service_module
+    from cryodaq.analytics.cooldown_service import CooldownService
+    from cryodaq.engine import _report_cooldown_predictor_model_status
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "predictor_model.json").write_text("{}", encoding="utf-8")
+    loaded_model = SimpleNamespace(n_curves=1, duration_mean=12.0, duration_std=0.5, curves=[])
+    predict = MagicMock(side_effect=AssertionError("disabled prediction executed"))
+    monkeypatch.setattr(cooldown_service_module, "load_model", MagicMock(return_value=loaded_model))
+    monkeypatch.setattr(cooldown_service_module, "predict", predict)
+    manager = SafetyManager(SafetyBroker(), mock=True)
+    manager._config.critical_channels = []
+    omitted_enabled = {
+        "channel_cold": "T_cold",
+        "channel_warm": "T_warm",
+        "model_dir": "model",
+    }
+    service = CooldownService(DataBroker(), omitted_enabled, model_dir, safety_manager=manager)
+
+    async def inline_owned_executor(function, /, *args):
+        return function(*args)
+
+    monkeypatch.setattr(service, "_run_owned_executor", inline_owned_executor)
+
+    await service.start()
+    try:
+        service._last_T_cold = 4.2
+        service._last_T_warm = 40.0
+        await service._do_predict()
+        await _report_cooldown_predictor_model_status(
+            omitted_enabled,
+            {"enabled": False},
+            tmp_path,
+            manager,
+        )
+
+        assert service._model is loaded_model
+        assert service.model_status.available is False
+        assert manager._cooldown_predictor_available is False
+        assert service.model_status.reason == manager._cooldown_predictor_unavailable_reason
+        predict.assert_not_called()
+    finally:
+        await service.stop()
+
+
 async def test_shipped_disabled_prediction_keeps_live_detector_and_cooldown_end_publication(
     tmp_path: Path,
 ) -> None:
-    from cryodaq.analytics.cooldown_service import CooldownPhase
     from cryodaq.engine import _build_live_cooldown_service
 
     repository = Path(os.environ.get("CRYODAQ_REGRESSION_REPOSITORY", Path(__file__).parents[2]))
     shipped = yaml.safe_load((repository / "config" / "cooldown.yaml").read_text(encoding="utf-8"))["cooldown"]
+    shipped["detect"] = {
+        "start_rate_threshold": -5.0,
+        "start_confirm_minutes": 0.01,
+        "end_T_cold_threshold": 6.0,
+        "end_rate_threshold": 0.1,
+        "end_confirm_minutes": 0.01,
+    }
     broker = DataBroker()
     service = _build_live_cooldown_service(
         shipped,
@@ -281,16 +429,34 @@ async def test_shipped_disabled_prediction_keeps_live_detector_and_cooldown_end_
         assert service.model_status.available is False
         assert "disabled by configuration" in service.model_status.reason
 
-        service._detector._phase = CooldownPhase.COMPLETE
-        service._detector._cooldown_start_ts = 1_700_000_000.0
-        service._cooldown_wall_start = 1_700_000_000.0
-        service._last_reading_ts = 1_700_003_600.0
-        service._buffer.extend([(0.0, 10.0, 20.0), (1.0, 4.2, 8.0)])
-        service._load_baseline_config = lambda: {"enabled": False}
+        service._load_baseline_config = MagicMock(return_value={"enabled": False})
         service._publish_cooldown_end_event = AsyncMock(return_value=True)
 
-        await service._on_cooldown_end()
+        async def publish(channel: str, value: float, timestamp: float) -> None:
+            await broker.publish(
+                Reading(
+                    timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
+                    instrument_id="live-detector-test",
+                    channel=channel,
+                    value=value,
+                    unit="K",
+                )
+            )
+            await _yield_until(
+                lambda: service._last_reading_ts == timestamp,
+                message=f"CooldownService did not consume {channel} at {timestamp}",
+            )
+
+        started_at = 1_700_000_000.0
+        await publish("Т11", 40.0, started_at)
+        for index in range(6):
+            await publish("Т12", 20.0 - index * 0.1, started_at + index * 10.0)
+        await publish("Т12", 5.0, started_at + 60.0)
+        for index in range(61):
+            await publish("Т12", 5.0, started_at + 70.0 + index * 30.0)
 
         service._publish_cooldown_end_event.assert_awaited_once()
+        assert service._detector.cooldown_start_ts is None
+        assert list(service._buffer) == []
     finally:
         await service.stop()

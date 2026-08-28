@@ -55,6 +55,22 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: KEITHLEY-WARNING-CHOICE-PRODUCTION-PATH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: KEITHLEY-WARNING-CHOICE-PERSISTENCE-001
+    guard: tests/core/test_predictor_soft_gate.py::test_start_with_predictor_warning_refuses_run_when_choice_receipt_fails
+    ci_partition: core
+    red_evidence: the_guard_injected_a_test_only_warning_choice_callback_below_the_engine_command_handler_so_it_stayed_green_if_the_production_writer_append_failure_was_swallowed_2026_08_28_pending_immutable_capture
+    green_evidence: local_ubuntu_22_04_python_3_14_6_production_handler_guard_passed_2026_08_28_pending_immutable_commit_tree_capture
+  - id: COOLDOWN-PREDICTION-TOGGLE-LIVE-PATH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: COOLDOWN-PREDICTION-TOGGLE-LIFECYCLE-001
+    guard: tests/core/test_predictor_soft_gate.py::test_shipped_disabled_prediction_keeps_live_detector_and_cooldown_end_publication
+    ci_partition: core
+    red_evidence: the_guard_forced_the_private_detector_phase_to_COMPLETE_and_called_the_end_handler_directly_so_it_stayed_green_if_disabled_prediction_disconnected_broker_readings_or_completion_detection_2026_08_28_pending_immutable_capture
+    green_evidence: local_ubuntu_22_04_python_3_14_6_live_broker_detector_guard_passed_2026_08_28_pending_immutable_commit_tree_capture
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -3666,6 +3682,48 @@ false_green_pairs:
     red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
+  - id: KEITHLEY-WARNING-CHOICE-PERSISTENCE-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md
+    applies_to: Warning-bearing Keithley RUN commands admitted through the production engine command handler.
+    classification: persistence_first_control_intent
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A source can energise after the operator accepted an observational warning even though the durable operator journal did not record that warning-bearing intent.
+    invariant: The production GUI command handler supplies its real writer to the warning-choice committer, and any append_operator_log failure refuses RUN before SafetyManager acquires an active source.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    guards:
+      - node: tests/core/test_predictor_soft_gate.py::test_start_with_predictor_warning_refuses_run_when_choice_receipt_fails
+        ci_partition: core
+    red_evidence: production_committer_failure_was_bypassed_by_a_test_only_callback_at_exact_PR117_head_50ed0da5d2caac6f845bdf59a6480ddae12eb2c1_2026_08_28_pending_immutable_capture
+    green_evidence: local_ubuntu_22_04_python_3_14_6_production_handler_guard_passed_2026_08_28_pending_immutable_commit_tree_capture
+  - id: COOLDOWN-PREDICTION-TOGGLE-LIFECYCLE-001
+    status: open
+    scope: product_contract
+    authority_source: config/cooldown.yaml
+    applies_to: CooldownService construction, model ownership, broker consumption, detection, prediction, auto-ingest, cooldown-end publication, and operator status reporting.
+    classification: optional_analytics_toggle_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: Disabling optional trajectory prediction or omitting its legacy flag can stop model-independent lifecycle work, discard a valid ingest owner, or make the running backend contradict the operator warning and RUN receipt.
+    invariant: An omitted enabled flag is prediction-off everywhere; enabled controls only prediction execution and exposure, while a valid model remains owned for auto-ingest and broker-delivered cold/warm readings continue through the live detector to required cooldown-end publication.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+    guards:
+      - node: tests/core/test_predictor_soft_gate.py::test_disabled_prediction_retains_valid_model_for_auto_ingest
+        ci_partition: core
+      - node: tests/core/test_predictor_soft_gate.py::test_omitted_prediction_flag_stays_disabled_in_service_and_status_owner
+        ci_partition: core
+      - node: tests/core/test_predictor_soft_gate.py::test_shipped_disabled_prediction_keeps_live_detector_and_cooldown_end_publication
+        ci_partition: core
+    red_evidence: exact_PR117_head_50ed0da5d2caac6f845bdf59a6480ddae12eb2c1_discarded_a_valid_model_when_prediction_was_disabled_defaulted_an_omitted_flag_differently_between_service_and_status_and_the_only_lifecycle_guard_forced_COMPLETE_2026_08_28_pending_immutable_capture
+    green_evidence: local_ubuntu_22_04_python_3_14_6_three_prediction_toggle_guards_passed_2026_08_28_pending_immutable_commit_tree_capture
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
     scope: product_contract

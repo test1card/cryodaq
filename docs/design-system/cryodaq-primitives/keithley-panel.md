@@ -4,7 +4,7 @@ keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel,
 applies_to: Keithley 2604B source-measure unit control overlay
 status: active
 implements: src/cryodaq/gui/shell/overlays/keithley_panel.py; removed v1 panel is historical only
-last_updated: 2026-07-19
+last_updated: 2026-08-28
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
@@ -72,7 +72,7 @@ Fixed at codebase level; UI code must not violate:
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  KEITHLEY 2604B                                        ● Подключён            │  ◀── header: title + connection
 │                                                                               │
-│  ( status banner — transient info/warning/error, auto-clear 4s )              │
+│  ( status banner — transient results or standing source cautions )            │
 │  ( gate reason label — shown when set_safety_ready(False, reason) )           │
 │                                                                               │
 │  Окно:  [10м]  [1ч]  [6ч]                                                     │  ◀── time-window toolbar
@@ -106,7 +106,7 @@ Fixed at codebase level; UI code must not violate:
 |---|---|---|
 | **Panel root** | Yes | `keithleyPanel` frame with background SURFACE_WINDOW |
 | **Header row** | Yes | Title «KEITHLEY 2604B» + connection indicator (● Подключён / ● Нет связи) |
-| **Status banner** | Yes | Transient messages (info / warning / error); auto-clears after 4 s |
+| **Status banner** | Yes | Ordinary settled-command confirmations/errors auto-clear after 4 s. In-flight, local-rejection, unknown-outcome, fault, and warning-bearing successful-start states are standing (`auto_clear=False`) until their documented authoritative clearing condition. A source-start caution clears only after the matching successful Stop/emergency-OFF or a later authoritative start result without warnings. |
 | **Gate reason label** | Yes | Shown when `set_safety_ready(False, reason)` — «Управление заблокировано: {reason}» in STATUS_WARNING |
 | **Window toolbar** | Yes | «10м» / «1ч» / «6ч» time-window buttons (active variant highlighted) |
 | **Channel block** (×2) | Yes | smua + smub — symmetric, always visible |
@@ -136,6 +136,7 @@ Fixed at codebase level; UI code must not violate:
 13. **Stale detection only when state == "on".** If channel is off or fault, a stalled reading isn't a symptom — the channel isn't supposed to stream. Stale chrome (STATUS_STALE border + «устар.» suffix) applies only to an "on" channel whose last reading is older than 5 s.
 14. **Fault state draws a 3 px STATUS_FAULT border on the channel block.** Visual coherence with other fault-bearing surfaces.
 15. **Plot line color is channel-coded, not quantity-coded.** smua → `PLOT_LINE_PALETTE[0]`, smub → `PLOT_LINE_PALETTE[1]`. All 4 plots of one channel share the same pen. Quantity distinction comes from the plot's Y-axis label + unit, not pen color. (RULE-COLOR-002 reserves STATUS_* for semantic state.)
+16. **A successful source start can carry a standing caution.** `operator_warnings` in the accepted Engine result describe observational coverage that remains unavailable while the source is active. The banner uses `STATUS_CAUTION`, retains the full Russian warning/consequence text and accessible name, and does not auto-clear. A transient four-second banner would erase load-bearing context while the warned-about run continues. Successful Stop/emergency-OFF removes the matching channel's caution; the other channel's active caution remains visible.
 
 ## API
 
@@ -171,7 +172,8 @@ class KeithleyPanel(QWidget):
     def set_safety_ready(self, ready: bool, reason: str = "") -> None: ...
     def set_read_only(self, read_only: bool) -> None: ...
 
-    # Transient banner
+    # Ordinary results are transient. Successful start results carrying
+    # operator_warnings become standing cautions until authoritative clearing.
     def show_info(self, text: str) -> None: ...
     def show_warning(self, text: str) -> None: ...
     def show_error(self, text: str) -> None: ...

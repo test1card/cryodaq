@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.1.1
 ---
 
 # Design System Changelog
@@ -12,6 +12,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.1.1] — 2026-08-28
+
+### Corrected
+
+- Reconciled the Keithley status-banner contract with the shipped standing
+  source caution. A successful start carrying Engine `operator_warnings` keeps
+  the full warning and consequence visible with `auto_clear=False` until the
+  matching source is authoritatively stopped/off or a later start returns no
+  warning; ordinary result banners retain their four-second auto-clear.
+- Recorded the operator tradeoff and focused scenario evidence: persistent
+  caution costs banner space, but prevents an active run from outliving its
+  load-bearing analytics-coverage warning.
 
 ## [4.1.0] — 2026-08-05
 

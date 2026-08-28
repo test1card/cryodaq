@@ -62,6 +62,29 @@ def _guard_source_blobs(record: dict) -> dict[str, str]:
     return {path: _git_blob_id((ROOT / path).read_bytes()) for path in sorted(paths)}
 
 
+def test_pr117_confirmed_regressions_are_bound_to_production_path_guards() -> None:
+    payload = validate_registry(_registry())
+    records = {record["id"]: record for record in payload["records"]}
+    pairs = {pair["id"]: pair for pair in payload["false_green_pairs"]}
+    cooldown_guard = (
+        "tests/core/test_predictor_soft_gate.py::"
+        "test_shipped_disabled_prediction_keeps_live_detector_and_cooldown_end_publication"
+    )
+    receipt_guard = (
+        "tests/core/test_predictor_soft_gate.py::"
+        "test_start_with_predictor_warning_refuses_run_when_choice_receipt_fails"
+    )
+
+    cooldown = records["COOLDOWN-PREDICTION-TOGGLE-LIFECYCLE-001"]
+    assert {guard["node"] for guard in cooldown["guards"]} >= {cooldown_guard}
+    assert {guard["ci_partition"] for guard in cooldown["guards"]} == {"core"}
+    assert pairs["COOLDOWN-PREDICTION-TOGGLE-LIVE-PATH-FALSE-GREEN-001"]["guard"] == cooldown_guard
+
+    receipt = records["KEITHLEY-WARNING-CHOICE-PERSISTENCE-001"]
+    assert receipt["guards"] == [{"node": receipt_guard, "ci_partition": "core"}]
+    assert pairs["KEITHLEY-WARNING-CHOICE-PRODUCTION-PATH-FALSE-GREEN-001"]["guard"] == receipt_guard
+
+
 def _required_governance_artifacts(payload: dict) -> tuple[str, ...]:
     paths = set(CANONICAL_ARTIFACTS)
     paths.update(node.split("::", 1)[0] for node in _guard_nodes(payload))

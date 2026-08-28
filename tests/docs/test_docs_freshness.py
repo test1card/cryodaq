@@ -1196,6 +1196,20 @@ def test_design_system_release_markers_are_one_version() -> None:
     assert f"Current v{version} state" in governance_rules
 
 
+def test_keithley_standing_source_caution_is_canonical_and_changelog_bound() -> None:
+    design_root = REPO_ROOT / "docs" / "design-system"
+    component = _read(design_root / "cryodaq-primitives" / "keithley-panel.md")
+    changelog = _read(design_root / "CHANGELOG.md")
+    impact = _read(design_root / "governance" / "change-impact.md")
+
+    assert "A successful source start can carry a standing caution" in component
+    assert "does not auto-clear" in component
+    assert "Successful Stop/emergency-OFF removes the matching channel's caution" in component
+    assert "auto_clear=False" in component
+    assert "Keithley status-banner contract" in changelog
+    assert "Keithley standing source caution" in impact
+
+
 def test_canonical_design_system_artifacts_and_markdown_references_are_tracked() -> None:
     tracked = set(_tracked_files())
     design_root = REPO_ROOT / "docs" / "design-system"
