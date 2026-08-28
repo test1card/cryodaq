@@ -31,7 +31,7 @@
     ]
   },
   "guard_blobs": {
-    "tests/gui/shell/overlays/test_conductivity_panel.py": "dadd9f71546335bd9535fd5a1064a0223a649505"
+    "tests/gui/shell/overlays/test_conductivity_panel.py": "324e8668f5684139b0d62460f54d0e1e38a8a114"
   },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change"
