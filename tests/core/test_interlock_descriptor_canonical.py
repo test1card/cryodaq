@@ -48,7 +48,6 @@ _INTERLOCK_POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
 INTERLOCK_CHANNELS: dict[str, tuple[str, ...]] = {
     "overheat_cryostat": ("Т11", "Т12"),
     "source_overtemp": ("Т11", "Т12"),
-    "detector_warmup": ("Т12",),
 }
 
 _TRIP_MARGIN = 500.0  # comfortably clears every threshold in interlocks.yaml
@@ -160,7 +159,6 @@ async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None
             if entry["name"] in INTERLOCK_CHANNELS and entry["action"] != "warning"
         }
         assert expected_control_actions <= set(actions_seen)
-        assert config["detector_warmup"]["action"] == "warning"
         assert "warning" not in actions_seen
     finally:
         await engine.stop()
@@ -253,18 +251,21 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
             catalog,
             instrument_id=instrument_id,
             emitted_channel=emitted_channel,
-            value=11.0,
+            value=321.0,
             unit="K",
         )
         assert bound.channel == renamed_id
         await _publish_bound(broker, catalog, bound)
         await asyncio.sleep(0.1)
 
-        assert engine.get_state()["detector_warmup"] == InterlockState.TRIPPED, (
-            "detector_warmup detached after a canonical channel-id rename instead of following "
+        assert engine.get_state()["source_overtemp"] == InterlockState.TRIPPED, (
+            "source_overtemp detached after a canonical channel-id rename instead of following "
             "the declared LS218_2/input.4.temperature sensor binding"
         )
-        assert actions_seen == [], "observational detector warning must not invoke source control"
+        # It followed the binding AND it acted. This used to ride on detector_warmup,
+        # parked 2026-08-29 because there is no detector in the cryostat; aiming it at a
+        # control row proves the action routes after a rename as well.
+        assert actions_seen == ["stop_source"]
     finally:
         await engine.stop()
 

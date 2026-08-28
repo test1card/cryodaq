@@ -44,12 +44,28 @@ async def _publish_bound(broker: DataBroker, reading: Reading) -> None:
     )
 
 
-async def test_warm_detector_warns_operator_without_stopping_running_source() -> None:
-    entry = _interlocks()["detector_warmup"]
-    assert entry["channel_bindings"] == [{"instrument_id": "LS218_2", "source_key": "input.4.temperature"}]
-    assert entry["threshold"] == 10.0
-    assert entry["comparison"] == ">"
-    assert entry["action"] == "warning"
+async def test_warning_action_informs_operator_without_touching_the_source(tmp_path: Path) -> None:
+    """The operator-facing "warning" action informs, and takes nothing away.
+
+    This used to ride on the shipped detector_warmup row. That row is parked -
+    the owner, 2026-08-29: "there is no detector in the cryostat!" - but the
+    warning MECHANISM is live production code in _interlock_trip_handler, so the
+    guard declares its own warning row instead of disappearing with the row it
+    happened to borrow. Every assertion below is the one it made before.
+    """
+    interlocks_path = tmp_path / "interlocks.yaml"
+    raw = yaml.safe_load(INTERLOCKS_PATH.read_text(encoding="utf-8"))
+    raw["interlocks"].append(
+        {
+            "name": "synthetic_warning_probe",
+            "description": "operator warning only; declared by this test, not shipped",
+            "channel_bindings": [{"instrument_id": "LS218_2", "source_key": "input.4.temperature"}],
+            "threshold": 10.0,
+            "comparison": ">",
+            "action": "warning",
+        }
+    )
+    interlocks_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     class SafetyProbe:
         def __init__(self) -> None:
@@ -61,7 +77,7 @@ async def test_warm_detector_warns_operator_without_stopping_running_source() ->
 
     broker = DataBroker()
     event_bus = EventBus()
-    event_queue = await event_bus.subscribe("warm-detector-policy")
+    event_queue = await event_bus.subscribe("warning-mechanism-policy")
     safety = SafetyProbe()
     alarm_state_manager = AlarmStateManager()
     local_control_actions: list[str] = []
@@ -91,7 +107,7 @@ async def test_warm_detector_warns_operator_without_stopping_running_source() ->
         ),
     )
     engine.load_config(
-        INTERLOCKS_PATH,
+        interlocks_path,
         descriptor_catalog=load_live_channel_descriptor_catalog(DESCRIPTORS_PATH),
         poll_intervals_s_by_instrument=POLL_INTERVALS,
     )
@@ -107,16 +123,15 @@ async def test_warm_detector_warns_operator_without_stopping_running_source() ->
         assert safety.state == "running"
         assert safety.calls == []
         assert local_control_actions == []
-        assert engine.get_state()["detector_warmup"] is InterlockState.TRIPPED
+        assert engine.get_state()["synthetic_warning_probe"] is InterlockState.TRIPPED
         event = event_queue.get_nowait()
         assert event.event_type == "alarm_fired"
-        assert event.payload["alarm_id"] == "detector_warmup"
+        assert event.payload["alarm_id"] == "synthetic_warning_probe"
         assert event.payload["level"] == "WARNING"
         assert event.payload["channels"] == ["Т12"]
-        assert alarm_state_manager.get_active()["detector_warmup"].level == "WARNING"
+        assert alarm_state_manager.get_active()["synthetic_warning_probe"].level == "WARNING"
     finally:
         await engine.stop()
-
 
 async def test_cryostat_above_320_k_stops_source_without_emergency_off() -> None:
     entries = _interlocks()
