@@ -15,7 +15,7 @@ import yaml
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.core.safety_manager import RunWarningRequirement, SafetyManager, SafetyState
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
@@ -972,8 +972,13 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
 ) -> None:
     order: list[str] = []
     persisted: list[dict[str, object]] = []
+    warning = "Interlock stop_source: detector_warmup"
+    requirement = RunWarningRequirement(7, warning, object())
 
     class Safety:
+        def prepare_request_run_warning(self) -> RunWarningRequirement:
+            return requirement
+
         async def request_run(
             self,
             p_target: float,
@@ -981,7 +986,11 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
             i_comp: float,
             *,
             channel: str,
+            command_warning_requirement: RunWarningRequirement,
+            operator_warning_receipted: bool,
         ) -> dict[str, object]:
+            assert command_warning_requirement is requirement
+            assert operator_warning_receipted is True
             order.append("request_run")
             return {"ok": True, "channel": channel}
 
@@ -1014,7 +1023,7 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
             "operator_warning_choice": {
                 "schema": "cryodaq.keithley_warning_choice.v1",
                 "request_id": "a" * 32,
-                "warning": "Interlock stop_source: detector_warmup",
+                "warning": warning,
                 "choice": "start",
             },
         }
@@ -1041,8 +1050,75 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
         "channel": "smua",
         "choice": "start",
         "event": "keithley_start_with_safety_warning",
-        "warning": "Interlock stop_source: detector_warmup",
+        "warning": warning,
     }
+
+
+async def test_keithley_start_rejects_missing_required_warning_choice_before_dispatch(
+    manager: ExperimentManager,
+) -> None:
+    calls: list[str] = []
+    warning = "Interlock stop_source: detector_warmup"
+    requirement = RunWarningRequirement(8, warning, object())
+
+    class Safety:
+        def prepare_request_run_warning(self) -> RunWarningRequirement:
+            return requirement
+
+        async def request_run(self, *args: object, **kwargs: object) -> dict[str, object]:
+            calls.append("request_run")
+            return {"ok": True}
+
+    context = _context(manager)
+    context.safety_manager = Safety()
+
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "keithley_start",
+                "channel": "smua",
+                "p_target": 0.5,
+                "v_comp": 40.0,
+                "i_comp": 1.0,
+            }
+        ),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "keithley_warning_choice_required"
+    assert calls == []
+
+
+async def test_keithley_start_missing_warning_is_rejected_by_real_safety_owner(
+    manager: ExperimentManager,
+) -> None:
+    safety = SafetyManager(SafetyBroker(), mock=True)
+    await safety.start()
+    try:
+        requirement = safety.prepare_request_run_warning()
+        assert requirement.warning == "Safety is OFF but readiness has not been committed"
+        context = _context(manager)
+        context.safety_manager = safety
+
+        reply = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "keithley_start",
+                    "channel": "smua",
+                    "p_target": 0.5,
+                    "v_comp": 40.0,
+                    "i_comp": 1.0,
+                }
+            ),
+            context=context,
+        )
+
+        assert reply["ok"] is False
+        assert reply["error_code"] == "keithley_warning_choice_required"
+        assert safety._active_sources == set()
+    finally:
+        await safety.stop()
 
 
 @pytest.mark.parametrize(

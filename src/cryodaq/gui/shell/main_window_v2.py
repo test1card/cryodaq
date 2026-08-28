@@ -36,8 +36,10 @@ from cryodaq.channels.descriptors import (
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.core.safety_manager import SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
 from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
@@ -996,9 +998,14 @@ class MainWindowV2(QMainWindow):
             "analytics/keithley_channel_state/smua",
             "analytics/keithley_channel_state/smub",
         }:
-            # Admit only events observed through a valid live bridge. Once
-            # admitted, their lifetime belongs to the engine producer.
-            if self._current_bridge_instance_id() is not None:
+            metadata = reading.metadata
+            source_state_authoritative = (
+                type(metadata) is dict
+                and metadata.get(PUBLISHER_AUTHORITY_METADATA_KEY) == SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
+            )
+            # DataBroker stamps this marker only after the exact SafetyManager
+            # capability publishes on its reserved source-state channels.
+            if self._current_bridge_instance_id() is not None and source_state_authoritative:
                 source_state_key = channel.rsplit("/", maxsplit=1)[-1]
                 self._keithley_channel_state_snapshot[source_state_key] = reading
                 self._keithley_channel_state_received_monotonic[source_state_key] = time.monotonic()
@@ -1008,7 +1015,7 @@ class MainWindowV2(QMainWindow):
                     self._keithley_source_state_pending.add(source_state_key)
                 if not self._keithley_source_state_pending:
                     self._keithley_source_state_resync_not_before = None
-            if self._keithley_panel is not None:
+            if self._keithley_panel is not None and source_state_authoritative:
                 self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in

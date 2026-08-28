@@ -22,6 +22,7 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell import main_window_v2 as main_window_module
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
@@ -99,14 +100,18 @@ def _source_state_reading(
     state: str,
     *,
     observed_at: datetime | None = None,
+    authoritative: bool = True,
 ) -> Reading:
+    metadata = {"state": state}
+    if authoritative:
+        metadata[PUBLISHER_AUTHORITY_METADATA_KEY] = "safety_manager_source_state_v1"
     return Reading(
         timestamp=observed_at or datetime.now(UTC),
         instrument_id="safety_manager",
         channel=f"analytics/keithley_channel_state/{channel}",
         value=0.0,
         unit="",
-        metadata={"state": state},
+        metadata=metadata,
     )
 
 
@@ -1512,29 +1517,43 @@ def test_cached_replay_cannot_reconcile_unknown_start_outcome(
         _stop_timers(w)
 
 
-def test_keithley_overlay_channel_state_replay_cleared_on_lifecycle_reset() -> None:
+def test_keithley_overlay_channel_state_replay_cleared_on_lifecycle_reset(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    w = MainWindowV2()
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        w._on_experiment_status_received(
-            {
-                "active_experiment": {"experiment_id": "exp-old"},
-                "phases": [],
-            }
-        )
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._last_reading_time = time.monotonic()
         assert w._keithley_panel is None
         w._dispatch_reading(_source_state_reading("smua", "off"))
+        assert w._keithley_channel_state_snapshot["smua"].metadata["state"] == "off"
         assert w._keithley_panel is None
 
-        w._on_experiment_status_received(
-            {
-                "active_experiment": {"experiment_id": "exp-new"},
-                "phases": [],
-            }
-        )
+        w.invalidate_engine_producer()
+        assert w._keithley_channel_state_snapshot == {}
         w._ensure_overlay("source")
 
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_passive_source_state_packet_cannot_seed_lazy_start_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._last_reading_time = time.monotonic()
+        w._dispatch_reading(_source_state_reading("smua", "off", authoritative=False))
+
+        assert w._keithley_channel_state_snapshot == {}
+        w._ensure_overlay("source")
         assert w._keithley_panel is not None
         block = w._keithley_panel._smua_block
         assert block._channel_state == "unknown"

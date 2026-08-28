@@ -117,7 +117,7 @@ from cryodaq.core.qualification import (
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
+from cryodaq.core.safety_manager import RunWarningRequirement, SafetyConfigError, SafetyManager
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.core.scheduler import (
     InstrumentConfig,
@@ -546,6 +546,9 @@ async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
     safety_manager: SafetyManager,
+    *,
+    command_warning_requirement: RunWarningRequirement | None = None,
+    operator_warning_receipted: bool = False,
 ) -> dict[str, Any]:
     """Dispatch channel-scoped Keithley commands to SafetyManager."""
     channel = cmd.get("channel")
@@ -563,7 +566,13 @@ async def _run_keithley_command(
                 "error_code": "keithley_parameters_invalid",
                 "error": "Keithley command parameters are invalid.",
             }
-        return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        warning_kwargs: dict[str, Any] = {}
+        if command_warning_requirement is not None:
+            warning_kwargs = {
+                "command_warning_requirement": command_warning_requirement,
+                "operator_warning_receipted": operator_warning_receipted,
+            }
+        return await safety_manager.request_run(p, v, i, channel=smu_channel, **warning_kwargs)
 
     if action == "keithley_stop":
         smu_channel = normalize_smu_channel(channel)
@@ -5315,6 +5324,24 @@ async def _handle_gui_command(
             "keithley_set_limits",
         }:
             warning_receipt = None
+            command_warning_requirement = None
+            required_warning = None
+            if action == "keithley_start":
+                prepare_warning = getattr(safety_manager, "prepare_request_run_warning", None)
+                if not callable(prepare_warning):
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_authority_unavailable",
+                        "error": "Keithley Start was not sent because Safety warning authority is unavailable.",
+                    }
+                command_warning_requirement = prepare_warning()
+                if type(command_warning_requirement) is not RunWarningRequirement:
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_authority_unavailable",
+                        "error": "Keithley Start was not sent because Safety warning authority is invalid.",
+                    }
+                required_warning = command_warning_requirement.warning
             raw_warning_choice = cmd.get("operator_warning_choice")
             try:
                 warning_choice = _keithley_warning_choice(raw_warning_choice)
@@ -5323,6 +5350,18 @@ async def _handle_gui_command(
                     "ok": False,
                     "error_code": "keithley_warning_choice_invalid",
                     "error": "Keithley warning choice receipt request is invalid.",
+                }
+            if action == "keithley_start" and required_warning is not None and warning_choice is None:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_required",
+                    "error": "Keithley Start was not sent because its Safety warning choice was not recorded.",
+                }
+            if warning_choice is not None and warning_choice[1] != required_warning:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_invalid",
+                    "error": "Keithley warning choice does not match current Safety authority.",
                 }
             if warning_choice is not None:
                 if action != "keithley_start" or writer is None:
@@ -5350,7 +5389,13 @@ async def _handle_gui_command(
                         "error_code": "keithley_warning_choice_persistence_failed",
                         "error": "Keithley Start was not sent because its warning choice was not recorded.",
                     }
-            result = await _run_keithley_command(action, cmd, safety_manager)
+            result = await _run_keithley_command(
+                action,
+                cmd,
+                safety_manager,
+                command_warning_requirement=command_warning_requirement,
+                operator_warning_receipted=warning_receipt is not None,
+            )
             if warning_receipt is not None:
                 result = {**result, "operator_warning_receipt": warning_receipt}
             if result.get("ok"):
