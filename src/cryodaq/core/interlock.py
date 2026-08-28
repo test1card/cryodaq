@@ -140,7 +140,10 @@ class InterlockCondition:
         Оператор сравнения: ``">"`` (больше) или ``"<"`` (меньше).
     action:
         Имя действия из словаря actions, переданного в InterlockEngine.
-        Например: ``"emergency_off"`` или ``"stop_source"``.
+        Например: ``"emergency_off"`` или ``"stop_source"``. Наблюдательное
+        действие ``"warning"`` встроено: оно не вызывает защитный callable,
+        но передаёт полный контекст production ``trip_handler`` для видимого
+        операторского предупреждения.
     cooldown_s:
         Минимальный интервал в секундах между громкими УВЕДОМЛЕНИЯМИ о повторном
         срабатывании одной и той же блокировки. Защитное действие выполняется при
@@ -530,11 +533,12 @@ class InterlockEngine:
         """
         if condition.name in self._interlocks:
             raise ValueError(f"Блокировка '{condition.name}' уже зарегистрирована.")
-        if condition.action not in self._actions:
+        if condition.action != "warning" and condition.action not in self._actions:
+            available_actions = [*self._actions.keys(), "warning"]
             raise ValueError(
                 f"Блокировка '{condition.name}': неизвестное действие "
                 f"'{condition.action}'. Доступные действия: "
-                f"{list(self._actions.keys())}."
+                f"{available_actions}."
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
@@ -784,8 +788,8 @@ class InterlockEngine:
     ) -> None:
         """Выполнить срабатывание блокировки.
 
-        Устанавливает состояние TRIPPED, вызывает защитное действие,
-        записывает событие и логирует CRITICAL.
+        Устанавливает состояние TRIPPED, вызывает защитное действие (кроме
+        наблюдательного ``warning``), записывает событие и логирует нарушение.
 
         ``suppress_notification=True`` — повторное срабатывание в окне кулдауна:
         защитное действие выполняется как обычно, но громкое CRITICAL-уведомление
@@ -822,13 +826,17 @@ class InterlockEngine:
             )
         else:
             record.last_trip_time = now
-            # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
-            logger.critical(
-                "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
+            # Защитные действия остаются CRITICAL; наблюдательный warning не
+            # должен заявлять, что источник был заблокирован.
+            log = logger.warning if condition.action == "warning" else logger.critical
+            announcement = "ПРЕДУПРЕЖДЕНИЕ" if condition.action == "warning" else "БЛОКИРОВКА СРАБОТАЛА"
+            log(
+                "!!! %s !!! "
                 "Имя: '%s' | Описание: %s | "
                 "Канал: '%s' | Значение: %.4g | "
                 "Порог: %s %.4g | Действие: '%s' | "
                 "Время: %s | Всего срабатываний: %d",
+                announcement,
                 condition.name,
                 condition.description,
                 reading.channel,
@@ -840,30 +848,33 @@ class InterlockEngine:
                 record.trip_count,
             )
 
-        # Вызов защитного действия
-        action_callable = self._actions[condition.action]
-        try:
-            await action_callable()
-            logger.info(
-                "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
-                "авторитетный результат защиты не подтверждён.",
-                condition.action,
-                condition.name,
-            )
-        except Exception as exc:
-            # Ошибка действия не должна прерывать цикл, но логируется как CRITICAL
-            logger.critical(
-                "ОШИБКА выполнения действия '%s' для блокировки '%s': %s. "
-                "Требуется немедленное вмешательство оператора!",
-                condition.action,
-                condition.name,
-                exc,
-                exc_info=True,
-            )
+        # Вызов защитного действия. ``warning`` намеренно не получает
+        # actuator callable: production trip_handler публикует его на штатный
+        # operator-facing alarm path без передачи в SafetyManager.
+        if condition.action != "warning":
+            action_callable = self._actions[condition.action]
+            try:
+                await action_callable()
+                logger.info(
+                    "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
+                    "авторитетный результат защиты не подтверждён.",
+                    condition.action,
+                    condition.name,
+                )
+            except Exception as exc:
+                # Ошибка действия не должна прерывать цикл, но логируется как CRITICAL
+                logger.critical(
+                    "ОШИБКА выполнения действия '%s' для блокировки '%s': %s. "
+                    "Требуется немедленное вмешательство оператора!",
+                    condition.action,
+                    condition.name,
+                    exc,
+                    exc_info=True,
+                )
 
         # Phase 2a I.1: notify the optional trip_handler with FULL
-        # context. SafetyManager uses this to differentiate "stop_source"
-        # (soft stop, no fault latch) from "emergency_off" (full latch).
+        # context. Production routing sends warning to the operator alarm path,
+        # stop_source to a soft stop, and emergency_off to a full latch.
         # The handler is called even if the actions-dict callable above
         # raised — both paths run independently.
         if self._trip_handler is not None:
