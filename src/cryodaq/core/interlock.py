@@ -1159,6 +1159,8 @@ class InterlockEngine:
         return [
             {
                 "name": name,
+                "description": record.condition.description,
+                "channel_ids": sorted(record.condition.channel_ids),
                 "enabled": record.enabled,
                 "operator_disableable": record.condition.operator_disableable,
                 "action": record.condition.action,

@@ -50,6 +50,11 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
+from cryodaq.gui.shell.overlays.interlock_panel import (
+    InterlockPanel,
+    canonical_interlock_snapshot,
+    disabled_names_from_snapshot,
+)
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
@@ -212,6 +217,7 @@ class MainWindowV2(QMainWindow):
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
         self._last_disabled_interlocks: tuple[str, ...] | None = None
+        self._last_interlocks: tuple[dict[str, Any], ...] | None = None
         self._last_safety_observed_at: datetime | None = None
         self._accepted_safety_bridge_instance_id: str | None = None
         self._accepted_safety_experiment_id: str | None = None
@@ -257,6 +263,7 @@ class MainWindowV2(QMainWindow):
         "knowledge_base": ("_knowledge_base_panel", lambda self: KnowledgeBasePanel()),
         "log": ("_operator_log_panel", lambda self: OperatorLogPanel()),
         "instruments": ("_instrument_panel", lambda self: InstrumentsPanel()),
+        "interlocks": ("_interlock_panel", lambda self: InterlockPanel()),
         "archive": ("_archive_panel", lambda self: ArchivePanel()),
         "calibration": ("_calibration_panel", lambda self: CalibrationPanel()),
     }
@@ -296,6 +303,7 @@ class MainWindowV2(QMainWindow):
         self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
         self._instrument_panel: InstrumentsPanel | None = None
+        self._interlock_panel: InterlockPanel | None = None
         self._archive_panel: ArchivePanel | None = None
         self._calibration_panel: CalibrationPanel | None = None
 
@@ -451,6 +459,7 @@ class MainWindowV2(QMainWindow):
             "restart_engine",
             "settings",
             "calibration",
+            "interlocks",
         }:
             logger.warning("Replay mode rejected a mutating shell route")
             return
@@ -491,6 +500,12 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
+        if name == "interlocks":
+            widget.interlock_committed.connect(self._apply_interlock_commit)
+            stale = self._last_safety_observed_at is None or self._last_safety_observed_at < datetime.now(
+                UTC
+            ) - timedelta(seconds=_SAFETY_MAX_SOURCE_AGE_S)
+            widget.set_interlocks(self._last_interlocks, stale=stale)
         if name in {"source", "experiment", "log", "multiline"}:
             widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
@@ -825,6 +840,14 @@ class MainWindowV2(QMainWindow):
             and tuple(disabled_raw) == tuple(sorted(set(disabled_raw)))
             else None
         )
+        interlocks_present = "interlocks" in metadata
+        interlock_snapshot = canonical_interlock_snapshot(metadata.get("interlocks")) if interlocks_present else None
+        if interlocks_present and interlock_snapshot is None:
+            self._invalidate_safety_authority("Некорректный список программных блокировок")
+            return
+        if interlock_snapshot is not None and disabled_interlocks != disabled_names_from_snapshot(interlock_snapshot):
+            self._invalidate_safety_authority("Состояния программных блокировок противоречат друг другу")
+            return
         if (
             type(reading.timestamp) is not datetime
             or reading.timestamp.tzinfo is None
@@ -844,8 +867,14 @@ class MainWindowV2(QMainWindow):
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
-        self._last_disabled_interlocks = disabled_interlocks
-        self._bottom_bar.set_disabled_interlocks(disabled_interlocks)
+        if interlock_snapshot is None and self._last_interlocks is None:
+            self._last_disabled_interlocks = disabled_interlocks
+            self._bottom_bar.set_disabled_interlocks(disabled_interlocks)
+        elif interlock_snapshot is None:
+            self._invalidate_safety_authority("Список программных блокировок отсутствует")
+            return
+        else:
+            self._set_interlock_presentation(interlock_snapshot, stale=False)
         self._last_safety_observed_at = observed_at
         reason = metadata.get("reason", "") or ""
         if self._typed_safety_authority_seen:
@@ -903,8 +932,40 @@ class MainWindowV2(QMainWindow):
         elif disconnected:
             self._bottom_bar.set_safety_state(None, stale=True)
         self._bottom_bar.set_disabled_interlocks(self._last_disabled_interlocks, stale=True)
+        if self._interlock_panel is not None:
+            self._interlock_panel.set_interlocks(self._last_interlocks, stale=True)
         if self._keithley_panel is not None:
             self._keithley_panel.set_safety_ready(False, reason)
+
+    @Slot(dict)
+    def _apply_interlock_commit(self, committed: dict[str, Any]) -> None:
+        """Apply one exact engine reply without allowing a stale reply to regress state."""
+        name = committed.get("name")
+        enabled = committed.get("enabled")
+        previous = committed.get("previous_enabled")
+        if type(name) is not str or type(enabled) is not bool or type(previous) is not bool:
+            return
+        snapshot = self._last_interlocks
+        if snapshot is None:
+            return
+        current = next((row for row in snapshot if row["name"] == name), None)
+        if current is None or current["enabled"] is not previous:
+            return
+        updated = tuple({**row, "enabled": enabled} if row["name"] == name else dict(row) for row in snapshot)
+        self._set_interlock_presentation(updated, stale=False)
+
+    def _set_interlock_presentation(
+        self,
+        snapshot: tuple[dict[str, Any], ...],
+        *,
+        stale: bool,
+    ) -> None:
+        """Update the control and status strip from one canonical state cut."""
+        self._last_interlocks = tuple(dict(row) for row in snapshot)
+        self._last_disabled_interlocks = disabled_names_from_snapshot(self._last_interlocks)
+        self._bottom_bar.set_disabled_interlocks(self._last_disabled_interlocks, stale=stale)
+        if self._interlock_panel is not None:
+            self._interlock_panel.set_interlocks(self._last_interlocks, stale=stale)
 
     def _dispatch_disk_evidence(self, reading: Reading) -> None:
         """Accept only current, ordered disk evidence from this bridge instance."""
@@ -1289,6 +1350,7 @@ class MainWindowV2(QMainWindow):
         for attr in (
             "_keithley_panel",
             "_operator_log_panel",
+            "_interlock_panel",
             "_archive_panel",
             "_conductivity_panel",
             "_multiline_panel",

@@ -398,7 +398,7 @@ def test_replay_shell_rejects_direct_mutating_routes(monkeypatch) -> None:
         calls: list[str] = []
         monkeypatch.setattr(window, "_show_new_experiment_dialog", lambda: calls.append("new"))
         monkeypatch.setattr(window, "_restart_engine", lambda: calls.append("restart"))
-        for route in ("new_experiment", "restart_engine", "settings", "calibration"):
+        for route in ("new_experiment", "restart_engine", "settings", "calibration", "interlocks"):
             window._on_tool_clicked(route)
         window._on_create_experiment({"name": "forbidden"})
         assert calls == []

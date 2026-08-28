@@ -148,6 +148,7 @@ _MORE_ITEMS = [
     ("archive", "Архив"),
     # v0.55.6.1: «База знаний» promoted to main ToolRail — see _OVERLAY_ITEMS.
     ("calibration", "Калибровка"),
+    ("interlocks", "Блокировки"),
     ("settings", "Настройки"),
     ("__separator__", ""),
     ("web_panel", "Открыть Web-панель"),
