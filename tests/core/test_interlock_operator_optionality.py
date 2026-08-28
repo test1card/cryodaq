@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from cryodaq.core.command_authority import ENGINE_MUTATION_CAPABILITY, MUTATION_PROTOCOL_MAJOR
 from cryodaq.core.experiment import ExperimentManager
-from cryodaq.core.interlock import InterlockCondition, InterlockEngine
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
@@ -30,10 +29,8 @@ from cryodaq.storage.sqlite_writer import OperatorLogPublicationOutboxRecord
 
 
 @pytest.fixture
-def workspace_runtime_root() -> Path:
-    root = Path(".pytest_cache") / "interlock-operator-optionality" / uuid.uuid4().hex
-    root.mkdir(parents=True, exist_ok=False)
-    return root
+def workspace_runtime_root(tmp_path: Path) -> Path:
+    return tmp_path
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +152,37 @@ async def test_disabled_emergency_interlock_still_evaluates_warns_and_suppresses
 
 
 @pytest.mark.asyncio
+async def test_disabled_interlock_does_not_escalate_its_dead_channel(
+    workspace_runtime_root: Path,
+) -> None:
+    dead_channel = AsyncMock(return_value=True)
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        dead_channel_handler=dead_channel,
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    engine._nonusable_min_samples = 2
+    engine._nonusable_min_duration_s = 1.0
+    await _toggle(engine, enabled=False, request_id="1" * 32)
+
+    for seconds in (0, 1):
+        await engine._process_reading(
+            Reading(
+                timestamp=datetime(2026, 8, 28, 12, 0, seconds, tzinfo=UTC),
+                instrument_id="LS218_1",
+                channel="cryostat/t1",
+                value=float("nan"),
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            )
+        )
+
+    dead_channel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reenable_fires_immediately_when_last_observation_is_still_true(
     workspace_runtime_root: Path,
 ) -> None:
@@ -173,6 +201,67 @@ async def test_reenable_fires_immediately_when_last_observation_is_still_true(
 
     action.assert_awaited_once()
     assert engine.get_events()[-1].action_taken == "emergency_off"
+
+
+@pytest.mark.asyncio
+async def test_reenable_rearms_a_previously_tripped_row(
+    workspace_runtime_root: Path,
+) -> None:
+    action = AsyncMock()
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": action},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    await engine._process_reading(_reading())
+    await _toggle(engine, enabled=False, request_id="2" * 32)
+    await engine._process_reading(_reading(300.0))
+
+    await _toggle(engine, enabled=True, request_id="3" * 32)
+    assert engine.get_state()["overheat_cryostat"] is InterlockState.ARMED
+    await engine._process_reading(_reading())
+
+    assert action.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reenable_evaluates_latest_reading_for_every_bound_channel(
+    workspace_runtime_root: Path,
+) -> None:
+    action = AsyncMock()
+    condition = InterlockCondition(
+        name="overheat_cryostat",
+        description="Перегрев криостата",
+        channel_ids=frozenset({"cryostat/t1", "cryostat/t2"}),
+        threshold=350.0,
+        comparison=">",
+        action="emergency_off",
+        cooldown_s=10.0,
+    )
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": action},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(condition)
+    await _toggle(engine, enabled=False, request_id="4" * 32)
+    await engine._process_reading(_reading())
+    await engine._process_reading(
+        Reading(
+            timestamp=datetime(2026, 8, 28, 12, 0, 1, tzinfo=UTC),
+            instrument_id="LS218_1",
+            channel="cryostat/t2",
+            value=300.0,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+
+    await _toggle(engine, enabled=True, request_id="5" * 32)
+
+    action.assert_awaited_once()
+    assert engine.get_events()[-1].channel == "cryostat/t1"
 
 
 @pytest.mark.asyncio
@@ -373,6 +462,26 @@ async def test_suppressed_warning_uses_existing_operator_log_and_alarm_event_sur
 
 
 @pytest.mark.asyncio
+async def test_suppressed_warning_retries_immediately_after_total_publication_failure(
+    workspace_runtime_root: Path,
+) -> None:
+    warning_surface = AsyncMock(side_effect=[RuntimeError("all surfaces unavailable"), None])
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        suppressed_handler=warning_surface,
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    await _toggle(engine, enabled=False, request_id="6" * 32)
+
+    await engine._process_reading(_reading())
+    await engine._process_reading(_reading())
+
+    assert warning_surface.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_toggle_commands_need_no_confirmation_write_two_receipts_and_run_interval(
     workspace_runtime_root: Path,
 ) -> None:
@@ -438,6 +547,106 @@ async def test_toggle_commands_need_no_confirmation_write_two_receipts_and_run_i
         assert interval["reenable_receipt"]["commit_receipt"] == enabled["commit_receipt"]
     finally:
         context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
+async def test_toggle_history_survives_failed_provenance_until_restart_reconciliation(
+    workspace_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    experiment_id = manager.start_experiment("История блокировок", "Иван Петров", template_id="custom")
+    reconcile = manager.sync_interlock_operator_provenance
+
+    def fail_provenance(**_kwargs) -> bool:
+        raise OSError("metadata unavailable")
+
+    monkeypatch.setattr(manager, "record_interlock_operator_state", fail_provenance)
+    state_path = workspace_runtime_root / "interlock_operator_state.json"
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    engine.add_condition(_condition())
+    context = _command_context(
+        manager=manager,
+        writer=writer,
+        broker=_RequiredPublisher(),
+        interlock_engine=engine,
+    )
+    try:
+        disabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "Иван Петров",
+                    "request_id": "7" * 32,
+                }
+            ),
+            context=context,
+        )
+        enabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": True,
+                    "operator": "Иван Петров",
+                    "request_id": "8" * 32,
+                }
+            ),
+            context=context,
+        )
+        assert disabled["error_code"] == "interlock_toggle_reconciliation_failed"
+        assert enabled["error_code"] == "interlock_toggle_reconciliation_failed"
+
+        restarted = InterlockEngine(
+            broker=None,  # type: ignore[arg-type]
+            actions={"emergency_off": AsyncMock()},
+            state_path=state_path,
+        )
+        restarted.add_condition(_condition())
+        await restarted.restore_operator_state()
+        assert reconcile(restarted.get_operator_state()) is True
+
+        metadata_path = workspace_runtime_root / "experiment" / "experiments" / experiment_id / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        interval = metadata["interlock_disable_intervals"][0]
+        assert interval["disabled_at"] == disabled["entry"]["timestamp"]
+        assert interval["reenabled_at"] == enabled["entry"]["timestamp"]
+        assert interval["disable_receipt"]["request_id"] == "7" * 32
+        assert interval["reenable_receipt"]["request_id"] == "8" * 32
+    finally:
+        context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
+async def test_unsettled_toggle_history_is_bounded_fail_closed(
+    workspace_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.core.interlock as interlock_module
+
+    monkeypatch.setattr(interlock_module, "_MAX_PENDING_OPERATOR_TRANSITIONS", 2)
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    await _toggle(engine, enabled=False, request_id="9" * 32)
+    await _toggle(engine, enabled=True, request_id="a" * 32)
+
+    with pytest.raises(RuntimeError, match="provenance backlog is full"):
+        engine.prepare_operator_toggle("overheat_cryostat", enabled=False)
 
 
 def test_bottom_bar_lists_currently_disabled_interlocks() -> None:

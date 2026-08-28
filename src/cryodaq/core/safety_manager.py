@@ -3554,6 +3554,7 @@ class SafetyManager:
     async def _run_checks(self) -> None:
         now = time.monotonic()
         self._refresh_operator_safety_snapshot()
+        await self._publish_state("periodic_reconciliation")
 
         unmanaged_hazard = self._current_unmanaged_output_hazard()
         if unmanaged_hazard is not None and self._state is not SafetyState.FAULT_LATCHED:

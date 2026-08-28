@@ -2450,6 +2450,7 @@ async def _interlock_suppressed_handler(
     """Persist and dispatch a disabled-condition warning on existing surfaces."""
     experiment_id = context.experiment_manager.active_experiment_id if context.experiment_manager is not None else None
     failures: list[Exception] = []
+    established_surfaces = 0
     try:
         await _dispatch_alarm_notification(
             context.event_bus,
@@ -2461,6 +2462,7 @@ async def _interlock_suppressed_handler(
             channel=reading.channel,
             value=float(reading.value),
         )
+        established_surfaces += 1
     except Exception as exc:
         failures.append(exc)
     try:
@@ -2471,11 +2473,21 @@ async def _interlock_suppressed_handler(
             experiment_id=experiment_id,
             tags=("interlock_suppressed", condition.name),
         )
-        await _publish_operator_log_entry(context.broker, entry)
+        established_surfaces += 1
+        try:
+            await _publish_operator_log_entry(context.broker, entry)
+        except Exception as exc:
+            failures.append(exc)
     except Exception as exc:
         failures.append(exc)
-    if failures:
+    if established_surfaces == 0:
         raise RuntimeError("one or more suppressed-interlock warning surfaces failed") from failures[0]
+    if failures:
+        logger.warning(
+            "Suppressed interlock warning reached %d operator surface(s); %d secondary surface(s) failed",
+            established_surfaces,
+            len(failures),
+        )
 
 
 async def _set_interlock_operator_state(
@@ -2528,6 +2540,13 @@ async def _set_interlock_operator_state(
             "error": "Эта блокировка не допускает переключение оператором.",
             "retry_safe": False,
         }
+    except RuntimeError:
+        return {
+            "ok": False,
+            "error_code": "interlock_toggle_provenance_backlog",
+            "error": "Журнал происхождения переключений блокировки заполнен; требуется восстановление записи.",
+            "retry_safe": False,
+        }
 
     log_cmd: dict[str, Any] = {
         "cmd": "log_entry",
@@ -2558,7 +2577,7 @@ async def _set_interlock_operator_state(
             notice=notice,
             commit_receipt=commit_receipt,
         )
-        await asyncio.to_thread(
+        provenance_recorded = await asyncio.to_thread(
             context.experiment_manager.record_interlock_operator_state,
             interlock_name=name,
             enabled=enabled,
@@ -2567,6 +2586,9 @@ async def _set_interlock_operator_state(
             notice=notice,
             receipt={"entry": dict(entry), "commit_receipt": dict(commit_receipt)},
         )
+        if experiment_id is not None and provenance_recorded is not True:
+            raise RuntimeError("active experiment did not record interlock provenance")
+        await context.interlock_engine.mark_operator_transition_recorded(name, request_id)
     except Exception as exc:
         logger.error(
             "Receipted interlock toggle could not settle: interlock=%s exception=%s",
@@ -4960,7 +4982,7 @@ async def _execute_owned_experiment_command(
                 reconciliation_failures.append(feed_failure)
 
         if action in {"experiment_start", "experiment_create"}:
-            await _attempt_experiment_reconciliation_async(
+            interlock_sync = await _attempt_experiment_reconciliation_async(
                 reconciliation_failures,
                 "interlock_disable_provenance_seed",
                 lambda: asyncio.to_thread(
@@ -4968,6 +4990,12 @@ async def _execute_owned_experiment_command(
                     context.interlock_engine.get_operator_state(),
                 ),
             )
+            if interlock_sync is not None:
+                await _attempt_experiment_reconciliation_async(
+                    reconciliation_failures,
+                    "interlock_disable_provenance_receipt_settlement",
+                    context.interlock_engine.mark_all_operator_transitions_recorded,
+                )
             await _attempt_experiment_reconciliation_async(
                 reconciliation_failures,
                 "calibration_acquisition_activate",
@@ -6951,6 +6979,8 @@ async def _run_engine(
         experiment_manager.sync_interlock_operator_provenance,
         interlock_engine.get_operator_state(),
     )
+    if experiment_manager.active_experiment_id is not None:
+        await interlock_engine.mark_all_operator_transitions_recorded()
     try:
         _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
     except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot

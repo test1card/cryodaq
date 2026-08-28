@@ -83,6 +83,23 @@ async def _feed(broker, channel="Т1 Криостат верх", value=4.5, unit
     await asyncio.sleep(0.02)  # Let collect loop process
 
 
+@pytest.mark.asyncio
+async def test_periodic_safety_publication_retries_disabled_state_after_delivery_loss() -> None:
+    publisher = SimpleNamespace(
+        publish=AsyncMock(side_effect=[RuntimeError("delivery lost"), None]),
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=publisher)
+    manager.set_interlock_state_provider(lambda: ("overheat_cryostat",))
+
+    await manager.publish_interlock_operator_state()
+    await manager._run_checks()
+
+    assert publisher.publish.await_count == 2
+    delivered = publisher.publish.await_args_list[-1].args[0]
+    assert delivered.channel == "analytics/safety_state"
+    assert delivered.metadata["disabled_interlocks"] == ["overheat_cryostat"]
+
+
 class _RunPublicationGate(DataBroker):
     """Real broker whose first committed RUN state has a controlled boundary."""
 

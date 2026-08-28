@@ -20,7 +20,7 @@ import logging
 import math
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -104,6 +104,7 @@ logger = logging.getLogger(__name__)
 
 # Максимальное количество событий, хранимых в памяти
 _MAX_EVENTS = 1000
+_MAX_PENDING_OPERATOR_TRANSITIONS = 1024
 
 # Имя подписки InterlockEngine в DataBroker
 _SUBSCRIPTION_NAME = "interlock_engine"
@@ -234,11 +235,12 @@ class _InterlockRecord:
     last_trip_time: datetime | None = None
     trip_count: int = 0
     enabled: bool = True
-    latest_reading: Reading | None = None
+    latest_readings: dict[str, Reading] = field(default_factory=dict)
     condition_active: bool = False
     last_suppressed_warning: datetime | None = None
     disable_receipt: dict[str, Any] | None = None
     last_transition_receipt: dict[str, Any] | None = None
+    pending_transition_receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -659,7 +661,7 @@ class InterlockEngine:
             if record.condition.matches_reading(reading, descriptor_envelope)
         ]
         matching = [record for record in identity_matching if record.enabled and record.state == InterlockState.ARMED]
-        protected_matching = identity_matching
+        protected_matching = [record for record in identity_matching if record.enabled]
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
         # interlock-защищённом канале. Пороговое сравнение с NaN всегда даёт
@@ -671,6 +673,8 @@ class InterlockEngine:
         if reading.is_usable():
             if protected_matching:
                 await self._handle_usable(reading, protected_matching[0].condition)
+            elif identity_matching:
+                self._nonusable_windows.pop(reading.channel, None)
         elif protected_matching:
             if math.isinf(reading.value) and any(
                 record.condition.is_triggered(reading.value) for record in identity_matching
@@ -689,10 +693,17 @@ class InterlockEngine:
             else:
                 await self._handle_nonusable(reading, protected_matching[0].condition)
                 return
+        elif identity_matching:
+            self._nonusable_windows.pop(reading.channel, None)
+            if not (
+                math.isinf(reading.value)
+                and any(record.condition.is_triggered(reading.value) for record in identity_matching)
+            ):
+                return
 
         for record in identity_matching:
             if reading.is_usable() or math.isinf(reading.value):
-                record.latest_reading = reading
+                record.latest_readings[reading.channel] = reading
 
         for record in identity_matching:
             if record.enabled:
@@ -742,7 +753,6 @@ class InterlockEngine:
     ) -> None:
         """Publish one loud observation while deliberately suppressing action."""
         condition = record.condition
-        record.last_suppressed_warning = now
         message = (
             f"Блокировка '{condition.name}' подавлена решением оператора: "
             f"значение {reading.value:.4g} {reading.unit} пересекло порог "
@@ -771,6 +781,8 @@ class InterlockEngine:
                     condition.name,
                     type(exc).__name__,
                 )
+                return
+        record.last_suppressed_warning = now
 
     async def _handle_usable(self, reading: Reading, condition: InterlockCondition) -> None:
         """Clear dead-channel state only after recovery authority accepts this sample."""
@@ -1042,6 +1054,7 @@ class InterlockEngine:
                 "last_transition_receipt": (
                     None if record.last_transition_receipt is None else dict(record.last_transition_receipt)
                 ),
+                "pending_transition_receipts": [dict(receipt) for receipt in record.pending_transition_receipts],
             }
             for name, record in self._interlocks.items()
         ]
@@ -1055,10 +1068,41 @@ class InterlockEngine:
             raise KeyError(interlock_name)
         if not record.condition.operator_disableable:
             raise PermissionError(interlock_name)
+        if len(record.pending_transition_receipts) >= _MAX_PENDING_OPERATOR_TRANSITIONS:
+            raise RuntimeError("interlock operator provenance backlog is full")
         return self.operator_notice(record.condition, enabled=enabled)
 
     def disabled_interlocks(self) -> tuple[str, ...]:
         return tuple(sorted(name for name, record in self._interlocks.items() if not record.enabled))
+
+    def _persistent_operator_states(
+        self,
+        *,
+        target_name: str | None = None,
+        target_enabled: bool | None = None,
+        target_receipt: dict[str, Any] | None = None,
+        target_pending: list[dict[str, Any]] | None = None,
+        clear_pending: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        states = {name: dict(state) for name, state in self._retired_operator_state.items()}
+        for name, item in self._interlocks.items():
+            receipt = target_receipt if name == target_name else item.last_transition_receipt
+            if receipt is None:
+                continue
+            if name == target_name:
+                if target_enabled is None or target_pending is None:
+                    raise RuntimeError("target operator state is incomplete")
+                enabled = target_enabled
+                pending = target_pending
+            else:
+                enabled = item.enabled
+                pending = [] if clear_pending else item.pending_transition_receipts
+            states[name] = {
+                "enabled": enabled,
+                "receipt": dict(receipt),
+                "pending_receipts": [dict(pending_receipt) for pending_receipt in pending],
+            }
+        return states
 
     async def set_enabled(
         self,
@@ -1084,6 +1128,7 @@ class InterlockEngine:
         if changed_at.tzinfo is None or changed_at.utcoffset() is None:
             raise ValueError("changed_at must be timezone-aware")
         receipt = {
+            "enabled": enabled,
             "operator": operator.strip(),
             "changed_at": changed_at.astimezone(UTC).isoformat(),
             "request_id": request_id,
@@ -1091,29 +1136,30 @@ class InterlockEngine:
             "commit_receipt": dict(commit_receipt),
         }
         async with self._state_change_lock:
+            if len(record.pending_transition_receipts) >= _MAX_PENDING_OPERATOR_TRANSITIONS:
+                raise RuntimeError("interlock operator provenance backlog is full")
             previous = record.enabled
-            next_state = {
-                name: {
-                    "enabled": item.enabled,
-                    "receipt": dict(item.last_transition_receipt),
-                }
-                for name, item in self._interlocks.items()
-                if name != interlock_name and item.last_transition_receipt is not None
-            }
-            next_state[interlock_name] = {"enabled": enabled, "receipt": receipt}
-            next_state.update(self._retired_operator_state)
+            pending = [*record.pending_transition_receipts, receipt]
+            next_state = self._persistent_operator_states(
+                target_name=interlock_name,
+                target_enabled=enabled,
+                target_receipt=receipt,
+                target_pending=pending,
+            )
             await asyncio.to_thread(self._write_operator_state, next_state)
             record.enabled = enabled
             record.disable_receipt = None if enabled else receipt
             record.last_transition_receipt = receipt
+            record.pending_transition_receipts = pending
             if not enabled:
                 record.condition_active = False
-            elif (
-                not previous
-                and record.latest_reading is not None
-                and record.condition.is_triggered(record.latest_reading.value)
-            ):
-                await self._trip(record, record.latest_reading)
+            elif not previous:
+                record.state = InterlockState.ARMED
+                for channel in sorted(record.latest_readings):
+                    latest = record.latest_readings[channel]
+                    if record.condition.is_triggered(latest.value):
+                        await self._trip(record, latest)
+                        break
             if self._state_changed_handler is not None:
                 result = self._state_changed_handler()
                 if asyncio.iscoroutine(result):
@@ -1126,6 +1172,38 @@ class InterlockEngine:
             "notice": notice,
             "changed_at": receipt["changed_at"],
         }
+
+    async def mark_operator_transition_recorded(self, interlock_name: str, request_id: str) -> bool:
+        """Discard one pending receipt only after experiment provenance settles."""
+        record = self._interlocks.get(interlock_name)
+        if record is None:
+            raise KeyError(interlock_name)
+        async with self._state_change_lock:
+            pending = [
+                receipt for receipt in record.pending_transition_receipts if receipt.get("request_id") != request_id
+            ]
+            if len(pending) == len(record.pending_transition_receipts):
+                return False
+            next_state = self._persistent_operator_states(
+                target_name=interlock_name,
+                target_enabled=record.enabled,
+                target_receipt=record.last_transition_receipt,
+                target_pending=pending,
+            )
+            await asyncio.to_thread(self._write_operator_state, next_state)
+            record.pending_transition_receipts = pending
+            return True
+
+    async def mark_all_operator_transitions_recorded(self) -> bool:
+        """Clear the pending journal after full provenance reconciliation."""
+        async with self._state_change_lock:
+            if not any(record.pending_transition_receipts for record in self._interlocks.values()):
+                return False
+            next_state = self._persistent_operator_states(clear_pending=True)
+            await asyncio.to_thread(self._write_operator_state, next_state)
+            for record in self._interlocks.values():
+                record.pending_transition_receipts = []
+            return True
 
     def _load_operator_state(self) -> None:
         path = self._state_path
@@ -1143,22 +1221,42 @@ class InterlockEngine:
         if type(payload) is not dict or set(payload) != {"schema_version", "interlocks", "updated_at"}:
             raise InterlockConfigError(f"interlock operator state at {path} is invalid")
         states = payload.get("interlocks")
-        if payload.get("schema_version") != 1 or type(states) is not dict or type(payload.get("updated_at")) is not str:
+        schema_version = payload.get("schema_version")
+        if schema_version not in (1, 2) or type(states) is not dict or type(payload.get("updated_at")) is not str:
             raise InterlockConfigError(f"interlock operator state at {path} is invalid")
         for name, state in states.items():
+            expected_keys = (
+                {"enabled", "receipt"}
+                if schema_version == 1
+                else {
+                    "enabled",
+                    "receipt",
+                    "pending_receipts",
+                }
+            )
             if (
                 type(name) is not str
                 or type(state) is not dict
-                or set(state) != {"enabled", "receipt"}
+                or set(state) != expected_keys
                 or type(state.get("enabled")) is not bool
                 or type(state.get("receipt")) is not dict
+                or (
+                    schema_version == 2
+                    and (
+                        type(state.get("pending_receipts")) is not list
+                        or len(state["pending_receipts"]) > _MAX_PENDING_OPERATOR_TRANSITIONS
+                        or any(type(receipt) is not dict for receipt in state["pending_receipts"])
+                    )
+                )
             ):
                 raise InterlockConfigError(f"interlock operator state at {path} is invalid")
+            pending_receipts = [] if schema_version == 1 else [dict(receipt) for receipt in state["pending_receipts"]]
             record = self._interlocks.get(name)
             if record is None:
                 self._retired_operator_state[name] = {
                     "enabled": state["enabled"],
                     "receipt": dict(state["receipt"]),
+                    "pending_receipts": pending_receipts,
                 }
                 continue
             if state["enabled"] is False and not record.condition.operator_disableable:
@@ -1166,6 +1264,7 @@ class InterlockEngine:
             record.enabled = state["enabled"]
             record.last_transition_receipt = dict(state["receipt"])
             record.disable_receipt = None if state["enabled"] else dict(state["receipt"])
+            record.pending_transition_receipts = pending_receipts
 
     async def restore_operator_state(self) -> None:
         """Load or initialize operator state without blocking the engine loop."""
@@ -1176,7 +1275,7 @@ class InterlockEngine:
         if path is None:
             return
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "interlocks": states,
             "updated_at": datetime.now(UTC).isoformat(),
         }
