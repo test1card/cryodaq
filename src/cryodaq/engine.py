@@ -64,7 +64,7 @@ from cryodaq.core.alarm_ack_codec import (
 )
 from cryodaq.core.alarm_config import AlarmConfig, AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
@@ -2398,6 +2398,7 @@ class _InterlockHandlerContext:
     dead_channel_alarm_sent: set[str]
     event_bus: Any | None = None
     experiment_manager: Any | None = None
+    alarm_state_manager: Any | None = None
 
 
 async def _interlock_noop() -> None:
@@ -2410,8 +2411,38 @@ async def _interlock_trip_handler(
     *,
     context: _InterlockHandlerContext,
 ) -> None:
-    """Route an interlock trip to SafetyManager, failing closed on errors."""
+    """Route control actions to SafetyManager and warnings to operator alarms."""
     try:
+        if condition.action == "warning":
+            if context.event_bus is None or context.experiment_manager is None or context.alarm_state_manager is None:
+                raise RuntimeError("interlock warning publication path is unavailable")
+            transition = context.alarm_state_manager.process(
+                condition.name,
+                AlarmEvent(
+                    alarm_id=condition.name,
+                    level="WARNING",
+                    message=condition.description,
+                    triggered_at=time.time(),
+                    channels=[reading.channel],
+                    values={
+                        reading.channel: float(reading.value) if reading.value is not None else 0.0,
+                    },
+                ),
+                {},
+            )
+            if transition != "TRIGGERED":
+                return
+            await _dispatch_alarm_notification(
+                context.event_bus,
+                context.alarm_dispatch_tasks,
+                alarm_id=condition.name,
+                level="WARNING",
+                message=condition.description,
+                experiment_id=context.experiment_manager.active_experiment_id,
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else 0.0,
+            )
+            return
         await context.safety_manager.on_interlock_trip(
             interlock_name=condition.name,
             channel=reading.channel,
@@ -2436,6 +2467,35 @@ async def _interlock_trip_handler(
                 "Interlock fault escalation failed: exception=%s; instrument state is unknown",
                 type(exc2).__name__,
             )
+
+
+def _interlock_trip_admission(
+    condition: Any,
+    _reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> bool:
+    """Admit soft-stop conditions only in the source-active lifecycle."""
+    if condition.action != "stop_source":
+        return True
+    state = context.safety_manager.get_status().get("state")
+    if state in {"safe_off", "ready", "fault_latched", "manual_recovery"}:
+        return False
+    return True
+
+
+def _interlock_warning_recovery_handler(
+    condition: Any,
+    _reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Remove a recovered warning from authoritative alarm state."""
+    if condition.action != "warning":
+        return
+    if context.alarm_state_manager is None:
+        raise RuntimeError("interlock warning recovery path is unavailable")
+    context.alarm_state_manager.process(condition.name, None, {})
 
 
 async def _interlock_dead_channel_handler(
@@ -6747,6 +6807,14 @@ async def _run_engine(
             _interlock_dead_channel_recovery_handler,
             context=interlock_handler_context,
         ),
+        trip_admission=functools.partial(
+            _interlock_trip_admission,
+            context=interlock_handler_context,
+        ),
+        warning_recovery_handler=functools.partial(
+            _interlock_warning_recovery_handler,
+            context=interlock_handler_context,
+        ),
     )
     _log_physical_policy_receipt(
         "interlocks",
@@ -6820,6 +6888,7 @@ async def _run_engine(
     _alarm_v2_setpoint = ExperimentSetpointProvider(experiment_manager, _alarm_v2_engine_cfg.setpoints)
     alarm_v2_evaluator = AlarmEvaluator(_alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint)
     alarm_v2_state_mgr = AlarmStateManager()
+    interlock_handler_context.alarm_state_manager = alarm_v2_state_mgr
     zmq_pub.configure_periodic_authority(
         reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
         alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
