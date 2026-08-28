@@ -4,7 +4,7 @@ keywords: status-bar, bottom-bar, connection, safety-state, uptime, disk, data-r
 applies_to: bottom chrome strip showing passive system-level evidence
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
-last_updated: 2026-07-20
+last_updated: 2026-08-28
 references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md, governance/change-impact.md
 ---
 
@@ -14,14 +14,15 @@ The shipped `BottomStatusBar` is the thin, persistent technical strip at the
 bottom of the v2 shell. Its active contract is the production implementation,
 not the older proposed Engine/Safety/ZMQ four-field mock-up.
 
-The bar presents six fields in this order:
+The bar presents seven fields in this order:
 
 1. current SafetyManager state supplied by the host;
-2. launcher/UI uptime measured from this widget's construction;
-3. free space for the configured data directory;
-4. the latest data rate supplied by the host;
-5. recent-reading connection evidence supplied by the host;
-6. the GUI host's current local time.
+2. disabled-software-interlock evidence supplied by the host;
+3. launcher/UI uptime measured from this widget's construction;
+4. free space for the configured data directory;
+5. the latest data rate supplied by the host;
+6. recent-reading connection evidence supplied by the host;
+7. the GUI host's current local time.
 
 This is supporting evidence, not the primary alarm or verified-OFF surface.
 Nothing in the bar grants control authority.
@@ -40,7 +41,7 @@ acknowledgement, or any command.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ ● safety │ Лаунчер 00:00:00 │ Диск 120 ГБ │ 10 изм/с │ ● Подключено │ 14:32:15 │
+│ ● safety │ ⚠ Блок.: 2 │ Лаунчер 00:00:00 │ Диск 120 ГБ │ 10 изм/с │ ● Подключено │ 14:32:15 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,7 +52,7 @@ acknowledgement, or any command.
 | Data disk | `MainWindowV2` passes fresh, incarnation-bound `disk_monitor` evidence | `Диск N ГБ`; stale or disconnected history is marked explicitly |
 | Data rate | last value passed to `set_data_rate` | integer `изм/с` |
 | Connection | host calls `set_connected` from recent-reading evidence | Russian connected/disconnected label |
-| Disabled interlocks | `MainWindowV2` passes the backend-owned list from safety telemetry | `Откл. блокировки: …`; an unconfirmed list shows `—`, never an empty list |
+| Disabled interlocks | `MainWindowV2` passes the backend-owned list from safety telemetry | one bounded identifier, or `⚠ Блок.: N` for multiple entries; tooltip and accessible description retain every identifier; an unconfirmed list shows `—`, never an empty list |
 | Clock | widget-local wall clock | local `HH:MM:SS` |
 
 Separators are visible `│` glyphs using `BORDER_SUBTLE`. The rightmost clock is
@@ -137,6 +138,11 @@ already sorted and deduplicated. `None` means "not confirmed" and renders as
 `—`; it must never be shown as an empty list, because "no interlock is
 disabled" and "nobody told me which interlocks are disabled" are different
 facts and only one of them is safe to read as all-guards-armed.
+When one interlock is disabled, its bounded identifier remains visible. When
+multiple interlocks are disabled, the persistent warning glyph and count remain
+glanceable. In both cases the complete identifier list remains available
+through the same tooltip and accessible-description channel used for the bar's
+other bounded evidence.
 
 ## Update ownership and failure behavior
 
@@ -160,7 +166,7 @@ facts and only one of them is safe to read as all-guards-armed.
 
 Better:
 
-- all six values stay visible in one fixed, quiet strip;
+- all seven values stay visible in one fixed, quiet strip;
 - lowercase safety text, Russian connection text, and dot glyphs provide
   non-color cues;
 - activity no longer trains operators to interpret green as “running”;
@@ -205,6 +211,9 @@ screen-reader, and operator-night-shift evidence remains open.
   run-permitted activity to `ACCENT`.
 - `test_disk_space_thresholds_use_canonical_safety_rungs` covers both disk
   boundaries.
+- `test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail`
+  bounds the complete row at 1280 logical pixels while retaining full hostile
+  protocol values, including interlock identifiers, in accessible detail.
 - fault-beep tests cover exact activation, immediate/repeating timer ownership,
   idempotent repeated updates, and stop-on-state-change behavior.
 - documentation freshness must assert that this setter list exactly matches the
@@ -234,6 +243,11 @@ screen-reader, and operator-night-shift evidence remains open.
 
 ## Changelog
 
+- **2026-08-28** — compacted disabled-interlock presentation to a persistent
+  warning plus one bounded identifier or a multiple-entry count, and retained
+  the complete identifier list in the existing tooltip and
+  accessible-description channels so the seven-field row remains bounded at
+  the supported 1280-pixel floor.
 - **2026-07-20 (v4.0.3)** — reconciled the active specification to the shipped
   six-field widget, removed the fictional `StatusItem`/four-setter API,
   documented activity and readiness colors, and recorded the open heartbeat,

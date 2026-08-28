@@ -1501,10 +1501,13 @@ def test_bottom_bar_lists_currently_disabled_interlocks() -> None:
             )
         )
         bar = window._bottom_bar
-        assert "overheat_compressor" in bar._interlock_label.text()
-        assert "overheat_cryostat" in bar._interlock_label.text()
+        assert bar._interlock_label.text() == "⚠ Блок.: 2"
         assert theme.STATUS_WARNING in bar._interlock_label.styleSheet()
-        assert "Отключённые программные блокировки" in bar._interlock_label.accessibleDescription()
+        detail = bar._interlock_label.accessibleDescription()
+        assert "Отключённые программные блокировки" in detail
+        assert "overheat_compressor" in detail
+        assert "overheat_cryostat" in detail
+        assert bar._interlock_label.toolTip() == detail
     finally:
         for timer in window.findChildren(QTimer):
             timer.stop()

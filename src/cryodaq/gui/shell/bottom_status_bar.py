@@ -19,7 +19,7 @@ from cryodaq.gui import theme
 _HEIGHT_PX = theme.BOTTOM_BAR_HEIGHT  # DESIGN: invariant #1 — canonical 28px
 _MAX_VISIBLE_STATE_CHARS = 28
 _MAX_VISIBLE_CONNECTION_CHARS = 22
-_MAX_VISIBLE_INTERLOCK_CHARS = 64
+_MAX_VISIBLE_INTERLOCK_CHARS = 24
 _MAX_VISIBLE_UPTIME_CHARS = 20
 _MAX_VISIBLE_NUMERIC = 1_000_000.0
 
@@ -98,8 +98,8 @@ class BottomStatusBar(QWidget):
 
         layout.addWidget(_separator())
 
-        self._interlock_label = QLabel("Откл. блокировки: —")
-        self._interlock_label.setMaximumWidth(460)
+        self._interlock_label = QLabel("Блок.: —")
+        self._interlock_label.setMaximumWidth(200)
         self._interlock_label.setStyleSheet(muted)
         self._interlock_label.setToolTip("Нет подтверждённого списка отключённых программных блокировок")
         self._interlock_label.setAccessibleDescription("Нет подтверждённого списка отключённых программных блокировок")
@@ -218,7 +218,7 @@ class BottomStatusBar(QWidget):
     ) -> bool:
         """Present the backend-owned list; unknown never looks like an empty list."""
         if names is None:
-            self._interlock_label.setText("Откл. блокировки: —")
+            self._interlock_label.setText("Блок.: —")
             detail = "Нет подтверждённого списка отключённых программных блокировок"
             self._interlock_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             self._interlock_label.setToolTip(detail)
@@ -232,13 +232,17 @@ class BottomStatusBar(QWidget):
         if canonical:
             listing = ", ".join(canonical)
             suffix = " · нет связи" if stale else ""
-            visible = _bounded_visible(f"Откл. блокировки: {listing}{suffix}", _MAX_VISIBLE_INTERLOCK_CHARS)
+            if len(canonical) == 1:
+                visible_name = _bounded_visible(canonical[0], _MAX_VISIBLE_INTERLOCK_CHARS)
+                visible = f"⚠ Блок.: {visible_name}{suffix}"
+            else:
+                visible = f"⚠ Блок.: {len(canonical)}{suffix}"
             detail = f"Отключённые программные блокировки: {listing}"
             if stale:
                 detail += "; список последний подтверждённый, текущая связь с Engine отсутствует"
             color = theme.TEXT_MUTED if stale else theme.STATUS_WARNING
         else:
-            visible = "Откл. блокировки: нет" if not stale else "Откл. блокировки: нет · нет связи"
+            visible = "Блок.: нет" if not stale else "Блок.: нет · нет связи"
             detail = "Отключённых программных блокировок нет"
             if stale:
                 detail += "; это последнее подтверждённое состояние, текущая связь с Engine отсутствует"

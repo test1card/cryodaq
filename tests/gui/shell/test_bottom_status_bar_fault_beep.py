@@ -102,6 +102,7 @@ def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> N
     bar.set_data_rate(1e300)
     bar.set_connected(False, "y" * 1_000)
     assert bar.set_disk_evidence(1e300, source="disk_monitor", state="ok")
+    assert bar.set_disabled_interlocks(("z" * 1_000,))
     bar._start_time -= 10**12
     bar._tick()
     bar.resize(1280, bar.height())
@@ -111,6 +112,7 @@ def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> N
     assert bar.minimumSizeHint().width() <= 1280
     for label in (
         bar._safety_label,
+        bar._interlock_label,
         bar._uptime_label,
         bar._disk_label,
         bar._rate_label,
@@ -121,6 +123,9 @@ def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> N
     assert "x" * 100 in bar._safety_label.accessibleDescription()
     assert "1e+300" in bar._disk_label.accessibleDescription()
     assert "y" * 100 in bar._conn_label.accessibleDescription()
+    assert "z" * 100 in bar._interlock_label.accessibleDescription()
+    assert bar._interlock_label.toolTip() == bar._interlock_label.accessibleDescription()
+    assert "z" * 100 not in bar._interlock_label.text()
     assert "д" in bar._uptime_label.accessibleDescription()
 
 
