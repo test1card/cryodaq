@@ -2275,6 +2275,8 @@ class ConductivityPanel(QWidget):
                 self._auto_run_creation_failed = True
                 self._auto_run_creation_error = "активный эксперимент отсутствует"
                 self._auto_binding_resolution = "unrequested"
+                if self._persistence_completion_is_stopped():
+                    return
                 self._release_prearm_creation_failure(self._auto_run_creation_error)
                 return
             if not is_ready_attachment:
