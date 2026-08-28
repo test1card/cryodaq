@@ -211,6 +211,7 @@ class MainWindowV2(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_disabled_interlocks: tuple[str, ...] | None = None
         self._last_safety_observed_at: datetime | None = None
         self._accepted_safety_bridge_instance_id: str | None = None
         self._accepted_safety_experiment_id: str | None = None
@@ -816,6 +817,14 @@ class MainWindowV2(QMainWindow):
         if type(state_name) is not str or not state_name:
             self._invalidate_safety_authority("Некорректное состояние Safety")
             return
+        disabled_raw = metadata.get("disabled_interlocks")
+        disabled_interlocks = (
+            tuple(disabled_raw)
+            if type(disabled_raw) is list
+            and all(type(name) is str and bool(name) for name in disabled_raw)
+            and tuple(disabled_raw) == tuple(sorted(set(disabled_raw)))
+            else None
+        )
         if (
             type(reading.timestamp) is not datetime
             or reading.timestamp.tzinfo is None
@@ -835,6 +844,9 @@ class MainWindowV2(QMainWindow):
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
+        self._last_disabled_interlocks = disabled_interlocks
+        self._bottom_bar.set_disabled_interlocks(disabled_interlocks)
+        self._last_safety_observed_at = observed_at
         reason = metadata.get("reason", "") or ""
         if self._typed_safety_authority_seen:
             # READY-looking analytics cannot overwrite the coherent typed cut.
@@ -843,14 +855,12 @@ class MainWindowV2(QMainWindow):
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._last_safety_state = state_name
                 self._last_safety_reason = str(reason) if reason else ""
-                self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
                 self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
             return
 
         self._last_safety_state = state_name
         self._last_safety_reason = str(reason) if reason else ""
-        self._last_safety_observed_at = observed_at
         self._bottom_bar.set_safety_state(self._last_safety_state)
 
         # Analytics is presentation telemetry, not command authority. It may
@@ -892,6 +902,7 @@ class MainWindowV2(QMainWindow):
             self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
         elif disconnected:
             self._bottom_bar.set_safety_state(None, stale=True)
+        self._bottom_bar.set_disabled_interlocks(self._last_disabled_interlocks, stale=True)
         if self._keithley_panel is not None:
             self._keithley_panel.set_safety_ready(False, reason)
 

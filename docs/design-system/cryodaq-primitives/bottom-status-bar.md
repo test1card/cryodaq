@@ -51,6 +51,7 @@ acknowledgement, or any command.
 | Data disk | `MainWindowV2` passes fresh, incarnation-bound `disk_monitor` evidence | `Диск N ГБ`; stale or disconnected history is marked explicitly |
 | Data rate | last value passed to `set_data_rate` | integer `изм/с` |
 | Connection | host calls `set_connected` from recent-reading evidence | Russian connected/disconnected label |
+| Disabled interlocks | `MainWindowV2` passes the backend-owned list from safety telemetry | `Откл. блокировки: …`; an unconfirmed list shows `—`, never an empty list |
 | Clock | widget-local wall clock | local `HH:MM:SS` |
 
 Separators are visible `│` glyphs using `BORDER_SUBTLE`. The rightmost clock is
@@ -119,10 +120,23 @@ class BottomStatusBar(QWidget):
         connected: bool,
         label: str | None = None,
     ) -> None: ...
+    def set_disabled_interlocks(
+        self,
+        names: tuple[str, ...] | list[str] | None,
+        *,
+        stale: bool = False,
+    ) -> bool: ...
 ```
 
 There is no shipped `StatusItem`, `set_engine`, `set_safety`, `set_heartbeat`,
 or `set_time` API. Documentation and tests must not imply otherwise.
+
+`set_disabled_interlocks` returns `False` and presents nothing rather than
+guessing when the list is absent, is not a list of non-empty strings, or is not
+already sorted and deduplicated. `None` means "not confirmed" and renders as
+`—`; it must never be shown as an empty list, because "no interlock is
+disabled" and "nobody told me which interlocks are disabled" are different
+facts and only one of them is safe to read as all-guards-armed.
 
 ## Update ownership and failure behavior
 

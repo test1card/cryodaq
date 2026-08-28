@@ -78,6 +78,43 @@ def test_safety_strip_restored_on_reconnect() -> None:
         _stop_timers(w)
 
 
+def test_reordered_safety_packet_cannot_replace_current_disabled_interlocks() -> None:
+    _app()
+    window = MainWindowV2()
+    try:
+        window._typed_safety_authority_seen = True
+        observed_at = datetime.now(UTC)
+        window._dispatch_reading(
+            Reading(
+                timestamp=observed_at,
+                instrument_id="safety_manager",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={
+                    "state": "ready",
+                    "reason": "",
+                    "disabled_interlocks": ["overheat_cryostat"],
+                },
+            )
+        )
+        window._dispatch_reading(
+            Reading(
+                timestamp=observed_at,
+                instrument_id="safety_manager",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={"state": "ready", "reason": "", "disabled_interlocks": []},
+            )
+        )
+
+        assert window._last_disabled_interlocks == ("overheat_cryostat",)
+        assert "overheat_cryostat" in window._bottom_bar._interlock_label.text()
+    finally:
+        _stop_timers(window)
+
+
 def test_closeevent_delegates_status_timer_settlement_to_root(_isolate_shell_test: int) -> None:
     """closeEvent must stop the status timer so it can't fire into a
     half-destroyed window (and the QThread teardown stays bounded)."""
