@@ -1080,13 +1080,13 @@ class MainWindowV2(QMainWindow):
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
         reason = metadata.get("reason", "") or ""
+        legacy_reason = str(reason) if reason else ""
         if self._typed_safety_authority_seen:
             # READY-looking analytics cannot overwrite the coherent typed cut.
             # A negative observation is allowed to revoke it, and remains
             # visible until a newer typed cut supplies recovery authority.
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._last_safety_state = state_name
-                self._last_safety_reason = str(reason) if reason else ""
                 self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
                 current_safe_off = (
@@ -1098,10 +1098,16 @@ class MainWindowV2(QMainWindow):
                         or self._accepted_safety_experiment_id == self._active_experiment_id()
                     )
                 )
-                if current_safe_off:
+                typed_gate_can_remain_authoritative = self._typed_safety_ready or (
+                    self._last_safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY
+                )
+                if current_safe_off and typed_gate_can_remain_authoritative:
                     # The negative observation revokes readiness, not the
-                    # still-current bridge/experiment identity binding.
+                    # still-current bridge/experiment identity binding. It can
+                    # preserve an authoritative blocker, but cannot promote an
+                    # unavailable typed cut into authoritative gate evidence.
                     self._typed_safety_ready = False
+                    self._last_safety_reason = legacy_reason
                     self._last_safety_gate_cause = SafetyGateCause.AUTHORITATIVE_NOT_READY
                     if self._keithley_panel is not None:
                         self._keithley_panel.set_safety_ready(
@@ -1109,12 +1115,12 @@ class MainWindowV2(QMainWindow):
                             self._last_safety_reason or "Safety state is not ready",
                             cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
                         )
-                else:
-                    self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+                elif not current_safe_off:
+                    self._invalidate_safety_authority(legacy_reason or "Safety state is not ready")
             return
 
         self._last_safety_state = state_name
-        self._last_safety_reason = str(reason) if reason else ""
+        self._last_safety_reason = legacy_reason
         self._last_safety_observed_at = observed_at
         self._bottom_bar.set_safety_state(self._last_safety_state)
 

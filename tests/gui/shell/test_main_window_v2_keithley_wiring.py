@@ -81,10 +81,13 @@ def _safety_reading(
     *,
     observed_at: datetime | None = None,
     bridge_id: str | None = None,
+    experiment_id: str | None = None,
 ) -> Reading:
     metadata = {"state": state, "reason": reason}
     if bridge_id is not None:
         metadata["bridge_instance_id"] = bridge_id
+    if experiment_id is not None:
+        metadata["experiment_id"] = experiment_id
     return Reading(
         timestamp=observed_at or datetime.now(UTC),
         instrument_id="safety_manager",
@@ -395,6 +398,51 @@ def test_transport_stale_typed_safety_stays_unavailable_on_lazy_open(
         assert not panel._smua_block._start_btn.isEnabled()
         assert not panel._smua_block._p_spin.isEnabled()
         assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_legacy_safe_off_cannot_promote_unavailable_typed_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        store.accept_snapshot(_typed_ready_snapshot())
+        unavailable = store.observe_transport(connected=True, transport_age_s=11.0, stale_after_s=10.0)
+        w.render_operator_snapshot(unavailable)
+
+        assert w._accepted_safety_bridge_instance_id == live_zmq_bridge.bridge_instance_id
+        assert w._accepted_safety_experiment_id == "exp-1"
+        assert w._last_safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+
+        w._dispatch_reading(
+            _safety_reading(
+                SafetyLifecycle.SAFE_OFF.value,
+                "Interlock stop_source: detector_warmup",
+                observed_at=datetime.now(UTC),
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+                experiment_id="exp-1",
+            )
+        )
+
+        assert w._last_safety_state == SafetyLifecycle.SAFE_OFF.value
+        assert w._last_safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert not panel._smua_block._p_spin.isEnabled()
+        assert not panel._smua_block._v_spin.isEnabled()
+        assert not panel._smua_block._i_spin.isEnabled()
+        assert panel._smua_block._emergency_btn.isEnabled()
     finally:
         _stop_timers(w)
 
