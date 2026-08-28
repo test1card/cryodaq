@@ -37,6 +37,9 @@
   "guard_blobs": {
     "tests/gui/shell/overlays/test_conductivity_panel.py": "3f53d7dc523bddf281c32017de64fe88a260efb9"
   },
+  "guard_node_sha256": {
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change": "sha256:b15a7a418ea9d739effb002ec7ad7ec0377f15f091bad9b460c236380eeea0d0"
+  },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change"
   ],
@@ -45,7 +48,7 @@
   "record_ids": [
     "CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "stderr_bytes_base64": "",
   "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX18gdGVzdF9hdXRvX3N0ZXBfa2VlcHNfY29tbWFuZGVkX2NoYW5uZWxzX3doZW5fY29udHJvbHNfY2hhbmdlIF9fX19fX19fXw0KdGVzdHNcZ3VpXHNoZWxsXG92ZXJsYXlzXHRlc3RfY29uZHVjdGl2aXR5X3BhbmVsLnB5OjEyMjc6IGluIHRlc3RfYXV0b19zdGVwX2tlZXBzX2NvbW1hbmRlZF9jaGFubmVsc193aGVuX2NvbnRyb2xzX2NoYW5nZQ0KICAgIHBhbmVsLl9vbl9jaGFubmVsc19jaGFuZ2VkKCkNCnNyY1xjcnlvZGFxXGd1aVxzaGVsbFxvdmVybGF5c1xjb25kdWN0aXZpdHlfcGFuZWwucHk6ODUwOiBpbiBfb25fY2hhbm5lbHNfY2hhbmdlZA0KICAgIHNlbGYuX2NoX2xheW91dC5hZGRTdHJldGNoKCkNCiAgICBeXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXg0KRSAgIEF0dHJpYnV0ZUVycm9yOiAnUHlTaWRlNi5RdFdpZGdldHMuUUdyaWRMYXlvdXQnIG9iamVjdCBoYXMgbm8gYXR0cmlidXRlICdhZGRTdHJldGNoJy4gRGlkIHlvdSBtZWFuOiAncm93U3RyZXRjaCc/DQo9PT09PT09PT09PT09PT09PT09PT09PT09PT0gc2hvcnQgdGVzdCBzdW1tYXJ5IGluZm8gPT09PT09PT09PT09PT09PT09PT09PT09PT09DQpGQUlMRUQgdGVzdHMvZ3VpL3NoZWxsL292ZXJsYXlzL3Rlc3RfY29uZHVjdGl2aXR5X3BhbmVsLnB5Ojp0ZXN0X2F1dG9fc3RlcF9rZWVwc19jb21tYW5kZWRfY2hhbm5lbHNfd2hlbl9jb250cm9sc19jaGFuZ2UNCjEgZmFpbGVkIGluIDAuMzRzDQo=",

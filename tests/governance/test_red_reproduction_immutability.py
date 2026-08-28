@@ -14,6 +14,8 @@ from tools.ci_active_checkout_runner import (
     compare_red_reproduction_bindings,
 )
 from tools.governance_contract import _RED_REPRODUCTION_PROVENANCE
+from tools.red_reproduction import migrate_red_reproduction_node_digests
+from tools.test_node_source import test_node_sha256 as _test_node_sha256
 
 GUARD_FILE = "tests/governance/guard_demo.py"
 RECEIPT_PATH = "governance/red_reproductions/seed.json"
@@ -222,6 +224,39 @@ def test_accepts_forced_rerun_after_guard_change(tmp_path: Path) -> None:
     _commit(root, "re-run receipt against changed guard")
     result = compare_red_reproduction_bindings(root, candidate=_git(root, "rev-parse", "HEAD"), trusted_base=base)
     assert result["outcome"] == "passed"
+
+
+def test_accepts_only_tree_derived_legacy_to_node_digest_migration(tmp_path: Path) -> None:
+    guard_v1 = b"def test_guard():\n    assert False\n"
+    root, base = _seed_red(tmp_path, guard_v1=guard_v1)
+
+    assert migrate_red_reproduction_node_digests(root) == 1
+    receipt_raw = (root / RECEIPT_PATH).read_bytes()
+    receipt = json.loads(receipt_raw)
+    node = f"{GUARD_FILE}::test_guard"
+    assert receipt["schema_version"] == 2
+    assert receipt["guard_node_sha256"] == {node: _test_node_sha256(guard_v1, node)}
+    registry = (root / "governance" / "agent_preventions.yaml").read_text(encoding="utf-8")
+    assert f"sha256: sha256:{hashlib.sha256(receipt_raw).hexdigest()}" in registry
+
+    _commit(root, "derive node digest migration")
+    result = compare_red_reproduction_bindings(root, candidate=_git(root, "rev-parse", "HEAD"), trusted_base=base)
+    assert result["outcome"] == "passed"
+
+
+def test_node_digest_migration_refuses_a_changed_named_test_without_writes(tmp_path: Path) -> None:
+    guard_v1 = b"def test_guard():\n    assert False\n"
+    root, _base = _seed_red(tmp_path, guard_v1=guard_v1)
+    receipt_before = (root / RECEIPT_PATH).read_bytes()
+    registry_path = root / "governance" / "agent_preventions.yaml"
+    registry_before = registry_path.read_bytes()
+    (root / GUARD_FILE).write_bytes(b"def test_guard():\n    assert 1 == 2\n")
+
+    with pytest.raises(RuntimeError, match="named guard node changed"):
+        migrate_red_reproduction_node_digests(root)
+
+    assert (root / RECEIPT_PATH).read_bytes() == receipt_before
+    assert registry_path.read_bytes() == registry_before
 
 
 def test_still_refuses_repoint_with_unchanged_guard_files(tmp_path: Path) -> None:

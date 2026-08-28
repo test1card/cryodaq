@@ -13,7 +13,8 @@ from typing import Any
 import pytest
 import yaml
 
-from tools.governance_contract import GovernanceContractError, closure_semantics_sha256, validate_registry
+from tools.governance_contract import GovernanceContractError, _git_blob_id, closure_semantics_sha256, validate_registry
+from tools.test_node_source import test_node_sha256 as _test_node_sha256
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "governance" / "agent_preventions.yaml"
@@ -67,6 +68,17 @@ def _rewrite_receipt(payload: dict[str, Any], directory: Path, filename: str, re
     _refresh_locator_digest(payload, filename, raw)
 
 
+def _rebind_receipt_guard_files_to_current_tree(payload: dict[str, Any], directory: Path) -> None:
+    """Make an isolated control start green without accepting a claimed blob."""
+
+    for receipt_path in sorted(directory.glob("*.json")):
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["guard_blobs"] = {
+            path: _git_blob_id((ROOT / path).read_bytes()) for path in sorted(receipt["guard_blobs"])
+        }
+        _rewrite_receipt(payload, directory, receipt_path.name, receipt)
+
+
 def test_live_red_reproduction_receipts_bind_executed_preserved_defects() -> None:
     payload = validate_registry(_registry())
     typed = {
@@ -102,12 +114,76 @@ def test_validate_registry_refuses_implicit_root_outside_module_tree(
         validate_registry(_registry())
 
 
+def test_red_reproduction_named_test_change_still_reddens_receipt(tmp_path: Path) -> None:
+    """A receipt's binding must still fail when the exact test it names changes."""
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    guard_path = tmp_path / "tests" / "drivers" / "test_lakeshore_218s.py"
+    source = guard_path.read_text(encoding="utf-8")
+    named_start = source.index("async def test_mock_returns_8_channels()")
+    neighbour_start = source.index("async def test_mock_returns_raw_sensor_channels()", named_start)
+    named_source = source[named_start:neighbour_start]
+    changed_named_source = named_source.replace("assert len(readings) == 8", "assert len(readings) == 7", 1)
+    assert changed_named_source != named_source
+    guard_path.write_text(
+        source[:named_start] + changed_named_source + source[neighbour_start:],
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(GovernanceContractError, match="receipt guard .* does not match"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_red_reproduction_neighbour_change_does_not_redden_receipt(tmp_path: Path) -> None:
+    """A different test in the same file is outside the receipt's binding."""
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    guard_path = tmp_path / "tests" / "drivers" / "test_lakeshore_218s.py"
+    with guard_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n\nasync def test_receipt_unrelated_neighbour() -> None:\n    assert True\n")
+
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_node_digest_owns_decorators_and_nested_helpers_but_not_neighbours() -> None:
+    node = "tests/governance/test_example.py::TestReceipt::test_guard"
+    source = b"""\
+class TestReceipt:
+    @pytest.mark.parametrize("value", [1])
+    def test_guard(self, value):
+        def nested_helper():
+            return value
+
+        assert nested_helper() == 1
+
+    def test_neighbour(self):
+        assert True
+"""
+    digest = _test_node_sha256(source, node)
+
+    assert _test_node_sha256(source.replace(b"assert True", b"assert 1 == 1"), node) == digest
+    assert _test_node_sha256(source.replace(b"[1]", b"[2]"), node) != digest
+    assert _test_node_sha256(source.replace(b"return value", b"return value + 1"), node) != digest
+
+
 Mutation = Callable[[dict[str, Any]], None]
 
 
 def _wrong_guard_blob(receipt: dict[str, Any]) -> None:
     path = next(iter(receipt["guard_blobs"]))
     receipt["guard_blobs"][path] = "0" * 40
+
+
+def _different_resolving_guard_blob(receipt: dict[str, Any]) -> None:
+    path = next(iter(receipt["guard_blobs"]))
+    receipt["guard_blobs"][path] = next(iter(receipt["defective_source_blobs"].values()))
 
 
 def _missing_commit(receipt: dict[str, Any]) -> None:
@@ -138,6 +214,7 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
     ("mutate", "message"),
     [
         (_wrong_guard_blob, "guard blob does not match registry guard file"),
+        (_different_resolving_guard_blob, "recorded guard blob does not contain its named guard node"),
         (_missing_commit, "does not resolve to a local Git commit object"),
         (_wrong_tree, "defective tree does not match its defective commit"),
         (_successful_exit, "exit code indicates success"),
@@ -147,6 +224,7 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
     ],
     ids=(
         "guard-blob-mismatch",
+        "guard-blob-node-mismatch",
         "missing-defective-commit",
         "wrong-defective-tree",
         "successful-red-run",

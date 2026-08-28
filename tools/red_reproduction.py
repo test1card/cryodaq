@@ -23,6 +23,10 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+import yaml
+
+from tools.test_node_source import TestNodeSourceError, test_node_sha256, test_node_sha256_bindings
+
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _RECEIPT_DIRECTORY = Path("governance/red_reproductions")
 _PROVENANCE = "local-executed-red-reproduction; lower provenance than sealed hosted CI"
@@ -97,6 +101,11 @@ def _failure_signatures(output: bytes, nodes: list[str]) -> dict[str, list[str]]
     return signatures
 
 
+def _render_receipt(receipt: dict[str, object]) -> bytes:
+    rendered = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return rendered.encode("utf-8")
+
+
 def produce_red_reproduction(
     *,
     root: Path,
@@ -161,14 +170,19 @@ def produce_red_reproduction(
         if completed.returncode == 0:
             raise RedReproductionError("reproduction passed; refusing to emit a red receipt")
         signatures = _failure_signatures(completed.stdout + completed.stderr, nodes)
+        try:
+            node_digests = test_node_sha256_bindings(worktree, nodes)
+        except TestNodeSourceError as exc:
+            raise RedReproductionError("selected guard nodes cannot be structurally derived") from exc
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_ids": record_ids,
             "provenance": _PROVENANCE,
             "defective_commit": commit,
             "defective_tree": tree,
             "defective_source_blobs": source_blobs,
             "guard_blobs": guard_blobs,
+            "guard_node_sha256": node_digests,
             "command": command,
             "environment": environment,
             "python_version": python_version,
@@ -185,24 +199,159 @@ def produce_red_reproduction(
         shutil.rmtree(temporary_parent, ignore_errors=True)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    rendered = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     temporary_output = output.with_suffix(".tmp")
-    temporary_output.write_text(rendered, encoding="utf-8", newline="\r\n")
+    temporary_output.write_bytes(_render_receipt(receipt))
     temporary_output.replace(output)
     return receipt
 
 
+def _updated_registry_bytes(root: Path, receipt_bytes: dict[Path, bytes]) -> bytes:
+    registry_path = root / "governance" / "agent_preventions.yaml"
+    raw = registry_path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+        payload = yaml.safe_load(text)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise RedReproductionError("prevention registry is not valid UTF-8 YAML") from exc
+    if not isinstance(payload, dict):
+        raise RedReproductionError("prevention registry has no mapping root")
+
+    replacements: dict[str, tuple[str, str, int]] = {}
+    for collection in ("records", "false_green_pairs"):
+        entries = payload.get(collection)
+        if not isinstance(entries, list):
+            raise RedReproductionError(f"prevention registry collection is invalid: {collection}")
+        for entry in entries:
+            evidence = entry.get("red_evidence") if isinstance(entry, dict) else None
+            locator = evidence.get("locator") if isinstance(evidence, dict) else None
+            old_digest = evidence.get("sha256") if isinstance(evidence, dict) else None
+            if not isinstance(locator, str) or not locator.startswith("red-reproduction:"):
+                continue
+            relative = Path(locator.removeprefix("red-reproduction:"))
+            rendered = receipt_bytes.get(relative)
+            if rendered is None:
+                continue
+            current_receipt = root / relative
+            current_digest = f"sha256:{hashlib.sha256(current_receipt.read_bytes()).hexdigest()}"
+            if old_digest != current_digest:
+                raise RedReproductionError(f"registry digest is already stale for {locator}")
+            new_digest = f"sha256:{hashlib.sha256(rendered).hexdigest()}"
+            previous = replacements.get(locator)
+            if previous is not None and previous[:2] != (old_digest, new_digest):
+                raise RedReproductionError(f"registry has inconsistent receipt bindings for {locator}")
+            replacements[locator] = (old_digest, new_digest, (previous[2] if previous else 0) + 1)
+
+    for locator, (old_digest, new_digest, expected_count) in replacements.items():
+        pattern = re.compile(rf"(?m)^(\s*locator: {re.escape(locator)}\n\s*sha256: ){re.escape(old_digest)}$")
+        text, count = pattern.subn(lambda match: match.group(1) + new_digest, text)
+        if count != expected_count:
+            raise RedReproductionError(
+                f"registry binding replacement count for {locator} was {count}, expected {expected_count}"
+            )
+    return text.encode("utf-8")
+
+
+def migrate_red_reproduction_node_digests(root: Path) -> int:
+    """Derive node digests for every receipt and update its registry bindings.
+
+    Each digest is independently derived from the originally recorded guard
+    blob and the current materialized tree. A changed named node refuses the
+    migration; a caller cannot provide a digest or override the comparison.
+    """
+
+    receipt_directory = root / _RECEIPT_DIRECTORY
+    receipt_paths = sorted(receipt_directory.glob("*.json"))
+    if not receipt_paths:
+        raise RedReproductionError("no red-reproduction receipts exist to migrate")
+    rendered_receipts: dict[Path, bytes] = {}
+    for receipt_path in receipt_paths:
+        raw = receipt_path.read_bytes()
+        try:
+            receipt = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RedReproductionError(f"receipt is not valid UTF-8 JSON: {receipt_path.name}") from exc
+        if not isinstance(receipt, dict) or receipt.get("schema_version") not in {1, 2}:
+            raise RedReproductionError(f"receipt schema cannot be migrated: {receipt_path.name}")
+        nodes = receipt.get("guard_nodes")
+        guard_blobs = receipt.get("guard_blobs")
+        if not isinstance(nodes, list) or nodes != sorted(set(nodes)) or not nodes:
+            raise RedReproductionError(f"receipt guard nodes are invalid: {receipt_path.name}")
+        if not isinstance(guard_blobs, dict):
+            raise RedReproductionError(f"receipt guard blobs are invalid: {receipt_path.name}")
+        derived: dict[str, str] = {}
+        for node in nodes:
+            if not isinstance(node, str):
+                raise RedReproductionError(f"receipt guard node is invalid: {receipt_path.name}")
+            guard_path = node.split("::", 1)[0]
+            blob = guard_blobs.get(guard_path)
+            if not isinstance(blob, str) or _OBJECT_ID.fullmatch(blob) is None:
+                raise RedReproductionError(f"receipt guard blob is invalid: {receipt_path.name}")
+            historic_source = _git(root, "cat-file", "blob", blob)
+            try:
+                historic_digest = test_node_sha256(historic_source, node)
+                current_digest = test_node_sha256((root / guard_path).read_bytes(), node)
+            except (OSError, TestNodeSourceError) as exc:
+                raise RedReproductionError(
+                    f"cannot derive the named guard node for {receipt_path.name}: {node}"
+                ) from exc
+            if historic_digest != current_digest:
+                raise RedReproductionError(
+                    f"named guard node changed since the recorded reproduction; rerun required: {node}"
+                )
+            derived[node] = current_digest
+        existing = receipt.get("guard_node_sha256")
+        if existing is not None and existing != derived:
+            raise RedReproductionError(f"receipt carries a non-derived node digest: {receipt_path.name}")
+        receipt["schema_version"] = 2
+        receipt["guard_node_sha256"] = derived
+        relative = receipt_path.relative_to(root)
+        rendered_receipts[relative] = _render_receipt(receipt)
+
+    registry_raw = _updated_registry_bytes(root, rendered_receipts)
+    pending = {root / path: raw for path, raw in rendered_receipts.items()}
+    pending[root / "governance" / "agent_preventions.yaml"] = registry_raw
+    temporary_paths: list[tuple[Path, Path]] = []
+    try:
+        for target, raw in pending.items():
+            temporary = target.with_name(target.name + ".node-digest-migration.tmp")
+            temporary.write_bytes(raw)
+            temporary_paths.append((temporary, target))
+        for temporary, target in temporary_paths:
+            temporary.replace(target)
+    finally:
+        for temporary, _target in temporary_paths:
+            temporary.unlink(missing_ok=True)
+    return len(receipt_paths)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--record-id", action="append", required=True)
-    parser.add_argument("--defective-commit", required=True)
-    parser.add_argument("--guard-blob", action="append", required=True)
-    parser.add_argument("--source", action="append", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--migrate-node-digests", action="store_true")
+    parser.add_argument("--record-id", action="append")
+    parser.add_argument("--defective-commit")
+    parser.add_argument("--guard-blob", action="append")
+    parser.add_argument("--source", action="append")
+    parser.add_argument("--output")
     parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("nodes", nargs="+")
+    parser.add_argument("nodes", nargs="*")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
+    if args.migrate_node_digests:
+        supplied = (
+            args.record_id or args.defective_commit or args.guard_blob or args.source or args.output or args.nodes
+        )
+        if supplied:
+            parser.error("--migrate-node-digests accepts no receipt values or digest overrides")
+        try:
+            count = migrate_red_reproduction_node_digests(root)
+        except RedReproductionError as exc:
+            parser.error(str(exc))
+        print(f"migrated {count} red-reproduction receipts with tree-derived node digests")
+        return 0
+    if not all((args.record_id, args.defective_commit, args.guard_blob, args.source, args.output, args.nodes)):
+        parser.error(
+            "receipt production requires record IDs, defective commit, guard blobs, sources, output, and nodes"
+        )
     try:
         receipt = produce_red_reproduction(
             root=root,

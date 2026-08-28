@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from tools.test_node_source import TestNodeSourceError, test_node_sha256, test_node_sha256_from_root
+
 _ID = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _NODE = re.compile(r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+")
 _SCOPES = {"repository", "product_contract", "campaign_local"}
@@ -531,7 +533,11 @@ def _validate_red_reproduction_evidence(
         "stderr_bytes_base64",
         "stderr_sha256",
     }
-    if not isinstance(receipt, Mapping) or set(receipt) != required or receipt["schema_version"] != 1:
+    if not isinstance(receipt, Mapping):
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
+    schema_version = receipt.get("schema_version")
+    expected_fields = required if schema_version == 1 else required | {"guard_node_sha256"}
+    if schema_version not in {1, 2} or set(receipt) != expected_fields:
         raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
     record_ids = receipt["record_ids"]
     if (
@@ -588,21 +594,84 @@ def _validate_red_reproduction_evidence(
         )
         if blob != resolved_blob:
             raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob does not match its tree")
+    receipt_nodes = receipt["guard_nodes"]
+    failed_nodes = receipt["failed_nodes"]
+    if (
+        not isinstance(receipt_nodes, list)
+        or receipt_nodes != sorted(set(receipt_nodes))
+        or not receipt_nodes
+        or not set(receipt_nodes) <= guard_nodes
+        or failed_nodes != receipt_nodes
+    ):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
+        )
+
     receipt_guard_blobs = receipt["guard_blobs"]
-    expected_paths = {node.split("::", 1)[0] for node in guard_nodes}
+    expected_paths = {node.split("::", 1)[0] for node in receipt_nodes}
     if not isinstance(receipt_guard_blobs, Mapping) or set(receipt_guard_blobs) != expected_paths:
         raise GovernanceContractError(f"{entry_id}.red_evidence receipt guard blobs do not bind its guard files")
     for path, expected_blob in receipt_guard_blobs.items():
         if not isinstance(expected_blob, str) or _GIT_OBJECT_ID.fullmatch(expected_blob) is None:
             raise GovernanceContractError(f"{entry_id}.red_evidence receipt guard blob is invalid")
-        try:
-            actual_blob = _git_blob_id((root / path).read_bytes())
-        except OSError as exc:
-            raise GovernanceContractError(f"{entry_id}.red_evidence registry guard file is unavailable") from exc
-        if actual_blob != expected_blob:
+        if resolvable and git_repository is not None:
+            try:
+                _git_object_id(
+                    git_repository,
+                    expected_blob,
+                    kind="blob",
+                    field=f"{entry_id}.red_evidence receipt guard blob {path}",
+                )
+            except GovernanceContractError as exc:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
+                ) from exc
+    if schema_version == 1:
+        for path, expected_blob in receipt_guard_blobs.items():
+            try:
+                actual_blob = _git_blob_id((root / path).read_bytes())
+            except OSError as exc:
+                raise GovernanceContractError(f"{entry_id}.red_evidence registry guard file is unavailable") from exc
+            if actual_blob != expected_blob:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
+                )
+    else:
+        node_digests = receipt["guard_node_sha256"]
+        if not isinstance(node_digests, Mapping) or set(node_digests) != set(receipt_nodes):
             raise GovernanceContractError(
-                f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
+                f"{entry_id}.red_evidence receipt node digests do not exactly bind its guard nodes"
             )
+        for node, expected_digest in node_digests.items():
+            if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
+                raise GovernanceContractError(f"{entry_id}.red_evidence receipt node digest is invalid")
+            if resolvable and git_repository is not None:
+                recorded_blob = receipt_guard_blobs[node.split("::", 1)[0]]
+                try:
+                    recorded_source = _git_stdout(
+                        git_repository,
+                        ["cat-file", "blob", recorded_blob],
+                        field=f"{entry_id}.red_evidence recorded guard node {node}",
+                    )
+                    recorded_digest = test_node_sha256(recorded_source, node)
+                except (GovernanceContractError, TestNodeSourceError) as exc:
+                    raise GovernanceContractError(
+                        f"{entry_id}.red_evidence recorded guard blob does not contain its named guard node"
+                    ) from exc
+                if recorded_digest != expected_digest:
+                    raise GovernanceContractError(
+                        f"{entry_id}.red_evidence recorded guard node digest does not match its receipt binding"
+                    )
+            try:
+                actual_digest = test_node_sha256_from_root(root, node)
+            except TestNodeSourceError as exc:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence receipt guard node source is unavailable or invalid"
+                ) from exc
+            if actual_digest != expected_digest:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence receipt guard node digest does not match registry guard node"
+                )
     command = receipt["command"]
     environment = receipt["environment"]
     if (
@@ -619,18 +688,6 @@ def _validate_red_reproduction_evidence(
         raise GovernanceContractError(f"{entry_id}.red_evidence command or environment is not exact")
     if not isinstance(receipt["exit_code"], int) or receipt["exit_code"] == 0:
         raise GovernanceContractError(f"{entry_id}.red_evidence red reproduction exit code indicates success")
-    receipt_nodes = receipt["guard_nodes"]
-    failed_nodes = receipt["failed_nodes"]
-    if (
-        not isinstance(receipt_nodes, list)
-        or receipt_nodes != sorted(set(receipt_nodes))
-        or not receipt_nodes
-        or not set(receipt_nodes) <= guard_nodes
-        or failed_nodes != receipt_nodes
-    ):
-        raise GovernanceContractError(
-            f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
-        )
     stdout = _decode_receipt_bytes(receipt["stdout_bytes_base64"], receipt["stdout_sha256"], f"{entry_id}.stdout")
     stderr = _decode_receipt_bytes(receipt["stderr_bytes_base64"], receipt["stderr_sha256"], f"{entry_id}.stderr")
     signatures = receipt["failure_signatures"]

@@ -30,6 +30,7 @@ from tools.ci_candidate_runner import (
 )
 from tools.ci_guard_execution import active_guard_specs, checkout_execution_selection, current_guard_platform
 from tools.governance_contract import _RED_REPRODUCTION_PROVENANCE
+from tools.test_node_source import TestNodeSourceError, test_node_sha256
 
 # The sealed candidate disables autoload; this checkout runner must not reuse its explicit plugin list.
 _PYTEST = (sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider")
@@ -591,6 +592,62 @@ def _receipt_guard_blobs(root: Path, commit: str, path: PurePosixPath) -> dict[s
     return validated
 
 
+def _receipt_payload(root: Path, commit: str, path: PurePosixPath) -> dict[str, Any]:
+    try:
+        raw = _git_bytes(root, "show", f"{commit}:{path}")
+    except RedReproductionComparisonError:
+        raise RedReproductionComparisonError(f"red-reproduction receipt is not readable at {commit}: {path}")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(f"red-reproduction receipt is not valid JSON: {path}") from exc
+    if not isinstance(receipt, dict):
+        raise RedReproductionComparisonError(f"red-reproduction receipt has no mapping root: {path}")
+    return receipt
+
+
+def _receipt_node_digests(root: Path, commit: str, path: PurePosixPath) -> dict[str, str] | None:
+    receipt = _receipt_payload(root, commit, path)
+    if receipt.get("schema_version") == 1:
+        return None
+    nodes = receipt.get("guard_nodes")
+    digests = receipt.get("guard_node_sha256")
+    if (
+        receipt.get("schema_version") != 2
+        or not isinstance(nodes, list)
+        or nodes != sorted(set(nodes))
+        or not nodes
+        or not isinstance(digests, dict)
+        or set(digests) != set(nodes)
+        or any(not isinstance(node, str) or not isinstance(digest, str) for node, digest in digests.items())
+    ):
+        raise RedReproductionComparisonError(f"red-reproduction receipt node bindings are invalid: {path}")
+    return dict(sorted(digests.items()))
+
+
+def _derived_node_digests_from_recorded_blobs(root: Path, commit: str, path: PurePosixPath) -> dict[str, str]:
+    receipt = _receipt_payload(root, commit, path)
+    nodes = receipt.get("guard_nodes")
+    blobs = _receipt_guard_blobs(root, commit, path)
+    if not isinstance(nodes, list) or nodes != sorted(set(nodes)) or not nodes:
+        raise RedReproductionComparisonError(f"red-reproduction receipt guard nodes are invalid: {path}")
+    derived: dict[str, str] = {}
+    for node in nodes:
+        if not isinstance(node, str):
+            raise RedReproductionComparisonError(f"red-reproduction receipt guard node is invalid: {path}")
+        guard_path = node.split("::", 1)[0]
+        blob = blobs.get(guard_path)
+        if blob is None:
+            raise RedReproductionComparisonError(f"red-reproduction receipt guard node has no file blob: {node}")
+        try:
+            derived[node] = test_node_sha256(_git_bytes(root, "cat-file", "blob", blob), node)
+        except TestNodeSourceError as exc:
+            raise RedReproductionComparisonError(
+                f"red-reproduction receipt guard node cannot be structurally derived: {node}"
+            ) from exc
+    return dict(sorted(derived.items()))
+
+
 def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, digest: str) -> None:
     """Require the candidate receipt to be an honest red receipt bound to the candidate.
 
@@ -615,7 +672,7 @@ def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, dige
         receipt = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RedReproductionComparisonError(f"candidate red-reproduction receipt is not valid JSON: {path}") from exc
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+    if not isinstance(receipt, dict) or receipt.get("schema_version") not in {1, 2}:
         raise RedReproductionComparisonError(f"candidate red-reproduction receipt schema is not exact: {path}")
     if receipt.get("provenance") != _RED_REPRODUCTION_PROVENANCE:
         raise RedReproductionComparisonError(
@@ -626,18 +683,42 @@ def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, dige
             f"candidate red-reproduction receipt exit code does not record a failure: {path}"
         )
     guard_blobs = _receipt_guard_blobs(root, commit, path)
-    for guard_path, recorded_blob in guard_blobs.items():
-        recorded_path = PurePosixPath(guard_path)
-        try:
-            _mode, _kind, committed_blob = _tree_entry(root, commit, recorded_path)
-        except RedReproductionComparisonError as exc:
-            raise RedReproductionComparisonError(
-                f"candidate red-reproduction receipt names an absent guard file: {guard_path}"
-            ) from exc
-        if committed_blob != recorded_blob:
-            raise RedReproductionComparisonError(
-                f"candidate red-reproduction receipt guard blob does not match its committed guard file: {guard_path}"
-            )
+    if receipt["schema_version"] == 1:
+        for guard_path, recorded_blob in guard_blobs.items():
+            recorded_path = PurePosixPath(guard_path)
+            try:
+                _mode, _kind, committed_blob = _tree_entry(root, commit, recorded_path)
+            except RedReproductionComparisonError as exc:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt names an absent guard file: {guard_path}"
+                ) from exc
+            if committed_blob != recorded_blob:
+                raise RedReproductionComparisonError(
+                    "candidate red-reproduction receipt guard blob does not match its committed guard file: "
+                    f"{guard_path}"
+                )
+    else:
+        node_digests = _receipt_node_digests(root, commit, path)
+        assert node_digests is not None
+        for node, recorded_digest in node_digests.items():
+            guard_path = PurePosixPath(node.split("::", 1)[0])
+            try:
+                reproduced_source = _git_bytes(root, "cat-file", "blob", guard_blobs[str(guard_path)])
+                reproduced_digest = test_node_sha256(reproduced_source, node)
+                source = _git_bytes(root, "show", f"{commit}:{guard_path}")
+                actual_digest = test_node_sha256(source, node)
+            except (KeyError, RedReproductionComparisonError, TestNodeSourceError) as exc:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt names an absent or invalid guard node: {node}"
+                ) from exc
+            if reproduced_digest != recorded_digest:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt node digest does not match its recorded guard blob: {node}"
+                )
+            if actual_digest != recorded_digest:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt node digest does not match its committed guard node: {node}"
+                )
 
 
 def _tree_entry(root: Path, revision: str, path: PurePosixPath) -> tuple[str, str, str]:
@@ -709,16 +790,41 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
             # match the trusted base is a re-point while everything it describes
             # stands still, and stays refused.
             try:
-                base_guard_blobs = _receipt_guard_blobs(root, base_commit, path)
-                candidate_guard_blobs = _receipt_guard_blobs(root, candidate_commit, path)
+                base_nodes = _receipt_node_digests(root, base_commit, path)
+                candidate_nodes = _receipt_node_digests(root, candidate_commit, path)
             except RedReproductionComparisonError:
                 raise RedReproductionComparisonError(
                     f"candidate modified trusted-base locator or digest binding: {identity}"
                 )
-            if base_guard_blobs == candidate_guard_blobs:
+            if candidate_nodes is None:
+                if base_nodes is not None:
+                    raise RedReproductionComparisonError(
+                        f"candidate downgraded trusted-base red-reproduction node bindings: {identity}"
+                    )
+                base_guard_blobs = _receipt_guard_blobs(root, base_commit, path)
+                candidate_guard_blobs = _receipt_guard_blobs(root, candidate_commit, path)
+                if base_guard_blobs == candidate_guard_blobs:
+                    raise RedReproductionComparisonError(
+                        "candidate modified trusted-base red-reproduction binding while its guard files "
+                        f"are unchanged: {identity}"
+                    )
+            elif base_nodes is None:
+                base_receipt = _receipt_payload(root, base_commit, path)
+                migrated_receipt = _receipt_payload(root, candidate_commit, path)
+                migrated_receipt.pop("guard_node_sha256", None)
+                migrated_receipt["schema_version"] = 1
+                if migrated_receipt != base_receipt:
+                    raise RedReproductionComparisonError(
+                        f"candidate changed receipt claims while migrating node bindings: {identity}"
+                    )
+                if candidate_nodes != _derived_node_digests_from_recorded_blobs(root, base_commit, path):
+                    raise RedReproductionComparisonError(
+                        f"candidate node-binding migration was not derived from recorded guard blobs: {identity}"
+                    )
+            elif base_nodes == candidate_nodes:
                 raise RedReproductionComparisonError(
-                    f"candidate modified trusted-base red-reproduction binding while its guard files are unchanged: "
-                    f"{identity}"
+                    "candidate modified trusted-base red-reproduction binding while its guard nodes "
+                    f"are unchanged: {identity}"
                 )
             _honest_candidate_receipt(root, candidate_commit, path, candidate_binding[1])
         if base_entry[:2] != candidate_entry[:2]:

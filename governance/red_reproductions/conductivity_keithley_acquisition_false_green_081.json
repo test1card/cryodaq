@@ -37,6 +37,9 @@
   "guard_blobs": {
     "tests/drivers/test_keithley_disconnect_verified_off.py": "eef9e8e46c05fcc233e7615b2f215e81ca4ca84d"
   },
+  "guard_node_sha256": {
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": "sha256:6b218d048daf8ae8b0f5fedd7e731cb046274872e616ac432d2da4a2580d07f2"
+  },
   "guard_nodes": [
     "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only"
   ],
@@ -45,7 +48,7 @@
   "record_ids": [
     "CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "stderr_bytes_base64": "",
   "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX19fX19fIHRlc3RfbW9ja19jb25uZWN0aW9uX3VzZXNfc2ltdWxhdG9yX2xvY2FsX3Byb29mX29ubHkgX19fX19fX19fX19fXw0KdGVzdHNcZHJpdmVyc1x0ZXN0X2tlaXRobGV5X2Rpc2Nvbm5lY3RfdmVyaWZpZWRfb2ZmLnB5OjQ5NDogaW4gdGVzdF9tb2NrX2Nvbm5lY3Rpb25fdXNlc19zaW11bGF0b3JfbG9jYWxfcHJvb2Zfb25seQ0KICAgIGFzc2VydCBpc2luc3RhbmNlKGFjcXVpc2l0aW9uX3N0YXJ0ZWRfYXQsIGZsb2F0KQ0KRSAgIGFzc2VydCBGYWxzZQ0KRSAgICArICB3aGVyZSBGYWxzZSA9IGlzaW5zdGFuY2UoTm9uZSwgZmxvYXQpDQo9PT09PT09PT09PT09PT09PT09PT09PT09PT0gc2hvcnQgdGVzdCBzdW1tYXJ5IGluZm8gPT09PT09PT09PT09PT09PT09PT09PT09PT09DQpGQUlMRUQgdGVzdHMvZHJpdmVycy90ZXN0X2tlaXRobGV5X2Rpc2Nvbm5lY3RfdmVyaWZpZWRfb2ZmLnB5Ojp0ZXN0X21vY2tfY29ubmVjdGlvbl91c2VzX3NpbXVsYXRvcl9sb2NhbF9wcm9vZl9vbmx5DQoxIGZhaWxlZCBpbiAwLjE5cw0K",

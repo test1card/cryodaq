@@ -940,7 +940,7 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     assert "assert True" in weakened
     sealed_guard.write_text(weakened, encoding="utf-8")
 
-    with pytest.raises(GovernanceContractError, match="receipt guard blob does not match registry guard file"):
+    with pytest.raises(GovernanceContractError, match="guard-source-blob-mismatch"):
         validate_registry(payload, root=tmp_path)
 
     for entry in closed_entries:
@@ -1024,6 +1024,8 @@ def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_g
     )
 
     pair = next(pair for pair in payload["false_green_pairs"] if pair["id"] == "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201")
+    receipt_path = ROOT / "governance" / "red_reproductions" / "alarm_unknown_as_clear_false_green_201.json"
+    receipt_digest = f"sha256:{hashlib.sha256(receipt_path.read_bytes()).hexdigest()}"
     assert pair == {
         "id": "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201",
         "status": "open",
@@ -1036,7 +1038,7 @@ def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_g
         "ci_partition": "core",
         "red_evidence": {
             "locator": "red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json",
-            "sha256": "sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a",
+            "sha256": receipt_digest,
         },
         "green_evidence": "pending",
     }
