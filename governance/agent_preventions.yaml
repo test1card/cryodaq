@@ -3451,6 +3451,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: fresh_at_a51897df75820a049410d2d8cc4b415c490a09c2_the_non_mapping_telegram_settlement_branch_could_map_both_truthy_and_falsey_results_to_outcome_unknown_while_every_previously_registered_guard_remained_green_the_falsey_settlement_guard_registered_here_is_the_only_node_that_observes_that_escape
     green_evidence: pending
+  - id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-TRUTHY-FALSE-GREEN-344
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340
+    guard: tests/agents/assistant/test_output_router.py::test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered
+    ci_partition: agents
+    red_evidence: fresh_at_9313fb6309e695bd530c8a73670257ade9179091_reverting_the_compatibility_branch_to_sent_is_true_leaves_the_literal_true_parameter_green_but_turns_the_non_boolean_truthy_1_parameter_red_so_this_guard_is_the_only_registered_node_that_observes_that_false_green_escape
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open

@@ -204,6 +204,43 @@ async def test_untyped_telegram_recipient_outcomes_are_not_reported_as_delivered
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sender_outcome", "expected"),
+    [
+        ({101: False}, {"telegram": "failed"}),
+        ({101: None}, {"telegram": "failed"}),
+        (
+            {101: False, 202: None},
+            {"telegram": {"101": "failed", "202": "failed"}},
+        ),
+    ],
+)
+async def test_falsey_telegram_recipient_outcomes_are_reported_as_failed(sender_outcome, expected) -> None:
+    """Explicit falsey per-recipient outcomes remain failed after normalization."""
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value=sender_outcome)
+    router = OutputRouter(telegram_bot=telegram, event_bus=AsyncMock())
+
+    outcomes = await router.dispatch_detailed(
+        _Event(),
+        "response",
+        targets=[OutputTarget.TELEGRAM],
+        audit_id="audit-falsey-telegram-recipient-outcome",
+    )
+
+    assert outcomes == expected
+    assert (
+        await router.dispatch(
+            _Event(),
+            "response",
+            targets=[OutputTarget.TELEGRAM],
+            audit_id="audit-falsey-telegram-recipient-outcome-delivery",
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_audit_failure_prevents_external_egress(tmp_path, monkeypatch) -> None:
     audit = AuditLogger(tmp_path / "audit")
     monkeypatch.setattr(

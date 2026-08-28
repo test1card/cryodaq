@@ -65,6 +65,8 @@ def _normalize_telegram_recipient_outcome(state: Any) -> str:
     """Preserve only explicit Telegram recipient settlement states."""
     if state in ("delivered", "service_reported_delivered", "failed", "outcome_unknown"):
         return state
+    if not state:
+        return "failed"
     return "outcome_unknown"
 
 
