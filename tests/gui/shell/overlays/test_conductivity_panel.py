@@ -2311,7 +2311,7 @@ def test_active_experiment_is_reserved_before_writer_creation_can_finish(
     panel._auto_timer.stop()
 
 
-def test_finalize_that_wins_before_reservation_cannot_leave_an_unbound_sweep(
+def test_finalize_that_wins_before_reservation_continues_with_durable_unbound_sweep(
     app,
     monkeypatch,
     tmp_path,
@@ -2375,10 +2375,16 @@ def test_finalize_that_wins_before_reservation_cannot_leave_an_unbound_sweep(
 
     pending_workers[0].finish()
 
-    assert panel.get_auto_state() == "idle"
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel.is_auto_sweep_active() is True
     assert panel._auto_run_path is not None
-    assert not panel._auto_run_path.exists()
-    assert len(pending_workers) == 1
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert len(pending_workers) == 2
+    assert pending_workers[-1].cmd["cmd"] == "keithley_set_target"
+    assert "автономным файлом данных" in panel._banner_label.text()
+    panel._auto_timer.stop()
 
 
 def test_outcome_unknown_blocks_binding_completion_after_quick_reconnect(app, monkeypatch) -> None:
@@ -3191,7 +3197,7 @@ def test_terminal_effect_order_and_captured_experiment_binding(app, monkeypatch)
     assert panel.get_auto_state() == "done"
 
 
-def test_run_started_without_experiment_never_attaches_to_a_later_experiment(app, monkeypatch) -> None:
+def test_run_started_without_experiment_persists_unbound_before_first_target(app, monkeypatch) -> None:
     _DeferredWorker.running_experiment_id = None
     panel = ConductivityPanel()
     _stub_channels(panel, ["Т1", "Т2"])
@@ -3202,11 +3208,21 @@ def test_run_started_without_experiment_never_attaches_to_a_later_experiment(app
 
     panel._on_auto_start()
 
-    assert panel.get_auto_state() == "idle"
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel.is_auto_sweep_active() is True
     assert panel._auto_run_path is not None
-    assert not panel._auto_run_path.exists()
-    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == ["experiment_attach_run_record"]
-    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == [
+        "experiment_attach_run_record",
+        "keithley_set_target",
+    ]
+    assert _DeferredWorker.instances[-1].cmd["p_target"] == panel._generate_power_list()[0]
+    assert panel._banner_label.text() == (
+        "Активный эксперимент не найден. Автоизмерение продолжено с автономным файлом данных."
+    )
+    panel._auto_timer.stop()
 
 
 def test_real_persistence_worker_keeps_gui_thread_responsive(app) -> None:

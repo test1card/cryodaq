@@ -2272,6 +2272,24 @@ class ConductivityPanel(QWidget):
                 )
                 return
             if result.get("attached") is False:
+                if not is_ready_attachment:
+                    logger.warning(
+                        "Активный эксперимент отсутствует; автоизмерение продолжено с автономным файлом данных."
+                    )
+                    self.show_warning(
+                        "Активный эксперимент не найден. Автоизмерение продолжено с автономным файлом данных."
+                    )
+                    self._auto_state = "stabilizing"
+                    self._auto_binding_resolution = "unbound"
+                    if not self._begin_auto_writer_creation():
+                        self._on_auto_run_created(
+                            {
+                                "ok": False,
+                                "error": "file creation was not queued",
+                                "error_type": "RuntimeError",
+                            }
+                        )
+                    return
                 self._auto_run_creation_failed = True
                 self._auto_run_creation_error = "активный эксперимент отсутствует"
                 self._auto_binding_resolution = "unrequested"

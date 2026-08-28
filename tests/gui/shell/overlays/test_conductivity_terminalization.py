@@ -43,7 +43,7 @@ def test_stop_before_failed_running_attachment_resumes_deferred_terminalization(
     assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in guard_support._DeferredWorker.all_instances)
 
 
-def test_failed_running_attachment_waits_for_outstanding_stop_before_confirming_off(app, monkeypatch) -> None:
+def test_unbound_fallback_waits_for_outstanding_stop_before_confirming_off(app, monkeypatch) -> None:
     guard_support._DeferredWorker.defer_running_attachment = True
     monkeypatch.setattr(panel_module, "ZmqCommandWorker", guard_support._DeferredWorker)
     panel = ConductivityPanel()
@@ -76,4 +76,4 @@ def test_failed_running_attachment_waits_for_outstanding_stop_before_confirming_
     assert panel.get_auto_state() == "idle"
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
-    assert "отключение подтверждено" in panel._auto_status_label.text()
+    assert "отключение и запись подтверждены" in panel._auto_status_label.text()
