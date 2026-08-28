@@ -327,7 +327,7 @@ class AdaptiveThrottle:
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()
-            if state != "running":
+            if state != "running" and reading.metadata.get("is_transition") is not False:
                 self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
 
     def filter_for_archive(self, readings: list[Reading]) -> list[Reading]:

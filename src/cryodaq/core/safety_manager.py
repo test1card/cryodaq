@@ -2132,7 +2132,12 @@ class SafetyManager:
                 "active_channels": sorted(self._active_sources),
                 "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
             }
-        publish_task = asyncio.create_task(self._publish_keithley_channel_states("emergency_off"))
+        publish_task = asyncio.create_task(
+            self._publish_keithley_channel_states(
+                "emergency_off",
+                observed_channels=channels,
+            )
+        )
         _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
         if publish_error is not None:
             logger.warning("Emergency-OFF state publish failed: %s", publish_error)
@@ -2925,13 +2930,24 @@ class SafetyManager:
     async def _publish_state(self, reason: str = "") -> None:
         if self._data_broker is None:
             return
-        published_reason = self._fault_reason if self._state is SafetyState.FAULT_LATCHED else reason
+        is_transition = reason != "periodic"
+        if self._state is SafetyState.FAULT_LATCHED:
+            published_reason = self._fault_reason
+        elif self._state is SafetyState.MANUAL_RECOVERY and not is_transition:
+            recovery_ready, recovery_blocker = self._check_preconditions()
+            published_reason = "" if recovery_ready else recovery_blocker
+        else:
+            published_reason = reason
         reading = Reading.now(
             channel="analytics/safety_state",
             value=0.0,
             unit="",
             instrument_id="safety_manager",
-            metadata={"state": self._state.value, "reason": published_reason},
+            metadata={
+                "state": self._state.value,
+                "reason": published_reason,
+                "is_transition": is_transition,
+            },
         )
         try:
             await self._data_broker.publish(reading)
@@ -2943,6 +2959,7 @@ class SafetyManager:
         reason: str = "",
         *,
         fault_channel: str | None = None,
+        observed_channels: set[SmuChannel] | frozenset[SmuChannel] = frozenset(),
     ) -> None:
         if self._data_broker is None:
             return
@@ -2974,7 +2991,9 @@ class SafetyManager:
                 state = "unknown"
                 value = math.nan
 
-            if is_transition and state != self._source_observed_states[smu_channel]:
+            if is_transition and (
+                state != self._source_observed_states[smu_channel] or smu_channel in observed_channels
+            ):
                 self._source_observation_revisions[smu_channel] += 1
                 self._source_observed_states[smu_channel] = state
             reading = Reading(

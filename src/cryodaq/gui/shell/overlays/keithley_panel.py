@@ -243,9 +243,10 @@ class _SmuChannelBlock(QFrame):
         self._safety_ready: bool = False
         self._read_only: bool = False
         self._connection_generation = 0
+        self._source_observation_generation = 0
         self._source_observation_revision = 0
         self._safety_observation_revision = 0
-        self._unknown_outcome_requires: tuple[int, int] | None = None
+        self._unknown_outcome_requires: tuple[int, int, int] | None = None
         self._normal_pending_token: int | None = None
         # IV.2 A.3: default to the longest per-block buffer so the
         # first tick before _apply_global_window lands renders the
@@ -773,22 +774,34 @@ class _SmuChannelBlock(QFrame):
         normalized = state.strip().lower() if state else "unknown"
         if normalized not in _STATE_LABELS:
             normalized = "unknown"
-        if source_observation_revision is _SOURCE_OBSERVATION_UNSPECIFIED:
-            # Direct in-process pushes are explicit observations. Production
-            # Reading ingress always supplies the owner revision below.
-            self._source_observation_revision += 1
-        elif (
-            type(source_observation_revision) is int
-            and 1 <= source_observation_revision <= _MAX_SOURCE_OBSERVATION_REVISION
-        ):
-            self._source_observation_revision = max(
-                self._source_observation_revision,
-                source_observation_revision,
-            )
         # A queued reading received after the host declared disconnect cannot
         # re-establish current truth. Keep it out of both current and confirmed
         # state until a live connection exists again.
         if self._connected:
+            observation_accepted = False
+            if source_observation_revision is _SOURCE_OBSERVATION_UNSPECIFIED:
+                # Direct in-process pushes are explicit observations.
+                # Production Reading ingress always supplies the owner
+                # revision below.
+                if self._source_observation_generation == self._connection_generation:
+                    self._source_observation_revision += 1
+                else:
+                    self._source_observation_revision = 1
+                observation_accepted = True
+            elif (
+                type(source_observation_revision) is int
+                and 1 <= source_observation_revision <= _MAX_SOURCE_OBSERVATION_REVISION
+            ):
+                if self._source_observation_generation == self._connection_generation:
+                    self._source_observation_revision = max(
+                        self._source_observation_revision,
+                        source_observation_revision,
+                    )
+                else:
+                    self._source_observation_revision = source_observation_revision
+                observation_accepted = True
+            if observation_accepted:
+                self._source_observation_generation = self._connection_generation
             self._channel_state = normalized
             if normalized in {"off", "on", "fault"}:
                 self._last_confirmed_state = normalized
@@ -876,6 +889,7 @@ class _SmuChannelBlock(QFrame):
 
     def _latch_unknown_outcome(self) -> None:
         self._unknown_outcome_requires = (
+            self._source_observation_generation,
             self._source_observation_revision + 1,
             self._safety_observation_revision + 1,
         )
@@ -885,8 +899,12 @@ class _SmuChannelBlock(QFrame):
         required = self._unknown_outcome_requires
         if required is None or not self._connected:
             return
-        source_required, safety_required = required
-        if self._source_observation_revision < source_required or self._safety_observation_revision < safety_required:
+        source_generation, source_required, safety_required = required
+        source_is_fresh = self._source_observation_generation > source_generation or (
+            self._source_observation_generation == source_generation
+            and self._source_observation_revision >= source_required
+        )
+        if not source_is_fresh or self._safety_observation_revision < safety_required:
             return
         self._unknown_outcome_requires = None
         self._update_control_enablement()

@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import zmq
 
 from cryodaq.core import safety_manager as safety_manager_module
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.housekeeping import AdaptiveThrottle
 from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.smu_channel import SMU_CHANNELS
 from cryodaq.core.zmq_bridge import ZMQPublisher, ZMQSubscriber, _unpack_reading
 from cryodaq.drivers.base import Reading
@@ -414,9 +417,79 @@ async def test_late_transport_observer_receives_latched_safety_reason(
         assert safety_states[-1].metadata == {
             "state": "fault_latched",
             "reason": fault_reason,
+            "is_transition": False,
         }
     finally:
         await publisher.stop()
+
+
+async def test_periodic_safety_retransmission_allows_stable_archive_throttle_to_engage() -> None:
+    data_broker = DataBroker()
+    safety_states = await data_broker.subscribe(
+        "test_periodic_safety_retransmission_throttle",
+        maxsize=10,
+        filter_fn=lambda reading: reading.channel == "analytics/safety_state",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager._publish_state("periodic")
+    retransmission = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+
+    throttle = AdaptiveThrottle(
+        {
+            "enabled": True,
+            "include_patterns": ["TEMP_A"],
+            "stable_duration_s": 0.0,
+            "max_interval_s": 30.0,
+            "absolute_delta": {"default": 0.5},
+            "transition_holdoff_s": 30.0,
+        }
+    )
+    base = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+    archived: list[Reading] = []
+    for second in range(1, 121):
+        timestamp = base + timedelta(seconds=second)
+        throttle.observe_runtime_signal(replace(retransmission, timestamp=timestamp))
+        archived.extend(throttle.filter_for_archive([Reading(timestamp, "mock", "TEMP_A", 4.0, "K")]))
+
+    assert len(archived) == 4
+    assert throttle.suppressed_count == 116
+    assert retransmission.metadata["is_transition"] is False
+
+
+async def test_periodic_manual_recovery_state_publishes_current_blocker_reason() -> None:
+    data_broker = DataBroker()
+    safety_states = await data_broker.subscribe(
+        "test_manual_recovery_blocker_reason",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel == "analytics/safety_state",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    manager._config.cooldown_before_rearm_s = 0.0
+    await manager.start()
+    try:
+        await _drain(safety_states)
+        await manager._fault("operator recovery test")
+        manager._cooldown_predictor_available = False
+        manager._cooldown_predictor_unavailable_reason = "calibration model missing"
+        acknowledged = await manager.acknowledge_fault("fault inspected")
+        assert acknowledged["ok"] is True
+        assert manager.state is SafetyState.MANUAL_RECOVERY
+        if manager._pending_publishes:
+            await asyncio.gather(*manager._pending_publishes)
+        await _drain(safety_states)
+
+        await manager._publish_state("periodic")
+        periodic = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+
+        assert periodic.metadata["reason"] == "Cooldown predictor UNAVAILABLE: calibration model missing"
+        assert periodic.metadata["reason"] != "periodic"
+
+        manager._cooldown_predictor_available = True
+        await manager._publish_state("periodic")
+        unblocked = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+        assert unblocked.metadata["reason"] == ""
+    finally:
+        await manager.stop()
 
 
 async def test_command_tier_device_reported_off_publishes_off_without_verified_claim() -> None:
