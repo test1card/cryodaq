@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,8 @@ INTERLOCKS_PATH = ROOT / "config" / "interlocks.yaml"
 ALARMS_V3_PATH = ROOT / "config" / "alarms_v3.yaml"
 DESCRIPTORS_PATH = ROOT / "config" / "channel_descriptors.yaml"
 INSTRUMENTS_PATH = ROOT / "config" / "instruments.yaml"
+ALARMS_GUIDE_PATH = ROOT / "docs" / "alarms_tuning_guide.md"
+SAFETY_OPERATOR_PATH = ROOT / "docs" / "safety-operator.md"
 POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
 
 _EMERGENCY_ROW_SHA256 = {
@@ -93,6 +96,35 @@ def test_detector_warmup_is_kept_as_t12_warning() -> None:
     assert entry["action"] == "warning"
     assert "2-я ступень" in entry["description"]
     assert "измер" in entry["description"].lower()
+
+
+def test_operator_docs_match_warm_detector_and_source_overtemp_policy() -> None:
+    entries = _interlocks()
+    detector = entries["detector_warmup"]
+    source_overtemp = entries["source_overtemp"]
+    guide = ALARMS_GUIDE_PATH.read_text(encoding="utf-8")
+    operator = SAFETY_OPERATOR_PATH.read_text(encoding="utf-8")
+
+    guide_interlocks = guide.split("## Слой 2: Interlock Engine", 1)[1].split("## Слой 3:", 1)[0]
+    operator_ack = operator.split("## Interlock acknowledge", 1)[1].split("## Связанные документы", 1)[0]
+
+    assert detector["threshold"] == 10.0
+    assert detector["action"] == "warning"
+    assert 'action: "warning"' in guide_interlocks
+    assert "источник остаётся включён" in guide_interlocks
+    assert "во всех lifecycle-состояниях" in guide_interlocks
+    assert "Имя для ручного acknowledge: `detector_warmup`" in guide_interlocks
+    assert "при Т12 >10 K" in operator_ack
+    assert "источник не отключается" in operator_ack
+    assert "ручное имя acknowledge —\n`detector_warmup`" in operator_ack
+
+    assert source_overtemp["threshold"] == 320.0
+    assert source_overtemp["action"] == "stop_source"
+    assert '- name: "source_overtemp"' in guide_interlocks
+    assert "только в активном lifecycle источника" in guide_interlocks
+    assert "Имя для acknowledge после устранения причины: `source_overtemp`" in guide_interlocks
+    assert "`source_overtemp` — отдельная защитная ступень для Т1-Т8 >320 K" in operator_ack
+    assert "имя acknowledge после устранения причины —\n`source_overtemp`" in operator_ack
 
 
 async def test_detector_warmup_dispatches_operator_warning_without_control() -> None:
@@ -427,6 +459,12 @@ async def test_detector_warning_rearms_and_refires_after_cold_recovery() -> None
         assert first.payload["alarm_id"] == "detector_warmup"
         assert engine.get_state()["detector_warmup"] is InterlockState.TRIPPED
 
+        # Advance the notification window without adding a five-second wall-clock
+        # delay. The test still drives the production recovery and refire paths.
+        record = engine._interlocks["detector_warmup"]
+        assert record.last_trip_time is not None
+        record.last_trip_time -= timedelta(seconds=record.condition.cooldown_s + 1.0)
+
         await _publish_bound_sensor(broker, catalog, cold)
         await asyncio.sleep(0.05)
         assert engine.get_state()["detector_warmup"] is InterlockState.ARMED
@@ -438,6 +476,82 @@ async def test_detector_warning_rearms_and_refires_after_cold_recovery() -> None
         second_activation = alarm_state_manager.get_active()["detector_warmup"].activation_id
         assert second.payload["alarm_id"] == "detector_warmup"
         assert second_activation > first_activation
+        assert engine.get_state()["detector_warmup"] is InterlockState.TRIPPED
+    finally:
+        await engine.stop()
+
+
+async def test_detector_warning_cold_blip_does_not_refire_within_cooldown() -> None:
+    class SafetyProbe:
+        def get_status(self) -> dict[str, str]:
+            return {"state": "ready"}
+
+        async def on_interlock_trip(self, *_args, **_kwargs) -> None:
+            raise AssertionError("detector warning must not acquire control authority")
+
+        async def latch_fault(self, **_kwargs) -> None:
+            raise AssertionError("operator warning routing must remain available")
+
+    catalog = load_live_channel_descriptor_catalog(DESCRIPTORS_PATH)
+    broker = DataBroker()
+    bus = EventBus()
+    queue = await bus.subscribe("detector-warning-cooldown-test")
+    alarm_state_manager = AlarmStateManager()
+    context = _InterlockHandlerContext(
+        safety_manager=SafetyProbe(),
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent=set(),
+        event_bus=bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="measurement-1"),
+        alarm_state_manager=alarm_state_manager,
+    )
+    engine = InterlockEngine(
+        broker,
+        actions={"emergency_off": lambda: None, "stop_source": lambda: None},
+        trip_handler=lambda condition, reading: _interlock_trip_handler(
+            condition,
+            reading,
+            context=context,
+        ),
+        trip_admission=lambda condition, reading: _interlock_trip_admission(
+            condition,
+            reading,
+            context=context,
+        ),
+        warning_recovery_handler=lambda condition, reading: _interlock_warning_recovery_handler(
+            condition,
+            reading,
+            context=context,
+        ),
+    )
+    engine.load_config(
+        INTERLOCKS_PATH,
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument=POLL_INTERVALS,
+    )
+    await engine.start()
+    try:
+        warm = Reading.now("Т12 Теплообменник 2", 12.0, "K", instrument_id="LS218_2")
+        cold = Reading.now("Т12 Теплообменник 2", 5.0, "K", instrument_id="LS218_2")
+
+        await _publish_bound_sensor(broker, catalog, warm)
+        await asyncio.sleep(0.05)
+        first = queue.get_nowait()
+        first_activation = alarm_state_manager.get_active()["detector_warmup"].activation_id
+        assert first.payload["alarm_id"] == "detector_warmup"
+        assert queue.empty()
+
+        await _publish_bound_sensor(broker, catalog, cold)
+        await asyncio.sleep(0.05)
+        state_after_cold = engine.get_state()["detector_warmup"]
+        active_after_cold = alarm_state_manager.get_active()
+
+        await _publish_bound_sensor(broker, catalog, warm)
+        await asyncio.sleep(0.05)
+        assert queue.empty(), "warm/cold/warm inside cooldown must emit one alarm_fired event"
+        assert state_after_cold is InterlockState.TRIPPED
+        assert active_after_cold["detector_warmup"].activation_id == first_activation
+        assert alarm_state_manager.get_active()["detector_warmup"].activation_id == first_activation
         assert engine.get_state()["detector_warmup"] is InterlockState.TRIPPED
     finally:
         await engine.stop()

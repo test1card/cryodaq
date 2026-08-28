@@ -727,6 +727,16 @@ class InterlockEngine:
     async def _recover_warning(self, record: _InterlockRecord, reading: Reading) -> None:
         """Clear and re-arm one observational warning after safe-side evidence."""
         condition = record.condition
+        if condition.cooldown_s > 0 and record.last_trip_time is not None:
+            elapsed_s = (datetime.now(UTC) - record.last_trip_time).total_seconds()
+            if elapsed_s < condition.cooldown_s:
+                logger.debug(
+                    "Observational interlock warning '%s' remains active for %.3f s "
+                    "until its recovery cooldown expires.",
+                    condition.name,
+                    condition.cooldown_s - elapsed_s,
+                )
+                return
         if self._warning_recovery_handler is not None:
             try:
                 result = self._warning_recovery_handler(condition, reading)
