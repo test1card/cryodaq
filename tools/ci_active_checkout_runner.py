@@ -809,18 +809,36 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
                         f"are unchanged: {identity}"
                     )
             elif base_nodes is None:
-                base_receipt = _receipt_payload(root, base_commit, path)
-                migrated_receipt = _receipt_payload(root, candidate_commit, path)
-                migrated_receipt.pop("guard_node_sha256", None)
-                migrated_receipt["schema_version"] = 1
-                if migrated_receipt != base_receipt:
-                    raise RedReproductionComparisonError(
-                        f"candidate changed receipt claims while migrating node bindings: {identity}"
-                    )
-                if candidate_nodes != _derived_node_digests_from_recorded_blobs(root, base_commit, path):
-                    raise RedReproductionComparisonError(
-                        f"candidate node-binding migration was not derived from recorded guard blobs: {identity}"
-                    )
+                # The trusted base predates node binding. Two different things
+                # can bring us here, and they are told apart the same way the
+                # branch above tells them apart -- by whether the guard blobs
+                # the receipt RECORDS have moved.
+                base_guard_blobs = _receipt_guard_blobs(root, base_commit, path)
+                candidate_guard_blobs = _receipt_guard_blobs(root, candidate_commit, path)
+                if base_guard_blobs == candidate_guard_blobs:
+                    # A pure migration. Everything the receipt describes stands
+                    # still, so the ONLY legitimate change is adding node digests
+                    # derived from the blobs it already recorded.
+                    base_receipt = _receipt_payload(root, base_commit, path)
+                    migrated_receipt = _receipt_payload(root, candidate_commit, path)
+                    migrated_receipt.pop("guard_node_sha256", None)
+                    migrated_receipt["schema_version"] = 1
+                    if migrated_receipt != base_receipt:
+                        raise RedReproductionComparisonError(
+                            f"candidate changed receipt claims while migrating node bindings: {identity}"
+                        )
+                    if candidate_nodes != _derived_node_digests_from_recorded_blobs(root, base_commit, path):
+                        raise RedReproductionComparisonError(
+                            f"candidate node-binding migration was not derived from recorded guard blobs: {identity}"
+                        )
+                # else: the recorded guard blobs moved, so this is the re-run
+                # Rule A forces, arriving at the same time as node binding.
+                # tools/red_reproduction.py REFUSES to stamp a digest for a node
+                # whose source moved -- it demands exactly this re-run -- so
+                # forbidding it here would make any change to a receipt-bound
+                # guard test unmergeable. _honest_candidate_receipt below is
+                # what proves the new receipt is a real red rather than a
+                # convenient one.
             elif base_nodes == candidate_nodes:
                 raise RedReproductionComparisonError(
                     "candidate modified trusted-base red-reproduction binding while its guard nodes "
