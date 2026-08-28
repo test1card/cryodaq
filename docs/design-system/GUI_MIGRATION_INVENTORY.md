@@ -1,14 +1,14 @@
 ---
 title: GUI v3 Migration Inventory
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.1.1
 references: README.md, governance/testing-strategy.md, governance/performance-budget.md, accessibility/wcag-baseline.md
 ---
 
 # GUI v4 migration inventory
 
-This is the auditable backlog for the design-system v4.1.0 corpus-wide
+This is the auditable backlog for the design-system v4.1.1 corpus-wide
 informative-and-beautiful composition contract. It inventories every
 operator-visible production surface under `src/cryodaq/gui`; non-visual state,
 transport, buffers, and package/bootstrap modules are covered through the
@@ -53,7 +53,7 @@ not qualify as `v3-accepted`.
 | Calibration panel | `shell/overlays/calibration_panel.py` | pending-v3-audit | Setup/acquisition/results scenarios; raw-data provenance; focus; plots and dense-state visual QA |
 | Conductivity panel | `shell/overlays/conductivity_panel.py` | pending-v3-audit | Settling/stability/progress uses ACCENT or INFO rather than safety green/yellow; remaining: source-readback truth, no optimistic control state, keyboard, plot/readout hierarchy |
 | Instruments panel | `shell/overlays/instruments_panel.py` | pending-v3-audit | Non-OK presentation uses canonical «Внимание»/CAUTION; remaining: descriptor-qualified identity, refused/capacity/stale states, fleet scaling, visual QA |
-| Keithley/source panel | `shell/overlays/keithley_panel.py` | pending-v3-audit | Verified-OFF and safety readiness; no optimistic state; keyboard; non-color cues; visual QA |
+| Keithley/source panel | `shell/overlays/keithley_panel.py` | pending-v3-audit | Separate physical output badge from manager fault latch; verified-OFF and safety readiness; no optimistic state; keyboard; non-color cues; visual QA |
 | MultiLine panel and selector | `shell/overlays/multiline_panel.py`, `shell/overlays/multiline_channel_selector.py` | pending-v3-audit | Descriptor routing; selection/search; stale states; fleet scaling; keyboard and visual QA |
 | Knowledge and assistant chat | `shell/overlays/knowledge_base_panel.py`, `shell/overlays/_assistant_chat_widget.py` | pending-v3-audit | Observational-only boundary; hostile/bounded text; focus; empty/error states; visual QA |
 | Operator log | `shell/overlays/operator_log_panel.py` | pending-v3-audit | Ordering/provenance; long-text behavior; keyboard; large-log performance |

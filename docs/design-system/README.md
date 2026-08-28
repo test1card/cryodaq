@@ -3,14 +3,14 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-20
+last_updated: 2026-08-28
 status: canonical
-version: 4.1.0
+version: 4.1.1
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.1.0`
+**Current design-system version:** `4.1.1`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -306,6 +306,10 @@ From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-08-28: Released v4.1.1: corrected the Keithley source-state contract so
+  the per-channel badge reports current physical `off` / `unknown` evidence
+  while the independent manager fault latch and reason retain the incident and
+  normal-control lockout.
 - 2026-07-20: Released v4.0.3: removed remaining safety-green collisions from
   running/authorized, conductivity settling, and shift-handover presentation;
   normalized new operator-facing attention wording to the single caution rung

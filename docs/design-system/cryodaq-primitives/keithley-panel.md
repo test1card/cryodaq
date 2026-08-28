@@ -4,7 +4,7 @@ keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel,
 applies_to: Keithley 2604B source-measure unit control overlay
 status: active
 implements: src/cryodaq/gui/shell/overlays/keithley_panel.py; removed v1 panel is historical only
-last_updated: 2026-07-19
+last_updated: 2026-08-28
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
@@ -19,10 +19,11 @@ Operator overlay for controlling and monitoring the Keithley 2604B source-measur
 > I compliance `QDoubleSpinBox` controls debounced to 300 ms, 4 live
 > readouts (V / I / R / P) in Fira Mono with tabular figures
 > (RULE-TYPO-003), a 2×2 rolling plot grid per channel (V / I / R / P
-> over time, `apply_plot_style()` from `_plot_style.py`), state badge
-> driven by `analytics/keithley_channel_state/{smua,smub}`, STATUS_FAULT
-> 3px border on a faulted channel block, stale detection applied
-> *only* while state == "on" (if off/fault we don't expect live
+> over time, `apply_plot_style()` from `_plot_style.py`), physical-source
+> state badge driven by `analytics/keithley_channel_state/{smua,smub}`,
+> manager-level Safety gate driven separately, STATUS_FAULT 3px border on
+> a transition-faulted channel block, stale detection applied
+> *only* while state == "on" (if off/fault/unknown we don't expect live
 > measurements), safety gating via `set_safety_ready(ok, reason)` with
 > dedicated reason label, connection header that flips to «Нет связи»
 > and disables controls when disconnected, panel-level «Старт A+B»
@@ -110,7 +111,7 @@ Fixed at codebase level; UI code must not violate:
 | **Gate reason label** | Yes | Shown when `set_safety_ready(False, reason)` — «Управление заблокировано: {reason}» in STATUS_WARNING |
 | **Window toolbar** | Yes | «10м» / «1ч» / «6ч» time-window buttons (active variant highlighted) |
 | **Channel block** (×2) | Yes | smua + smub — symmetric, always visible |
-| **Channel header** | Per channel | Channel label «Канал А» / «Канал B» + state badge (ВЫКЛ / ВКЛ / АВАРИЯ) |
+| **Channel header** | Per channel | Channel label «Канал А» / «Канал B» + physical-source state badge (ВЫКЛ / ВКЛ / НЕИЗВЕСТНО / transition-only АВАРИЯ) |
 | **Controls card** | Per channel | P target + V compliance + I compliance `QDoubleSpinBox` + Старт / Стоп / АВАР. ОТКЛ. |
 | **Readouts card** | Per channel | 4 live value labels (V / I / R / P) in Fira Mono with tabular figures |
 | **Plots grid** | Per channel | 2×2 `pg.PlotWidget` (V / I / R / P), rolling window per panel-level toolbar selection |
@@ -120,13 +121,14 @@ Fixed at codebase level; UI code must not violate:
 
 1. **Both channels always visible.** Layout symmetry = operator visual parity = fewer mistakes. No collapsing smub, even when disconnected.
 2. **Engine command surface is power-control only.** Controls map 1:1 to engine payload: P target → `p_target` (W), V predel → `v_comp` (V), I predel → `i_comp` (A). No `mode=current/voltage`.
-3. **Spin changes are debounced 300 ms and gated on state == "on".** Spinning P / V / I while the channel is "on" restarts a single-shot `QTimer(300ms)`; on timeout the final value is sent (P → `keithley_set_target`, V/I → `keithley_set_limits`). In state "off" or "fault" spins emit no commands — the channel isn't receiving power, so live limit updates are meaningless.
+3. **Spin changes are debounced 300 ms and gated on state == "on".** Spinning P / V / I while the channel is "on" restarts a single-shot `QTimer(300ms)`; on timeout the final value is sent (P → `keithley_set_target`, V/I → `keithley_set_limits`). In state "off", "unknown", or "fault" spins emit no commands — the channel is not authoritatively known to be receiving power, so live limit updates are meaningless.
 4. **Start is the only path to source ON.** `Старт` click sends `keithley_start` which the engine routes through `SafetyManager.request_run(p, v, i)`. If preconditions fail, engine returns an error — UI does not bypass. The GUI never directly commands hardware.
 5. **Slew rate limit enforced server-side.** UI does NOT interpolate setpoints. Engine-side slew limiter ramps the output; UI sends the final target value.
 6. **Values display in SI units with Russian symbols.** V = «В», I = «А», R = «Ом», P = «Вт». (RULE-COPY-006.)
 7. **Live values use FONT_MONO with tabular figures.** `tnum` OpenType feature enabled when the Qt version supports it (graceful fallback). (RULE-TYPO-003.)
-8. **State badge uses redundant channels.** Text label (ВЫКЛ / ВКЛ / АВАРИЯ)
-   plus shape/chrome (MUTED_FOREGROUND / ACCENT / STATUS_FAULT). Source ON is
+8. **State badge uses redundant channels.** Text label (ВЫКЛ / ВКЛ /
+   НЕИЗВЕСТНО / transition-only АВАРИЯ) plus shape/chrome
+   (MUTED_FOREGROUND / ACCENT / STATUS_CAUTION / STATUS_FAULT). Source ON is
    activity, not proof of health, so it never consumes STATUS_OK. Not color
    alone. (RULE-A11Y-002.)
 9. **Emergency stop guarded by destructive-variant confirmation.** `QMessageBox.warning` with Ok / Cancel (RULE-INTER-004). FU.5 tracks a future HoldConfirm 1 s hold upgrade. A+B emergency uses a single confirmation covering both channels, not two separate dialogs.
@@ -136,6 +138,15 @@ Fixed at codebase level; UI code must not violate:
 13. **Stale detection only when state == "on".** If channel is off or fault, a stalled reading isn't a symptom — the channel isn't supposed to stream. Stale chrome (STATUS_STALE border + «устар.» suffix) applies only to an "on" channel whose last reading is older than 5 s.
 14. **Fault state draws a 3 px STATUS_FAULT border on the channel block.** Visual coherence with other fault-bearing surfaces.
 15. **Plot line color is channel-coded, not quantity-coded.** smua → `PLOT_LINE_PALETTE[0]`, smub → `PLOT_LINE_PALETTE[1]`. All 4 plots of one channel share the same pen. Quantity distinction comes from the plot's Y-axis label + unit, not pen color. (RULE-COLOR-002 reserves STATUS_* for semantic state.)
+16. **Per-channel source state and manager safety state are separate truths.**
+    The channel badge reports the latest physical-source evidence. A fault
+    transition may publish `"fault"` immediately for the implicated channel,
+    but the persistent incident owner is `analytics/safety_state` plus its
+    reason. A periodic snapshot replaces a transition-only `"fault"` with
+    `"off"` when current OFF evidence exists or `"unknown"` when it does not.
+    Seeing `"off"` or `"unknown"` does not mean the manager fault was acknowledged
+    or that normal command authority returned; the independent Safety gate
+    remains closed while the manager is `fault_latched`.
 
 ## API
 
@@ -181,8 +192,13 @@ class KeithleyPanel(QWidget):
 **Signal semantics.** Per-channel signals are relays from the internal `_SmuChannelBlock` widgets — the panel exposes them so tests and shell code can observe every user intent without running a real ZMQ bridge. Production code path: each click handler also spawns a `ZmqCommandWorker` with the appropriate payload (`keithley_start`, `keithley_stop`, `keithley_emergency_off`, `keithley_set_target`, `keithley_set_limits`). Worker result is logged asynchronously; the UI thread does not block.
 
 **Reading routing.** `on_reading(Reading)` inspects `reading.channel`:
-- `analytics/keithley_channel_state/smua|smub` → `metadata["state"]` drives the channel's state badge and enable/disable logic.
+- `analytics/keithley_channel_state/smua|smub` → `metadata["state"]` drives the channel's physical-source badge and per-channel enable/disable logic. It does not carry the persistent manager fault latch.
 - `<instrument>/smua|smub/{voltage|current|resistance|power}` → updates the matching readout label and appends `(timestamp, value)` to a per-measurement `deque(maxlen=3600)` for plot rendering.
+
+`set_safety_ready(False, reason)` is the separate manager-authority input. It
+keeps normal controls gated and the reason visible even after a periodic source
+snapshot changes the badge from a transition `АВАРИЯ` to physical `ВЫКЛ` or
+`НЕИЗВЕСТНО`. Emergency-off remains reachable with a live connection.
 
 A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — reading frequency from the driver is too high for per-event plot updates). Stale check: if state == "on" and `now - last_update_ts > 5 s`, apply STATUS_STALE border + «устар.» suffix.
 
@@ -201,8 +217,9 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 | **Disconnected** | All readouts «— В/А/Ом/Вт»; spins + start/stop disabled; emergency disabled (no link); «Нет связи» in STATUS_FAULT |
 | **Connected, both off** | Controls enabled, readouts show last sampled (likely zero), state badges «ВЫКЛ» in MUTED_FOREGROUND |
 | **Channel "on"** | State badge «ВКЛ» with ACCENT outline and explicit text; start disabled, stop/emergency enabled; spins debounced-live against engine; health remains a separate fact |
-| **Channel "fault"** | State badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border on channel block; start/stop/spins disabled on the faulted channel; emergency still enabled; sibling channel unaffected |
-| **Safety gated** | Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» visible in STATUS_CAUTION |
+| **Channel `"fault"` transition** | Immediate incident cue: state badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border; start/stop/spins disabled; emergency still enabled. This is transition evidence, not the persistent manager latch; the next periodic snapshot reports physical `"off"` or `"unknown"`. |
+| **Channel `"unknown"`** | State badge «НЕИЗВЕСТНО» in STATUS_CAUTION with last-confirmed state shown only as history; start/stop/spins disabled; emergency remains enabled while connected. |
+| **Manager `fault_latched` / Safety gated** | Independent of either channel badge: Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» remains visible in STATUS_CAUTION until manager recovery authority returns. |
 | **Cold start / unknown Safety** | Connected readings alone do not enable source controls; explicit «нет авторитетного состояния Safety» gate remains until an authoritative ready/run-permitted/running state arrives |
 | **Replay/read-only** | V/I/R/P and source-state evidence remains visible; spins, start/stop/set-target/set-limits and every emergency-off control are disabled; handler/dispatcher guards reject direct or queued commands |
 | **Stale reading (state="on")** | Last-known readouts remain visible but intentionally dim to MUTED_FOREGROUND; STATUS_STALE border and «12.345 В (устар.)» suffix make uncertainty explicit without erasing the value |
@@ -223,18 +240,28 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 11. **Coloring plot lines by quantity.** RULE-COLOR-002 reserves STATUS_* semantics and discourages per-quantity pen colors. Use `PLOT_LINE_PALETTE[channel_index]` — channel-coded, not quantity-coded.
 12. **Measured value colored STATUS_FAULT at body size.** Fails contrast. Use FOREGROUND + separate fault indicator. RULE-A11Y-003.
 13. **Blocking the GUI thread on a command.** `ZmqCommandWorker` is a `QThread`. Click handlers must spawn a worker and wire its `finished` signal; never call `send_command()` directly from a UI slot.
+14. **Treating the channel badge as the fault latch.** The badge is physical
+    source evidence after periodic reconciliation. Preserve manager
+    `fault_latched` and its reason through the separate Safety gate; never infer
+    acknowledgement or restored command authority from a badge changing to
+    `ВЫКЛ` or `НЕИЗВЕСТНО`.
 
 ## Related components
 
 - `components/dialog.md` — Emergency confirmation (warning variant per RULE-INTER-004).
 - `components/button.md` — Primary / Warning / Destructive button variants. Window-toolbar toggle variant is a DS coverage gap flagged in the II.6 rewrite.
-- `components/badge.md` — State badge (ВЫКЛ / ВКЛ / АВАРИЯ) alignment target.
+- `components/badge.md` — State badge (ВЫКЛ / ВКЛ / НЕИЗВЕСТНО / transition-only АВАРИЯ) alignment target.
 - `components/card.md` — Controls / readouts cards use card semantics (SURFACE_CARD background + BORDER_SUBTLE 1 px + RADIUS_MD).
 - `components/chart-tile.md` — Future alignment target for the V/I/R/P plots if Phase I.2 ChartTile primitive ships.
 - `cryodaq-primitives/analytics-panel.md` — Analytics surface consumes historical SMU data; live control lives only here.
 
 ## Changelog
 
+- **2026-08-28 (v1.2.1)** — Corrected the state contract to separate the
+  per-channel physical-source badge from the persistent manager fault latch.
+  Periodic snapshots replace transition-only `АВАРИЯ` with current `ВЫКЛ` or
+  `НЕИЗВЕСТНО`; the separate Safety gate and reason retain the incident and
+  command lockout until acknowledged recovery.
 - **2026-07-12 (v1.2.0)** — source authority now defaults fail-closed until authoritative Safety truth. Documented the replay read-only gate, including the deliberate distinction: emergency-off remains reachable with a live link when Safety blocks normal live control, but replay removes all source command authority including emergency-off.
 - **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec and supersedes the removed v1 surface behind `MainWindowV2` Ctrl+K. Follow-up K4 custom-command work remains deferred; any alternative emergency gesture remains a separately reviewed hazard decision.
 - **2026-04-17 — Initial version.** Documented mode-based Keithley 2604B control panel (B.7 design). Superseded by 2026-04-18 rewrite; entry preserved for historical trace.

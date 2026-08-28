@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-28
+version: 4.1.1
 ---
 
 # Design System Changelog
@@ -12,6 +12,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.1.1] — 2026-08-28
+
+### Corrected
+
+- `cryodaq-primitives/keithley-panel.md` and `docs/operator_manual.md` now
+  separate the per-channel physical source state from the manager fault latch.
+  A transition-only channel `fault` may be replaced by periodic `off` or
+  `unknown` evidence while the manager remains `fault_latched`, retains the
+  reason, and keeps normal controls gated. The badge no longer claims to be the
+  persistent incident owner.
+- Version bumped 4.1.0 → 4.1.1 as a contract-documentation correction matching
+  the shipped source-state publication path.
 
 ## [4.1.0] — 2026-08-05
 

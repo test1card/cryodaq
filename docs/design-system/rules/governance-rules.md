@@ -4,7 +4,7 @@ keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-07-20
+last_updated: 2026-08-28
 ---
 
 # Governance Rules
@@ -44,9 +44,9 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v4.1.0 (operator-state semantic correction: safety green is
-reserved for independently demonstrated health; ordinary activity uses accent,
-and new attention producers use the single caution rung; flat tokens unchanged).
+**Current version:** v4.1.1 (Keithley per-channel badges report physical source
+evidence separately from the persistent manager fault latch and command gate;
+flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -85,7 +85,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.1.0 state: all four Active, no pending removals.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.1.1 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -96,6 +96,9 @@ These four rules are themselves subject to the design system's evolution process
 
 ## Changelog
 
+- 2026-08-28 (v4.1.1): Reconciled governance markers to the Keithley contract
+  correction that separates physical source evidence from the manager fault
+  latch and its normal-control gate.
 - 2026-07-15 (v4.0.0): Added RULE-GOV-004, the mandatory five-field
   operator/safety change-impact record.
 - 2026-04-17: Initial version. Three governance rules as thin pointers to canonical governance documents. Closes forward references to RULE-GOV-001 and RULE-GOV-003 from Batches 1 and 2.
