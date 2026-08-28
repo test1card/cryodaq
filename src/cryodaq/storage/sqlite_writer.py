@@ -28,7 +28,7 @@ from typing import Any
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID, ChannelCatalog, unbound_channel_descriptor
+from cryodaq.channels.descriptors import ChannelCatalog
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.alarm_ack_codec import (
     ALARM_ACK_COMMIT_KEYS,
@@ -58,13 +58,16 @@ from cryodaq.storage._windows_secure_read import (
     read_secure_relative_bytes,
 )
 from cryodaq.storage.channel_descriptors import (
+    UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
     ChannelNotDescribedError,
     DescriptorBoundReading,
     LiveChannelDescriptorCatalog,
+    catalog_with_reserved_descriptor,
     descriptor_hash_for_reading,
     initialize_descriptor_storage,
     install_catalog,
+    is_reserved_descriptor,
     snapshot_catalog,
     verify_descriptor_storage,
 )
@@ -2522,17 +2525,11 @@ class SQLiteWriter:
         # THE RESERVED ENTRY TRAVELS WITH THE CATALOG, so a reading whose channel the
         # catalog does not describe has a real descriptor to reference. Without it the
         # foreign key refuses the row and the batch dies -- the defect this change
-        # exists to remove. See channels.descriptors.unbound_channel_descriptor.
-        self._unbound_descriptor = None
+        # exists to remove. The channel-descriptor adapter owns that entry's identity.
+        self._unbound_descriptor_hash = None
         if self._channel_catalog is not None:
-            self._unbound_descriptor = unbound_channel_descriptor()
-            if all(
-                descriptor.channel_id != self._unbound_descriptor.channel_id
-                for descriptor in self._channel_catalog.descriptors
-            ):
-                self._channel_catalog = snapshot_catalog(
-                    ChannelCatalog([*self._channel_catalog.descriptors, self._unbound_descriptor])
-                )
+            self._channel_catalog = catalog_with_reserved_descriptor(self._channel_catalog)
+            self._unbound_descriptor_hash = UNBOUND_DESCRIPTOR_HASH
         # When a reading names a channel the catalog does not describe, the row is
         # still written -- without a descriptor identity -- and the fact is said at a
         # bounded rate and counted. See _descriptor_hash_or_none.
@@ -7238,6 +7235,7 @@ class SQLiteWriter:
         # own receipt when the emitted label it keeps would resolve to something else.
         admitted_by_day: dict[date, list[str]] = {}
         unbound_emitted_by_day: dict[date, list[str | None]] = {}
+        admitted_is_unbound_by_day: dict[date, list[bool]] = {}
         for item in bound:
             reading = item.reading
             nonfinite = not math.isfinite(reading.value)
@@ -7261,7 +7259,8 @@ class SQLiteWriter:
             # long as the row exists. The reader side bounds how many such labels a bounded
             # query materialises (see archive_reader._MAX_MATERIALIZED_UNBOUND_CHANNELS),
             # which is where the roster bound belongs.
-            if item.descriptor.channel_id == UNBOUND_CHANNEL_ID:
+            admitted_is_unbound = is_reserved_descriptor(item.descriptor)
+            if admitted_is_unbound:
                 stable = reading
             else:
                 stable = replace(reading, channel=item.descriptor.channel_id)
@@ -7273,8 +7272,9 @@ class SQLiteWriter:
             by_day.setdefault(timestamp.date(), []).append(stable)
             admitted_by_day.setdefault(timestamp.date(), []).append(item.descriptor.descriptor_hash)
             unbound_emitted_by_day.setdefault(timestamp.date(), []).append(
-                str(reading.channel) if item.descriptor.channel_id == UNBOUND_CHANNEL_ID else None
+                str(reading.channel) if admitted_is_unbound else None
             )
+            admitted_is_unbound_by_day.setdefault(timestamp.date(), []).append(admitted_is_unbound)
 
         for day, stable_readings in sorted(by_day.items()):
             if not self._write_day_batch(
@@ -7282,6 +7282,7 @@ class SQLiteWriter:
                 stable_readings,
                 admitted_by_day[day],
                 unbound_emitted_by_day[day],
+                admitted_is_unbound_by_day[day],
             ):
                 return None
         return bound
@@ -7451,8 +7452,8 @@ class SQLiteWriter:
             # and the two cannot be told apart afterwards -- a migrated database holds
             # both kinds in one file, and an all-unbound day rotates with no descriptor
             # sidecar at all. This row carries its own provenance instead.
-            assert self._unbound_descriptor is not None
-            return self._unbound_descriptor.descriptor_hash
+            assert self._unbound_descriptor_hash is not None
+            return self._unbound_descriptor_hash
 
     def _record_unbound_channels(self, unbound: list[tuple[str, BaseException]]) -> None:
         """Count and say what was actually STORED, after the transaction committed.
@@ -7536,6 +7537,7 @@ class SQLiteWriter:
         batch: list[Reading],
         admitted_hashes: list[str] | None = None,
         admitted_unbound_channels: list[str | None] | None = None,
+        admitted_is_unbound: list[bool] | None = None,
     ) -> bool:
         """Write a single day's readings to the given connection.
 
@@ -7601,8 +7603,7 @@ class SQLiteWriter:
                 # and the row would store a real identity while the commit receipt carries
                 # the reserved one. The row and its receipt must not disagree.
                 descriptor_hash = admitted_hashes[index]
-                assert self._unbound_descriptor is not None
-                if descriptor_hash == self._unbound_descriptor.descriptor_hash:
+                if admitted_is_unbound is not None and admitted_is_unbound[index]:
                     unbound.append(
                         (
                             admitted_unbound_channels[index] if admitted_unbound_channels is not None else r.channel,

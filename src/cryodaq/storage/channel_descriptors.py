@@ -191,6 +191,31 @@ guard. Recognition is exact equality on an opaque value; nothing here interprets
 """
 
 
+def catalog_with_reserved_descriptor(catalog: object) -> ChannelCatalog:
+    """Return a persistence catalog that carries the canonical reserved descriptor.
+
+    The reserved descriptor belongs to SQLite persistence rather than to a live
+    driver roster. Keep both its construction and its channel-id interpretation
+    in this adapter, so generic writer code receives only a ready-to-install
+    catalog.
+    """
+
+    snapshot = snapshot_catalog(catalog)
+    if _carries_reserved_entry(snapshot):
+        return snapshot
+    return snapshot_catalog(ChannelCatalog([*snapshot.descriptors, unbound_channel_descriptor()]))
+
+
+def is_reserved_descriptor(descriptor: object) -> bool:
+    """Whether an opaque persisted descriptor is the canonical reserved entry.
+
+    Callers may use this result to preserve an emitted label. They must not
+    identify the entry by inspecting a channel id themselves.
+    """
+
+    return type(descriptor) is ChannelDescriptorV1 and descriptor.descriptor_hash == UNBOUND_DESCRIPTOR_HASH
+
+
 class ChannelDescriptorStorageError(RuntimeError):
     """The SQLite descriptor authority is malformed, corrupt, or ambiguous."""
 

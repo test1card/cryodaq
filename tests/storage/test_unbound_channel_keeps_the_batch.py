@@ -726,6 +726,26 @@ async def test_the_live_path_keeps_the_label_the_instrument_emitted(tmp_path: Pa
     assert persisted[0][0] != UNBOUND_CHANNEL_ID, "the row must not be relabelled as the reserved entry"
 
 
+async def test_the_live_path_keeps_each_undescribed_emitted_label(tmp_path: Path) -> None:
+    """Reserved admission preserves each physical source label, not one surrogate.
+
+    This drives ``write_committed`` through the same live binding and row-building
+    path as the scheduler. If the storage adapter stops classifying the reserved
+    descriptor, the writer replaces both labels with the reserved catalog id and
+    this assertion fails.
+    """
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=_live())
+    assert (
+        await writer.write_committed([_reading("sensor.rewired.one", 4.2), _reading("sensor.rewired.two", 4.3)])
+        is not None
+    )
+    await writer.stop()
+
+    persisted = _rows(tmp_path)
+    assert [row[0] for row in persisted] == ["sensor.rewired.one", "sensor.rewired.two"]
+
+
 async def test_the_live_path_still_refuses_a_disagreeing_instrument(tmp_path: Path) -> None:
     """The boundary, held on the production path as well as the legacy one.
 
