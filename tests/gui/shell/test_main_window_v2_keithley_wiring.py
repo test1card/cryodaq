@@ -91,9 +91,14 @@ def _safety_reading(
     )
 
 
-def _source_state_reading(channel: str, state: str) -> Reading:
+def _source_state_reading(
+    channel: str,
+    state: str,
+    *,
+    observed_at: datetime | None = None,
+) -> Reading:
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=observed_at or datetime.now(UTC),
         instrument_id="safety_manager",
         channel=f"analytics/keithley_channel_state/{channel}",
         value=0.0,
@@ -148,19 +153,25 @@ def _typed_ready_snapshot(
     mode: SnapshotMode = SnapshotMode.LIVE,
     observed_at: datetime | None = None,
     received_at: datetime | None = None,
+    experiment_id: str = "exp-1",
+    safety_ready: bool = True,
 ) -> OperatorSnapshot:
     observed = observed_at or datetime.now(UTC) - timedelta(seconds=1)
     received = received_at or observed
-    cut = SnapshotCut(revision, observed, received, "engine-v1", mode, "exp-1", "engine-v1")
-    state = OperatorPresentationState.OK if mode is SnapshotMode.LIVE else OperatorPresentationState.CAUTION
+    cut = SnapshotCut(revision, observed, received, "engine-v1", mode, experiment_id, "engine-v1")
+    state = (
+        OperatorPresentationState.OK
+        if mode is SnapshotMode.LIVE and safety_ready
+        else OperatorPresentationState.CAUTION
+    )
     status = SummaryStatus(state, 1.0, 0.0, ("authoritative",), "Подтверждено")
     manifest = SupportBundleManifest(
         "bundle-42",
         cut.received_at,
         (SupportBundleEntry("status/status.json", 123, "a" * 64),),
     )
-    readiness = ReadinessTruth.READY if mode is SnapshotMode.LIVE else ReadinessTruth.UNKNOWN
-    lifecycle = SafetyLifecycle.READY if mode is SnapshotMode.LIVE else SafetyLifecycle.UNKNOWN
+    readiness = ReadinessTruth.READY if mode is SnapshotMode.LIVE and safety_ready else ReadinessTruth.UNKNOWN
+    lifecycle = SafetyLifecycle.READY if mode is SnapshotMode.LIVE and safety_ready else SafetyLifecycle.UNKNOWN
     recording = RecordingTruth.RECORDING if mode is SnapshotMode.LIVE else RecordingTruth.REPLAY_ONLY
     recording_session_id = "rec-1" if mode is SnapshotMode.LIVE else None
     availability = AvailabilityTruth.AVAILABLE if mode is SnapshotMode.LIVE else AvailabilityTruth.UNKNOWN
@@ -182,7 +193,7 @@ def _typed_ready_snapshot(
         ExperimentOperatingState(
             cut,
             status,
-            "exp-1",
+            experiment_id,
             "Эксперимент",
             "cooldown",
             recording,
@@ -844,6 +855,207 @@ def test_keithley_overlay_resynchronizes_off_from_newer_ready_cut_after_gap(
 
         assert block._channel_state == "off"
         assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize("newer_state", ["on", "fault"])
+def test_ready_resync_preserves_a_newer_channel_observation(
+    newer_state: str,
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older cross-topic READY cut cannot erase newer active/fault truth."""
+
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        clock[0] = 101.0
+        w._dispatch_reading(_measurement_reading())
+        gap_boundary = w._last_measurement_received_at
+        assert gap_boundary is not None
+
+        clock[0] = 111.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        block_a = w._keithley_panel._smua_block
+        block_b = w._keithley_panel._smub_block
+        assert block_a._channel_state == "unknown"
+
+        channel_observed_at = datetime.now(UTC)
+        w._dispatch_reading(_source_state_reading("smua", newer_state, observed_at=channel_observed_at))
+        delayed_ready = _typed_ready_snapshot(
+            revision=43,
+            observed_at=max(
+                gap_boundary + timedelta(microseconds=1),
+                channel_observed_at - timedelta(milliseconds=1),
+            ),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(delayed_ready))
+
+        assert block_a._channel_state == newer_state
+        assert block_b._channel_state == "off"
+    finally:
+        _stop_timers(w)
+
+
+def test_unknown_source_observation_remains_pending_for_newer_ready_recovery(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNKNOWN is visible evidence, but it cannot satisfy actionable recovery."""
+
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        clock[0] = 101.0
+        w._dispatch_reading(_measurement_reading())
+        clock[0] = 111.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
+        w._dispatch_reading(_source_state_reading("smub", "off"))
+        w._dispatch_reading(_source_state_reading("smua", "unknown"))
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+
+        w.render_operator_snapshot(
+            store.accept_snapshot(_typed_ready_snapshot(revision=43, observed_at=datetime.now(UTC)))
+        )
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_ready_cut_for_previous_experiment_cannot_authorize_or_resynchronize_source(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The experiment binding is checked before either READY side effect."""
+
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-new"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        clock[0] = 101.0
+        w._dispatch_reading(_measurement_reading())
+        clock[0] = 111.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+
+        w.render_operator_snapshot(
+            store.accept_snapshot(
+                _typed_ready_snapshot(
+                    revision=43,
+                    observed_at=datetime.now(UTC),
+                    experiment_id="exp-old",
+                )
+            )
+        )
+
+        assert w._keithley_panel._safety_ready is False
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_newer_nonready_snapshot_revokes_off_when_on_publication_is_lost(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    """Periodic typed cuts cover isolated loss of the best-effort state topic."""
+
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        first_ready = _typed_ready_snapshot(revision=42)
+        w.render_operator_snapshot(store.accept_snapshot(first_ready))
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        w._ensure_overlay("source")
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+
+        # Unrelated producer measurements continue normally; no generic-flow
+        # gap can reveal the independently dropped source-state publication.
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        assert w._keithley_panel._connected is True
+        assert block._channel_state == "off"
+
+        # The ON publication is deliberately absent: only the next periodic
+        # authoritative cut reveals that retained OFF is no longer covered.
+        w.render_operator_snapshot(
+            store.accept_snapshot(
+                _typed_ready_snapshot(
+                    revision=43,
+                    observed_at=datetime.now(UTC),
+                    safety_ready=False,
+                )
+            )
+        )
+
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_ready_derived_off_is_revoked_by_the_next_measurement_gap(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A READY projection is presentation, not a producer receipt for later gaps."""
+
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        clock = _controlled_measurement_clock(monkeypatch, w)
+        w._ensure_overlay("source")
+        clock[0] = 101.0
+        w._dispatch_reading(_measurement_reading())
+
+        clock[0] = 109.0
+        ready_during_first_gap = _typed_ready_snapshot(
+            revision=43,
+            observed_at=datetime.now(UTC),
+        )
+        w.render_operator_snapshot(store.accept_snapshot(ready_during_first_gap))
+
+        clock[0] = 111.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+
+        # No new source observation or READY cut follows the one recovered
+        # measurement. The second gap must revoke the derived OFF again.
+        clock[0] = 121.0
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 

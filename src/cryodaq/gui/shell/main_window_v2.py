@@ -38,7 +38,7 @@ from cryodaq.channels.descriptors import (
 )
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
-from cryodaq.core.smu_channel import SMU_CHANNELS
+from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.shell.annunciation_controller import AnnunciationController
@@ -91,6 +91,9 @@ _DISK_MAX_SOURCE_AGE_S = 600.0
 _SAFETY_FUTURE_TOLERANCE_S = 5.0
 _SAFETY_MAX_SOURCE_AGE_S = 10.0
 _MEASUREMENT_CONNECTION_TIMEOUT_S = 3.0
+_CONCRETE_KEITHLEY_SOURCE_STATES = frozenset(
+    state.value for state in KeithleySourceState if state is not KeithleySourceState.UNKNOWN
+)
 _WORKER_SETTLE_MS = 1_500
 # settle_owned_workers() used to give every descendant QThread the full
 # _WORKER_SETTLE_MS on the Qt main thread, across up to 4 stabilization
@@ -403,6 +406,9 @@ class MainWindowV2(QMainWindow):
         cut = snapshot.cut
         readiness = snapshot.readiness
         bridge_instance_id = self._current_bridge_instance_id()
+        experiment_matches = (
+            self._latest_experiment_status is None or snapshot.experiment.experiment_id == self._active_experiment_id()
+        )
         producer_changed = self._typed_safety_producer_id not in (None, cut.producer_id)
         if producer_changed:
             self._typed_safety_revision = None
@@ -418,6 +424,7 @@ class MainWindowV2(QMainWindow):
             bridge_instance_id is not None
             and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
+            and experiment_matches
             and readiness.readiness is ReadinessTruth.READY
             and readiness.lifecycle is SafetyLifecycle.READY
             and readiness.status.state is OperatorPresentationState.OK
@@ -440,21 +447,40 @@ class MainWindowV2(QMainWindow):
         self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
         self._accepted_safety_bridge_instance_id = bridge_instance_id
         self._last_safety_state = readiness.lifecycle.value
-        self._last_safety_reason = readiness.status.operator_text
-        transport_stale = readiness.status.state in {
-            OperatorPresentationState.STALE,
-            OperatorPresentationState.DISCONNECTED,
-        }
+        self._last_safety_reason = (
+            readiness.status.operator_text if experiment_matches else "Эксперимент Safety изменился"
+        )
+        transport_stale = (
+            readiness.status.state
+            in {
+                OperatorPresentationState.STALE,
+                OperatorPresentationState.DISCONNECTED,
+            }
+            or not experiment_matches
+        )
         self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
         if self._keithley_panel is not None:
-            reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
+            if ready:
+                reason = ""
+            elif transport_stale:
+                reason = "Состояние Safety устарело"
+            else:
+                reason = self._last_safety_reason
             self._keithley_panel.set_safety_ready(ready, reason)
-        if ready:
-            # READY is stronger than a UI convenience state: the typed
-            # snapshot contract requires current verified-OFF evidence for
-            # both source channels. It is therefore the only aggregate cut
-            # allowed to close a missed per-channel publication after a gap.
-            self._resynchronize_keithley_source_state_from_ready_snapshot(snapshot)
+        if (
+            bridge_instance_id is not None
+            and not self._replay_mode
+            and cut.mode is SnapshotMode.LIVE
+            and experiment_matches
+        ):
+            # Periodic typed cuts cover isolated loss of the best-effort
+            # source-state topic. READY provides verified-OFF evidence; a
+            # newer non-READY cut revokes older per-channel presentation
+            # without guessing which source is active.
+            self._synchronize_keithley_source_state_from_typed_snapshot(
+                snapshot,
+                ready=ready,
+            )
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -665,7 +691,12 @@ class MainWindowV2(QMainWindow):
         retained_keys = {
             key
             for key, received_at in self._keithley_channel_state_received_monotonic.items()
-            if self._last_reading_time > 0.0 and received_at >= self._last_reading_time
+            if (
+                self._last_reading_time > 0.0
+                and received_at >= self._last_reading_time
+                and key in self._keithley_channel_state_snapshot
+                and self._keithley_source_state_is_concrete(self._keithley_channel_state_snapshot[key])
+            )
         }
         self._keithley_channel_state_snapshot = {
             key: reading for key, reading in self._keithley_channel_state_snapshot.items() if key in retained_keys
@@ -689,37 +720,88 @@ class MainWindowV2(QMainWindow):
         self,
         snapshot: OperatorSnapshot,
     ) -> None:
-        """Project a post-gap verified-OFF Safety cut into both source badges."""
-        if not self._keithley_source_state_pending or self._replay_mode:
+        """Project a current verified-OFF Safety cut into eligible source badges."""
+        self._synchronize_keithley_source_state_from_typed_snapshot(
+            snapshot,
+            ready=True,
+        )
+
+    def _synchronize_keithley_source_state_from_typed_snapshot(
+        self,
+        snapshot: OperatorSnapshot,
+        *,
+        ready: bool,
+    ) -> None:
+        """Bound retained channel presentation to the periodic typed Safety cut."""
+        if self._replay_mode:
             return
-        if (
+        if ready and (
             self._last_reading_time <= 0.0
             or (time.monotonic() - self._last_reading_time) >= _MEASUREMENT_CONNECTION_TIMEOUT_S
         ):
             return
         not_before = self._keithley_source_state_resync_not_before
-        if not_before is None or snapshot.cut.observed_at < not_before:
+        if not_before is not None and snapshot.cut.observed_at < not_before:
             return
 
-        self._keithley_channel_state_snapshot = {
-            key: Reading(
-                timestamp=snapshot.cut.observed_at,
-                instrument_id="safety_manager",
-                channel=f"analytics/keithley_channel_state/{key}",
-                value=0.0,
-                unit="",
-                metadata={
-                    "state": "off",
-                    "reason": "verified_off_operator_snapshot_resync",
-                },
-            )
-            for key in SMU_CHANNELS
-        }
-        resync_received_at = time.monotonic()
-        self._keithley_channel_state_received_monotonic = {key: resync_received_at for key in SMU_CHANNELS}
-        self._keithley_source_state_pending.clear()
-        self._keithley_source_state_resync_not_before = None
-        self._replay_keithley_channel_state_snapshot()
+        changed_keys: set[str] = set()
+        for key in SMU_CHANNELS:
+            retained = self._keithley_channel_state_snapshot.get(key)
+            retained_observed_at = self._keithley_source_state_observed_at(retained)
+            if retained_observed_at is not None and snapshot.cut.observed_at <= retained_observed_at:
+                continue
+            changed_keys.add(key)
+            self._keithley_channel_state_received_monotonic.pop(key, None)
+            if ready:
+                self._keithley_channel_state_snapshot[key] = Reading(
+                    timestamp=snapshot.cut.observed_at,
+                    instrument_id="safety_manager",
+                    channel=f"analytics/keithley_channel_state/{key}",
+                    value=0.0,
+                    unit="",
+                    metadata={
+                        "state": KeithleySourceState.OFF.value,
+                        "reason": "verified_off_operator_snapshot_resync",
+                    },
+                )
+                self._keithley_source_state_pending.discard(key)
+            else:
+                self._keithley_channel_state_snapshot.pop(key, None)
+                self._keithley_source_state_pending.add(key)
+
+        if not self._keithley_source_state_pending:
+            self._keithley_source_state_resync_not_before = None
+        if ready:
+            self._replay_keithley_channel_state_snapshot()
+        elif self._keithley_panel is not None and self._keithley_panel._connected:
+            for key in changed_keys:
+                self._keithley_panel.replay_source_state(
+                    key,
+                    Reading(
+                        timestamp=snapshot.cut.observed_at,
+                        instrument_id="safety_manager",
+                        channel=f"analytics/keithley_channel_state/{key}",
+                        value=0.0,
+                        unit="",
+                        metadata={
+                            "state": KeithleySourceState.UNKNOWN.value,
+                            "reason": "nonready_operator_snapshot_revocation",
+                        },
+                    ),
+                )
+
+    @staticmethod
+    def _keithley_source_state_observed_at(reading: Reading | None) -> datetime | None:
+        if reading is None or type(reading.timestamp) is not datetime:
+            return None
+        if reading.timestamp.tzinfo is None or reading.timestamp.utcoffset() is None:
+            return None
+        return reading.timestamp.astimezone(UTC)
+
+    @staticmethod
+    def _keithley_source_state_is_concrete(reading: Reading) -> bool:
+        metadata = reading.metadata
+        return type(metadata) is dict and metadata.get("state") in _CONCRETE_KEITHLEY_SOURCE_STATES
 
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
@@ -890,7 +972,10 @@ class MainWindowV2(QMainWindow):
                 source_state_key = channel.rsplit("/", maxsplit=1)[-1]
                 self._keithley_channel_state_snapshot[source_state_key] = reading
                 self._keithley_channel_state_received_monotonic[source_state_key] = time.monotonic()
-                self._keithley_source_state_pending.discard(source_state_key)
+                if self._keithley_source_state_is_concrete(reading):
+                    self._keithley_source_state_pending.discard(source_state_key)
+                else:
+                    self._keithley_source_state_pending.add(source_state_key)
                 if not self._keithley_source_state_pending:
                     self._keithley_source_state_resync_not_before = None
             if self._keithley_panel is not None:
