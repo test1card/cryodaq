@@ -2164,6 +2164,10 @@ class ConductivityPanel(QWidget):
         evidence_power_channel: str | None = None,
         evidence_temperature_channels: tuple[str, ...] | None = None,
     ) -> None:
+        import logging as _tmp_logging
+        _tmp_logging.getLogger("cryodaq.PROBE").error(
+            "AUTO-CMD-REPLY cmd=%s result=%s", command.get("cmd"), result
+        )
         """Commit only the exact current operation's authoritative reply."""
 
         if token in self._auto_settled_command_tokens:
