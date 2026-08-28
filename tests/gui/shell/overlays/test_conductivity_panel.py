@@ -1725,6 +1725,54 @@ def test_restart_invalidates_cached_descriptors_until_new_generation_readings(ap
     assert "нет подтверждённых дескрипторов" in panel._banner_label.text()
 
 
+def test_auto_start_disconnected_explains_missing_connection(app) -> None:
+    panel = ConductivityPanel()
+
+    panel._on_auto_start()
+
+    assert not panel._banner_label.isHidden()
+    assert panel._banner_label.text() == (
+        "Автоизмерение не запущено: нет связи с Engine. Дождитесь восстановления связи."
+    )
+
+
+def test_auto_start_while_stabilizing_explains_active_sweep(app) -> None:
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    panel._auto_state = "stabilizing"
+
+    panel._on_auto_start()
+
+    assert not panel._banner_label.isHidden()
+    assert panel._banner_label.text() == ("Автоизмерение уже выполняется. Дождитесь завершения или нажмите «Стоп».")
+
+
+def test_auto_start_with_unknown_outcome_explains_required_reconciliation(app) -> None:
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    panel._auto_outcome_unknown = True
+
+    panel._on_auto_start()
+
+    assert not panel._banner_label.isHidden()
+    assert panel._banner_label.text() == (
+        "Автоизмерение не запущено: исход предыдущей команды неизвестен. Нажмите «Стоп» для проверки отключения."
+    )
+
+
+def test_auto_start_with_pending_command_explains_wait_for_confirmation(app) -> None:
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    panel._auto_pending_token = 17
+
+    panel._on_auto_start()
+
+    assert not panel._banner_label.isHidden()
+    assert panel._banner_label.text() == (
+        "Автоизмерение не запущено: выполняется команда управления мощностью. Дождитесь подтверждения."
+    )
+
+
 def test_connection_drop_mid_sweep_retains_active_unknown_until_live_stop(app, monkeypatch):
     """Disconnect cannot synthesize idle or dispatch through a dead link."""
     import cryodaq.gui.shell.overlays.conductivity_panel as module

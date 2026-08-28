@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -37,25 +38,25 @@ def _stop_timers(w: MainWindowV2) -> None:
             pass
 
 
-def _temp_reading(channel: str, value: float) -> Reading:
+def _temp_reading(channel: str, value: float, *, bridge_instance_id: str | None = None) -> Reading:
     return Reading(
         timestamp=datetime.now(UTC),
         instrument_id="LakeShore_1",
         channel=channel,
         value=value,
         unit="K",
-        metadata={},
+        metadata={} if bridge_instance_id is None else {"bridge_instance_id": bridge_instance_id},
     )
 
 
-def _power_reading(value: float) -> Reading:
+def _power_reading(value: float, *, bridge_instance_id: str | None = None) -> Reading:
     return Reading(
         timestamp=datetime.now(UTC),
         instrument_id="Keithley_1",
         channel="Keithley_1/smua/power",
         value=value,
         unit="W",
-        metadata={},
+        metadata={} if bridge_instance_id is None else {"bridge_instance_id": bridge_instance_id},
     )
 
 
@@ -236,6 +237,149 @@ def test_lazy_open_disconnected_on_cold_start():
         w._ensure_overlay("conductivity")
         # Visible contract: cold-open → Start button disabled.
         assert w._conductivity_panel._auto_start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_lazy_open_replays_current_bound_readings_for_auto_selection():
+    app = _app()
+    bridge_instance_id = "a" * 32
+    w = MainWindowV2(bridge=SimpleNamespace(bridge_instance_id=bridge_instance_id))
+    try:
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-week"}})
+        _dispatch_described(
+            w,
+            _temp_reading("Т1", 5.1, bridge_instance_id=bridge_instance_id),
+            ChannelQuantity.TEMPERATURE,
+        )
+        _dispatch_described(
+            w,
+            _temp_reading("Т2", 4.9, bridge_instance_id=bridge_instance_id),
+            ChannelQuantity.TEMPERATURE,
+        )
+        _dispatch_described(
+            w,
+            _power_reading(0.2, bridge_instance_id=bridge_instance_id),
+            ChannelQuantity.POWER,
+            source=True,
+        )
+        assert w._conductivity_panel is None
+
+        w._ensure_overlay("conductivity")
+        app.processEvents()
+        panel = w._conductivity_panel
+        panel._chain = ["Т1", "Т2"]
+        panel._power_channel = "Keithley_1/smua/power"
+
+        assert set(panel._latest_channel_descriptors) >= {
+            "Т1",
+            "Т2",
+            "Keithley_1/smua/power",
+        }
+        assert panel._snapshot_auto_selection() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_lazy_open_does_not_replay_snapshot_from_superseded_bridge():
+    app = _app()
+    old_bridge_instance_id = "a" * 32
+    bridge = SimpleNamespace(bridge_instance_id=old_bridge_instance_id)
+    w = MainWindowV2(bridge=bridge)
+    try:
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-week"}})
+        for reading, quantity, source in (
+            (
+                _temp_reading("Т1", 5.1, bridge_instance_id=old_bridge_instance_id),
+                ChannelQuantity.TEMPERATURE,
+                False,
+            ),
+            (
+                _temp_reading("Т2", 4.9, bridge_instance_id=old_bridge_instance_id),
+                ChannelQuantity.TEMPERATURE,
+                False,
+            ),
+            (
+                _power_reading(0.2, bridge_instance_id=old_bridge_instance_id),
+                ChannelQuantity.POWER,
+                True,
+            ),
+        ):
+            _dispatch_described(w, reading, quantity, source=source)
+        assert len(w._conductivity_snapshot) == 3
+
+        bridge.bridge_instance_id = "b" * 32
+        w._ensure_overlay("conductivity")
+        app.processEvents()
+        panel = w._conductivity_panel
+        panel._chain = ["Т1", "Т2"]
+        panel._power_channel = "Keithley_1/smua/power"
+
+        assert panel._latest_channel_descriptors == {}
+        assert panel._snapshot_auto_selection() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_lazy_open_does_not_replay_snapshot_from_superseded_experiment():
+    app = _app()
+    bridge_instance_id = "a" * 32
+    w = MainWindowV2(bridge=SimpleNamespace(bridge_instance_id=bridge_instance_id))
+    try:
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-old"}})
+        for reading, quantity, source in (
+            (
+                _temp_reading("Т1", 5.1, bridge_instance_id=bridge_instance_id),
+                ChannelQuantity.TEMPERATURE,
+                False,
+            ),
+            (
+                _temp_reading("Т2", 4.9, bridge_instance_id=bridge_instance_id),
+                ChannelQuantity.TEMPERATURE,
+                False,
+            ),
+            (
+                _power_reading(0.2, bridge_instance_id=bridge_instance_id),
+                ChannelQuantity.POWER,
+                True,
+            ),
+        ):
+            _dispatch_described(w, reading, quantity, source=source)
+        assert len(w._conductivity_snapshot) == 3
+
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-new"}})
+        assert w._conductivity_snapshot == {}
+        w._ensure_overlay("conductivity")
+        app.processEvents()
+        panel = w._conductivity_panel
+        panel._chain = ["Т1", "Т2"]
+        panel._power_channel = "Keithley_1/smua/power"
+
+        assert panel._latest_channel_descriptors == {}
+        assert panel._snapshot_auto_selection() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_lazy_open_keeps_auto_selection_refused_for_unconfirmed_identity():
+    app = _app()
+    bridge_instance_id = "a" * 32
+    w = MainWindowV2(bridge=SimpleNamespace(bridge_instance_id=bridge_instance_id))
+    try:
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-week"}})
+        w._dispatch_reading(_temp_reading("Т1", 5.1, bridge_instance_id=bridge_instance_id))
+        w._dispatch_reading(_temp_reading("Т2", 4.9, bridge_instance_id=bridge_instance_id))
+        w._dispatch_reading(_power_reading(0.2, bridge_instance_id=bridge_instance_id))
+        assert w._conductivity_snapshot == {}
+
+        w._ensure_overlay("conductivity")
+        app.processEvents()
+        panel = w._conductivity_panel
+        panel._chain = ["Т1", "Т2"]
+        panel._power_channel = "Keithley_1/smua/power"
+
+        assert panel._latest_channel_descriptors == {}
+        assert panel._snapshot_auto_selection() is False
     finally:
         _stop_timers(w)
 
