@@ -50,6 +50,7 @@ from cryodaq.analytics.cooldown_compare import DEFAULT_THRESHOLDS, compare
 from cryodaq.analytics.cooldown_fingerprint import (
     BASELINE_POINTER,
     CooldownFingerprint,
+    _is_safe_fingerprint_id,
     get_baseline,
     list_fingerprints,
     set_baseline,
@@ -154,7 +155,7 @@ def _baseline_pointer_is_unreadable(history_dir: Path) -> bool:
         data = json.loads(pointer.read_text(encoding="utf-8"))
     except (OSError, ValueError, AttributeError):
         return True
-    return not isinstance(data, dict) or not data.get("fingerprint_id")
+    return not isinstance(data, dict) or not _is_safe_fingerprint_id(data.get("fingerprint_id"))
 
 
 def _badge_verdict(

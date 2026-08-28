@@ -383,3 +383,13 @@ def test_card_empty_state_counts_independent_baseline_corruption(tmp_path: Path)
     # One corrupt fingerprint and a separately corrupt baseline pointer are two
     # independent unreadable files — both must appear in the count.
     assert card._empty_label.text() == "История недоступна (2 файла не читаются)."
+
+
+def test_card_empty_state_counts_non_string_baseline_pointer_as_independent_corruption(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    (tmp_path / BASELINE_POINTER).write_text(json.dumps({"fingerprint_id": 123}), encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    assert card._empty_label.text() == "История недоступна (2 файла не читаются)."

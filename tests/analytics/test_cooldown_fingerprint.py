@@ -109,6 +109,22 @@ def test_persist_roundtrip_and_listing(tmp_path) -> None:
     assert listed[0].fingerprint_id == fp.fingerprint_id
 
 
+def test_configured_base_threshold_above_50_roundtrips(tmp_path: Path) -> None:
+    fp = build_fingerprint(
+        [0.0, 1.0, 2.0, 3.0],
+        [100.0, 55.0, 45.0, 40.0],
+        cooldown_start_ts=1.0,
+        base_threshold_K=60.0,
+        fingerprint_id="above_50",
+    )
+    save_fingerprint(fp, tmp_path)
+
+    listed, unreadable = list_fingerprints(tmp_path)
+
+    assert listed == [fp]
+    assert unreadable == 0
+
+
 def test_baseline_pointer(tmp_path) -> None:
     t, T_cold, _ = _synthetic_cooldown()
     fp1 = build_fingerprint(t, T_cold, cooldown_start_ts=100.0)
@@ -154,6 +170,35 @@ def test_get_baseline_returns_unreadable_when_pointer_is_corrupt(tmp_path: Path)
     (tmp_path / BASELINE_POINTER).write_text("{not-json", encoding="utf-8")
     base, unreadable = get_baseline(tmp_path)
     assert base is None
+    assert unreadable == 1
+
+
+@pytest.mark.parametrize("fingerprint_id", ["../outside", "nested/record", r"nested\record"])
+def test_get_baseline_rejects_path_component_identifier(tmp_path: Path, fingerprint_id: str) -> None:
+    history_dir = tmp_path / "history"
+    history_dir.mkdir()
+    payload = CooldownFingerprint(
+        fingerprint_id="outside",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=1.0,
+        time_to_50K_h=0.5,
+        ultimate_vacuum_mbar=1e-6,
+        n_points=4,
+    ).to_dict()
+    payload["fingerprint_id"] = fingerprint_id
+    target = history_dir / f"{fingerprint_id}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    (history_dir / BASELINE_POINTER).write_text(
+        json.dumps({"fingerprint_id": fingerprint_id}),
+        encoding="utf-8",
+    )
+
+    baseline, unreadable = get_baseline(history_dir)
+
+    assert baseline is None
     assert unreadable == 1
 
 
@@ -310,6 +355,51 @@ def test_get_baseline_returns_unreadable_when_pointer_access_is_denied(tmp_path:
         return original_exists(path)
 
     monkeypatch.setattr(Path, "exists", denied_pointer_exists)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1
+
+
+@pytest.mark.parametrize("discovery_call", ["exists", "glob"])
+def test_list_fingerprints_returns_unreadable_when_history_discovery_is_denied(
+    tmp_path: Path, monkeypatch, discovery_call: str
+) -> None:
+    if discovery_call == "exists":
+
+        def denied_exists(path: Path) -> bool:
+            if path == tmp_path:
+                raise PermissionError("history access denied")
+            return True
+
+        monkeypatch.setattr(Path, "exists", denied_exists)
+    else:
+
+        def denied_glob(path: Path, pattern: str):
+            if path == tmp_path:
+                raise PermissionError("history traversal denied")
+            return iter(())
+
+        monkeypatch.setattr(Path, "glob", denied_glob)
+
+    listed, unreadable = list_fingerprints(tmp_path)
+
+    assert listed == []
+    assert unreadable == 1
+
+
+def test_get_baseline_returns_unreadable_when_target_existence_probe_is_denied(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "target.json"
+    (tmp_path / BASELINE_POINTER).write_text(json.dumps({"fingerprint_id": "target"}), encoding="utf-8")
+    original_exists = Path.exists
+
+    def denied_target_exists(path: Path) -> bool:
+        if path == target:
+            raise PermissionError("target access denied")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", denied_target_exists)
 
     baseline, unreadable = get_baseline(tmp_path)
 

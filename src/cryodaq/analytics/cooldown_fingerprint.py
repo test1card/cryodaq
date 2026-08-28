@@ -38,6 +38,7 @@ class CooldownFingerprint:
     time_to_50K_h: float | None
     ultimate_vacuum_mbar: float | None
     n_points: int
+    base_threshold_K: float = 5.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,11 +55,19 @@ class CooldownFingerprint:
             time_to_50K_h=_opt_float(d.get("time_to_50K_h")),
             ultimate_vacuum_mbar=_opt_float(d.get("ultimate_vacuum_mbar")),
             n_points=d["n_points"],
+            base_threshold_K=float(d.get("base_threshold_K", 5.0)),
         )
 
 
+def _is_safe_fingerprint_id(value: Any) -> bool:
+    """Whether ``value`` names one local fingerprint file, without traversal."""
+    return (
+        isinstance(value, str) and bool(value) and value not in {".", ".."} and "/" not in value and "\\" not in value
+    )
+
+
 def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
-    if not isinstance(d, dict) or not isinstance(d.get("fingerprint_id"), str):
+    if not isinstance(d, dict) or not _is_safe_fingerprint_id(d.get("fingerprint_id")):
         raise ValueError("invalid fingerprint record")
     numeric_fields = ("cooldown_start_ts", "duration_h", "T_cold_final")
     optional_numeric_fields = ("time_to_base_h", "time_to_50K_h", "ultimate_vacuum_mbar")
@@ -77,16 +86,30 @@ def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
         raise ValueError("invalid fingerprint record")
     if not isinstance(d.get("n_points"), int) or isinstance(d.get("n_points"), bool):
         raise ValueError("invalid fingerprint record")
+    base_threshold_K = d.get("base_threshold_K", 5.0)
+    if (
+        not isinstance(base_threshold_K, (int, float))
+        or isinstance(base_threshold_K, bool)
+        or not math.isfinite(base_threshold_K)
+    ):
+        raise ValueError("invalid fingerprint record")
+    time_to_base_h = d.get("time_to_base_h")
+    time_to_50K_h = d.get("time_to_50K_h")
+    milestones_out_of_order = (
+        time_to_50K_h is not None
+        and time_to_base_h is not None
+        and (
+            (base_threshold_K < 50.0 and time_to_50K_h > time_to_base_h)
+            or (base_threshold_K > 50.0 and time_to_base_h > time_to_50K_h)
+            or (base_threshold_K == 50.0 and time_to_base_h != time_to_50K_h)
+        )
+    )
     if (
         d["duration_h"] < 0
         or d["T_cold_final"] < 0
         or any(d.get(field) is not None and d[field] < 0 for field in ("time_to_base_h", "time_to_50K_h"))
         or any(d.get(field) is not None and d[field] > d["duration_h"] for field in ("time_to_base_h", "time_to_50K_h"))
-        or (
-            d.get("time_to_50K_h") is not None
-            and d.get("time_to_base_h") is not None
-            and d["time_to_50K_h"] > d["time_to_base_h"]
-        )
+        or milestones_out_of_order
         or (d.get("ultimate_vacuum_mbar") is not None and d["ultimate_vacuum_mbar"] <= 0)
         or d["n_points"] <= 0
     ):
@@ -146,6 +169,7 @@ def build_fingerprint(
         time_to_50K_h=time_to_50K_h,
         ultimate_vacuum_mbar=ultimate_vacuum_mbar,
         n_points=len(t_hours),
+        base_threshold_K=float(base_threshold_K),
     )
 
 
@@ -156,6 +180,8 @@ def build_fingerprint(
 
 def save_fingerprint(fp: CooldownFingerprint, history_dir: Path) -> Path:
     """Atomically persist ``fp`` as ``<history_dir>/<id>.json``; return path."""
+    if not _is_safe_fingerprint_id(fp.fingerprint_id):
+        raise ValueError("invalid fingerprint id")
     history_dir = Path(history_dir)
     path = history_dir / f"{fp.fingerprint_id}.json"
     atomic_write_text(path, json.dumps(fp.to_dict(), indent=2, ensure_ascii=False))
@@ -170,11 +196,15 @@ def load_fingerprint(path: Path) -> CooldownFingerprint:
 def list_fingerprints(history_dir: Path) -> tuple[list[CooldownFingerprint], int]:
     """All fingerprints under ``history_dir`` (excludes the baseline pointer)."""
     history_dir = Path(history_dir)
-    if not history_dir.exists():
-        return [], 0
+    try:
+        if not history_dir.exists():
+            return [], 0
+        paths = sorted(history_dir.glob("*.json"))
+    except OSError:
+        return [], 1
     out: list[CooldownFingerprint] = []
     unreadable_files = 0
-    for p in sorted(history_dir.glob("*.json")):
+    for p in paths:
         if p.name == BASELINE_POINTER:
             continue
         try:
@@ -188,6 +218,8 @@ def list_fingerprints(history_dir: Path) -> tuple[list[CooldownFingerprint], int
 
 def set_baseline(fingerprint_id: str, history_dir: Path) -> None:
     """Pin ``fingerprint_id`` as the golden baseline via the pointer file."""
+    if not _is_safe_fingerprint_id(fingerprint_id):
+        raise ValueError("invalid fingerprint id")
     path = Path(history_dir) / BASELINE_POINTER
     atomic_write_text(path, json.dumps({"fingerprint_id": fingerprint_id}))
 
@@ -200,17 +232,15 @@ def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
     """
     pointer = Path(history_dir) / BASELINE_POINTER
     try:
-        if not pointer.exists():
-            return None, 0
         data = json.loads(pointer.read_text(encoding="utf-8"))
         fid = data.get("fingerprint_id")
+    except FileNotFoundError:
+        return None, 0
     except (OSError, ValueError, AttributeError):
         return None, 1
-    if not isinstance(fid, str) or not fid:
+    if not _is_safe_fingerprint_id(fid):
         return None, 1
     fp_path = Path(history_dir) / f"{fid}.json"
-    if not fp_path.exists():
-        return None, 1
     try:
         fingerprint = load_fingerprint(fp_path)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
