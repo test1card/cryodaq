@@ -107,6 +107,7 @@ logger = logging.getLogger(__name__)
 _MAX_EVENTS = 1000
 _MAX_PENDING_OPERATOR_TRANSITIONS = 1024
 _MAX_OPERATOR_TRANSITION_RECEIPTS = 1024
+_MAX_OPERATOR_STATE_BYTES = 4 * 1024 * 1024
 _OPERATOR_TRANSITION_RECEIPT_KEYS = frozenset(
     {
         "enabled",
@@ -534,7 +535,7 @@ class InterlockEngine:
                 f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
             )
 
-        operator_disableable_default = raw.get("operator_disableable", True)
+        operator_disableable_default = raw.get("operator_disableable", False)
         enabled_by_default = raw.get("enabled_by_default", True)
         if type(operator_disableable_default) is not bool or type(enabled_by_default) is not bool:
             raise InterlockConfigError(
@@ -1378,7 +1379,7 @@ class InterlockEngine:
         if not path.exists():
             self._write_operator_state({})
             return
-        if path.stat().st_size > 4 * 1024 * 1024:
+        if path.stat().st_size > _MAX_OPERATOR_STATE_BYTES:
             raise InterlockConfigError(f"interlock operator state at {path} exceeds its size bound")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1503,8 +1504,11 @@ class InterlockEngine:
             "interlocks": states,
             "updated_at": datetime.now(UTC).isoformat(),
         }
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+        if len(serialized.encode("utf-8")) > _MAX_OPERATOR_STATE_BYTES:
+            raise RuntimeError("interlock operator state exceeds its size bound")
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+        atomic_write_text(path, serialized)
 
     def get_state(self) -> dict[str, InterlockState]:
         """Вернуть текущее состояние всех зарегистрированных блокировок.

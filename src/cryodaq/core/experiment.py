@@ -2453,6 +2453,122 @@ class ExperimentManager:
         )
         return True
 
+    def _seed_disabled_interlock_boundary(
+        self,
+        *,
+        name: str,
+        disable_receipt: dict[str, Any],
+        payloads: dict[str, dict[str, Any]],
+        changed_experiments: set[str],
+    ) -> None:
+        """Carry one still-disabled guard into the current experiment."""
+        target_experiment_id = self.active_experiment_id
+        if target_experiment_id is None:
+            return
+        request_id = _interlock_receipt_request_id(disable_receipt)
+        commit_receipt = disable_receipt.get("commit_receipt")
+        source_experiment_id = disable_receipt.get("experiment_id")
+        if (
+            request_id is None
+            or type(commit_receipt) is not dict
+            or source_experiment_id != commit_receipt.get("experiment_id")
+            or (source_experiment_id is not None and not _is_lower_hex(source_experiment_id, 12))
+        ):
+            raise RuntimeError("disabled interlock boundary receipt is invalid")
+
+        target_payload = payloads.setdefault(
+            target_experiment_id,
+            self._read_metadata_payload(target_experiment_id),
+        )
+        target_experiment = target_payload.get("experiment")
+        target_started_at = target_experiment.get("start_time") if type(target_experiment) is dict else None
+        if _parse_time(target_started_at) is None:
+            raise RuntimeError("interlock target experiment start time is invalid")
+        target_intervals = list(target_payload.get("interlock_disable_intervals") or [])
+        if not all(type(item) is dict for item in target_intervals):
+            raise RuntimeError("interlock disable provenance is invalid")
+        matching_target = next(
+            (
+                interval
+                for interval in reversed(target_intervals)
+                if interval.get("interlock_name") == name
+                and _interlock_receipt_request_id(interval.get("disable_receipt")) == request_id
+            ),
+            None,
+        )
+        if matching_target is not None:
+            if not _interlock_interval_is_open(matching_target):
+                raise RuntimeError("disabled interlock has no open interval in the active experiment")
+            return
+
+        source_interval: dict[str, Any] | None = None
+        visited: set[str] = set()
+        while source_experiment_id is not None and source_experiment_id != target_experiment_id:
+            if source_experiment_id in visited:
+                raise RuntimeError("interlock disable continuation contains a cycle")
+            visited.add(source_experiment_id)
+            source_path = self._metadata_path(source_experiment_id)
+            if not source_path.exists():
+                raise RuntimeError("prior interlock transition experiment metadata is unavailable")
+            source_payload = payloads.setdefault(
+                source_experiment_id,
+                self._read_metadata_payload(source_experiment_id),
+            )
+            source_intervals = list(source_payload.get("interlock_disable_intervals") or [])
+            if not all(type(item) is dict for item in source_intervals):
+                raise RuntimeError("interlock disable provenance is invalid")
+            source_interval = next(
+                (
+                    interval
+                    for interval in reversed(source_intervals)
+                    if interval.get("interlock_name") == name
+                    and _interlock_receipt_request_id(interval.get("disable_receipt")) == request_id
+                ),
+                None,
+            )
+            if source_interval is None:
+                raise RuntimeError("prior interlock disable interval is unavailable")
+            continued_in = source_interval.get("continued_in_experiment_id")
+            if continued_in is None:
+                source_experiment = source_payload.get("experiment")
+                source_ended_at = source_experiment.get("end_time") if type(source_experiment) is dict else None
+                if _parse_time(source_ended_at) is None:
+                    raise RuntimeError("prior interlock transition experiment was not finalized")
+                source_interval["closed_at"] = source_ended_at
+                source_interval["close_reason"] = "experiment_boundary"
+                source_interval["continued_in_experiment_id"] = target_experiment_id
+                source_payload["interlock_disable_intervals"] = source_intervals
+                changed_experiments.add(source_experiment_id)
+                break
+            if not _is_lower_hex(continued_in, 12):
+                raise RuntimeError("interlock disable continuation identity is invalid")
+            source_experiment_id = continued_in
+
+        if source_experiment_id == target_experiment_id:
+            raise RuntimeError("active interlock disable interval is unavailable")
+
+        carried_receipt = (
+            source_interval.get("disable_receipt") if source_interval is not None else dict(commit_receipt)
+        )
+        target_intervals.append(
+            {
+                "interlock_name": name,
+                "disabled_at": target_started_at,
+                "disabled_by": disable_receipt.get("operator"),
+                "disable_notice": disable_receipt.get("notice"),
+                "disable_receipt": dict(carried_receipt or {}),
+                "reenabled_at": None,
+                "reenabled_by": None,
+                "reenable_notice": None,
+                "reenable_receipt": None,
+                "closed_at": None,
+                "close_reason": None,
+                "continued_from_experiment_id": source_experiment_id,
+            }
+        )
+        target_payload["interlock_disable_intervals"] = target_intervals
+        changed_experiments.add(target_experiment_id)
+
     @_serialized_lifecycle_mutation
     def sync_interlock_operator_provenance(self, states: list[dict[str, Any]]) -> bool:
         """Reconcile pending toggles into the exact experiments that logged them."""
@@ -2637,6 +2753,16 @@ class ExperimentManager:
                     intervals.append(carried_interval)
                     changed_experiments.add(experiment_id)
                 payload["interlock_disable_intervals"] = intervals
+            if state.get("enabled") is False:
+                disable_receipt = state.get("disable_receipt")
+                if type(disable_receipt) is not dict:
+                    raise RuntimeError("disabled interlock state lacks its disable receipt")
+                self._seed_disabled_interlock_boundary(
+                    name=name,
+                    disable_receipt=disable_receipt,
+                    payloads=payloads,
+                    changed_experiments=changed_experiments,
+                )
         if not changed_experiments:
             return False
         from cryodaq.core.atomic_write import atomic_write_text

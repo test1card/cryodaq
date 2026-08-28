@@ -137,6 +137,27 @@ def test_tracked_policy_makes_every_row_optional_and_enabled_by_default() -> Non
     assert any(state["action"] == "emergency_off" for state in states)
 
 
+def test_legacy_policy_without_disable_authority_remains_non_disableable() -> None:
+    config_path = Path("config/interlocks.yaml")
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload.pop("operator_disableable")
+    instruments = {binding["instrument_id"] for row in payload["interlocks"] for binding in row["channel_bindings"]}
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock(), "stop_source": AsyncMock()},
+    )
+
+    engine.load_config(
+        config_path,
+        snapshot=yaml.safe_dump(payload, allow_unicode=True).encode("utf-8"),
+        poll_intervals_s_by_instrument={instrument_id: 2.0 for instrument_id in instruments},
+    )
+
+    assert all(state["operator_disableable"] is False for state in engine.get_operator_state())
+    with pytest.raises(PermissionError):
+        engine.prepare_operator_toggle("overheat_cryostat", enabled=False)
+
+
 @pytest.mark.asyncio
 async def test_disabled_emergency_interlock_still_evaluates_warns_and_suppresses_action(
     workspace_runtime_root: Path,
@@ -931,6 +952,94 @@ async def test_disabled_interval_is_split_when_experiment_ownership_changes(
 
 
 @pytest.mark.asyncio
+async def test_disabled_interval_is_seeded_at_each_boundary_without_reenable(
+    workspace_runtime_root: Path,
+) -> None:
+    writer = _ReceiptWriter()
+    manager = ExperimentManager(
+        workspace_runtime_root / "experiment",
+        Path("config/instruments.yaml"),
+        templates_dir=Path("config/experiment_templates"),
+    )
+    experiment_a = manager.start_experiment(
+        "Эксперимент A",
+        "Иван Петров",
+        template_id="custom",
+        start_time=datetime(2026, 8, 28, 10, 0, tzinfo=UTC),
+    )
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=workspace_runtime_root / "interlock_operator_state.json",
+    )
+    engine.add_condition(_condition())
+    context = _command_context(
+        manager=manager,
+        writer=writer,
+        broker=_RequiredPublisher(),
+        interlock_engine=engine,
+    )
+    first_boundary = datetime(2026, 8, 28, 12, 30, tzinfo=UTC)
+    second_boundary = datetime(2026, 8, 28, 13, 30, tzinfo=UTC)
+    try:
+        disabled = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "interlock_set_enabled",
+                    "interlock_name": "overheat_cryostat",
+                    "enabled": False,
+                    "operator": "Иван Петров",
+                    "request_id": "0" * 32,
+                }
+            ),
+            context=context,
+        )
+        assert disabled["ok"] is True
+
+        manager.finalize_experiment(experiment_a, end_time=first_boundary)
+        experiment_b = manager.start_experiment(
+            "Эксперимент B",
+            "Иван Петров",
+            template_id="custom",
+            start_time=first_boundary,
+        )
+        assert manager.sync_interlock_operator_provenance(engine.get_operator_state()) is True
+
+        manager.finalize_experiment(experiment_b, end_time=second_boundary)
+        experiment_c = manager.start_experiment(
+            "Эксперимент C",
+            "Иван Петров",
+            template_id="custom",
+            start_time=second_boundary,
+        )
+        assert manager.sync_interlock_operator_provenance(engine.get_operator_state()) is True
+
+        metadata_by_id = {
+            experiment_id: json.loads(
+                (workspace_runtime_root / "experiment" / "experiments" / experiment_id / "metadata.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            for experiment_id in (experiment_a, experiment_b, experiment_c)
+        }
+        interval_a = metadata_by_id[experiment_a]["interlock_disable_intervals"][0]
+        interval_b = metadata_by_id[experiment_b]["interlock_disable_intervals"][0]
+        interval_c = metadata_by_id[experiment_c]["interlock_disable_intervals"][0]
+        assert interval_a["closed_at"] == first_boundary.isoformat()
+        assert interval_a["continued_in_experiment_id"] == experiment_b
+        assert interval_b["disabled_at"] == first_boundary.isoformat()
+        assert interval_b["closed_at"] == second_boundary.isoformat()
+        assert interval_b["continued_from_experiment_id"] == experiment_a
+        assert interval_b["continued_in_experiment_id"] == experiment_c
+        assert interval_c["disabled_at"] == second_boundary.isoformat()
+        assert interval_c["continued_from_experiment_id"] == experiment_b
+        assert interval_c["closed_at"] is None
+        assert interval_c["disable_receipt"] == interval_a["disable_receipt"]
+    finally:
+        context.experiment_commands_accepting = False
+
+
+@pytest.mark.asyncio
 async def test_experiment_boundary_split_recovers_from_pending_transition_journal(
     workspace_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1309,6 +1418,68 @@ async def test_unsettled_toggle_history_is_bounded_fail_closed(
 
     with pytest.raises(RuntimeError, match="provenance backlog is full"):
         engine.prepare_operator_toggle("overheat_cryostat", enabled=False)
+
+
+@pytest.mark.asyncio
+async def test_serialized_operator_journals_cannot_outgrow_the_restart_loader(
+    workspace_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.core.interlock as interlock_module
+
+    serialized_limit = 32 * 1024
+    monkeypatch.setattr(interlock_module, "_MAX_OPERATOR_STATE_BYTES", serialized_limit, raising=False)
+    state_path = workspace_runtime_root / "interlock_operator_state.json"
+    conditions = [
+        InterlockCondition(
+            name=f"guard_{index}",
+            description=f"Guard {index}",
+            channel_ids=frozenset({"cryostat/t1"}),
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+        )
+        for index in range(3)
+    ]
+    engine = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    for condition in conditions:
+        engine.add_condition(condition)
+
+    rejected_after: int | None = None
+    for index in range(128):
+        name = conditions[index % len(conditions)].name
+        enabled = index % 2 == 1
+        request_id = f"{index + 1:032x}"
+        try:
+            await engine.set_enabled(
+                name,
+                enabled=enabled,
+                operator="И" * 256,
+                changed_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+                request_id=request_id,
+                notice=engine.prepare_operator_toggle(name, enabled=enabled),
+                commit_receipt=_commit_receipt(request_id),
+            )
+        except RuntimeError as exc:
+            assert "size bound" in str(exc)
+            rejected_after = index
+            break
+
+    assert rejected_after is not None
+    assert state_path.stat().st_size <= serialized_limit
+
+    restarted = InterlockEngine(
+        broker=None,  # type: ignore[arg-type]
+        actions={"emergency_off": AsyncMock()},
+        state_path=state_path,
+    )
+    for condition in conditions:
+        restarted.add_condition(condition)
+    await restarted.restore_operator_state()
 
 
 def test_bottom_bar_lists_currently_disabled_interlocks() -> None:
