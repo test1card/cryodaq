@@ -117,7 +117,7 @@ from cryodaq.core.qualification import (
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
+from cryodaq.core.safety_manager import RunWarningRequirement, SafetyConfigError, SafetyManager
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.core.scheduler import (
     InstrumentConfig,
@@ -217,6 +217,11 @@ from cryodaq.storage.sqlite_writer import (
 )
 
 logger = logging.getLogger("cryodaq.engine")
+
+_KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S = 1.0
+_KEITHLEY_WARNING_PERSISTENCE_NOTICE = (
+    "Долговременная запись выбора оператора после предупреждения Safety не подтверждена; запрос Start продолжен."
+)
 
 # Compatibility re-exports for tests and callers that import moved helpers
 # from ``cryodaq.engine``. Referenced here so linters keep the imports.
@@ -462,10 +467,134 @@ def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     return value
 
 
+def _keithley_warning_choice(raw: object) -> tuple[str, str] | None:
+    """Validate the exact GUI receipt request without interpreting warning prose."""
+
+    if raw is None:
+        return None
+    if type(raw) is not dict or set(raw) != {"schema", "request_id", "warning", "choice"}:
+        raise ValueError("warning choice must use the exact supported schema")
+    if raw.get("schema") != "cryodaq.keithley_warning_choice.v1" or raw.get("choice") != "start":
+        raise ValueError("warning choice schema or decision is invalid")
+    request_id = raw.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(character not in "0123456789abcdef" for character in request_id)
+    ):
+        raise ValueError("warning choice request identity is invalid")
+    warning = raw.get("warning")
+    if (
+        type(warning) is not str
+        or not warning
+        or warning != warning.strip()
+        or not warning.isprintable()
+        or len(warning.encode("utf-8")) > 2048
+    ):
+        raise ValueError("warning choice text is invalid")
+    return request_id, warning
+
+
+async def _persist_keithley_warning_choice(
+    *,
+    writer: Any,
+    experiment_id: str | None,
+    channel: str,
+    request_id: str,
+    warning: str,
+) -> dict[str, Any]:
+    payload = {
+        "channel": channel,
+        "choice": "start",
+        "event": "keithley_start_with_safety_warning",
+        "warning": warning,
+    }
+    message = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    fingerprint = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    commit_task = asyncio.create_task(
+        writer.append_operator_log_idempotent(
+            message=message,
+            author="operator",
+            source="operator",
+            experiment_id=experiment_id,
+            tags=("keithley", "safety_warning", "operator_choice"),
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        ),
+        name=f"keithley_warning_choice_{request_id}",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {commit_task},
+            timeout=_KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S,
+        )
+    except BaseException:
+        commit_task.cancel()
+        commit_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None,
+        )
+        raise
+    if not done:
+        commit_task.cancel()
+        commit_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None,
+        )
+        return {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": request_id,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": "persistence_timeout",
+        }
+    commit = commit_task.result()
+    if (
+        type(commit) is not OperatorLogCommitResult
+        or type(commit.entry) is not OperatorLogEntry
+        or type(commit.entry.id) is not int
+        or commit.entry.id <= 0
+        or type(commit.replayed) is not bool
+        or commit.entry.message != message
+        or commit.entry.author != "operator"
+        or commit.entry.source != "operator"
+        or commit.entry.experiment_id != experiment_id
+        or commit.entry.tags != ("keithley", "safety_warning", "operator_choice")
+    ):
+        raise RuntimeError("warning choice persistence returned an invalid receipt")
+    return {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": request_id,
+        "committed": True,
+        "operator_log_id": commit.entry.id,
+        "replayed": commit.replayed,
+        "error_code": None,
+    }
+
+
+def _unconfirmed_keithley_warning_receipt(request_id: str, error_code: str) -> dict[str, Any]:
+    return {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": request_id,
+        "committed": False,
+        "operator_log_id": None,
+        "replayed": None,
+        "error_code": error_code,
+    }
+
+
 async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
     safety_manager: SafetyManager,
+    *,
+    command_warning_requirement: RunWarningRequirement | None = None,
+    operator_warning_receipted: bool = False,
 ) -> dict[str, Any]:
     """Dispatch channel-scoped Keithley commands to SafetyManager."""
     channel = cmd.get("channel")
@@ -483,7 +612,13 @@ async def _run_keithley_command(
                 "error_code": "keithley_parameters_invalid",
                 "error": "Keithley command parameters are invalid.",
             }
-        return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        warning_kwargs: dict[str, Any] = {}
+        if command_warning_requirement is not None:
+            warning_kwargs = {
+                "command_warning_requirement": command_warning_requirement,
+                "operator_warning_receipted": operator_warning_receipted,
+            }
+        return await safety_manager.request_run(p, v, i, channel=smu_channel, **warning_kwargs)
 
     if action == "keithley_stop":
         smu_channel = normalize_smu_channel(channel)
@@ -5235,11 +5370,100 @@ async def _handle_gui_command(
             "keithley_set_target",
             "keithley_set_limits",
         }:
-            result = await _run_keithley_command(action, cmd, safety_manager)
+            warning_receipt = None
+            command_warning_requirement = None
+            required_warning = None
+            if action == "keithley_start":
+                prepare_warning = getattr(safety_manager, "prepare_request_run_warning", None)
+                if not callable(prepare_warning):
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_authority_unavailable",
+                        "error": "Keithley Start was not sent because Safety warning authority is unavailable.",
+                    }
+                command_warning_requirement = prepare_warning()
+                if type(command_warning_requirement) is not RunWarningRequirement:
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_authority_unavailable",
+                        "error": "Keithley Start was not sent because Safety warning authority is invalid.",
+                    }
+                required_warning = command_warning_requirement.warning
+            raw_warning_choice = cmd.get("operator_warning_choice")
+            try:
+                warning_choice = _keithley_warning_choice(raw_warning_choice)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_invalid",
+                    "error": "Keithley warning choice receipt request is invalid.",
+                }
+            if action == "keithley_start" and required_warning is not None and warning_choice is None:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_required",
+                    "error": "Keithley Start was not sent because its Safety warning choice was not recorded.",
+                }
+            if warning_choice is not None and warning_choice[1] != required_warning:
+                return {
+                    "ok": False,
+                    "error_code": "keithley_warning_choice_invalid",
+                    "error": "Keithley warning choice does not match current Safety authority.",
+                }
+            if warning_choice is not None:
+                if action != "keithley_start":
+                    return {
+                        "ok": False,
+                        "error_code": "keithley_warning_choice_invalid",
+                        "error": "Keithley warning choice is valid only for Start.",
+                    }
+                request_id, warning = warning_choice
+                if writer is None:
+                    warning_receipt = _unconfirmed_keithley_warning_receipt(
+                        request_id,
+                        "persistence_unavailable",
+                    )
+                else:
+                    try:
+                        warning_receipt = await _persist_keithley_warning_choice(
+                            writer=writer,
+                            experiment_id=getattr(experiment_manager, "active_experiment_id", None),
+                            channel=normalize_smu_channel(cmd.get("channel")),
+                            request_id=request_id,
+                            warning=warning,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Keithley warning-choice persistence failed: exception=%s",
+                            type(exc).__name__,
+                        )
+                        warning_receipt = _unconfirmed_keithley_warning_receipt(
+                            request_id,
+                            "persistence_failed",
+                        )
+                if warning_receipt["committed"] is False:
+                    logger.warning(
+                        "Keithley warning-choice persistence was not confirmed: error_code=%s",
+                        warning_receipt["error_code"],
+                    )
+            result = await _run_keithley_command(
+                action,
+                cmd,
+                safety_manager,
+                command_warning_requirement=command_warning_requirement,
+                # The command boundary receipts the validated operator choice;
+                # the nested receipt separately states whether persistence confirmed.
+                operator_warning_receipted=warning_choice is not None,
+            )
+            if warning_receipt is not None:
+                result = {**result, "operator_warning_receipt": warning_receipt}
+                if warning_receipt["committed"] is False:
+                    result = {**result, "warning": _KEITHLEY_WARNING_PERSISTENCE_NOTICE}
             if result.get("ok"):
                 ch = cmd.get("channel", "?")
                 if action == "keithley_start":
-                    await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
+                    if warning_receipt is None or warning_receipt["committed"] is True:
+                        await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
                 elif action == "keithley_stop":
                     await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
                 elif action == "keithley_emergency_off":

@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.broker import PublisherAuthority
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
@@ -43,6 +44,7 @@ from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
 
 logger = logging.getLogger(__name__)
 
+SAFETY_MANAGER_SOURCE_STATE_PUBLISHER = "safety_manager_source_state_v1"
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
@@ -85,6 +87,15 @@ class _RunAuthorityRevocation:
     reason: str
     full_shutdown: bool
     fault_required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RunWarningRequirement:
+    """Safety-owner cut that the command boundary must receipt before RUN."""
+
+    revision: int
+    warning: str | None
+    _authority: object = field(repr=False, compare=False)
 
 
 @dataclass
@@ -178,6 +189,16 @@ class SafetyManager:
         )
         self._reviewed_source_generation: _ReviewedSourceGeneration | None = None
         self._data_broker = data_broker
+        self._source_state_publication_authority: PublisherAuthority | None = None
+        if data_broker is not None:
+            reserve_publisher = getattr(data_broker, "reserve_publisher", None)
+            if not callable(reserve_publisher):
+                raise TypeError("data_broker must reserve SafetyManager source-state channels")
+            self._source_state_publication_authority = reserve_publisher(
+                SAFETY_MANAGER_SOURCE_STATE_PUBLISHER,
+                tuple(f"analytics/keithley_channel_state/{channel}" for channel in SMU_CHANNELS),
+            )
+        self._run_warning_authority = object()
         self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
@@ -927,6 +948,15 @@ class SafetyManager:
         self._observe_terminal_safety_children()
         return self._operator_safety_snapshot
 
+    def prepare_request_run_warning(self) -> RunWarningRequirement:
+        """Bind a command-side warning decision to the current Safety cut."""
+
+        snapshot = self.snapshot_operator_safety()
+        warning = None
+        if snapshot.readiness is ReadinessTruth.BLOCKED:
+            warning = "; ".join(dict.fromkeys(blocker.operator_text for blocker in snapshot.blockers))
+        return RunWarningRequirement(snapshot.revision, warning, self._run_warning_authority)
+
     def record_reviewed_source_connected(self, *, verified_off: bool) -> None:
         """Commit explicit simulator-only connection evidence.
 
@@ -1120,11 +1150,41 @@ class SafetyManager:
         i_comp: float,
         *,
         channel: str | None = None,
+        command_warning_requirement: RunWarningRequirement | None = None,
+        operator_warning_receipted: bool = False,
     ) -> dict[str, Any]:
         start_abort_generation = self._abort_generation
         start_full_abort_generation = self._full_abort_generation
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
+
+            if command_warning_requirement is not None:
+                current_warning = None
+                if self._operator_safety_snapshot.readiness is ReadinessTruth.BLOCKED:
+                    current_warning = "; ".join(
+                        dict.fromkeys(blocker.operator_text for blocker in self._operator_safety_snapshot.blockers)
+                    )
+                if (
+                    type(command_warning_requirement) is not RunWarningRequirement
+                    or command_warning_requirement._authority is not self._run_warning_authority
+                    or command_warning_requirement.revision != self._operator_safety_snapshot.revision
+                    or command_warning_requirement.warning != current_warning
+                ):
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error_code": "keithley_warning_requirement_changed",
+                        "error": "Safety warning authority changed before Start dispatch.",
+                    }
+                if current_warning is not None and operator_warning_receipted is not True:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error_code": "keithley_warning_choice_required",
+                        "error": "Keithley Start requires a persisted operator warning choice.",
+                    }
 
             if self._state == SafetyState.FAULT_LATCHED:
                 return {
@@ -3021,7 +3081,10 @@ class SafetyManager:
                 },
             )
             try:
-                await self._data_broker.publish(reading)
+                await self._data_broker.publish(
+                    reading,
+                    publisher_authority=self._source_state_publication_authority,
+                )
             except Exception as exc:
                 logger.warning("Failed to publish Keithley channel state for %s: %s", smu_channel, exc)
 

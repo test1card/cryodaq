@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -21,9 +22,11 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell import main_window_v2 as main_window_module
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.shell.overlays.keithley_panel import SafetyGateCause
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.operator_snapshot import (
@@ -39,6 +42,7 @@ from cryodaq.operator_snapshot import (
     OperatorSnapshot,
     PlantHealthItem,
     PlantHealthSummary,
+    ReadinessBlocker,
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
@@ -96,14 +100,18 @@ def _source_state_reading(
     state: str,
     *,
     observed_at: datetime | None = None,
+    authoritative: bool = True,
 ) -> Reading:
+    metadata = {"state": state}
+    if authoritative:
+        metadata[PUBLISHER_AUTHORITY_METADATA_KEY] = "safety_manager_source_state_v1"
     return Reading(
         timestamp=observed_at or datetime.now(UTC),
         instrument_id="safety_manager",
         channel=f"analytics/keithley_channel_state/{channel}",
         value=0.0,
         unit="",
-        metadata={"state": state},
+        metadata=metadata,
     )
 
 
@@ -205,6 +213,50 @@ def _typed_ready_snapshot(
     )
 
 
+def _typed_interlock_snapshot(*, revision: int = 43) -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot(revision=revision)
+    status = SummaryStatus(
+        OperatorPresentationState.CAUTION,
+        1.0,
+        0.0,
+        ("readiness_not_ready",),
+        "Backend readiness authority",
+    )
+    readiness = ReadinessSummary(
+        snapshot.cut,
+        status,
+        ReadinessTruth.BLOCKED,
+        (
+            ReadinessBlocker(
+                "safety_state_safe_off",
+                OperatorPresentationState.CAUTION,
+                "Interlock stop_source: detector_warmup",
+                "Review the active interlock before choosing Start",
+            ),
+        ),
+        SafetyLifecycle.SAFE_OFF,
+    )
+    return replace(snapshot, readiness=readiness)
+
+
+def _typed_unknown_snapshot(*, revision: int = 44) -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot(revision=revision)
+    readiness = ReadinessSummary(
+        snapshot.cut,
+        SummaryStatus(
+            OperatorPresentationState.CAUTION,
+            1.0,
+            0.0,
+            ("readiness_not_ready",),
+            "Backend readiness authority",
+        ),
+        ReadinessTruth.UNKNOWN,
+        (),
+        SafetyLifecycle.UNKNOWN,
+    )
+    return replace(snapshot, readiness=readiness)
+
+
 # ----------------------------------------------------------------------
 # Host wiring — connection state
 # ----------------------------------------------------------------------
@@ -261,6 +313,197 @@ def test_keithley_overlay_receives_connection_state_via_tick():
 # ----------------------------------------------------------------------
 # Host wiring — safety state
 # ----------------------------------------------------------------------
+
+
+def test_current_typed_interlock_is_warning_only_on_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+        assert w._keithley_panel is None
+
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+        panel._update_both_buttons_enablement()
+
+        assert w._current_keithley_safety_gate()[0] is False
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled()
+        assert panel._smua_block._p_spin.isEnabled()
+        assert panel._smua_block._v_spin.isEnabled()
+        assert panel._smua_block._i_spin.isEnabled()
+        assert panel._smua_block._emergency_btn.isEnabled()
+        assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+        assert "заблокировано" not in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_unknown_typed_safety_authority_disables_start_and_parameters(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_unknown_snapshot())
+
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert not panel._smua_block._p_spin.isEnabled()
+        assert not panel._smua_block._v_spin.isEnabled()
+        assert not panel._smua_block._i_spin.isEnabled()
+        assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_transport_stale_typed_safety_stays_unavailable_on_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        store.accept_snapshot(_typed_ready_snapshot())
+        stale = store.observe_transport(connected=True, transport_age_s=11.0, stale_after_s=10.0)
+        w.render_operator_snapshot(stale)
+        assert w._keithley_panel is None
+
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert not panel._smua_block._p_spin.isEnabled()
+        assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_composer_shaped_interlock_uses_blocker_text_in_warning_and_start_receipt(
+    live_zmq_bridge: ZmqBridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    captured: list[dict] = []
+
+    class _FakeSignal:
+        def connect(self, _slot) -> None:  # noqa: ANN001
+            pass
+
+    class _FakeWorker:
+        def __init__(self, command: dict, parent=None) -> None:  # noqa: ANN001
+            captured.append(command)
+            self.finished = _FakeSignal()
+
+        def start(self) -> None:
+            pass
+
+    import cryodaq.gui.shell.overlays.keithley_panel as panel_module
+
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _FakeWorker)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+        panel._smua_block._start_btn.click()
+
+        actual_blocker = "Interlock stop_source: detector_warmup"
+        assert actual_blocker in panel._gate_reason_label.text()
+        assert "Backend readiness authority" not in panel._gate_reason_label.text()
+        assert len(captured) == 1
+        assert captured[0]["operator_warning_choice"]["warning"] == actual_blocker
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize(
+    ("active_experiment", "start_enabled"),
+    (("exp-1", True), ("different-experiment", False)),
+)
+def test_typed_interlock_only_warns_for_current_experiment_binding(
+    active_experiment: str,
+    start_enabled: bool,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": active_experiment}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+
+        w.render_operator_snapshot(_typed_interlock_snapshot())
+
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled() is start_enabled
+        if start_enabled:
+            assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        else:
+            assert "Управление заблокировано" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_current_safe_off_telemetry_keeps_interlock_as_warning(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+
+        w._dispatch_reading(
+            _safety_reading(
+                SafetyLifecycle.SAFE_OFF.value,
+                "Interlock stop_source: detector_warmup",
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+
+        assert w._current_keithley_safety_gate()[0] is False
+        assert panel._safety_ready is False
+        assert panel._smua_block._start_btn.isEnabled()
+        assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+        assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
 
 
 def test_keithley_overlay_receives_safety_state_via_dispatch():
@@ -1274,29 +1517,43 @@ def test_cached_replay_cannot_reconcile_unknown_start_outcome(
         _stop_timers(w)
 
 
-def test_keithley_overlay_channel_state_replay_cleared_on_lifecycle_reset() -> None:
+def test_keithley_overlay_channel_state_replay_cleared_on_lifecycle_reset(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    w = MainWindowV2()
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        w._on_experiment_status_received(
-            {
-                "active_experiment": {"experiment_id": "exp-old"},
-                "phases": [],
-            }
-        )
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._last_reading_time = time.monotonic()
         assert w._keithley_panel is None
         w._dispatch_reading(_source_state_reading("smua", "off"))
+        assert w._keithley_channel_state_snapshot["smua"].metadata["state"] == "off"
         assert w._keithley_panel is None
 
-        w._on_experiment_status_received(
-            {
-                "active_experiment": {"experiment_id": "exp-new"},
-                "phases": [],
-            }
-        )
+        w.invalidate_engine_producer()
+        assert w._keithley_channel_state_snapshot == {}
         w._ensure_overlay("source")
 
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_passive_source_state_packet_cannot_seed_lazy_start_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._last_reading_time = time.monotonic()
+        w._dispatch_reading(_source_state_reading("smua", "off", authoritative=False))
+
+        assert w._keithley_channel_state_snapshot == {}
+        w._ensure_overlay("source")
         assert w._keithley_panel is not None
         block = w._keithley_panel._smua_block
         assert block._channel_state == "unknown"

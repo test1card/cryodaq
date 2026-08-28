@@ -21,7 +21,7 @@ Public API (MainWindowV2 push points):
 - ``on_reading(reading)``  — route a single Reading into the overlay
 - ``replay_source_state(key, reading)`` — present retained state without freshness credit
 - ``set_connected(ok)``    — mark Keithley connection state
-- ``set_safety_ready(ok, reason="")`` — toggle safety gate
+- ``set_safety_ready(ok, reason="", cause=...)`` — apply the typed safety gate
 
 Out of scope (tracked as follow-ups):
 - FU.4: K4 custom-command popup
@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import logging
 import math
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable
+from enum import StrEnum
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -91,6 +93,13 @@ _STATE_LABELS: dict[str, str] = {
     "on": "ВКЛ",
     "fault": "АВАРИЯ",
 }
+
+
+class SafetyGateCause(StrEnum):
+    """Structured distinction between missing authority and a current condition."""
+
+    AUTHORITY_UNAVAILABLE = "authority_unavailable"
+    AUTHORITATIVE_NOT_READY = "authoritative_not_ready"
 
 
 def _format_voltage(value: float) -> str:
@@ -242,6 +251,8 @@ class _SmuChannelBlock(QFrame):
         self._last_confirmed_state: str | None = None
         self._connected: bool = False
         self._safety_ready: bool = False
+        self._safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
+        self._safety_warning_reason = ""
         self._read_only: bool = False
         self._connection_generation = 0
         self._source_observation_generation = 0
@@ -583,15 +594,21 @@ class _SmuChannelBlock(QFrame):
         p = float(self._p_spin.value())
         v = float(self._v_spin.value())
         i = float(self._i_spin.value())
-        dispatched = self._dispatch_command(
-            {
-                "cmd": "keithley_start",
-                "channel": self._key,
-                "p_target": p,
-                "v_comp": v,
-                "i_comp": i,
+        command: dict[str, object] = {
+            "cmd": "keithley_start",
+            "channel": self._key,
+            "p_target": p,
+            "v_comp": v,
+            "i_comp": i,
+        }
+        if not self._safety_ready and self._safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY:
+            command["operator_warning_choice"] = {
+                "schema": "cryodaq.keithley_warning_choice.v1",
+                "request_id": secrets.token_hex(16),
+                "warning": self._safety_warning_reason,
+                "choice": "start",
             }
-        )
+        dispatched = self._dispatch_command(command)
         if dispatched:
             self.channel_start_requested.emit(self._key, p, v, i)
         return dispatched
@@ -735,7 +752,11 @@ class _SmuChannelBlock(QFrame):
             self.command_finished.emit(self._key, token, command_name, "unknown", error)
             return
 
-        error = str(result.get("error") or "") if isinstance(result, dict) else "некорректный ответ Engine"
+        error = (
+            str(result.get("error") or result.get("warning") or "")
+            if isinstance(result, dict)
+            else "некорректный ответ Engine"
+        )
         if isinstance(result, dict) and result.get("ok") is True:
             outcome = "ok"
         elif self._result_outcome_unknown(result):
@@ -864,9 +885,19 @@ class _SmuChannelBlock(QFrame):
             self._apply_state_visuals()
         self._update_control_enablement()
 
-    def set_safety_ready(self, ready: bool) -> None:
+    def set_safety_ready(
+        self,
+        ready: bool,
+        *,
+        cause: SafetyGateCause = SafetyGateCause.AUTHORITY_UNAVAILABLE,
+        reason: str = "",
+    ) -> None:
+        if type(cause) is not SafetyGateCause:
+            raise TypeError("cause must be a SafetyGateCause")
         self._safety_observation_revision += 1
         self._safety_ready = bool(ready)
+        self._safety_gate_cause = cause
+        self._safety_warning_reason = reason.strip()
         self._update_control_enablement()
         self._maybe_reconcile_unknown_outcome()
 
@@ -886,7 +917,7 @@ class _SmuChannelBlock(QFrame):
     def _update_control_enablement(self) -> None:
         interactive_ok = (
             self._connected
-            and self._safety_ready
+            and (self._safety_ready or self._safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY)
             and not self._read_only
             and self._unknown_outcome_requires is None
             and self._normal_pending_token is None
@@ -953,7 +984,7 @@ class _SmuChannelBlock(QFrame):
             return "предыдущая команда имеет неизвестный исход; нужна свежая сверка state и Safety"
         if self._normal_pending_token is not None:
             return "для канала уже выполняется команда"
-        if not self._safety_ready:
+        if not self._safety_ready and self._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE:
             return "нет свежего разрешения Safety"
         required_state = "off" if command_name == "keithley_start" else "on"
         if command_name not in {
@@ -1076,6 +1107,8 @@ class KeithleyPanel(QWidget):
         super().__init__(parent)
         self._connected: bool = False
         self._safety_ready: bool = False
+        self._safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
+        self._safety_reason = ""
         self._read_only: bool = False
         self._pending_commands: dict[tuple[str, int], str] = {}
         self._unresolved_outcomes: dict[str, str] = {}
@@ -1301,6 +1334,14 @@ class KeithleyPanel(QWidget):
         if self._command_error_latched or self._unresolved_outcomes:
             self._update_both_buttons_enablement()
             return
+        if error.strip():
+            self._set_banner(
+                f"{description}: Engine подтвердил выполнение. {error.strip()}",
+                theme.STATUS_CAUTION,
+                auto_clear=False,
+            )
+            self._update_both_buttons_enablement()
+            return
         if self._pending_commands:
             self._set_banner(
                 f"Engine подтвердил часть команд; ожидается ответ: {len(self._pending_commands)}.",
@@ -1423,7 +1464,15 @@ class KeithleyPanel(QWidget):
                 state = str(reading.metadata.get("state", "unknown"))
                 block.apply_state(
                     state,
-                    source_observation_revision=reading.metadata.get("source_observation_revision"),
+                    # A producer that stamps no revision has still OBSERVED
+                    # something.  Absence means "unspecified", not "invalid":
+                    # `.get()` returning None would fall through both the
+                    # sentinel and the int branch below, so a genuine new
+                    # observation could never reconcile an unknown outcome and
+                    # the operator's controls would stay latched forever.
+                    source_observation_revision=reading.metadata.get(
+                        "source_observation_revision", _SOURCE_OBSERVATION_UNSPECIFIED
+                    ),
                 )
                 self._update_both_buttons_enablement()
             return
@@ -1465,22 +1514,46 @@ class KeithleyPanel(QWidget):
             block.set_connected(connected)
         self._update_both_buttons_enablement()
 
-    def set_safety_ready(self, ready: bool, reason: str = "") -> None:
-        self._safety_ready = ready
+    def set_safety_ready(
+        self,
+        ready: bool,
+        reason: str = "",
+        *,
+        cause: SafetyGateCause = SafetyGateCause.AUTHORITY_UNAVAILABLE,
+    ) -> None:
+        if type(cause) is not SafetyGateCause:
+            raise TypeError("cause must be a SafetyGateCause")
+        self._safety_ready = bool(ready)
+        self._safety_gate_cause = cause
+        self._safety_reason = reason.strip()
+        if not self._safety_ready and cause is SafetyGateCause.AUTHORITATIVE_NOT_READY and not self._safety_reason:
+            self._safety_reason = "Safety сообщает о действующем условии"
         for block in self._blocks.values():
-            block.set_safety_ready(ready)
+            block.set_safety_ready(ready, cause=cause, reason=self._safety_reason)
         if self._read_only:
             self._gate_reason_label.setText("Архивный повтор: управление источником недоступно")
             self._gate_reason_label.setVisible(True)
         elif not ready:
-            text = "Управление заблокировано"
-            if reason:
-                text = f"{text}: {reason}"
+            if cause is SafetyGateCause.AUTHORITATIVE_NOT_READY:
+                condition = self._safety_reason or "Safety сообщает о действующем условии"
+                text = (
+                    f"ПРЕДУПРЕЖДЕНИЕ Safety: {condition}. "
+                    "Условие может остановить работающий источник; "
+                    "Старт и параметры остаются доступны."
+                )
+            else:
+                text = "Управление заблокировано"
+                if self._safety_reason:
+                    text = f"{text}: {self._safety_reason}"
             self._gate_reason_label.setText(text)
+            self._gate_reason_label.setAccessibleName(text)
+            self._gate_reason_label.setAccessibleDescription(text)
             self._gate_reason_label.setVisible(True)
         else:
             self._gate_reason_label.setVisible(False)
             self._gate_reason_label.setText("")
+            self._gate_reason_label.setAccessibleName("")
+            self._gate_reason_label.setAccessibleDescription("")
         self._update_both_buttons_enablement()
 
     def set_read_only(self, read_only: bool) -> None:
@@ -1493,7 +1566,15 @@ class KeithleyPanel(QWidget):
             self._gate_reason_label.setText("Архивный повтор: управление источником недоступно")
             self._gate_reason_label.setVisible(True)
         elif not self._safety_ready:
-            self._gate_reason_label.setText("Управление заблокировано: нет авторитетных данных Safety")
+            if self._safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY:
+                condition = self._safety_reason or "Safety сообщает о действующем условии"
+                self._gate_reason_label.setText(
+                    f"ПРЕДУПРЕЖДЕНИЕ Safety: {condition}. "
+                    "Условие может остановить работающий источник; "
+                    "Старт и параметры остаются доступны."
+                )
+            else:
+                self._gate_reason_label.setText("Управление заблокировано: нет авторитетных данных Safety")
             self._gate_reason_label.setVisible(True)
         self._update_both_buttons_enablement()
 
