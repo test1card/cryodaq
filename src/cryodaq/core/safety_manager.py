@@ -3431,6 +3431,10 @@ class SafetyManager:
         if not self._safety_children_authoritative():
             return False, "Safety monitor/collector authority is unavailable"
 
+        disabled_interlocks = self._disabled_interlocks()
+        if disabled_interlocks:
+            return False, "Software interlock(s) disabled: " + ", ".join(disabled_interlocks)
+
         if self._keithley is not None and getattr(self._keithley, "watchdog_trip_pending", False) is True:
             return False, (
                 "Keithley watchdog has unconsumed prior-trip evidence — "

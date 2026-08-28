@@ -100,6 +100,20 @@ async def test_periodic_safety_publication_retries_disabled_state_after_delivery
     assert delivered.metadata["disabled_interlocks"] == ["overheat_cryostat"]
 
 
+@pytest.mark.asyncio
+async def test_disabled_software_interlock_blocks_later_source_energization() -> None:
+    manager, _broker = await _make_manager(mock=True)
+    manager.set_interlock_state_provider(lambda: ("overheat_cryostat",))
+    try:
+        result = await manager.request_run(1.0, 1.0, 0.01, channel="smua")
+
+        assert result["ok"] is False
+        assert result["state"] == "safe_off"
+        assert "overheat_cryostat" in result["error"]
+    finally:
+        await manager.stop()
+
+
 class _RunPublicationGate(DataBroker):
     """Real broker whose first committed RUN state has a controlled boundary."""
 

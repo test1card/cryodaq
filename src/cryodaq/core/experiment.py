@@ -2242,10 +2242,9 @@ class ExperimentManager:
         changed_at: str,
         notice: str,
         receipt: dict[str, Any],
+        expected_experiment_id: str | None,
     ) -> bool:
-        """Carry one software-interlock disable interval in the active run record."""
-        if self._active is None:
-            return False
+        """Carry one software-interlock interval in its logged experiment record."""
         if type(interlock_name) is not str or not interlock_name:
             raise ValueError("interlock_name must be non-empty")
         if type(enabled) is not bool:
@@ -2254,10 +2253,26 @@ class ExperimentManager:
             raise ValueError("operator must be non-empty")
         if _parse_time(changed_at) is None or type(notice) is not str or not notice:
             raise ValueError("interlock transition time and notice must be explicit")
-        if type(receipt) is not dict:
-            raise TypeError("interlock receipt must be a dict")
+        if type(receipt) is not dict or set(receipt) != {"entry", "commit_receipt"}:
+            raise TypeError("interlock receipt must contain the exact entry and commit receipt")
+        entry = receipt.get("entry")
+        commit_receipt = receipt.get("commit_receipt")
+        if type(entry) is not dict or type(commit_receipt) is not dict:
+            raise TypeError("interlock receipt identity is invalid")
+        if (
+            entry.get("experiment_id") != expected_experiment_id
+            or commit_receipt.get("experiment_id") != expected_experiment_id
+        ):
+            raise RuntimeError("interlock receipt experiment identity mismatch")
+        if expected_experiment_id is None:
+            return False
+        if not _is_lower_hex(expected_experiment_id, 12):
+            raise RuntimeError("interlock receipt experiment identity is invalid")
+        metadata_path = self._metadata_path(expected_experiment_id)
+        if not metadata_path.exists():
+            raise RuntimeError("interlock receipt experiment metadata is unavailable")
 
-        payload = self._read_metadata_payload(self._active.experiment_id)
+        payload = self._read_metadata_payload(expected_experiment_id)
         intervals = list(payload.get("interlock_disable_intervals") or [])
         if not all(type(item) is dict for item in intervals):
             raise RuntimeError("interlock disable provenance is invalid")
@@ -2290,22 +2305,16 @@ class ExperimentManager:
         from cryodaq.core.atomic_write import atomic_write_text
 
         atomic_write_text(
-            self._metadata_path(self._active.experiment_id),
+            metadata_path,
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
         return True
 
     @_serialized_lifecycle_mutation
     def sync_interlock_operator_provenance(self, states: list[dict[str, Any]]) -> bool:
-        """Reconcile a newly active or recovered run from durable toggle state."""
-        if self._active is None:
-            return False
+        """Reconcile pending toggles into the exact experiments that logged them."""
         if type(states) is not list or any(type(item) is not dict for item in states):
             raise TypeError("interlock states must be an exact dict list")
-        payload = self._read_metadata_payload(self._active.experiment_id)
-        intervals = list(payload.get("interlock_disable_intervals") or [])
-        if not all(type(item) is dict for item in intervals):
-            raise RuntimeError("interlock disable provenance is invalid")
 
         def receipt_request_id(receipt: object) -> str | None:
             if type(receipt) is not dict:
@@ -2314,16 +2323,8 @@ class ExperimentManager:
             candidate = nested.get("request_id") if type(nested) is dict else receipt.get("request_id")
             return candidate if type(candidate) is str else None
 
-        recorded_request_ids = {
-            request_id
-            for interval in intervals
-            for request_id in (
-                receipt_request_id(interval.get("disable_receipt")),
-                receipt_request_id(interval.get("reenable_receipt")),
-            )
-            if request_id is not None
-        }
-        changed = False
+        payloads: dict[str, dict[str, Any]] = {}
+        changed_experiments: set[str] = set()
         for state in states:
             last_receipt = state.get("last_transition_receipt")
             if type(last_receipt) is not dict:
@@ -2341,6 +2342,32 @@ class ExperimentManager:
                 transitions.append(dict(last_receipt))
             for transition in transitions:
                 request_id = receipt_request_id(transition)
+                commit_receipt = transition.get("commit_receipt")
+                if type(commit_receipt) is not dict:
+                    raise RuntimeError("interlock transition receipt lacks commit authority")
+                experiment_id = transition.get("experiment_id", commit_receipt.get("experiment_id"))
+                if experiment_id != commit_receipt.get("experiment_id"):
+                    raise RuntimeError("interlock transition experiment identity is inconsistent")
+                if experiment_id is None:
+                    continue
+                if not _is_lower_hex(experiment_id, 12):
+                    raise RuntimeError("interlock transition experiment identity is invalid")
+                metadata_path = self._metadata_path(experiment_id)
+                if not metadata_path.exists():
+                    raise RuntimeError("interlock transition experiment metadata is unavailable")
+                payload = payloads.setdefault(experiment_id, self._read_metadata_payload(experiment_id))
+                intervals = list(payload.get("interlock_disable_intervals") or [])
+                if not all(type(item) is dict for item in intervals):
+                    raise RuntimeError("interlock disable provenance is invalid")
+                recorded_request_ids = {
+                    recorded_id
+                    for interval in intervals
+                    for recorded_id in (
+                        receipt_request_id(interval.get("disable_receipt")),
+                        receipt_request_id(interval.get("reenable_receipt")),
+                    )
+                    if recorded_id is not None
+                }
                 if request_id is not None and request_id in recorded_request_ids:
                     continue
                 transition_enabled = transition.get("enabled")
@@ -2371,24 +2398,23 @@ class ExperimentManager:
                             "reenable_receipt": None,
                         }
                     )
-                    changed = True
+                    changed_experiments.add(experiment_id)
                 elif transition_enabled is True and open_interval is not None:
                     open_interval["reenabled_at"] = transition.get("changed_at")
                     open_interval["reenabled_by"] = transition.get("operator")
                     open_interval["reenable_notice"] = transition.get("notice")
                     open_interval["reenable_receipt"] = dict(transition.get("commit_receipt") or {})
-                    changed = True
-                if request_id is not None:
-                    recorded_request_ids.add(request_id)
-        if not changed:
+                    changed_experiments.add(experiment_id)
+                payload["interlock_disable_intervals"] = intervals
+        if not changed_experiments:
             return False
-        payload["interlock_disable_intervals"] = intervals
         from cryodaq.core.atomic_write import atomic_write_text
 
-        atomic_write_text(
-            self._metadata_path(self._active.experiment_id),
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
+        for experiment_id in sorted(changed_experiments):
+            atomic_write_text(
+                self._metadata_path(experiment_id),
+                json.dumps(payloads[experiment_id], ensure_ascii=False, indent=2),
+            )
         return True
 
     # ------------------------------------------------------------------

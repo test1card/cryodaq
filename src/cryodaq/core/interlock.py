@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -32,7 +33,7 @@ from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.core.broker import DataBroker, PublishedReading
 from cryodaq.core.descriptor_transport import encode_descriptor_envelope
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
-from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
+from cryodaq.core.shutdown_settlement import await_executor_owner, cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
 
@@ -105,6 +106,24 @@ logger = logging.getLogger(__name__)
 # Максимальное количество событий, хранимых в памяти
 _MAX_EVENTS = 1000
 _MAX_PENDING_OPERATOR_TRANSITIONS = 1024
+_MAX_OPERATOR_TRANSITION_RECEIPTS = 1024
+_OPERATOR_TRANSITION_RECEIPT_KEYS = frozenset(
+    {
+        "enabled",
+        "previous_enabled",
+        "operator",
+        "changed_at",
+        "request_id",
+        "notice",
+        "experiment_id",
+        "policy_fingerprint",
+        "commit_receipt",
+    }
+)
+_LEGACY_OPERATOR_TRANSITION_RECEIPT_KEYS = frozenset(
+    {"enabled", "operator", "changed_at", "request_id", "notice", "commit_receipt"}
+)
+_OPERATOR_LOG_COMMIT_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
 
 # Имя подписки InterlockEngine в DataBroker
 _SUBSCRIPTION_NAME = "interlock_engine"
@@ -122,6 +141,96 @@ class InterlockState(Enum):
     ARMED = "armed"  # Активна, ожидает срабатывания
     TRIPPED = "tripped"  # Сработала — действие выполнено, ожидает подтверждения
     ACKNOWLEDGED = "acknowledged"  # Подтверждена оператором, возврат в ARMED
+
+
+def _is_lower_hex(value: object, length: int) -> bool:
+    return (
+        type(value) is str
+        and len(value) == length
+        and value == value.lower()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _interlock_policy_fingerprint(condition: InterlockCondition) -> str:
+    bindings = [
+        {
+            "instrument_id": binding.instrument_id,
+            "source_key": binding.source_key,
+            "channel_id": binding.channel_id,
+            "descriptor_sha256": hashlib.sha256(binding.descriptor_envelope).hexdigest(),
+        }
+        for binding in sorted(
+            condition.channel_bindings,
+            key=lambda item: (item.instrument_id, item.source_key, item.channel_id, item.descriptor_envelope),
+        )
+    ]
+    policy = {
+        "name": condition.name,
+        "description": condition.description,
+        "channel_ids": sorted(condition.channel_ids),
+        "channel_bindings": bindings,
+        "threshold": condition.threshold,
+        "comparison": condition.comparison,
+        "action": condition.action,
+        "cooldown_s": condition.cooldown_s,
+        "operator_disableable": condition.operator_disableable,
+        "enabled_by_default": condition.enabled_by_default,
+    }
+    canonical = json.dumps(policy, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validated_operator_transition_receipt(receipt: object) -> dict[str, Any]:
+    if type(receipt) is not dict or frozenset(receipt) not in {
+        _OPERATOR_TRANSITION_RECEIPT_KEYS,
+        _LEGACY_OPERATOR_TRANSITION_RECEIPT_KEYS,
+    }:
+        raise ValueError("operator transition receipt keys are invalid")
+    enabled = receipt.get("enabled")
+    previous_enabled = receipt.get("previous_enabled")
+    operator = receipt.get("operator")
+    changed_at = receipt.get("changed_at")
+    request_id = receipt.get("request_id")
+    notice = receipt.get("notice")
+    commit_receipt = receipt.get("commit_receipt")
+    if (
+        type(enabled) is not bool
+        or (frozenset(receipt) == _OPERATOR_TRANSITION_RECEIPT_KEYS and type(previous_enabled) is not bool)
+        or type(operator) is not str
+        or not operator.strip()
+        or len(operator.encode("utf-8")) > 512
+        or type(notice) is not str
+        or not notice
+        or len(notice.encode("utf-8")) > 4096
+        or not _is_lower_hex(request_id, 32)
+        or type(changed_at) is not str
+    ):
+        raise ValueError("operator transition receipt fields are invalid")
+    try:
+        parsed_at = datetime.fromisoformat(changed_at)
+    except ValueError as exc:
+        raise ValueError("operator transition timestamp is invalid") from exc
+    if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+        raise ValueError("operator transition timestamp is invalid")
+    if type(commit_receipt) is not dict or frozenset(commit_receipt) != _OPERATOR_LOG_COMMIT_RECEIPT_KEYS:
+        raise ValueError("operator transition commit receipt is invalid")
+    experiment_id = commit_receipt.get("experiment_id")
+    if (
+        commit_receipt.get("schema") != "operator_log_commit_v1"
+        or commit_receipt.get("request_id") != request_id
+        or type(commit_receipt.get("entry_id")) is not int
+        or commit_receipt["entry_id"] <= 0
+        or (experiment_id is not None and (type(experiment_id) is not str or not experiment_id))
+        or commit_receipt.get("committed") is not True
+    ):
+        raise ValueError("operator transition commit receipt is invalid")
+    if frozenset(receipt) == _OPERATOR_TRANSITION_RECEIPT_KEYS:
+        if receipt.get("experiment_id") != experiment_id or not _is_lower_hex(receipt.get("policy_fingerprint"), 64):
+            raise ValueError("operator transition authority binding is invalid")
+    detached = dict(receipt)
+    detached["commit_receipt"] = dict(commit_receipt)
+    return detached
 
 
 @dataclass
@@ -241,6 +350,7 @@ class _InterlockRecord:
     disable_receipt: dict[str, Any] | None = None
     last_transition_receipt: dict[str, Any] | None = None
     pending_transition_receipts: list[dict[str, Any]] = field(default_factory=list)
+    transition_receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1055,6 +1165,7 @@ class InterlockEngine:
                     None if record.last_transition_receipt is None else dict(record.last_transition_receipt)
                 ),
                 "pending_transition_receipts": [dict(receipt) for receipt in record.pending_transition_receipts],
+                "transition_receipts": [dict(receipt) for receipt in record.transition_receipts],
             }
             for name, record in self._interlocks.items()
         ]
@@ -1075,6 +1186,13 @@ class InterlockEngine:
     def disabled_interlocks(self) -> tuple[str, ...]:
         return tuple(sorted(name for name, record in self._interlocks.items() if not record.enabled))
 
+    def operator_transition_pending(self, interlock_name: str, request_id: str) -> bool:
+        """Return whether exact experiment provenance still needs settlement."""
+        record = self._interlocks.get(interlock_name)
+        if record is None:
+            raise KeyError(interlock_name)
+        return any(receipt.get("request_id") == request_id for receipt in record.pending_transition_receipts)
+
     def _persistent_operator_states(
         self,
         *,
@@ -1082,6 +1200,7 @@ class InterlockEngine:
         target_enabled: bool | None = None,
         target_receipt: dict[str, Any] | None = None,
         target_pending: list[dict[str, Any]] | None = None,
+        target_transitions: list[dict[str, Any]] | None = None,
         clear_pending: bool = False,
     ) -> dict[str, dict[str, Any]]:
         states = {name: dict(state) for name, state in self._retired_operator_state.items()}
@@ -1090,17 +1209,20 @@ class InterlockEngine:
             if receipt is None:
                 continue
             if name == target_name:
-                if target_enabled is None or target_pending is None:
+                if target_enabled is None or target_pending is None or target_transitions is None:
                     raise RuntimeError("target operator state is incomplete")
                 enabled = target_enabled
                 pending = target_pending
+                transitions = target_transitions
             else:
                 enabled = item.enabled
                 pending = [] if clear_pending else item.pending_transition_receipts
+                transitions = item.transition_receipts
             states[name] = {
                 "enabled": enabled,
                 "receipt": dict(receipt),
                 "pending_receipts": [dict(pending_receipt) for pending_receipt in pending],
+                "transition_receipts": [dict(transition_receipt) for transition_receipt in transitions],
             }
         return states
 
@@ -1127,51 +1249,91 @@ class InterlockEngine:
             raise ValueError("operator must be non-empty")
         if changed_at.tzinfo is None or changed_at.utcoffset() is None:
             raise ValueError("changed_at must be timezone-aware")
-        receipt = {
-            "enabled": enabled,
-            "operator": operator.strip(),
-            "changed_at": changed_at.astimezone(UTC).isoformat(),
-            "request_id": request_id,
-            "notice": notice,
-            "commit_receipt": dict(commit_receipt),
-        }
         async with self._state_change_lock:
+            policy_fingerprint = _interlock_policy_fingerprint(record.condition)
+            normalized_changed_at = changed_at.astimezone(UTC).isoformat()
+            for retained in record.transition_receipts:
+                if retained.get("request_id") != request_id:
+                    continue
+                retained = _validated_operator_transition_receipt(retained)
+                if (
+                    retained.get("enabled") is not enabled
+                    or retained.get("operator") != operator.strip()
+                    or retained.get("changed_at") != normalized_changed_at
+                    or retained.get("notice") != notice
+                    or retained.get("commit_receipt") != commit_receipt
+                    or retained.get("policy_fingerprint") != policy_fingerprint
+                ):
+                    raise RuntimeError("interlock operator request identity conflict")
+                return {
+                    "name": interlock_name,
+                    "enabled": retained["enabled"],
+                    "previous_enabled": retained["previous_enabled"],
+                    "operator_disableable": record.condition.operator_disableable,
+                    "notice": retained["notice"],
+                    "changed_at": retained["changed_at"],
+                }
             if len(record.pending_transition_receipts) >= _MAX_PENDING_OPERATOR_TRANSITIONS:
                 raise RuntimeError("interlock operator provenance backlog is full")
+            if len(record.transition_receipts) >= _MAX_OPERATOR_TRANSITION_RECEIPTS:
+                raise RuntimeError("interlock operator idempotency journal is full")
             previous = record.enabled
+            receipt = {
+                "enabled": enabled,
+                "previous_enabled": previous,
+                "operator": operator.strip(),
+                "changed_at": normalized_changed_at,
+                "request_id": request_id,
+                "notice": notice,
+                "experiment_id": commit_receipt.get("experiment_id"),
+                "policy_fingerprint": policy_fingerprint,
+                "commit_receipt": dict(commit_receipt),
+            }
+            receipt = _validated_operator_transition_receipt(receipt)
             pending = [*record.pending_transition_receipts, receipt]
+            transitions = [*record.transition_receipts, receipt]
             next_state = self._persistent_operator_states(
                 target_name=interlock_name,
                 target_enabled=enabled,
                 target_receipt=receipt,
                 target_pending=pending,
+                target_transitions=transitions,
             )
-            await asyncio.to_thread(self._write_operator_state, next_state)
-            record.enabled = enabled
-            record.disable_receipt = None if enabled else receipt
-            record.last_transition_receipt = receipt
-            record.pending_transition_receipts = pending
-            if not enabled:
-                record.condition_active = False
-            elif not previous:
-                record.state = InterlockState.ARMED
-                for channel in sorted(record.latest_readings):
-                    latest = record.latest_readings[channel]
-                    if record.condition.is_triggered(latest.value):
-                        await self._trip(record, latest)
-                        break
-            if self._state_changed_handler is not None:
-                result = self._state_changed_handler()
-                if asyncio.iscoroutine(result):
-                    await result
-        return {
-            "name": interlock_name,
-            "enabled": enabled,
-            "previous_enabled": previous,
-            "operator_disableable": record.condition.operator_disableable,
-            "notice": notice,
-            "changed_at": receipt["changed_at"],
-        }
+
+            async def settle_transition() -> dict[str, Any]:
+                await asyncio.to_thread(self._write_operator_state, next_state)
+                record.enabled = enabled
+                record.disable_receipt = None if enabled else receipt
+                record.last_transition_receipt = receipt
+                record.pending_transition_receipts = pending
+                record.transition_receipts = transitions
+                if not enabled:
+                    record.condition_active = False
+                elif not previous:
+                    record.state = InterlockState.ARMED
+                    for channel in sorted(record.latest_readings):
+                        latest = record.latest_readings[channel]
+                        if record.condition.is_triggered(latest.value):
+                            await self._trip(record, latest)
+                            break
+                if self._state_changed_handler is not None:
+                    result = self._state_changed_handler()
+                    if asyncio.iscoroutine(result):
+                        await result
+                return {
+                    "name": interlock_name,
+                    "enabled": enabled,
+                    "previous_enabled": previous,
+                    "operator_disableable": record.condition.operator_disableable,
+                    "notice": notice,
+                    "changed_at": receipt["changed_at"],
+                }
+
+            owner = asyncio.create_task(
+                settle_transition(),
+                name=f"interlock_operator_transition_{request_id[:8]}",
+            )
+            return await await_executor_owner(owner)
 
     async def mark_operator_transition_recorded(self, interlock_name: str, request_id: str) -> bool:
         """Discard one pending receipt only after experiment provenance settles."""
@@ -1189,6 +1351,7 @@ class InterlockEngine:
                 target_enabled=record.enabled,
                 target_receipt=record.last_transition_receipt,
                 target_pending=pending,
+                target_transitions=record.transition_receipts,
             )
             await asyncio.to_thread(self._write_operator_state, next_state)
             record.pending_transition_receipts = pending
@@ -1222,49 +1385,107 @@ class InterlockEngine:
             raise InterlockConfigError(f"interlock operator state at {path} is invalid")
         states = payload.get("interlocks")
         schema_version = payload.get("schema_version")
-        if schema_version not in (1, 2) or type(states) is not dict or type(payload.get("updated_at")) is not str:
+        updated_at = payload.get("updated_at")
+        if schema_version not in (1, 2, 3) or type(states) is not dict or type(updated_at) is not str:
+            raise InterlockConfigError(f"interlock operator state at {path} is invalid")
+        try:
+            parsed_updated_at = datetime.fromisoformat(updated_at)
+        except ValueError as exc:
+            raise InterlockConfigError(f"interlock operator state at {path} is invalid") from exc
+        if parsed_updated_at.tzinfo is None or parsed_updated_at.utcoffset() is None:
             raise InterlockConfigError(f"interlock operator state at {path} is invalid")
         for name, state in states.items():
-            expected_keys = (
-                {"enabled", "receipt"}
-                if schema_version == 1
-                else {
+            if schema_version == 1:
+                expected_keys = {"enabled", "receipt"}
+            elif schema_version == 2:
+                expected_keys = {
                     "enabled",
                     "receipt",
                     "pending_receipts",
                 }
-            )
+            else:
+                expected_keys = {
+                    "enabled",
+                    "receipt",
+                    "pending_receipts",
+                    "transition_receipts",
+                }
             if (
                 type(name) is not str
+                or not name
                 or type(state) is not dict
                 or set(state) != expected_keys
                 or type(state.get("enabled")) is not bool
                 or type(state.get("receipt")) is not dict
                 or (
-                    schema_version == 2
+                    schema_version >= 2
                     and (
                         type(state.get("pending_receipts")) is not list
                         or len(state["pending_receipts"]) > _MAX_PENDING_OPERATOR_TRANSITIONS
                         or any(type(receipt) is not dict for receipt in state["pending_receipts"])
                     )
                 )
+                or (
+                    schema_version == 3
+                    and (
+                        type(state.get("transition_receipts")) is not list
+                        or not state["transition_receipts"]
+                        or len(state["transition_receipts"]) > _MAX_OPERATOR_TRANSITION_RECEIPTS
+                        or any(type(receipt) is not dict for receipt in state["transition_receipts"])
+                    )
+                )
             ):
                 raise InterlockConfigError(f"interlock operator state at {path} is invalid")
-            pending_receipts = [] if schema_version == 1 else [dict(receipt) for receipt in state["pending_receipts"]]
+            try:
+                last_receipt = _validated_operator_transition_receipt(state["receipt"])
+                pending_receipts = (
+                    []
+                    if schema_version == 1
+                    else [_validated_operator_transition_receipt(receipt) for receipt in state["pending_receipts"]]
+                )
+                if schema_version == 3:
+                    transition_receipts = [
+                        _validated_operator_transition_receipt(receipt) for receipt in state["transition_receipts"]
+                    ]
+                else:
+                    transition_receipts = list(pending_receipts)
+                    if not any(receipt["request_id"] == last_receipt["request_id"] for receipt in transition_receipts):
+                        transition_receipts.append(last_receipt)
+            except (UnicodeError, ValueError) as exc:
+                raise InterlockConfigError(f"interlock operator state at {path} is invalid") from exc
+            transition_ids = [receipt["request_id"] for receipt in transition_receipts]
+            pending_ids = [receipt["request_id"] for receipt in pending_receipts]
+            if (
+                last_receipt["enabled"] is not state["enabled"]
+                or len(set(transition_ids)) != len(transition_ids)
+                or len(set(pending_ids)) != len(pending_ids)
+                or last_receipt["request_id"] not in transition_ids
+                or any(request_id not in transition_ids for request_id in pending_ids)
+            ):
+                raise InterlockConfigError(f"interlock operator state at {path} is invalid")
             record = self._interlocks.get(name)
             if record is None:
                 self._retired_operator_state[name] = {
                     "enabled": state["enabled"],
-                    "receipt": dict(state["receipt"]),
+                    "receipt": last_receipt,
                     "pending_receipts": pending_receipts,
+                    "transition_receipts": transition_receipts,
                 }
                 continue
             if state["enabled"] is False and not record.condition.operator_disableable:
                 raise InterlockConfigError(f"persisted disabled interlock {name!r} is no longer operator-disableable")
+            if state["enabled"] is False:
+                if frozenset(last_receipt) != _OPERATOR_TRANSITION_RECEIPT_KEYS:
+                    raise InterlockConfigError(f"persisted disabled interlock {name!r} has no reviewed policy identity")
+                if last_receipt["policy_fingerprint"] != _interlock_policy_fingerprint(record.condition):
+                    raise InterlockConfigError(
+                        f"persisted disabled interlock {name!r} no longer matches its reviewed policy"
+                    )
             record.enabled = state["enabled"]
-            record.last_transition_receipt = dict(state["receipt"])
-            record.disable_receipt = None if state["enabled"] else dict(state["receipt"])
+            record.last_transition_receipt = last_receipt
+            record.disable_receipt = None if state["enabled"] else dict(last_receipt)
             record.pending_transition_receipts = pending_receipts
+            record.transition_receipts = transition_receipts
 
     async def restore_operator_state(self) -> None:
         """Load or initialize operator state without blocking the engine loop."""
@@ -1275,7 +1496,7 @@ class InterlockEngine:
         if path is None:
             return
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "interlocks": states,
             "updated_at": datetime.now(UTC).isoformat(),
         }

@@ -166,6 +166,7 @@ from cryodaq.drivers.transport.mock_instrument import (
     ExternalMockInstrumentClient,
     MockInstrumentEndpoint,
 )
+from cryodaq.engine_wiring.operator_safety_snapshot import OperatorSafetySnapshot
 from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
 from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.engine_wiring.runtime_tasks import (
@@ -2394,10 +2395,10 @@ async def _safety_fault_log_callback(
 @dataclass(slots=True)
 class _InterlockHandlerContext:
     safety_manager: Any
-    writer: Any
-    broker: Any
     alarm_dispatch_tasks: set[asyncio.Task[Any]]
     dead_channel_alarm_sent: set[str]
+    writer: Any | None = field(default=None, kw_only=True)
+    broker: Any | None = field(default=None, kw_only=True)
     event_bus: Any | None = None
     experiment_manager: Any | None = None
 
@@ -2524,6 +2525,20 @@ async def _set_interlock_operator_state(
             "error": "Поля переключения блокировки недействительны.",
             "retry_safe": True,
         }
+    if enabled is False:
+        snapshot_operator_safety = getattr(context.safety_manager, "snapshot_operator_safety", None)
+        try:
+            safety_snapshot = snapshot_operator_safety() if callable(snapshot_operator_safety) else None
+        except Exception:  # noqa: BLE001 - unavailable safety authority fails closed
+            safety_snapshot = None
+        if type(safety_snapshot) is not OperatorSafetySnapshot or safety_snapshot.verified_off is not True:
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "interlock_disable_requires_verified_off",
+                "error": "Отключение блокировки недоступно без подтверждённого состояния источников OFF.",
+                "retry_safe": True,
+            }
     try:
         notice = context.interlock_engine.prepare_operator_toggle(name, enabled=enabled)
     except KeyError:
@@ -2577,18 +2592,20 @@ async def _set_interlock_operator_state(
             notice=notice,
             commit_receipt=commit_receipt,
         )
-        provenance_recorded = await asyncio.to_thread(
-            context.experiment_manager.record_interlock_operator_state,
-            interlock_name=name,
-            enabled=enabled,
-            operator=operator,
-            changed_at=state["changed_at"],
-            notice=notice,
-            receipt={"entry": dict(entry), "commit_receipt": dict(commit_receipt)},
-        )
-        if experiment_id is not None and provenance_recorded is not True:
-            raise RuntimeError("active experiment did not record interlock provenance")
-        await context.interlock_engine.mark_operator_transition_recorded(name, request_id)
+        if context.interlock_engine.operator_transition_pending(name, request_id):
+            provenance_recorded = await asyncio.to_thread(
+                context.experiment_manager.record_interlock_operator_state,
+                interlock_name=name,
+                enabled=enabled,
+                operator=operator,
+                changed_at=state["changed_at"],
+                notice=notice,
+                receipt={"entry": dict(entry), "commit_receipt": dict(commit_receipt)},
+                expected_experiment_id=experiment_id,
+            )
+            if experiment_id is not None and provenance_recorded is not True:
+                raise RuntimeError("logged experiment did not record interlock provenance")
+            await context.interlock_engine.mark_operator_transition_recorded(name, request_id)
     except Exception as exc:
         logger.error(
             "Receipted interlock toggle could not settle: interlock=%s exception=%s",
@@ -6979,8 +6996,7 @@ async def _run_engine(
         experiment_manager.sync_interlock_operator_provenance,
         interlock_engine.get_operator_state(),
     )
-    if experiment_manager.active_experiment_id is not None:
-        await interlock_engine.mark_all_operator_transitions_recorded()
+    await interlock_engine.mark_all_operator_transitions_recorded()
     try:
         _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
     except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot
