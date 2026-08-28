@@ -33,7 +33,7 @@
     ]
   },
   "guard_blobs": {
-    "tests/gui/shell/overlays/test_conductivity_panel.py": "dadd9f71546335bd9535fd5a1064a0223a649505"
+    "tests/gui/shell/overlays/test_conductivity_panel.py": "324e8668f5684139b0d62460f54d0e1e38a8a114"
   },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof"
@@ -44,6 +44,7 @@
     "CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081",
     "CONDUCTIVITY-GUARD-ACQUISITION-CUT-FALSE-GREEN-081"
   ],
+  "rederivation_note": "guard_blobs re-derived 2026-08-28 because this branch's correction round edited the guard FILE by adding two sibling tests and renaming a third. The recorded guard NODE test_auto_tick_rejects_samples_without_post_ack_acquisition_proof was not touched. The recorded red was RE-REPRODUCED rather than the hash copied across: with the corrected guard file (blob 324e8668f5684139b0d62460f54d0e1e38a8a114) and the defective source blob 483b82b8787789e5e3588216fb1c62dd35561360 restored, all three parametrisations [before_ack, missing, backlogged] FAIL; with the branch's fixed source they PASS. So the guard still catches the defect it records. An earlier automated attempt reported the replay as not reproducing; that run aborted in libzmq while binding a loopback socket and its result was not trustworthy.",
   "schema_version": 1,
   "stderr_bytes_base64": "",
   "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
