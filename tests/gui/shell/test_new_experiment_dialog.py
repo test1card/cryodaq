@@ -90,6 +90,43 @@ def test_editing_invalid_operator_clears_fault_border_and_announcement(app):
     assert dialog._validation_label.isHidden(), "editing the invalid field must clear the visible error"
 
 
+@pytest.mark.parametrize(
+    ("invalid_field", "message"),
+    [
+        ("name", "Введите название"),
+        ("operator", "Введите оператора"),
+    ],
+)
+def test_editing_invalid_required_field_with_whitespace_keeps_error_visible(app, invalid_field, message):
+    dialog = NewExperimentDialog(available_templates=[])
+    if invalid_field == "name":
+        dialog._name_edit.setText("")
+        dialog._operator_combo.setEditText("Vladimir")
+        invalid_widget = dialog._name_edit
+    else:
+        dialog._name_edit.setText("Test")
+        dialog._operator_combo.setEditText("")
+        invalid_widget = dialog._operator_combo
+
+    received: list = []
+    dialog.experiment_create_requested.connect(received.append)
+    dialog._on_create_clicked()
+    assert received == []
+
+    if invalid_field == "name":
+        dialog._name_edit.setText(" \t ")
+    else:
+        dialog._operator_combo.setEditText(" \t ")
+
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in invalid_widget.styleSheet()
+    assert invalid_widget.accessibleDescription() == message
+    assert not dialog._validation_label.isHidden()
+    assert dialog._validation_label.text() == message
+
+    dialog._on_create_clicked()
+    assert received == [], "whitespace-only required values must still reject submission"
+
+
 def test_editing_other_field_preserves_invalid_name_error(app):
     dialog = NewExperimentDialog(available_templates=[])
     dialog._name_edit.setText("")

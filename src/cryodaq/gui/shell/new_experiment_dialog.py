@@ -236,12 +236,22 @@ class NewExperimentDialog(QDialog):
         invalid = self._invalid_field
         if invalid is not None and field is not invalid:
             return
+        if invalid is field and not self._required_field_value(field):
+            return
         self._clear_error()
+
+    def _required_field_value(self, field: QWidget) -> str:
+        """Return a required field's submission-normalized value."""
+        if field is self._name_edit:
+            return self._name_edit.text().strip()
+        if field is self._operator_combo:
+            return self._operator_combo.currentText().strip()
+        raise ValueError("not a required experiment field")
 
     def _on_create_clicked(self) -> None:
         self._clear_error()
-        name = self._name_edit.text().strip()
-        operator = self._operator_combo.currentText().strip()
+        name = self._required_field_value(self._name_edit)
+        operator = self._required_field_value(self._operator_combo)
         if not name:
             self._show_error("Введите название", self._name_edit)
             self._name_edit.setFocus()
