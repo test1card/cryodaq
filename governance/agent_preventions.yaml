@@ -7293,3 +7293,28 @@ records:
         platform: windows
     red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
     green_evidence: pending
+  - id: LAUNCHER-COLD-START-READINESS-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Launcher construction and automatic runtime replacement of live or replay engine children through src/cryodaq/launcher.py exact readiness verification.
+    classification: operator_event_loop_blocking
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A cold engine can be rejected before its persistence and safety owners establish exact readiness, losing acquisition availability; after the UI is running, synchronously spending the expanded one-minute readiness budget blocks repaint, tray interaction, the audible down alarm, status timers, and operator shutdown on the Qt thread.
+    invariant: Launcher construction permits the measured cold-start readiness budget before app.exec(), but an automatic runtime restart transfers that same bounded exact readiness wait to one owned worker observed only by nonblocking Qt timer ticks. The bridge cannot attach and the down state cannot clear before exact readiness succeeds. Both live and replay waits remain elapsed-time bounded at roughly one minute.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/launcher/test_launcher_cold_start_budget.py::test_cold_start_evidence_names_measured_platforms
+        ci_partition: remaining
+      - node: tests/launcher/test_launcher_cold_start_budget.py::test_launcher_waits_past_old_budget_for_exact_cold_start_readiness
+        ci_partition: remaining
+      - node: tests/launcher/test_launcher_cold_start_budget.py::test_launcher_cold_start_wait_remains_elapsed_time_bounded
+        ci_partition: remaining
+      - node: tests/launcher/test_launcher_cold_start_budget.py::test_runtime_restart_keeps_cold_readiness_wait_off_qt_callback
+        ci_partition: remaining
+    red_evidence: local_ubuntu_22_04_controls_on_2026_08_28_restored_src_cryodaq_launcher_py_to_exact_head_blob_c21b6d71d6251f02867f13d0a9e0b5592497d3ff_and_the_runtime_nonblocking_guard_failed_then_restored_the_incorrect_platform_comment_and_the_attribution_guard_failed_then_removed_this_record_and_the_mapping_guard_failed; immutable_candidate_receipt_pending
+    green_evidence: local_ubuntu_22_04_focused_launcher_and_mapping_guards_passed_after_restoration_on_2026_08_28; immutable_candidate_and_hosted_remaining_receipts_pending
