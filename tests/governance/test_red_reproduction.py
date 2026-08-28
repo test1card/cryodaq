@@ -256,3 +256,45 @@ def test_red_reproduction_receipt_refusals_are_independent(
         # repository is now STATED rather than inferred. The asserted refusals are
         # unchanged: every mutation must still raise.
         validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_migration_branch_accepts_a_rerun_whose_guard_blobs_moved(tmp_path: Path) -> None:
+    """A node binding may arrive together with the re-run that node forced.
+
+    When a named guard's source moves, tools/red_reproduction.py REFUSES to stamp
+    a digest for it and demands a re-run.  If the trusted-base comparison then
+    treated every node-binding arrival as a pure migration -- receipt bytes
+    frozen, digests only added -- that re-run could never merge, and no change to
+    any receipt-bound guard test could ever land.  The comparison tells the two
+    apart by the guard blobs the receipt RECORDS: if they moved, the receipt
+    describes something that moved.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_migration_branch_still_refuses_a_repoint_whose_guard_blobs_stand_still(tmp_path: Path) -> None:
+    """Changing a receipt while everything it describes stands still stays refused.
+
+    This is the direction that must never be relaxed.  A receipt whose recorded
+    guard blobs are unchanged, but whose claims about the run have moved, is a
+    re-point: the evidence is being made to fit a demand rather than re-earned.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    receipt_path = next(iter(directory.glob("*.json")))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["stdout_sha256"] = "0" * 64
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(GovernanceContractError):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
