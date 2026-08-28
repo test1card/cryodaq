@@ -252,6 +252,37 @@ def _typed_unknown_snapshot(*, revision: int = 44) -> OperatorSnapshot:
     return replace(snapshot, readiness=readiness)
 
 
+def _typed_active_snapshot(
+    lifecycle: SafetyLifecycle,
+    *,
+    revision: int = 43,
+    observed_at: datetime | None = None,
+) -> OperatorSnapshot:
+    snapshot = _typed_ready_snapshot(revision=revision, observed_at=observed_at)
+    status = SummaryStatus(
+        OperatorPresentationState.CAUTION,
+        1.0,
+        0.0,
+        ("source_active",),
+        "Backend readiness authority",
+    )
+    readiness = ReadinessSummary(
+        snapshot.cut,
+        status,
+        ReadinessTruth.BLOCKED,
+        (
+            ReadinessBlocker(
+                "source_active",
+                OperatorPresentationState.CAUTION,
+                "Safety lifecycle reports an active source",
+                "Stop the source before choosing Start",
+            ),
+        ),
+        lifecycle,
+    )
+    return replace(snapshot, readiness=readiness)
+
+
 # ----------------------------------------------------------------------
 # Host wiring — connection state
 # ----------------------------------------------------------------------
@@ -497,6 +528,47 @@ def test_current_safe_off_telemetry_keeps_interlock_as_warning(
         assert panel._smua_block._start_btn.isEnabled()
         assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
         assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize("typed_authority", ["unknown", "transport_unavailable"])
+def test_legacy_safe_off_cannot_restore_start_after_typed_authority_is_unavailable(
+    typed_authority: str,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        panel._smua_block.apply_state("off")
+        if typed_authority == "unknown":
+            unavailable = _typed_unknown_snapshot()
+        else:
+            store = OperatorSnapshotStore()
+            store.accept_snapshot(_typed_ready_snapshot())
+            unavailable = store.observe_transport(connected=True, transport_age_s=11.0, stale_after_s=10.0)
+        w.render_operator_snapshot(unavailable)
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+
+        w._dispatch_reading(
+            _safety_reading(
+                SafetyLifecycle.SAFE_OFF.value,
+                "Legacy SAFE_OFF telemetry",
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+
+        assert w._current_keithley_safety_gate()[2] is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        assert not panel._smua_block._start_btn.isEnabled()
+        assert "Управление заблокировано" in panel._gate_reason_label.text()
     finally:
         _stop_timers(w)
 
@@ -1253,6 +1325,52 @@ def test_newer_nonready_snapshot_revokes_off_when_on_publication_is_lost(
 
         assert block._channel_state == "unknown"
         assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize("lifecycle", [SafetyLifecycle.RUN_PERMITTED, SafetyLifecycle.RUNNING])
+def test_newer_active_snapshot_revokes_cached_off_when_on_publication_is_lost(
+    lifecycle: SafetyLifecycle,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        observed = datetime.now(UTC) - timedelta(seconds=3)
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot(revision=42, observed_at=observed)))
+        w._dispatch_reading(
+            _source_state_reading(
+                "smua",
+                "off",
+                observed_at=observed + timedelta(seconds=1),
+            )
+        )
+        w._ensure_overlay("source")
+        panel = w._keithley_panel
+        assert panel is not None
+        block = panel._smua_block
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled()
+
+        # The best-effort ON event is deliberately absent. A later typed cut
+        # still carries authoritative lifecycle truth that contradicts OFF.
+        w.render_operator_snapshot(
+            store.accept_snapshot(
+                _typed_active_snapshot(
+                    lifecycle,
+                    revision=43,
+                    observed_at=observed + timedelta(seconds=2),
+                )
+            )
+        )
+
+        assert panel._safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY
+        assert block._channel_state == "unknown"
+        assert not block._start_btn.isEnabled()
     finally:
         _stop_timers(w)
 

@@ -281,6 +281,28 @@ def test_lazy_open_replays_current_bound_readings_for_auto_selection():
         _stop_timers(w)
 
 
+def test_transport_invalidation_clears_lazy_snapshot_binding():
+    _app()
+    bridge_instance_id = "a" * 32
+    w = MainWindowV2(bridge=SimpleNamespace(bridge_instance_id=bridge_instance_id))
+    try:
+        w._on_experiment_status_received({"active_experiment": {"experiment_id": "thermal-week"}})
+        _dispatch_described(
+            w,
+            _temp_reading("T1", 5.1, bridge_instance_id=bridge_instance_id),
+            ChannelQuantity.TEMPERATURE,
+        )
+        assert set(w._conductivity_snapshot) == {"T1"}
+        assert w._conductivity_snapshot_binding == (bridge_instance_id, "thermal-week")
+
+        w.invalidate_descriptor_transport()
+
+        assert w._conductivity_snapshot == {}
+        assert w._conductivity_snapshot_binding is None
+    finally:
+        _stop_timers(w)
+
+
 def test_lazy_open_does_not_replay_snapshot_from_superseded_bridge():
     app = _app()
     old_bridge_instance_id = "a" * 32

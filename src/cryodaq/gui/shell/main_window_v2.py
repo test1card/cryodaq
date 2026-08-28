@@ -501,14 +501,15 @@ class MainWindowV2(QMainWindow):
             and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
             and experiment_matches
-            and (ready or cause is SafetyGateCause.AUTHORITY_UNAVAILABLE)
+            and readiness.lifecycle is not SafetyLifecycle.SAFE_OFF
         ):
             # Periodic typed cuts cover isolated loss of the best-effort
-            # source-state topic. READY provides verified-OFF evidence; a cut
-            # with unavailable authority revokes older per-channel
-            # presentation without guessing which source is active. A current
-            # authoritative blocker is warning-permissive and must not erase a
-            # retained OFF state merely to disable Start indirectly.
+            # source-state topic. READY provides verified-OFF evidence. Every
+            # lifecycle other than SAFE_OFF that does not provide READY truth
+            # revokes older per-channel presentation: active lifecycles
+            # contradict OFF, while UNKNOWN/fault/recovery cannot vouch for it.
+            # A current SAFE_OFF blocker remains warning-permissive and may
+            # retain the independently observed OFF state.
             self._synchronize_keithley_source_state_from_typed_snapshot(
                 snapshot,
                 ready=ready,
@@ -920,8 +921,10 @@ class MainWindowV2(QMainWindow):
         descriptor_store = getattr(self, "_descriptor_store", None)
         if descriptor_store is not None:
             descriptor_store.invalidate_transport()
-        self._conductivity_snapshot.clear()
-        self._conductivity_snapshot_binding = None
+        conductivity_snapshot = getattr(self, "_conductivity_snapshot", None)
+        if conductivity_snapshot is not None:
+            conductivity_snapshot.clear()
+            self._conductivity_snapshot_binding = None
         annunciation_controller = getattr(self, "_annunciation_controller", None)
         if annunciation_controller is not None:
             annunciation_controller.invalidate_transport()
@@ -1121,14 +1124,23 @@ class MainWindowV2(QMainWindow):
                 )
                 if current_safe_off:
                     # The negative observation revokes readiness, not the
-                    # still-current bridge/experiment identity binding.
+                    # still-current bridge/experiment identity binding. It
+                    # can make a previously READY typed cut warning-permissive,
+                    # but cannot upgrade typed UNKNOWN/transport-unavailable
+                    # authority to that permissive cause.
+                    legacy_cause = (
+                        SafetyGateCause.AUTHORITATIVE_NOT_READY
+                        if self._typed_safety_ready
+                        or self._last_safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY
+                        else SafetyGateCause.AUTHORITY_UNAVAILABLE
+                    )
                     self._typed_safety_ready = False
-                    self._last_safety_gate_cause = SafetyGateCause.AUTHORITATIVE_NOT_READY
+                    self._last_safety_gate_cause = legacy_cause
                     if self._keithley_panel is not None:
                         self._keithley_panel.set_safety_ready(
                             False,
                             self._last_safety_reason or "Safety state is not ready",
-                            cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+                            cause=legacy_cause,
                         )
                 else:
                     self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
