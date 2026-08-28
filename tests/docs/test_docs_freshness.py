@@ -810,9 +810,24 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             recorded.setdefault(match.group(1), []).append(int(match.group(2)))
         return recorded
 
+    number_words = {
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+        6: "six",
+        7: "seven",
+        8: "eight",
+        9: "nine",
+        10: "ten",
+        11: "eleven",
+        12: "twelve",
+    }
+
     def assert_current(
         candidate: str, candidate_paths: list[str], candidate_contents: dict[str, bytes]
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         rows = _open_cell_rows(candidate)
         oc_012 = " | ".join(rows["OC-012"])
         oc_030 = " | ".join(rows["OC-030"])
@@ -867,36 +882,28 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         # The closure gate's prose count must agree with the locator set it
         # summarizes: a stale "all N sites" lets an implementer close the row
         # while leaving a live spelling-inference site unfixed.
-        number_words = {
-            1: "one",
-            2: "two",
-            3: "three",
-            4: "four",
-            5: "five",
-            6: "six",
-            7: "seven",
-            8: "eight",
-            9: "nine",
-            10: "ten",
-            11: "eleven",
-            12: "twelve",
-        }
         total_locators = sum(len(lines) for lines in recorded.values())
         assert total_locators in number_words
         assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
             "OC-030 closure gate must name the exact live locator count",
             total_locators,
         )
-        return len(governance_modules), inventory_size
+        return len(governance_modules), len(runner_modules), inventory_size
 
-    governance_module_count, inventory_size = assert_current(text, tracked, contents)
-    # DERIVED, not pinned.  This pair used to read `("All 6 tracked workflows", ...)`, so adding a
-    # seventh workflow made the mutation find nothing, `mutated == text`, and the control below
-    # failed -- reporting a broken register when what had actually broken was the control.  Every
-    # sibling pair in this tuple already derives its number; this one now does too.
+    governance_module_count, runner_module_count, inventory_size = assert_current(text, tracked, contents)
+    # DERIVED, not pinned.  Numeric mutation anchors below come from the same live inventories
+    # that assert_current validates.  A moved locator or changed count therefore cannot make a
+    # mutation a no-op before the negative control exercises the register guard.
     workflow_count = len(
         [path for path in tracked if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))]
     )
+    live_locators = live_oc030_locators(tracked, contents)
+    live_locator_count = sum(len(lines) for lines in live_locators.values())
+    wrong_locator_count = live_locator_count - 1 if live_locator_count > 1 else live_locator_count + 1
+    locator_mutations = tuple(
+        (f"`{path}:{line}`", f"`{path}:{line - 1}`") for path, lines in live_locators.items() for line in lines
+    )
+
     for old, replacement in (
         (f"All {workflow_count} tracked workflows", f"All {workflow_count - 2} tracked workflows"),
         (
@@ -905,31 +912,21 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ),
         (f"The exact {inventory_size}-path", f"The exact {inventory_size - 1}-path"),
         (
-            "all 10 tracked workflow-referenced CI/governance runner modules",
-            "all 9 tracked workflow-referenced CI/governance runner modules",
+            f"all {runner_module_count} tracked workflow-referenced CI/governance runner modules",
+            f"all {runner_module_count - 1} tracked workflow-referenced CI/governance runner modules",
         ),
         (
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1626`",
+            f"at all {number_words[live_locator_count]} sites",
+            f"at all {number_words[wrong_locator_count]} sites",
         ),
-        (
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:167`",
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:166`",
-        ),
-        ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
-        ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
-        ("at all seven sites", "at all six sites"),
-        (
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:147`",
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:146`",
-        ),
+        *locator_mutations,
     ):
         mutated = text.replace(old, replacement, 1)
         assert mutated != text
         with pytest.raises(AssertionError):
             assert_current(mutated, tracked, contents)
 
-    omitted_locator = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`; ", "", 1)
+    omitted_locator = text.replace(locator_mutations[0][0], "", 1)
     assert omitted_locator != text
     with pytest.raises(AssertionError):
         assert_current(omitted_locator, tracked, contents)
@@ -946,12 +943,12 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         assert_current(text, added_paths, added_reference)
     with pytest.raises(AssertionError):
         assert_current(text, [path for path in tracked if path != "tools/check_python_compile.py"], contents)
+    runner_inventory_claim = (
+        f"all {runner_module_count} tracked workflow-referenced CI/governance runner modules were swept"
+    )
     registry_claim = text.replace(
-        "all 10 tracked workflow-referenced CI/governance runner modules were swept",
-        (
-            "all 10 tracked workflow-referenced CI/governance runner modules were swept, "
-            "and the registry/config references were swept"
-        ),
+        runner_inventory_claim,
+        f"{runner_inventory_claim}, and the registry/config references were swept",
         1,
     )
     assert registry_claim != text
