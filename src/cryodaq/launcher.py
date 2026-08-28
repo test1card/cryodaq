@@ -6625,6 +6625,19 @@ class LauncherWindow(QMainWindow):
         pending_id = selected if selected != current and selected in packs_by_id else None
         self._update_theme_pending_indicator(pending_id)
 
+        from cryodaq.gui.display_precision import precision_mode_enabled
+
+        settings_menu.addSeparator()
+        self._precision_mode_action = QAction(
+            "Точные значения",
+            self,
+            checkable=True,
+        )
+        self._precision_mode_action.setChecked(precision_mode_enabled())
+        self._precision_mode_action.setStatusTip("Показывать измерения с полной сохранённой точностью.")
+        self._precision_mode_action.triggered.connect(self._on_precision_mode_toggled)
+        settings_menu.addAction(self._precision_mode_action)
+
         # IV.4 F2: operator-level debug-logging toggle. Sits directly
         # under «Настройки» alongside «Тема» so it shares the same
         # menu location; state is persisted in QSettings and read by
@@ -6646,6 +6659,28 @@ class LauncherWindow(QMainWindow):
         )
         self._debug_logging_action.triggered.connect(self._on_debug_logging_toggled)
         settings_menu.addAction(self._debug_logging_action)
+
+    @Slot(bool)
+    def _on_precision_mode_toggled(self, checked: bool) -> None:
+        """Persist and immediately apply the display-only precision preference."""
+
+        if not LauncherWindow._runtime_callback_is_current(self):
+            return
+        from PySide6.QtWidgets import QMessageBox
+
+        from cryodaq.gui.display_precision import set_precision_mode
+
+        if not set_precision_mode(checked):
+            self._precision_mode_action.blockSignals(True)
+            self._precision_mode_action.setChecked(not checked)
+            self._precision_mode_action.blockSignals(False)
+            QMessageBox.critical(
+                self,
+                "Не удалось сохранить точность",
+                "Режим точных значений не изменён. Проверьте локальные настройки.",
+            )
+            return
+        self._main_window.refresh_display_precision()
 
     @Slot(bool)
     def _on_debug_logging_toggled(self, checked: bool) -> None:

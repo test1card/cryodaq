@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import msgpack
 import pytest
 import zmq
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import QSettings, QThread, QTimer
 from PySide6.QtWidgets import QApplication
 
 import cryodaq.gui.shell.overlays.conductivity_panel as panel_module
@@ -526,8 +526,128 @@ def test_power_reading_updates_power_channel(app):
     assert panel._power == 0.025
     # Rendered contract: power label must display the value after a reading.
     panel._update_power_label()
-    assert "0.025" in panel._power_label.text()
+    assert "0.03" in panel._power_label.text()
     assert "Вт" in panel._power_label.text()
+
+
+@pytest.mark.parametrize(
+    ("precision_mode", "expected_display"),
+    [
+        (False, "P = 0.20 Вт"),
+        (True, "P = 0.199999964322 Вт"),
+    ],
+)
+def test_display_precision_never_changes_persisted_autosweep_value(
+    app,
+    tmp_path,
+    precision_mode: bool,
+    expected_display: str,
+) -> None:
+    from cryodaq.storage.conductivity_run import ConductivityRunWriter
+
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    value = 0.199999964322
+    try:
+        settings.setValue(key, precision_mode)
+        settings.sync()
+
+        path = tmp_path / f"precision-{precision_mode}.csv"
+        writer = ConductivityRunWriter(
+            path,
+            run_id=f"precision-{precision_mode}",
+            started_at=datetime(2026, 8, 29, tzinfo=UTC),
+            parameters={},
+        )
+        writer.append_point(
+            {
+                "timestamp_utc": "2026-08-29T00:00:00+00:00",
+                "P_W": value,
+                "T_hot_K": 1.0,
+                "T_cold_K": 0.5,
+                "T_avg_K": 0.75,
+                "dT_K": 0.5,
+                "R_KW": 0.12745973,
+                "G_WK": 0.11708202,
+                "settled_pct": 99.0,
+            }
+        )
+        writer.close()
+
+        panel = ConductivityPanel()
+        panel._power = value
+        panel._power_received = True
+        panel._update_power_label()
+
+        assert panel._power_label.text() == expected_display
+        assert f",{value}," in path.read_text(encoding="utf-8")
+        snapshot = read_conductivity_run(path)
+        assert snapshot.rows[0]["conductance_wk"] == 0.11708202
+        assert snapshot.rows[0]["resistance_kw"] == 0.12745973
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
+@pytest.mark.parametrize(
+    ("precision_mode", "expected_fragments"),
+    [
+        (False, ("P=0.20 Вт", "dT=0.50 К", "R=0.1275", "G=0.1171")),
+        (
+            True,
+            (
+                "P=0.199999964322 Вт",
+                "dT=0.500000012345 К",
+                "R=0.12745973",
+                "G=0.11708202",
+            ),
+        ),
+    ],
+)
+def test_completion_dialog_obeys_display_precision(
+    app,
+    monkeypatch,
+    precision_mode: bool,
+    expected_fragments: tuple[str, ...],
+) -> None:
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    messages: list[str] = []
+    try:
+        settings.setValue(key, precision_mode)
+        settings.sync()
+        monkeypatch.setattr(
+            panel_module.QMessageBox,
+            "information",
+            lambda _parent, _title, body: messages.append(body),
+        )
+        panel = ConductivityPanel()
+        panel._auto_results = [
+            {
+                "P": 0.199999964322,
+                "dT": 0.500000012345,
+                "R": 0.12745973,
+                "G": 0.11708202,
+                "settled_pct": 99.0,
+            }
+        ]
+
+        panel._publish_auto_complete()
+
+        assert len(messages) == 1
+        for expected in expected_fragments:
+            assert expected in messages[0]
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
 
 
 def test_unknown_channel_is_noop(app):
@@ -570,7 +690,7 @@ def test_table_calculates_R_and_G_correctly(app):
     # R = dT / P = 10 / 0.005 = 2000 — exact value, not a substring that
     # could match "20000" or similar.
     r_text = panel._table.item(0, 4).text()
-    assert r_text == "2000", f"Expected exact '2000' for R, got {r_text!r}"
+    assert r_text == "2.0000e+03", f"Expected exact '2.0000e+03' for R, got {r_text!r}"
     # G = P / dT = 0.005 / 10 = 0.0005 — exact value.
     g_text = panel._table.item(0, 5).text()
     assert g_text == "0.0005", f"Expected exact '0.0005' for G, got {g_text!r}"
@@ -590,10 +710,10 @@ def test_table_total_row_present(app):
     # 2 pairs + 1 total row = 3 rows
     assert panel._table.rowCount() == 3
     assert panel._table.item(2, 0).text() == "ИТОГО"
-    # Total R = 1000 + 1000 = 2000 (exact :.4g)
+    # Total R = 1000 + 1000 = 2000 (four thermal-resistance decimals)
     total_r_text = panel._table.item(2, 4).text()
-    assert total_r_text == "2000", f"Expected total R '2000', got {total_r_text!r}"
-    # Total G = P / total_dT = 0.01 / 20 = 0.0005 (exact :.4g)
+    assert total_r_text == "2.0000e+03", f"Expected total R '2.0000e+03', got {total_r_text!r}"
+    # Total G = P / total_dT = 0.01 / 20 = 0.0005 (four conductance decimals)
     total_g_text = panel._table.item(2, 5).text()
     assert total_g_text == "0.0005", f"Expected total G '0.0005', got {total_g_text!r}"
 

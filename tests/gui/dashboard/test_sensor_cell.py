@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QSettings, Qt
 from PySide6.QtGui import QKeyEvent
 
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -52,6 +52,100 @@ def test_sensor_cell_update_value_with_reading(app, mock_channel_mgr, buffer_sto
     assert "4.21" in cell._value_widget.text()
     assert cell._unit_widget.text() == "K"
     assert cell._last_status == ChannelStatus.OK
+
+
+def test_sensor_cell_display_precision_round_trips_without_changing_reading(
+    app,
+    mock_channel_mgr,
+    buffer_store,
+):
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    reading = Reading(
+        channel="Т1 Криостат верх",
+        value=0.199999964322,
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+    try:
+        settings.remove(key)
+        settings.sync()
+        cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+        cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+        assert cell._value_widget.text() == "0.20"
+
+        settings.setValue(key, True)
+        settings.sync()
+        cell.refresh_display_precision()
+        assert cell._value_widget.text() == "0.199999964322"
+
+        settings.setValue(key, False)
+        settings.sync()
+        cell.refresh_display_precision()
+        assert cell._value_widget.text() == "0.20"
+        assert reading.value == 0.199999964322
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
+def test_sensor_cell_absent_and_faulted_readings_stay_dash_in_both_precision_modes(
+    app,
+    mock_channel_mgr,
+    buffer_store,
+):
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    try:
+        cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+        assert cell._value_widget.text() == "—"
+        faulted = Reading(
+            channel="Т1 Криостат верх",
+            value=float("nan"),
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.SENSOR_ERROR,
+            instrument_id="lakeshore_218s",
+        )
+        cell.update_value(faulted, IdentityStatus.AUTHORITATIVE)
+
+        for precision_mode in (False, True):
+            settings.setValue(key, precision_mode)
+            settings.sync()
+            cell.refresh_display_precision()
+            assert cell._value_widget.text() == "—"
+            assert cell._value_widget.text() != "0.00"
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
+def test_display_precision_setting_survives_settings_recreation(tmp_path):
+    from cryodaq.gui.display_precision import precision_mode_enabled, set_precision_mode
+
+    settings_path = tmp_path / "CryoDAQ.ini"
+    settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    assert precision_mode_enabled(settings) is False
+
+    assert set_precision_mode(True, settings) is True
+    restarted = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    restarted.sync()
+    assert precision_mode_enabled(restarted) is True
+
+    assert set_precision_mode(False, restarted) is True
+    restarted_again = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    restarted_again.sync()
+    assert precision_mode_enabled(restarted_again) is False
 
 
 def test_sensor_cell_names_faulted_channel_and_instrument_reason(app, mock_channel_mgr, buffer_store):

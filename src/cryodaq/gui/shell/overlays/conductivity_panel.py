@@ -72,10 +72,12 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
+from cryodaq.gui.display_precision import format_display_value
 from cryodaq.gui.zmq_client import (
     ZmqCommandWorker,
     capture_gui_worker_session_token,
@@ -1333,7 +1335,15 @@ class ConductivityPanel(QWidget):
         if not self._power_received:
             self._power_label.setText("P = ожидание данных")
             return
-        self._power_label.setText(f"P = {self._power:.6g} Вт")
+        power_text = format_display_value(self._power, quantity=ChannelQuantity.POWER)
+        self._power_label.setText(f"P = {power_text} Вт")
+
+    def refresh_display_precision(self) -> None:
+        """Re-render live measurement readouts after a preference change."""
+
+        self._update_power_label()
+        self._update_power_preview()
+        self._update_table(self._predictor.get_all_predictions())
 
     def _update_table(self, preds: dict) -> None:
         # IV.1 finding 5: stack state is kept in sync via both the
@@ -1381,7 +1391,10 @@ class ConductivityPanel(QWidget):
                 t_inf_hot = p_hot.t_predicted
                 t_inf_cold = p_cold.t_predicted
                 dt_inf = t_inf_hot - t_inf_cold
-                t_inf_str = f"{t_inf_hot:.3f} / {t_inf_cold:.3f}"
+                t_inf_str = (
+                    f"{format_display_value(t_inf_hot, quantity=ChannelQuantity.TEMPERATURE)} / "
+                    f"{format_display_value(t_inf_cold, quantity=ChannelQuantity.TEMPERATURE)}"
+                )
                 tau_avg = (p_hot.tau_s + p_cold.tau_s) / 2
                 tau_str = f"{tau_avg / 60:.1f}"
                 pct_val = min(p_hot.percent_settled, p_cold.percent_settled)
@@ -1389,19 +1402,33 @@ class ConductivityPanel(QWidget):
                 if P != 0 and abs(dt_inf) > 1e-10:
                     r_pred = dt_inf / P
                     g_pred = P / dt_inf
-                    r_pred_str = f"{r_pred:.4g}"
-                    g_pred_str = f"{g_pred:.4g}"
+                    r_pred_str = format_display_value(
+                        r_pred,
+                        quantity=ChannelQuantity.THERMAL_RESISTANCE,
+                    )
+                    g_pred_str = format_display_value(
+                        g_pred,
+                        quantity=ChannelQuantity.THERMAL_CONDUCTANCE,
+                    )
                     if math.isfinite(r_pred):
                         total_r_pred += r_pred
 
             hot_display = get_channel_manager().get_display_name(hot_ch)
             cold_display = get_channel_manager().get_display_name(cold_ch)
             self._table.setItem(row, 0, _cell(f"{hot_display} → {cold_display}"))
-            self._table.setItem(row, 1, _cell(f"{t_hot:.4f}"))
-            self._table.setItem(row, 2, _cell(f"{t_cold:.4f}"))
-            self._table.setItem(row, 3, _cell(f"{dt:.4f}" if math.isfinite(dt) else "—"))
-            self._table.setItem(row, 4, _cell(f"{R:.4g}" if math.isfinite(R) else "—"))
-            self._table.setItem(row, 5, _cell(f"{G:.4g}" if math.isfinite(G) else "—"))
+            self._table.setItem(row, 1, _cell(format_display_value(t_hot, quantity=ChannelQuantity.TEMPERATURE)))
+            self._table.setItem(row, 2, _cell(format_display_value(t_cold, quantity=ChannelQuantity.TEMPERATURE)))
+            self._table.setItem(row, 3, _cell(format_display_value(dt, quantity=ChannelQuantity.TEMPERATURE)))
+            self._table.setItem(
+                row,
+                4,
+                _cell(format_display_value(R, quantity=ChannelQuantity.THERMAL_RESISTANCE)),
+            )
+            self._table.setItem(
+                row,
+                5,
+                _cell(format_display_value(G, quantity=ChannelQuantity.THERMAL_CONDUCTANCE)),
+            )
             self._table.setItem(row, 6, _cell(t_inf_str))
             self._table.setItem(row, 7, _cell(tau_str))
             pct_item = _cell(pct_str)
@@ -1419,20 +1446,48 @@ class ConductivityPanel(QWidget):
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
 
         self._table.setItem(total_row, 0, _cell("ИТОГО"))
-        self._table.setItem(total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—"))
-        self._table.setItem(total_row, 2, _cell(f"{t_last:.4f}" if math.isfinite(t_last) else "—"))
-        self._table.setItem(total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—"))
+        self._table.setItem(
+            total_row,
+            1,
+            _cell(format_display_value(t_first, quantity=ChannelQuantity.TEMPERATURE)),
+        )
+        self._table.setItem(
+            total_row,
+            2,
+            _cell(format_display_value(t_last, quantity=ChannelQuantity.TEMPERATURE)),
+        )
+        self._table.setItem(
+            total_row,
+            3,
+            _cell(format_display_value(total_dt, quantity=ChannelQuantity.TEMPERATURE)),
+        )
         self._table.setItem(
             total_row,
             4,
-            _cell(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"),
+            _cell(format_display_value(total_r, quantity=ChannelQuantity.THERMAL_RESISTANCE) if total_r != 0 else "—"),
         )
-        self._table.setItem(total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—"))
+        self._table.setItem(
+            total_row,
+            5,
+            _cell(format_display_value(total_G, quantity=ChannelQuantity.THERMAL_CONDUCTANCE)),
+        )
         self._table.setItem(total_row, 6, _cell(""))
         self._table.setItem(total_row, 7, _cell(""))
         self._table.setItem(total_row, 8, _cell(""))
-        self._table.setItem(total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—"))
-        self._table.setItem(total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—"))
+        self._table.setItem(
+            total_row,
+            9,
+            _cell(
+                format_display_value(total_r_pred, quantity=ChannelQuantity.THERMAL_RESISTANCE)
+                if total_r_pred != 0
+                else "—"
+            ),
+        )
+        self._table.setItem(
+            total_row,
+            10,
+            _cell(format_display_value(total_G_pred, quantity=ChannelQuantity.THERMAL_CONDUCTANCE)),
+        )
 
         bold_font = _mono_cell_font()
         bold_font.setBold(True)
@@ -1526,10 +1581,12 @@ class ConductivityPanel(QWidget):
                 if rate > _STABILITY_THRESHOLD:
                     stable = False
         if stable:
-            self._stability_label.setText(f"Стабильно (dT/dt = {max_rate:.4f} К/мин)")
+            rate_text = format_display_value(max_rate, quantity=ChannelQuantity.TEMPERATURE)
+            self._stability_label.setText(f"Стабильно (dT/dt = {rate_text} К/мин)")
             color = theme.ACCENT
         else:
-            self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
+            rate_text = format_display_value(max_rate, quantity=ChannelQuantity.TEMPERATURE)
+            self._stability_label.setText(f"Нестабильно (dT/dt = {rate_text} К/мин)")
             color = theme.STATUS_INFO
         self._stability_label.setStyleSheet(
             f"color: {color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
@@ -2209,10 +2266,11 @@ class ConductivityPanel(QWidget):
     def _update_power_preview(self) -> None:
         powers = self._generate_power_list()
         if len(powers) <= 6:
-            text = ", ".join(f"{p:.4g}" for p in powers)
+            text = ", ".join(format_display_value(p, quantity=ChannelQuantity.POWER) for p in powers)
         else:
-            first3 = ", ".join(f"{p:.4g}" for p in powers[:3])
-            text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
+            first3 = ", ".join(format_display_value(p, quantity=ChannelQuantity.POWER) for p in powers[:3])
+            last = format_display_value(powers[-1], quantity=ChannelQuantity.POWER)
+            text = f"{first3}, ... , {last}  ({len(powers)} шагов)"
         self._power_preview.setText("Список мощностей: " + text)
 
     def _send_auto_cmd(
@@ -2577,7 +2635,8 @@ class ConductivityPanel(QWidget):
         self._auto_progress.setVisible(True)
         self._auto_progress.setValue(0)
         self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
+        power_text = format_display_value(powers[0], quantity=ChannelQuantity.POWER)
+        self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {power_text} Вт")
         self._update_control_enablement()
 
         if not self._begin_auto_run_async(powers, data_dir):
@@ -2792,8 +2851,9 @@ class ConductivityPanel(QWidget):
         self._auto_progress.setValue(min(pct, 99))
 
         settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
+        power_text = format_display_value(P, quantity=ChannelQuantity.POWER)
         self._auto_status_label.setText(
-            f"Шаг {step_idx + 1}/{step_total} — P = {P:.4g} Вт — {elapsed:.0f} с — стабил.: {settled_str}"
+            f"Шаг {step_idx + 1}/{step_total} — P = {power_text} Вт — {elapsed:.0f} с — стабил.: {settled_str}"
         )
 
         if is_stable:
@@ -2945,7 +3005,19 @@ class ConductivityPanel(QWidget):
         if self._auto_results:
             summary_lines = ["Автоизмерение завершено:\n"]
             for i, pt in enumerate(self._auto_results, 1):
-                summary_lines.append(f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, R={pt['R']:.4g}, G={pt['G']:.4g}")
+                power_text = format_display_value(pt["P"], quantity=ChannelQuantity.POWER)
+                dt_text = format_display_value(pt["dT"], quantity=ChannelQuantity.TEMPERATURE)
+                resistance_text = format_display_value(
+                    pt["R"],
+                    quantity=ChannelQuantity.THERMAL_RESISTANCE,
+                )
+                conductance_text = format_display_value(
+                    pt["G"],
+                    quantity=ChannelQuantity.THERMAL_CONDUCTANCE,
+                )
+                summary_lines.append(
+                    f"{i}. P={power_text} Вт, dT={dt_text} К, R={resistance_text}, G={conductance_text}"
+                )
             QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
         self.auto_sweep_completed.emit(n)
 

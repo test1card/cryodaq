@@ -21,10 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, InstrumentStatusFaultReason, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.display_precision import MISSING_VALUE_TEXT, format_display_value
 from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,7 @@ class SensorCell(QFrame):
         self._read_only = False
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
+        self._display_value: float | None = None
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -231,6 +234,22 @@ class SensorCell(QFrame):
     # Value updates
     # ------------------------------------------------------------------
 
+    def _render_display_value(self) -> None:
+        if self._display_value is None:
+            self._value_widget.setText(MISSING_VALUE_TEXT)
+            return
+        self._value_widget.setText(
+            format_display_value(
+                self._display_value,
+                quantity=ChannelQuantity.TEMPERATURE,
+            )
+        )
+
+    def refresh_display_precision(self) -> None:
+        """Re-render the current value after the display preference changes."""
+
+        self._render_display_value()
+
     def update_value(
         self,
         reading: Reading,
@@ -244,13 +263,10 @@ class SensorCell(QFrame):
 
         value = reading.value
         if reading.is_usable():
-            if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
-                text = f"{value:.2e}"
-            else:
-                text = f"{value:.2f}"
-            self._value_widget.setText(text)
+            self._display_value = float(value)
         else:
-            self._value_widget.setText("\u2014")
+            self._display_value = None
+        self._render_display_value()
 
         self._unit_widget.setText(reading.unit or "")
         self._source_status = reading.status
@@ -296,7 +312,8 @@ class SensorCell(QFrame):
         last = self._buffer.get_last_with_status(self._channel_id)
         if last is None:
             if not self._data_stale:
-                self._value_widget.setText("\u2014")
+                self._display_value = None
+                self._render_display_value()
                 self._unit_widget.setText("")
                 self._apply_stale_style()
                 self._status_hint_widget.setText(
@@ -321,13 +338,10 @@ class SensorCell(QFrame):
 
         self._source_status = status
         if status is ChannelStatus.OK and isinstance(value, (int, float)) and math.isfinite(value):
-            if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
-                text = f"{value:.2e}"
-            else:
-                text = f"{value:.2f}"
-            self._value_widget.setText(text)
+            self._display_value = float(value)
         else:
-            self._value_widget.setText("\u2014")
+            self._display_value = None
+        self._render_display_value()
         self._data_stale = False
         if self._source_identity is not IdentityStatus.AUTHORITATIVE:
             self._apply_identity_state(stale=False)

@@ -281,6 +281,12 @@ class DashboardView(QScrollArea):
         self._read_only = bool(read_only)
         self._update_mutation_authority()
 
+    def refresh_display_precision(self) -> None:
+        """Refresh dashboard measurement text after a preference change."""
+
+        if self._sensor_grid is not None:
+            self._sensor_grid.refresh_display_precision()
+
     def set_connected(self, connected: bool) -> None:
         connected = bool(connected)
         if connected == self._connected:

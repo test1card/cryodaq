@@ -1675,6 +1675,13 @@ class MainWindowV2(QMainWindow):
         if controller is not None:
             controller.complete_root_shutdown()
 
+    def refresh_display_precision(self) -> None:
+        """Re-render loaded operator measurement surfaces."""
+
+        self._overview_panel.refresh_display_precision()
+        if self._conductivity_panel is not None:
+            self._conductivity_panel.refresh_display_precision()
+
     def closeEvent(self, event):  # noqa: ANN001
         """Transfer a close request to the one composition-root owner.
 
