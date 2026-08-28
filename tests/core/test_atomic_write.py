@@ -47,6 +47,15 @@ def test_atomic_write_cyrillic(tmp_path):
     assert target.read_text(encoding="utf-8") == "Эксперимент начат, оператор Иванов"
 
 
+def test_atomic_write_text_preserves_checked_utf8_bytes(tmp_path):
+    target = tmp_path / "bounded-state.json"
+    content = '{\n  "operator": "Иванов"\n}\n'
+
+    atomic_write_text(target, content)
+
+    assert target.read_bytes() == content.encode("utf-8")
+
+
 def test_atomic_write_bytes(tmp_path):
     target = tmp_path / "blob.bin"
     payload = b"\x00\x01\x02\xff"

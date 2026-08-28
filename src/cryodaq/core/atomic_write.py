@@ -35,7 +35,7 @@ def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> N
         suffix=".tmp",
     )
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
             f.write(content)
             f.flush()
             try:
