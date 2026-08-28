@@ -91,6 +91,15 @@ _SEVERITY_TOKENS: dict[str, str] = {
     "UNKNOWN": theme.STATUS_FAULT,
 }
 
+
+def _severity_foreground(display_severity: str) -> str:
+    """Return the contrast-tested foreground for a filled severity control."""
+
+    if display_severity in {"CRITICAL", "UNKNOWN"}:
+        return theme.ON_DESTRUCTIVE
+    return theme.ON_PRIMARY
+
+
 # Russian short labels for the severity chip. No emoji (RULE-COPY-005).
 _SEVERITY_LABELS: dict[str, str] = {
     "CRITICAL": "КРИТ",
@@ -263,7 +272,7 @@ class SeverityChip(QLabel):
         else:
             label = base_label
             bg_color = _SEVERITY_TOKENS[self._display_severity]
-            fg_color = theme.ON_PRIMARY
+            fg_color = _severity_foreground(self._display_severity)
         self.setText(label)
         self.setFont(_chip_font())
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -293,12 +302,13 @@ def _make_ack_button(severity: str, label: str = "ПОДТВЕРДИТЬ") -> QP
     the color comes from the DS status token for the severity.
     """
     btn = QPushButton(label)
-    color = _SEVERITY_TOKENS[alarm_level_for_display(severity)]
+    display_severity = alarm_level_for_display(severity)
+    color = _SEVERITY_TOKENS[display_severity]
     btn.setFont(_chip_font())
     btn.setStyleSheet(
         f"QPushButton {{"
         f" background-color: {color};"
-        f" color: {theme.ON_PRIMARY};"
+        f" color: {_severity_foreground(display_severity)};"
         f" border: none;"
         f" border-radius: {theme.RADIUS_SM}px;"
         f" padding: {theme.SPACE_1}px {theme.SPACE_3}px;"

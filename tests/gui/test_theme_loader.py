@@ -479,9 +479,14 @@ def _contrast_ratio(fg: str, bg: str) -> float:
 
 def test_default_cool_alarm_labels_pass_aa(real_themes_dir):
     pack = loader.validate_theme_pack("default_cool")
-    for token in ("STATUS_OK", "STATUS_CAUTION", "STATUS_INFO"):
-        ratio = _contrast_ratio(pack["ON_PRIMARY"], pack[token])
-        assert ratio >= 4.5, f"default_cool.ON_PRIMARY vs {token} contrast {ratio:.2f}:1 < 4.5 AA"
+    for token, foreground in (
+        ("STATUS_OK", "ON_PRIMARY"),
+        ("STATUS_CAUTION", "ON_PRIMARY"),
+        ("STATUS_INFO", "ON_PRIMARY"),
+        ("STATUS_FAULT", "ON_DESTRUCTIVE"),
+    ):
+        ratio = _contrast_ratio(pack[foreground], pack[token])
+        assert ratio >= 4.5, f"default_cool.{foreground} vs {token} contrast {ratio:.2f}:1 < 4.5 AA"
 
 
 def test_status_palette_hue_locked_across_all_themes(real_themes_dir):

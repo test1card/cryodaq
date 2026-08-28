@@ -31,7 +31,7 @@ ACCENT_600: "#b8c0ff"
 
 # Text on colored backgrounds
 ON_PRIMARY: "#141210"
-ON_DESTRUCTIVE: "#e8eaf0"
+ON_DESTRUCTIVE: "#ffffff"
 
 # Status palette (LOCKED — identical across all bundled themes; one-time
 # semantic refresh from v1 values, see CHANGELOG)

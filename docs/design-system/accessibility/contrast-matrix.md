@@ -4,7 +4,7 @@ keywords: contrast, wcag, aa, aaa, ratios, measured, token-pairs, foreground, ba
 applies_to: WCAG contrast ratios for every token pair used in the product
 status: canonical
 references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md
-last_updated: 2026-08-12
+last_updated: 2026-08-28
 ---
 
 # Contrast Matrix
@@ -69,21 +69,21 @@ pills must prefer a contrast-tested foreground pair. See
 
 ### `default_cool` filled-label foreground
 
-The shipped `default_cool` pack uses `ON_PRIMARY #141210` for alarm labels and
-acknowledgement buttons. These pairs are measured against the actual status or
-accent fills used by that pack:
+The shipped `default_cool` pack uses `ON_PRIMARY #141210` for ordinary alarm
+labels and acknowledgement buttons, and `ON_DESTRUCTIVE #ffffff` for fault
+and unknown-alarm controls. These pairs are measured against the actual status
+fills used by that pack:
 
 | Background | Foreground | Ratio | AA body (4.5:1) | AA large (3:1) |
 |---|---|---|---|---|
 | STATUS_OK `#4a8a5e` | ON_PRIMARY `#141210` | **4.53:1** | ✓ | ✓ |
 | STATUS_CAUTION `#c4862e` | ON_PRIMARY `#141210` | **6.05:1** | ✓ | ✓ |
 | STATUS_INFO `#6490c4` | ON_PRIMARY `#141210` | **5.63:1** | ✓ | ✓ |
-| STATUS_FAULT `#c44545` | ON_PRIMARY `#141210` | **3.81:1** | ✗ | ✓ |
+| STATUS_FAULT `#c44545` | ON_DESTRUCTIVE `#ffffff` | **4.90:1** | ✓ | ✓ |
 | ACCENT `#7c8cff` | ON_PRIMARY `#141210` | **6.28:1** | ✓ | ✓ |
 
-The fault pair remains supplementary at body size and follows the existing
-multi-channel alarm treatment. Other packs retain their own `ON_PRIMARY` and
-`ON_DESTRUCTIVE` values; their pairs must be measured from the active pack.
+Other packs retain their own `ON_PRIMARY` and `ON_DESTRUCTIVE` values; their
+pairs must be measured from the active pack.
 
 ## Ratios vs SECONDARY surfaces
 
@@ -167,7 +167,7 @@ Some AA gaps are deliberate design trade-offs:
 - **TEXT_DISABLED 2.79:1** — disabled means unreachable; operator's eye should skip it. AA compliance on disabled text is not required per WCAG (explicitly excluded).
 - **STATUS_OK 4.67:1 body on BACKGROUND** — passes AA but close to threshold; fails on CARD/SECONDARY/MUTED. Acceptable because STATUS_OK is used mostly as chrome/indicator, not body text.
 - **STATUS_FAULT / DESTRUCTIVE 3.94:1 body on BACKGROUND** — fails AA body on every surface but passes AA large (≥3:1) on BACKGROUND/CARD/MUTED. Used as chrome, filled-pill background, or large semibold labels — never as body text.
-- **Filled-pill text** — the generic ON_DESTRUCTIVE (`#e8eaf0`) pairs above remain the legacy baseline; `default_cool` uses the separately measured ON_PRIMARY `#141210` pairs above. The fault pair still fails AA body, so retained alarm pills require multi-channel redundancy and an adjacent readable FOREGROUND label; the pill text is supplementary, not the sole state signal.
+- **Filled-pill text** — the generic ON_DESTRUCTIVE (`#e8eaf0`) pairs above remain the legacy baseline. `default_cool` uses its separately measured `ON_PRIMARY #141210` pairs for OK/caution/info and `ON_DESTRUCTIVE #ffffff` for fault/unknown controls, so the displayed control labels meet AA body contrast.
 - **BORDER 1.46:1 non-text on BACKGROUND (and lower on CARD/SECONDARY)** — fails 1.4.11 (≥3:1) on every surface. Accepted as a visual-grouping stroke only; functional boundaries (focus, active, fault) use ACCENT or STATUS_* which do meet 3:1. This gap downgrades 1.4.11 to `Partial` in `accessibility/wcag-baseline.md`.
 
 None of these gaps is "we didn't notice"; each is a documented trade-off between accessibility and visual design density. Multi-channel redundancy (shape + color + icon + text) ensures operators never depend on a single sub-threshold pair to resolve state.
@@ -239,6 +239,9 @@ Any new token or background color added must go through this calculation + get a
 
 ## Changelog
 
+- 2026-08-28: Split `default_cool` fault/unknown alarm controls onto
+  `ON_DESTRUCTIVE #ffffff` (4.90:1 on `STATUS_FAULT`), while ordinary
+  alarm controls retain their measured `ON_PRIMARY #141210` pairs.
 - 2026-08-12: Added the measured `default_cool` `ON_PRIMARY #141210` filled-label
   pairs and separated them from the generic `ON_DESTRUCTIVE` legacy baseline.
 - 2026-04-17: Initial version. Measured ratios for all 13 primary text/accent tokens vs BACKGROUND. Filled-pill context ratios. Non-text contrast for UI borders. Documented AA gaps with rationale. Light theme deferred.

@@ -246,7 +246,7 @@ def test_severity_presentation_uses_design_tokens_and_non_color_cues(app):
     assert "✓" in acknowledged.text()
     assert theme.STATUS_FAULT in critical.styleSheet()
     assert theme.STATUS_CAUTION in caution.styleSheet()
-    assert theme.ON_PRIMARY in critical.styleSheet()
+    assert theme.ON_DESTRUCTIVE in critical.styleSheet()
     assert theme.ON_PRIMARY in caution.styleSheet()
     assert theme.SURFACE_MUTED in acknowledged.styleSheet()
 
@@ -255,8 +255,21 @@ def test_ack_button_uses_status_and_disabled_tokens(app):
     button = _make_ack_button("CRITICAL")
     assert button.text() == "ПОДТВЕРДИТЬ"
     assert theme.STATUS_FAULT in button.styleSheet()
-    assert theme.ON_PRIMARY in button.styleSheet()
+    assert theme.ON_DESTRUCTIVE in button.styleSheet()
     assert theme.SURFACE_MUTED in button.styleSheet()
+
+
+@pytest.mark.parametrize("severity", ("CRITICAL", "UNKNOWN"))
+def test_fault_controls_use_destructive_foreground_for_aa_text(app, severity):
+    """Fault fills need ON_DESTRUCTIVE rather than the primary foreground."""
+    chip = SeverityChip(severity)
+    button = _make_ack_button(severity)
+
+    for control in (chip, button):
+        style = control.styleSheet()
+        assert theme.STATUS_FAULT in style
+        assert theme.ON_DESTRUCTIVE in style
+        assert theme.ON_PRIMARY not in style
 
 
 def test_update_renders_complete_v2_evidence_and_count(app):
