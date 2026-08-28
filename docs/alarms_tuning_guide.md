@@ -152,28 +152,53 @@ scheduler_drain_timeout_s: 5.0
 ```yaml
 interlocks:
   - name: "overheat_cryostat"
-    channel_pattern: "Т[1-8] .*"   # любой из Т1-Т8
+    description: "Перегрев криостата — аварийное отключение нагревателя"
+    channel_bindings:
+      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
     threshold: 350.0               # K
     comparison: ">"
     action: "emergency_off"        # полное отключение
     cooldown_s: 10.0
 
   - name: "overheat_compressor"
-    channel_pattern: "Т(9|10|11|12) .*"
+    description: "Перегрев компрессорной линии"
+    channel_bindings:
+      - {instrument_id: "LS218_2", source_key: "input.1.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.2.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 320.0
     comparison: ">"
     action: "emergency_off"
     cooldown_s: 10.0
 
   - name: "detector_warmup"
-    channel_pattern: "Т12 .*"
+    description: "2-я ступень (Т12) выше рабочей температуры — данные измерения могут быть недостоверны"
+    channel_bindings:
+      - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 10.0                # K
     comparison: ">"
     action: "warning"              # предупреждение; источник остаётся включён
     cooldown_s: 5.0
 
   - name: "source_overtemp"
-    channel_pattern: "Т[1-8] .*"
+    description: "Температура криостата выше 320 K — остановка источника"
+    channel_bindings:
+      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
+      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
     threshold: 320.0               # K
     comparison: ">"
     action: "stop_source"          # verified OFF без нового fault latch
@@ -196,7 +221,7 @@ interlocks:
 |---|---|---|
 | `overheat_cryostat` Т1-Т8 | >350 K | Консервативно. Можно оставить. Если Т1 (верх криостата) в проде редко доходит до 300К — OK. |
 | `overheat_compressor` Т9-Т12 | >320 K | Компрессор GM-cooler реально греется до 50-100°C = 323-373 K. Проверь паспорт твоего криокулера — может ужесточить до 310 K. |
-| `detector_warmup` Т12 | >10 K | **Основной рабочий порог качества данных.** Т12 = 2-я ступень, рабочая температура 3-4 K. При >10 K публикуется WARNING; источник остаётся включён. Предупреждение действует во всех lifecycle-состояниях и автоматически снимается по безопасному показанию после окончания 5-секундного cooldown. Имя для ручного acknowledge: `detector_warmup`. |
+| `detector_warmup` Т12 | >10 K | **Основной рабочий порог качества данных.** Т12 = 2-я ступень, рабочая температура 3-4 K. При >10 K публикуется WARNING; источник остаётся включён. Предупреждение действует во всех lifecycle-состояниях и автоматически снимается по безопасному показанию после окончания 5-секундного cooldown; ручной acknowledge не применяется. |
 | `source_overtemp` Т1-Т8 | >320 K | Остановка источника допускается только в активном lifecycle источника (`run_permitted` или `running`). В idle условие остаётся `ARMED`. Имя для acknowledge после устранения причины: `source_overtemp`. |
 
 ### Важные замечания

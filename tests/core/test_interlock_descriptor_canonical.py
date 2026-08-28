@@ -148,8 +148,14 @@ async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None
                 "channel_pattern no longer matches F-1's canonical Reading.channel"
             )
 
-        expected_actions = {entry["action"] for entry in config.values() if entry["name"] in INTERLOCK_CHANNELS}
-        assert expected_actions <= set(actions_seen)
+        expected_control_actions = {
+            entry["action"]
+            for entry in config.values()
+            if entry["name"] in INTERLOCK_CHANNELS and entry["action"] != "warning"
+        }
+        assert expected_control_actions <= set(actions_seen)
+        assert config["detector_warmup"]["action"] == "warning"
+        assert "warning" not in actions_seen
     finally:
         await engine.stop()
 
@@ -252,7 +258,7 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
             "detector_warmup detached after a canonical channel-id rename instead of following "
             "the declared LS218_2/input.4.temperature sensor binding"
         )
-        assert actions_seen == ["stop_source"]
+        assert actions_seen == [], "observational detector warning must not invoke source control"
     finally:
         await engine.stop()
 

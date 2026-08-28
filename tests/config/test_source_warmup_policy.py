@@ -113,10 +113,10 @@ def test_operator_docs_match_warm_detector_and_source_overtemp_policy() -> None:
     assert 'action: "warning"' in guide_interlocks
     assert "источник остаётся включён" in guide_interlocks
     assert "во всех lifecycle-состояниях" in guide_interlocks
-    assert "Имя для ручного acknowledge: `detector_warmup`" in guide_interlocks
+    assert "ручной acknowledge не применяется" in guide_interlocks
     assert "при Т12 >10 K" in operator_ack
     assert "источник не отключается" in operator_ack
-    assert "ручное имя acknowledge —\n`detector_warmup`" in operator_ack
+    assert "не квитируется вручную" in operator_ack
 
     assert source_overtemp["threshold"] == 320.0
     assert source_overtemp["action"] == "stop_source"
@@ -125,6 +125,32 @@ def test_operator_docs_match_warm_detector_and_source_overtemp_policy() -> None:
     assert "Имя для acknowledge после устранения причины: `source_overtemp`" in guide_interlocks
     assert "`source_overtemp` — отдельная защитная ступень для Т1-Т8 >320 K" in operator_ack
     assert "имя acknowledge после устранения причины —\n`source_overtemp`" in operator_ack
+
+
+def test_documented_current_interlocks_are_loadable_with_production_bindings(tmp_path: Path) -> None:
+    guide = ALARMS_GUIDE_PATH.read_text(encoding="utf-8")
+    interlock_layer = guide.split("## Слой 2: Interlock Engine", 1)[1].split("## Слой 3:", 1)[0]
+    current = interlock_layer.split("### Текущая конфигурация", 1)[1].split("### Actions", 1)[0]
+    yaml_block = current.split("```yaml", 1)[1].split("```", 1)[0]
+    documented = yaml.safe_load(yaml_block)
+    source_overtemp = next(row for row in documented["interlocks"] if row["name"] == "source_overtemp")
+
+    assert source_overtemp["channel_bindings"] == _interlocks()["source_overtemp"]["channel_bindings"]
+    assert "channel_pattern" not in source_overtemp
+
+    documented_path = tmp_path / "interlocks.yaml"
+    documented_path.write_text(yaml_block, encoding="utf-8")
+    catalog = load_live_channel_descriptor_catalog(DESCRIPTORS_PATH)
+    engine = InterlockEngine(
+        DataBroker(),
+        actions={"emergency_off": lambda: None, "stop_source": lambda: None},
+    )
+    engine.load_config(
+        documented_path,
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument=POLL_INTERVALS,
+    )
+    assert set(engine.get_state()) == set(_interlocks())
 
 
 async def test_detector_warmup_dispatches_operator_warning_without_control() -> None:
@@ -185,6 +211,48 @@ async def test_detector_warmup_dispatches_operator_warning_without_control() -> 
             "acknowledged": False,
         }
     ]
+
+
+async def test_detector_warning_publication_failure_never_latches_safety(caplog) -> None:
+    class FailingBus:
+        async def publish(self, _event) -> None:
+            raise RuntimeError("notification transport unavailable")
+
+    class SafetyProbe:
+        def __init__(self) -> None:
+            self.latch_calls: list[dict] = []
+
+        async def on_interlock_trip(self, *_args, **_kwargs) -> None:
+            raise AssertionError("warning must not enter the control path")
+
+        async def latch_fault(self, **kwargs) -> None:
+            self.latch_calls.append(kwargs)
+
+    safety = SafetyProbe()
+    alarm_state_manager = AlarmStateManager()
+    context = _InterlockHandlerContext(
+        safety_manager=safety,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent=set(),
+        event_bus=FailingBus(),
+        experiment_manager=SimpleNamespace(active_experiment_id="measurement-1"),
+        alarm_state_manager=alarm_state_manager,
+    )
+    condition = SimpleNamespace(
+        name="detector_warmup",
+        description="detector stage is warm",
+        action="warning",
+    )
+
+    await _interlock_trip_handler(
+        condition,
+        Reading.now("Т12", 12.0, "K", instrument_id="LS218_2"),
+        context=context,
+    )
+
+    assert safety.latch_calls == []
+    assert "detector_warmup" in alarm_state_manager.get_active()
+    assert "Interlock warning publication failed" in caplog.text
 
 
 async def test_warm_mock_readings_do_not_request_source_stop(monkeypatch) -> None:

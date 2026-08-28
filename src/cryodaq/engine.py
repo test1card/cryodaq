@@ -2412,8 +2412,8 @@ async def _interlock_trip_handler(
     context: _InterlockHandlerContext,
 ) -> None:
     """Route control actions to SafetyManager and warnings to operator alarms."""
-    try:
-        if condition.action == "warning":
+    if condition.action == "warning":
+        try:
             if context.event_bus is None or context.experiment_manager is None or context.alarm_state_manager is None:
                 raise RuntimeError("interlock warning publication path is unavailable")
             transition = context.alarm_state_manager.process(
@@ -2442,7 +2442,15 @@ async def _interlock_trip_handler(
                 channel=reading.channel,
                 value=float(reading.value) if reading.value is not None else 0.0,
             )
-            return
+        except Exception as exc:
+            logger.error(
+                "Interlock warning publication failed; interlock=%s exception=%s; no safety escalation",
+                condition.name,
+                type(exc).__name__,
+            )
+        return
+
+    try:
         await context.safety_manager.on_interlock_trip(
             interlock_name=condition.name,
             channel=reading.channel,
