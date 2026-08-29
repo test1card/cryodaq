@@ -163,8 +163,16 @@ def test_temperature_reading_reaches_overlay():
         t_cold_item = table.item(0, 2)
         assert t_hot_item is not None, "t_hot cell (col 1) is None after _refresh()"
         assert t_cold_item is not None, "t_cold cell (col 2) is None after _refresh()"
-        assert t_hot_item.text() == f"{77.3:.4f}", f"t_hot cell text wrong: {t_hot_item.text()!r}"
-        assert t_cold_item.text() == f"{4.2:.4f}", f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        # DISPLAY ROUNDS, STORAGE DOES NOT.  The owner ruled 2026-08-29 that the
+        # screen carries two decimals with a precision mode for full values, so the
+        # cells no longer render `.4f`.  The stored values asserted above are still
+        # the exact readings - that is the half that must never round, and it is
+        # checked before this block rather than instead of it.
+        assert t_hot_item.text() == "77.30", f"t_hot cell text wrong: {t_hot_item.text()!r}"
+        assert t_cold_item.text() == "4.20", f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        # and the underlying values did not move when the rendering did
+        assert panel._temps.get("Т1") == 77.3
+        assert panel._temps.get("Т2") == 4.2
     finally:
         _stop_timers(w)
 
@@ -179,9 +187,17 @@ def test_power_reading_reaches_overlay():
 
         QCoreApplication.processEvents()
         # Assert stored value AND that it renders into the power label.
+        #
+        # DISPLAY ROUNDS, STORAGE DOES NOT.  The owner ruled 2026-08-29 that the
+        # screen carries two decimals, so the label shows "0.04" where it used to
+        # show "0.037".  The stored value is asserted to be the EXACT reading on the
+        # line above - rounding on the way to memory or disk would be his own "data
+        # lost" criterion, and that is what this guard now pins on both sides.
         assert w._conductivity_panel._power == 0.037
         w._conductivity_panel._update_power_label()
-        assert "0.037" in w._conductivity_panel._power_label.text()
+        rendered = w._conductivity_panel._power_label.text()
+        assert "0.04" in rendered, f"power label did not render the rounded value: {rendered!r}"
+        assert w._conductivity_panel._power == 0.037, "rendering must not mutate the stored value"
     finally:
         _stop_timers(w)
 
