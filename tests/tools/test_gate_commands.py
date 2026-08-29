@@ -324,13 +324,26 @@ def test_the_emitted_active_checkout_command_is_accepted_by_the_runners_own_veri
     args = build_parser().parse_args(argv[3:])
 
     repository_root = WORKFLOW.parent.parent.parent
-    head = subprocess.run(
+    resolved = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout.strip()
+        check=False,
+    )
+    if resolved.returncode != 0:
+        # An EXPORTED candidate tree has no `.git`, and that is the environment CI
+        # runs this suite in. Deliberately NOT a skip: the emission still has to be
+        # checked here, it simply cannot carry a SHA. It must refuse rather than
+        # claim a revision it cannot know - claiming one is the original defect.
+        assert "CRYODAQ_CANDIDATE_REVISION:?" in invocation, (
+            f"no repository here, so the emitted command must refuse rather than name a revision: {invocation}"
+        )
+        assert "--revision HEAD" not in invocation, (
+            f"a symbolic ref was emitted where no revision could be resolved: {invocation}"
+        )
+        return
+    head = resolved.stdout.strip()
     assert args.revision == head, (
         f"the emitted --revision {args.revision!r} is not what _verify_checkout compares against ({head!r})"
     )
