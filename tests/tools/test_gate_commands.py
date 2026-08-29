@@ -158,3 +158,72 @@ def test_the_emitted_partition_command_carries_every_required_argument() -> None
     assert "ci_candidate_evidence run" in emitted, "no partition command was emitted at all"
     missing = sorted(name for name in required if name not in emitted)
     assert missing == [], f"the emitted partition command cannot run; it omits {missing}"
+
+
+def test_every_partition_has_a_command_that_can_actually_run_here() -> None:
+    """Codex P1 at 1608b8602: the emitted commands could not run locally at all.
+
+    They routed local reproduction through the evidence publisher, which calls
+    `_github_environment()` and refuses without Actions-only identity variables -
+    so the tool's advertised "run these" partition commands exited before running
+    a single test in the very workflow they exist to support.
+
+    Measured 2026-08-29 with no Actions identity present:
+    `python -m tools.ci_candidate_runner --suite remaining --root .` with
+    CRYODAQ_CANDIDATE_PYTEST_BASETEMP bound ran the real partition - 3648 passed,
+    51 skipped, 758 deselected. That is the supported local invocation.
+    """
+
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from tools.gate_commands import main as emit
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        emit([])
+    emitted = buffer.getvalue()
+
+    facts = gate_facts()
+    for suite in facts["suites"]:
+        assert f"ci_candidate_runner --suite {suite} --root" in emitted, (
+            f"no locally runnable command is emitted for the {suite} partition"
+        )
+    assert "CRYODAQ_CANDIDATE_PYTEST_BASETEMP" in emitted, (
+        "the local command omits the basetemp binding and refuses without it"
+    )
+    assert "Actions-only execution identity" in emitted, (
+        "the publisher command is presented without saying it cannot run here"
+    )
+
+
+def test_the_printed_matrix_can_be_run_sequentially_in_one_shell() -> None:
+    """Codex P2 at 1608b8602: every printed command shared one export destination.
+
+    `export_candidate()` requires its destination to be absent or empty, so the
+    second suite was rejected. CI never sees this - each matrix job is a separate
+    runner with its own RUNNER_TEMP - which is exactly why it had to be found by
+    reading rather than by the gate going red.
+    """
+
+    import io as _io
+    import re as _re
+    from contextlib import redirect_stdout
+
+    from tools.gate_commands import main as emit
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        emit([])
+    emitted = buffer.getvalue()
+
+    for flag in ("--destination", "--output"):
+        paths = _re.findall(rf"{flag} (\S+)", emitted)
+        assert paths, f"no {flag} was emitted at all"
+        assert len(paths) == len(set(paths)), (
+            f"{flag} repeats a path across partitions: {paths} - "
+            "running the printed matrix in one shell would be refused"
+        )
+
+    basetemps = _re.findall(r"CRYODAQ_CANDIDATE_PYTEST_BASETEMP=(\S+)", emitted)
+    assert basetemps and len(basetemps) == len(set(basetemps)), f"the local commands share a basetemp: {basetemps}"
