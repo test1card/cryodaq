@@ -497,3 +497,60 @@ def test_refresh_adds_stale_without_erasing_non_authoritative_identity(app, mock
         assert expected_text in cell._status_hint_widget.text()
         assert "Устарело" in cell._status_hint_widget.text()
         assert expected_color in cell.styleSheet()
+
+
+def test_refresh_does_not_resurrect_an_unavailable_reading(app, mock_channel_mgr, buffer_store):
+    """A dash for an unavailable sensor must survive the presentation tick.
+
+    Codex P2 at c9d1326ea held that `refresh_from_buffer()` accepted everything
+    except NaN and would replace the dash with a finite or infinite value.  Read
+    against this tree it does not: the refresh requires `status is ChannelStatus.OK`
+    AND `math.isfinite(value)`, and the only two production callers of the store's
+    append pass `reading.status` explicitly.
+
+    This pins that, so the finding cannot quietly become true later.  A sensor that
+    is unavailable must not revert to a confident-looking number on a timer.
+    """
+
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    unusable = Reading(
+        channel="Т1 Криостат верх",
+        value=380.0,  # finite, plausible, and NOT trustworthy
+        unit="K",
+        timestamp=now,
+        instrument_id="LS218_1",
+        status=ChannelStatus.OVERRANGE,
+    )
+
+    buffer_store.append("Т1", now.timestamp(), 380.0, unusable.status)
+    cell.update_value(unusable, IdentityStatus.AUTHORITATIVE)
+    assert cell._value_widget.text() == "—", "the push path showed an unusable value"
+
+    cell.refresh_from_buffer()
+    assert cell._value_widget.text() == "—", "a presentation tick resurrected an unavailable sensor's value"
+
+
+def test_an_infinite_reading_is_not_resurrected_either(app, mock_channel_mgr, buffer_store):
+    """±inf is not a temperature, and NaN is not the only unusable value."""
+
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    buffer_store.append("Т1", now.timestamp(), float("inf"), ChannelStatus.OK)
+    cell.refresh_from_buffer()
+    assert cell._value_widget.text() == "—", "an infinite value reached the operator"
+
+
+def test_the_buffer_append_status_default_is_the_residual_hazard(buffer_store):
+    """The default is OK, so a caller that omits status stores an unusable sample as usable.
+
+    Both production callers pass it today (`dashboard_view.py:266,270`).  This pins
+    WHY that matters: omitting the argument is silently equivalent to asserting the
+    reading is good, which is how Codex's finding would become true.
+    """
+
+    now = datetime.now(UTC).timestamp()
+    buffer_store.append("Т9", now, 380.0)  # status omitted
+    assert buffer_store.get_last_with_status("Т9")[2] is ChannelStatus.OK, (
+        "the default changed; re-check every caller before relying on it"
+    )
