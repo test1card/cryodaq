@@ -469,9 +469,7 @@ async def test_tripped_control_interlock_is_rearmed_and_fires_again() -> None:
         actions_seen.clear()
         await _publish_bound_interlock_reading(broker, 350.1)
         await asyncio.sleep(0.05)
-        assert actions_seen == [], (
-            "a latched control interlock must not act again until it is re-armed"
-        )
+        assert actions_seen == [], "a latched control interlock must not act again until it is re-armed"
 
         # 3. The operator deliberately starts again; the guards come back.
         rearmed = engine.rearm_tripped_control_interlocks()
@@ -483,10 +481,7 @@ async def test_tripped_control_interlock_is_rearmed_and_fires_again() -> None:
         await _publish_bound_interlock_reading(broker, 350.1)
         await asyncio.sleep(0.05)
         assert engine.get_state()["overheat_cryostat"] is InterlockState.TRIPPED
-        assert actions_seen, (
-            "a re-armed interlock did not protect the new run while the "
-            "violation was still present"
-        )
+        assert actions_seen, "a re-armed interlock did not protect the new run while the violation was still present"
     finally:
         await engine.stop()
 
@@ -567,9 +562,7 @@ async def test_deliberate_start_rearms_control_interlocks() -> None:
         manager._state = SafetyState.SAFE_OFF
         result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
         assert result["ok"] is True, result
-        assert calls == ["rearm"], (
-            "a deliberate start did not re-arm the control interlocks"
-        )
+        assert calls == ["rearm"], "a deliberate start did not re-arm the control interlocks"
     finally:
         await manager.stop()
 

@@ -40,6 +40,4 @@ def test_failed_sync_does_not_leave_the_new_value_live(tmp_path, monkeypatch) ->
     monkeypatch.setattr(store, "status", real_status, raising=False)
 
     assert accepted is False, "a failed sync must be reported as a failure"
-    assert precision_mode_enabled(store) is False, (
-        "the failed write left the new value live in the settings cache"
-    )
+    assert precision_mode_enabled(store) is False, "the failed write left the new value live in the settings cache"

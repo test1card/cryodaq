@@ -940,7 +940,9 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     assert "assert True" in weakened
     sealed_guard.write_text(weakened, encoding="utf-8")
 
-    with pytest.raises(GovernanceContractError, match=(
+    with pytest.raises(
+        GovernanceContractError,
+        match=(
             # Whole-file receipt binding was restored 2026-08-29 (owner: "Go back to
             # the old safe way"), so the receipt-blob check fires BEFORE the
             # closed-guard source-blob check.  The weakening is still REFUSED - it is
@@ -948,7 +950,8 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
             # the closed-guard mechanism itself; that is an ordering narrowing, not a
             # weakening, and it is recorded for the post-run pass.
             "guard blob does not match registry guard file"
-        )):
+        ),
+    ):
         validate_registry(payload, root=tmp_path)
 
     for entry in closed_entries:

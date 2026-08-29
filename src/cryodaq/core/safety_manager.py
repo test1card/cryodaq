@@ -1302,9 +1302,7 @@ class SafetyManager:
                 _persistence_only = self._fault_sources == {"persistence"}
                 if _persistence_only:
                     try:
-                        _recovered = bool(
-                            self._persistence_recovered is not None and self._persistence_recovered()
-                        )
+                        _recovered = bool(self._persistence_recovered is not None and self._persistence_recovered())
                     except Exception as exc:
                         logger.error(
                             "persistence_recovered query failed: %s; keeping the latch",
@@ -1344,9 +1342,7 @@ class SafetyManager:
                     interlock_warning = {
                         "code": "latched_interlock_start",
                         "operator_text": f"ИНТЕРЛОК БЫЛ ЗАЩЁЛКНУТ: {self._fault_reason}",
-                        "consequence": (
-                            "Источник был аварийно отключён; оператор намеренно продолжает запуск"
-                        ),
+                        "consequence": ("Источник был аварийно отключён; оператор намеренно продолжает запуск"),
                         "reason": self._fault_reason,
                     }
                 self._pending_interlock_start_warning = (

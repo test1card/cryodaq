@@ -902,9 +902,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
                 if not identity_available:
                     btn.setToolTip("Подтвердить нельзя: не удалось точно определить, какое это срабатывание")
                 elif retained_pending:
-                    btn.setToolTip(
-                        "Повторить сохранённую команду и завершить обязательную отправку подтверждения"
-                    )
+                    btn.setToolTip("Повторить сохранённую команду и завершить обязательную отправку подтверждения")
 
                 if retained_pending:
 

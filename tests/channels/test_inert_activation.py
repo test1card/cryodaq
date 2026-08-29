@@ -205,12 +205,8 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         # digits a quantity shows; neither writes, persists or publishes.  This allow-list
         # exists so a new importer of the channel contract is a DELIBERATE entry rather than
         # an accident, and this is that deliberate entry.
-        "gui/dashboard/sensor_cell.py": _direct_imports(
-            "cryodaq.channels.descriptors", "ChannelQuantity"
-        ),
-        "gui/display_precision.py": _direct_imports(
-            "cryodaq.channels.descriptors", "ChannelQuantity"
-        ),
+        "gui/dashboard/sensor_cell.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
+        "gui/display_precision.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "gui/shell/main_window_v2.py": _direct_imports(
             "cryodaq.channels.descriptors",
             "ChannelDescriptorV1",
@@ -218,9 +214,7 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
             "ChannelRole",
             "ChannelSafetyClass",
         ),
-        "gui/shell/overlays/conductivity_panel.py": _direct_imports(
-            "cryodaq.channels.descriptors", "ChannelQuantity"
-        ),
+        "gui/shell/overlays/conductivity_panel.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "gui/shell/overlays/instruments_panel.py": _direct_imports(
             "cryodaq.channels.descriptors", "MAX_CATALOG_DESCRIPTORS", "ChannelDescriptorV1"
         ),

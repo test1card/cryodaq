@@ -133,6 +133,7 @@ async def test_warning_action_informs_operator_without_touching_the_source(tmp_p
     finally:
         await engine.stop()
 
+
 async def test_cryostat_above_320_k_stops_source_without_emergency_off() -> None:
     entries = _interlocks()
     overtemp = entries["source_overtemp"]

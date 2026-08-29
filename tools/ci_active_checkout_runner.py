@@ -705,8 +705,7 @@ def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, dige
             ) from exc
         if committed_blob != recorded_blob:
             raise RedReproductionComparisonError(
-                "candidate red-reproduction receipt guard blob does not match its committed guard file: "
-                f"{guard_path}"
+                f"candidate red-reproduction receipt guard blob does not match its committed guard file: {guard_path}"
             )
 
     if receipt["schema_version"] != 1:

@@ -149,6 +149,7 @@ def _concise_display():
             settings.remove(key)
         settings.sync()
 
+
 def test_temperature_reading_reaches_overlay():
     _app()
     w = MainWindowV2()
