@@ -409,3 +409,66 @@ def test_the_trusted_base_bindings_cover_every_event_the_workflow_handles() -> N
     declared = set(re.findall(r'EVENT_NAME(?::\?)?\}?"\s*==\s*"([A-Za-z_]+)"', workflow))
     assert declared, "the workflow no longer dispatches on EVENT_NAME; re-check this parser"
     assert set(sources) == declared, f"parsed {sorted(sources)} but the workflow handles {sorted(declared)}"
+
+
+def test_the_tool_works_where_there_is_no_git_repository(tmp_path: Path) -> None:
+    """CI runs this suite against an EXPORTED tree, which has no `.git`.
+
+    Measured 2026-08-29: resolving the revision inside `gate_facts()` made all
+    ELEVEN tests in this module fail at call time in CI, because
+    `export_candidate()` exports a tree rather than a clone. Reading the workflow
+    does not need a repository and must not require one.
+
+    This drives the real tool with its workflow copied into a directory that is
+    deliberately not a repository.
+    """
+
+    import io as _io
+    import shutil
+    from contextlib import redirect_stdout
+
+    from tools import gate_commands
+
+    workflow = tmp_path / "main.yml"
+    shutil.copy2(WORKFLOW, workflow)
+
+    facts = gate_facts(workflow)
+    assert facts["lint_command"], "the workflow-derived facts must survive without a repository"
+    assert facts["suites"], "the partition list must survive without a repository"
+    assert facts["revision"] is None, "an absent repository must answer None, not raise"
+
+    # and the emission must refuse rather than printing a symbolic ref
+    original = gate_commands.WORKFLOW
+    try:
+        gate_commands.WORKFLOW = workflow
+        buffer = _io.StringIO()
+        with redirect_stdout(buffer):
+            gate_commands.main([])
+        emitted = buffer.getvalue()
+    finally:
+        gate_commands.WORKFLOW = original
+
+    # The emission is backslash-continued, so the honest unit is the command BLOCK.
+    # Scoped to the ACTIVE-CHECKOUT runner only: the publisher resolves its revision
+    # with `rev-parse --verify {revision}^{commit}`, so `HEAD` is correct there.
+    lines = emitted.splitlines()
+    block: list[str] = []
+    for index, line in enumerate(lines):
+        if "ci_active_checkout_runner" not in line:
+            continue
+        cursor = index
+        while cursor < len(lines):
+            block.append(lines[cursor])
+            if not lines[cursor].rstrip().endswith("\\"):
+                break
+            cursor += 1
+        break
+    assert block, "no active-checkout command was emitted at all"
+    joined = " ".join(block)
+    assert "--revision HEAD" not in joined, (
+        f"a symbolic ref reached the active-checkout command, which compares it without "
+        f"resolving, so the command exits before running a single guard:\n{joined}"
+    )
+    assert "CRYODAQ_CANDIDATE_REVISION:?" in joined, (
+        f"the unresolved revision must be a parameter the shell refuses when unset:\n{joined}"
+    )

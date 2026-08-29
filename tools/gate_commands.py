@@ -67,7 +67,7 @@ class GateCommandsError(RuntimeError):
     """The workflow could not be read for the facts this tool reports."""
 
 
-def _resolve_head(root: Path = WORKFLOW.parent.parent.parent) -> str:
+def _resolve_head(root: Path = WORKFLOW.parent.parent.parent) -> str | None:
     """The commit this checkout is on, as a full SHA.
 
     `ci_active_checkout_runner._verify_checkout` compares `git rev-parse HEAD`
@@ -88,10 +88,16 @@ def _resolve_head(root: Path = WORKFLOW.parent.parent.parent) -> str:
             text=True,
             check=True,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - no git
-        raise GateCommandsError(f"cannot resolve HEAD in {root}") from exc
+    except (OSError, subprocess.CalledProcessError):
+        # NOT an error. CI runs this suite against an EXPORTED candidate tree, which
+        # has no `.git` - `export_candidate()` exports a tree, not a clone. Raising
+        # here made every test in this module fail at call time, because reading the
+        # workflow does not need a repository and should not require one.
+        return None
     revision = completed.stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        # A repository that answers something other than a commit IS an inconsistency,
+        # as opposed to an absent repository, so this still refuses.
         raise GateCommandsError(f"git rev-parse HEAD returned something that is not a commit: {revision!r}")
     return revision
 
@@ -140,7 +146,8 @@ def gate_facts(workflow: Path = WORKFLOW) -> dict[str, object]:
     return {
         "lint_command": lint.group(1).strip(),
         "format_base": base.group(1),
-        "revision": _resolve_head(),
+        # the tree the WORKFLOW belongs to, not whichever checkout this module sits in
+        "revision": _resolve_head(workflow.parent.parent.parent),
         "trusted_base_sources": trusted_base_sources,
         "format_selection": (f"git diff --name-only --diff-filter=ACMR {base.group(1)}...HEAD -- '*.py'"),
         "format_command": "python -m ruff format --check --no-cache --",
@@ -154,7 +161,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit machine-readable facts")
     args = parser.parse_args(argv)
 
-    facts = gate_facts()
+    # Read the module global at CALL time. `gate_facts`'s default argument is
+    # bound at import, so a caller that repoints WORKFLOW would otherwise be
+    # silently ignored - and a tool about not trusting remembered values must
+    # not itself remember one.
+    facts = gate_facts(WORKFLOW)
     if args.json:
         print(json.dumps(facts, indent=2, sort_keys=True))
         return 0
@@ -187,7 +198,19 @@ def main(argv: list[str] | None = None) -> int:
         print("#      against --revision without resolving it, so the literal `HEAD`")
         print("#      never matches and the command exits before running any guard.")
         print("python -m tools.ci_active_checkout_runner \\")
-        print(f"  --repository . --revision {facts['revision']} \\")
+        revision = facts["revision"]
+        if revision is None:
+            # No repository here, so no commit to bind to. Emit a parameter the SHELL
+            # refuses when unset rather than the literal `HEAD`, which this runner
+            # compares without resolving and which therefore exits before running a
+            # single guard - the defect this emission exists to avoid.
+            print(
+                '  --repository . --revision "${CRYODAQ_CANDIDATE_REVISION:?'
+                "no git repository here, so the revision could not be resolved; "
+                'supply the exact candidate commit}" \\'
+            )
+        else:
+            print(f"  --repository . --revision {revision} \\")
         print('  --trusted-base "${CRYODAQ_TRUSTED_BASE:?read the note below - this value comes from the CI event}" \\')
         print("  --suite remaining \\")
         print("  --basetemp <tmp>/cryodaq-active-remaining-pytest")
