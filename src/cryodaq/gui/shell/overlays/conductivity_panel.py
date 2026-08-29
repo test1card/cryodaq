@@ -78,6 +78,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
 from cryodaq.gui.display_precision import format_display_value
+from cryodaq.gui.shell.command_outcome import result_outcome_unknown
 from cryodaq.gui.zmq_client import (
     ZmqCommandWorker,
     capture_gui_worker_session_token,
@@ -2307,16 +2308,16 @@ class ConductivityPanel(QWidget):
             self._auto_terminal_publication_status = status
             self._dispatch_pending_terminal_attachment()
             return
-        self._publish_terminal_status(status)
+        self._publish_terminal_status(status, terminal["accepted_point_count"])
 
-    def _publish_terminal_status(self, status: str) -> None:
+    def _publish_terminal_status(self, status: str, accepted_point_count: int) -> None:
         if status == "COMPLETED":
             self._publish_auto_complete()
         elif status == "FAILED":
             if self._auto_run_creation_failed and not self._auto_power_target_dispatched:
                 self._release_prearm_creation_failure(self._auto_run_creation_error or "файл данных не создан")
             else:
-                self._publish_auto_failure()
+                self._publish_auto_failure(accepted_point_count)
         else:
             self._publish_auto_stop()
 
@@ -2560,10 +2561,14 @@ class ConductivityPanel(QWidget):
                 ):
                     self._block_after_terminal_attachment_failure("подтверждение отключения источника устарело")
                     return
+                point_count = (command.get("result_summary") or {}).get("point_count")
+                if type(point_count) is not int or point_count < 0:
+                    self._block_after_terminal_attachment_failure("число подтверждённых точек потеряло идентичность")
+                    return
                 self._auto_terminal_attachment_command = None
                 self._auto_terminal_publication_status = None
                 self._auto_outcome_unknown = False
-                self._publish_terminal_status(status)
+                self._publish_terminal_status(status, point_count)
                 return
             if not reconcile_prearm:
                 logger.warning("Повторный ответ RUNNING-привязки проигнорирован после разрешения привязки.")
@@ -2579,6 +2584,13 @@ class ConductivityPanel(QWidget):
                     self._auto_pending_stop_intent = None
                     self._latch_auto_outcome_unknown(
                         f"Сверка RUNNING-резервирования не подтверждена ({error[:120]}); повторите Стоп."
+                    )
+                    return
+                if result_outcome_unknown(result):
+                    self._auto_state = "stabilizing"
+                    self._auto_binding_resolution = "reservation_failed"
+                    self._latch_auto_outcome_unknown(
+                        f"Исход RUNNING-резервирования неизвестен ({error[:120]}); выполните Стоп для сверки."
                     )
                     return
                 self._auto_binding_resolution = "unrequested"
@@ -2753,16 +2765,25 @@ class ConductivityPanel(QWidget):
 
         from cryodaq.paths import get_data_dir
 
+        # A directory refusal belongs to the new attempt, never to the closed
+        # run whose identity remains available for operator review.
+        self._auto_run_writer = None
+        self._auto_run_path = None
+        self._auto_run_id = None
+        self._auto_run_started_at = None
+        self._auto_run_parameters = None
+        self._auto_experiment_id = None
+        self._auto_expected_experiment_id = None
+        self._auto_experiment_binding_known = False
+        self._auto_binding_resolution = "unrequested"
+        self._auto_persistence_error = None
+        self._auto_trailing_write_outcome = None
         try:
             data_dir = get_data_dir()
         except OSError as exc:
-            self._on_auto_run_created(
-                {
-                    "ok": False,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                }
-            )
+            self._clear_auto_selection()
+            self._refuse_auto_start(f"файл данных не создан: каталог данных недоступен ({str(exc)[:160]})")
+            self._on_channels_changed()
             return
         self._auto_power_list = powers
         self._auto_step = 0
@@ -2920,7 +2941,7 @@ class ConductivityPanel(QWidget):
 
         self._begin_or_defer_terminal("FAILED")
 
-    def _publish_auto_failure(self) -> None:
+    def _publish_auto_failure(self, accepted_point_count: int) -> None:
         """Publish a durable FAILED run only after authoritative source OFF."""
 
         self._auto_state = "done"
@@ -2932,7 +2953,8 @@ class ConductivityPanel(QWidget):
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText(
-            "Автоизмерение остановлено: точка не принята; отключение и FAILED-запись подтверждены"
+            f"Автоизмерение остановлено: подтверждённых на диске точек: {accepted_point_count}; "
+            "отключение и FAILED-запись подтверждены"
         )
         self._clear_auto_selection()
         self._on_channels_changed()

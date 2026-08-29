@@ -107,7 +107,13 @@ def _matching_attachment_reply(worker: _DeferredCommandWorker, experiment_id: st
     }
 
 
-def _seed_run_identity(panel: ConductivityPanel, tmp_path, *, create_writer: bool) -> ConductivityRunWriter | None:
+def _seed_run_identity(
+    panel: ConductivityPanel,
+    tmp_path,
+    *,
+    create_writer: bool,
+    experiment_id: str | None = "experiment-a",
+) -> ConductivityRunWriter | None:
     started_at = datetime(2026, 8, 29, 12, tzinfo=UTC)
     path = tmp_path / "conductivity-race.csv"
     parameters = {"power_values_w": [0.01]}
@@ -125,12 +131,26 @@ def _seed_run_identity(panel: ConductivityPanel, tmp_path, *, create_writer: boo
         started_at=started_at,
         parameters=parameters,
     )
-    writer.append_binding("experiment-a")
+    writer.append_binding(experiment_id)
     panel._auto_run_writer = writer
-    panel._auto_experiment_id = "experiment-a"
+    panel._auto_experiment_id = experiment_id
     panel._auto_experiment_binding_known = True
     panel._auto_binding_resolution = "durable"
     return writer
+
+
+def _point() -> dict[str, float | str]:
+    return {
+        "timestamp_utc": "2026-08-29T12:00:01+00:00",
+        "P_W": 0.012,
+        "T_hot_K": 110.0,
+        "T_cold_K": 100.0,
+        "T_avg_K": 105.0,
+        "dT_K": 10.0,
+        "R_KW": 10.0 / 0.012,
+        "G_WK": 0.0012,
+        "settled_pct": 99.0,
+    }
 
 
 def test_terminal_fsync_error_reconciles_disk_and_retries_metadata_attachment(
@@ -232,3 +252,130 @@ def test_settled_malformed_reservation_enters_failure_and_stop_reconciles_termin
     assert panel.get_auto_state() == "idle"
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_stop_btn.isEnabled() is False
+
+
+def test_outcome_unknown_reservation_stays_guarded_until_exact_record_reconciliation(
+    app,
+    tmp_path,
+) -> None:
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    _seed_run_identity(panel, tmp_path, create_writer=False)
+    panel._auto_state = "reserving"
+    command = panel._attachment_command(
+        status="RUNNING",
+        terminal=None,
+        finished_at=None,
+        reservation_state="reserved",
+    )
+    assert command is not None
+    panel._auto_binding_resolution = "reservation_pending"
+    panel._auto_command_sequence = 1
+    panel._auto_pending_token = 1
+
+    panel._on_auto_cmd_result(
+        1,
+        command,
+        {
+            "ok": False,
+            "outcome_unknown": True,
+            "delivery_state": "dispatched",
+            "commit_state": "unknown",
+            "error": "reply timed out after dispatch",
+        },
+        panel._auto_connection_generation,
+        panel._auto_operation_generation,
+    )
+
+    assert panel._auto_binding_resolution == "reservation_failed"
+    assert panel._auto_run_creation_failed is False
+    assert panel._auto_outcome_unknown is True
+    assert panel.get_auto_state() == "stabilizing"
+    assert panel._auto_start_btn.isEnabled() is False
+    assert panel._auto_stop_btn.isEnabled() is True
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredCommandWorker.instances[-1]
+    assert stop_worker.cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    stop_worker.finish({"ok": True})
+
+    reconciliation = _DeferredCommandWorker.instances[-1]
+    assert reconciliation is not stop_worker
+    assert reconciliation.cmd == command
+    assert panel._auto_binding_resolution == "reservation_reconciliation_pending"
+    assert panel.get_auto_state() == "stabilizing"
+    reconciliation.finish(_matching_attachment_reply(reconciliation))
+
+    terminal_attachment = _DeferredCommandWorker.instances[-1]
+    assert terminal_attachment not in {stop_worker, reconciliation}
+    assert terminal_attachment.cmd["cmd"] == "experiment_attach_run_record"
+    assert terminal_attachment.cmd["status"] == "ABORTED"
+    terminal_attachment.finish(_matching_attachment_reply(terminal_attachment))
+
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.bound_experiment_id == "experiment-a"
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_outcome_unknown is False
+
+
+def test_data_directory_failure_cannot_replace_previous_terminal_record(
+    app,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import cryodaq.paths as paths_module
+
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    writer = _seed_run_identity(panel, tmp_path, create_writer=True)
+    assert writer is not None
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 29, 12, 1, tzinfo=UTC))
+    previous_path = panel._auto_run_path
+    previous_run_id = panel._auto_run_id
+    panel._auto_state = "done"
+
+    def _fail_data_directory():
+        raise PermissionError("configured data volume is unavailable")
+
+    monkeypatch.setattr(paths_module, "get_data_dir", _fail_data_directory)
+
+    panel._start_auto_sweep([0.02])
+
+    assert previous_path is not None
+    snapshot = read_conductivity_run(previous_path)
+    assert snapshot.run_id == previous_run_id
+    assert snapshot.status == "COMPLETED"
+    assert snapshot.accepted_point_count == 1
+    assert _DeferredCommandWorker.instances == []
+    assert panel._auto_run_writer is None
+    assert panel._auto_run_path is None
+    assert panel._auto_run_id is None
+    assert panel._auto_experiment_id is None
+    assert "Автоизмерение не запущено" in panel._auto_status_label.text()
+
+
+def test_failed_terminal_publication_reports_reconciled_durable_point_count(
+    app,
+    tmp_path,
+) -> None:
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    writer = _seed_run_identity(panel, tmp_path, create_writer=True, experiment_id=None)
+    assert writer is not None
+    writer.append_point(_point())
+    panel._auto_results = []
+    panel._auto_persistence_error = "OSError: checkpoint reply was lost"
+    panel._auto_terminal_failure_required = True
+
+    panel._begin_terminalize_auto_run("FAILED")
+
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "FAILED"
+    assert snapshot.terminal is not None
+    assert snapshot.terminal["accepted_point_count"] == snapshot.checkpoint_count == 1
+    assert panel._auto_results == []
+    assert panel.get_auto_state() == "done"
+    assert "подтверждённых на диске точек: 1" in panel._auto_status_label.text()
+    assert "точка не принята" not in panel._auto_status_label.text()
