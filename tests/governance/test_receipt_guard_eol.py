@@ -98,5 +98,11 @@ def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path)
         newline="\n",
     )
 
-    with pytest.raises(GovernanceContractError, match="receipt guard node digest does not match registry guard node"):
+    with pytest.raises(GovernanceContractError, match=(
+            # Whole-file receipt binding restored 2026-08-29: the file-level check
+            # fires before the node-level one, so a real source mismatch is refused
+            # earlier.  The node-digest check remains enforced as an additional
+            # constraint and is covered by its own cases.
+            "guard blob does not match registry guard file"
+        )):
         validate_registry(payload, root=tmp_path)

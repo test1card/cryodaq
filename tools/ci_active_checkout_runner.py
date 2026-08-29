@@ -683,21 +683,33 @@ def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, dige
             f"candidate red-reproduction receipt exit code does not record a failure: {path}"
         )
     guard_blobs = _receipt_guard_blobs(root, commit, path)
-    if receipt["schema_version"] == 1:
-        for guard_path, recorded_blob in guard_blobs.items():
-            recorded_path = PurePosixPath(guard_path)
-            try:
-                _mode, _kind, committed_blob = _tree_entry(root, commit, recorded_path)
-            except RedReproductionComparisonError as exc:
-                raise RedReproductionComparisonError(
-                    f"candidate red-reproduction receipt names an absent guard file: {guard_path}"
-                ) from exc
-            if committed_blob != recorded_blob:
-                raise RedReproductionComparisonError(
-                    "candidate red-reproduction receipt guard blob does not match its committed guard file: "
-                    f"{guard_path}"
-                )
-    else:
+
+    # WHOLE-FILE BINDING APPLIES TO BOTH SCHEMAS.  Owner decision, 2026-08-29:
+    # "Go back to the old safe way".  Measured that day, 11 of 13 receipt-bound
+    # guards depend on a module-level helper, class or fixture OUTSIDE the hashed
+    # function range, so a function-only digest lets a weakened shared helper keep
+    # its receipt.  Whole-file hashing gives false INVALIDATION (noisy, safe);
+    # function-only hashing gives false RETENTION (quiet, unsafe).  Before a
+    # week-long run the quiet failure is the one that matters.
+    #
+    # The node digests below are NOT removed.  They remain enforced as an
+    # ADDITIONAL constraint, so a schema-2 receipt must match the whole guard file
+    # AND the named node - strictly stronger than either scheme alone.
+    for guard_path, recorded_blob in guard_blobs.items():
+        recorded_path = PurePosixPath(guard_path)
+        try:
+            _mode, _kind, committed_blob = _tree_entry(root, commit, recorded_path)
+        except RedReproductionComparisonError as exc:
+            raise RedReproductionComparisonError(
+                f"candidate red-reproduction receipt names an absent guard file: {guard_path}"
+            ) from exc
+        if committed_blob != recorded_blob:
+            raise RedReproductionComparisonError(
+                "candidate red-reproduction receipt guard blob does not match its committed guard file: "
+                f"{guard_path}"
+            )
+
+    if receipt["schema_version"] != 1:
         node_digests = _receipt_node_digests(root, commit, path)
         assert node_digests is not None
         for node, recorded_digest in node_digests.items():

@@ -626,17 +626,27 @@ def _validate_red_reproduction_evidence(
                 raise GovernanceContractError(
                     f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
                 ) from exc
-    if schema_version == 1:
-        for path, expected_blob in receipt_guard_blobs.items():
-            try:
-                actual_blob = _git_blob_id((root / path).read_bytes())
-            except OSError as exc:
-                raise GovernanceContractError(f"{entry_id}.red_evidence registry guard file is unavailable") from exc
-            if actual_blob != expected_blob:
-                raise GovernanceContractError(
-                    f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
-                )
-    else:
+    # WHOLE-FILE BINDING APPLIES TO BOTH SCHEMAS.  Owner decision, 2026-08-29:
+    # "Go back to the old safe way".  THIS is the check that compares a receipt's
+    # recorded guard blob against the guard file as it stands; under schema 2 it
+    # was skipped entirely, so a change ANYWHERE in the file outside the named
+    # test - a helper, a fixture, a class the test depends on - left the receipt
+    # vouching for a guard whose effective behaviour had moved.  Measured that
+    # day: 11 of 13 receipt-bound guards depend on exactly such a name.
+    #
+    # The node digests below are NOT removed.  They stay enforced as an ADDITIONAL
+    # constraint, so a schema-2 receipt must match the whole guard file AND its
+    # named node - strictly stronger than either scheme alone.
+    for path, expected_blob in receipt_guard_blobs.items():
+        try:
+            actual_blob = _git_blob_id((root / path).read_bytes())
+        except OSError as exc:
+            raise GovernanceContractError(f"{entry_id}.red_evidence registry guard file is unavailable") from exc
+        if actual_blob != expected_blob:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
+            )
+    if schema_version != 1:
         node_digests = receipt["guard_node_sha256"]
         if not isinstance(node_digests, Mapping) or set(node_digests) != set(receipt_nodes):
             raise GovernanceContractError(
