@@ -665,3 +665,79 @@ async def test_a_failing_recovery_query_keeps_the_latch() -> None:
         assert result["ok"] is False, result
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_expired_off_proof_is_revoked_and_current_proof_is_not() -> None:
+    """Proof that a device was OFF long ago must not stay positive evidence.
+
+    Codex P1 at c9d1326ea: when verified-OFF evidence aged past `stale_timeout_s`,
+    the publish path substituted UNKNOWN only in the PUBLISHED READING, while
+    `_reviewed_source_off_evidence.verified_off` stayed true - so the snapshot and
+    the command boundary went on authorising.  The GUI hid Start after seeing
+    UNKNOWN, which made the interface the only thing between an expired proof and
+    an energised source.
+
+    Both directions are pinned here: a guard that revoked unconditionally would
+    satisfy the first assertion while refusing every legitimate Start.
+    """
+
+    manager = _qualified_manager()
+    await manager.start()
+    try:
+        manager.record_reviewed_source_connected(verified_off=True)
+        assert manager._reviewed_source_off_evidence.verified_off is True
+
+        # Still current: nothing is revoked.
+        assert manager._expire_stale_off_evidence() is False
+        assert manager._reviewed_source_off_evidence.verified_off is True
+
+        # Aged past the bound, with every other precondition unchanged - exactly
+        # the situation the finding describes.
+        manager._reviewed_source_off_evidence_observed_monotonic_s -= manager._config.stale_timeout_s + 5.0
+        assert manager._expire_stale_off_evidence() is True
+        assert manager._reviewed_source_off_evidence.verified_off is False, (
+            "expired OFF proof was left as positive evidence"
+        )
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_command_boundary_expires_off_proof_itself() -> None:
+    """`request_run` must run the expiry itself, not inherit it from elsewhere.
+
+    A REQ client can issue `keithley_start` without ever reading the operator
+    snapshot, and `request_run` contains NO snapshot refresh - measured, lines
+    1142-1450 - so the boundary call is the only expiry on that path.
+
+    THE FIRST VERSION OF THIS GUARD WAS VACUOUS. It monkeypatched the expiry and
+    asserted it had been called, which stayed true with the boundary call removed
+    because `manager.start()` runs a background monitor that refreshes the
+    snapshot on its own schedule. It observed the process, not the path.
+
+    This is deterministic instead: the state makes `request_run` refuse at a check
+    that sits AFTER the expiry, so the only thing that can have revoked the proof
+    by then is the boundary call.
+    """
+
+    manager = _qualified_manager()
+    await manager.start()
+    try:
+        manager.record_reviewed_source_connected(verified_off=True)
+        manager._reviewed_source_off_evidence_observed_monotonic_s -= manager._config.stale_timeout_s + 5.0
+        assert manager._reviewed_source_off_evidence.verified_off is True
+
+        # MANUAL_RECOVERY is not a state a Start may proceed from, and that check
+        # is downstream of the expiry.
+        manager._state = SafetyState.MANUAL_RECOVERY
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert result["ok"] is False
+
+        assert manager._reviewed_source_off_evidence.verified_off is False, (
+            "request_run refused for another reason without expiring the stale "
+            "OFF proof, so a client reaching a permitted state would still "
+            "energise from it"
+        )
+    finally:
+        await manager.stop()

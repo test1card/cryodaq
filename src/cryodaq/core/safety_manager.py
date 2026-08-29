@@ -1280,6 +1280,11 @@ class SafetyManager:
                 else:
                     self._pending_interlock_start_warning = None
 
+            # A REQ client can issue keithley_start without ever reading the
+            # operator snapshot, so the expiry runs HERE as well.  Revoking in
+            # one place only would leave exactly the path Codex named.
+            self._expire_stale_off_evidence()
+
             if self._state == SafetyState.FAULT_LATCHED:
                 # A latch whose ONLY origin is persistence is consumable by a
                 # deliberate Start, for the same reason the interlock latch is:
@@ -2916,6 +2921,34 @@ class SafetyManager:
             None,
         )
 
+    def _expire_stale_off_evidence(self) -> bool:
+        """Revoke retained OFF proof once it is older than the staleness bound.
+
+        A device that reported OFF long ago is not evidence it is OFF now.  That
+        sentence was already written in the publish path, but only the PUBLISHED
+        READING acted on it: the Safety-owned evidence stayed positive, so the
+        operator snapshot and the command boundary went on authorising a Start
+        from proof that had expired.  The GUI hid the button after seeing UNKNOWN,
+        which made the interface the only thing standing between an expired proof
+        and an energised source.
+
+        Returns True when evidence was revoked by this call.
+        """
+
+        if not self._reviewed_source_off_evidence.verified_off:
+            return False
+        age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
+        if age_s <= self._config.stale_timeout_s:
+            return False
+        logger.warning(
+            "Retained OFF evidence expired after %.1fs (bound %.1fs); revoking it. "
+            "A device that reported OFF long ago is not evidence it is OFF now.",
+            age_s,
+            self._config.stale_timeout_s,
+        )
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        return True
+
     def _refresh_operator_safety_snapshot(self) -> None:
         """Replace the owner cut synchronously from already-owned facts only."""
         previous = self._operator_safety_snapshot
@@ -2927,6 +2960,9 @@ class SafetyManager:
         # output readback is unusable; neither condition can remain verified OFF.
         if self._keithley is not None and getattr(self._keithley, "output_state_unverified", None) is True:
             self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        # Staleness is the same kind of fact as the negative cache above, and was
+        # previously honoured only in the published reading.
+        self._expire_stale_off_evidence()
         verified_off = (
             children_authoritative
             and self._reviewed_source_connected
