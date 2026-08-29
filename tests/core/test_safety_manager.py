@@ -1644,6 +1644,63 @@ async def test_a_committed_start_still_shows_the_operator_the_warning() -> None:
     )
 
 
+async def test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record() -> None:
+    """The broken re-arm remains a warning, but silence is not permissive design.
+
+    This drives the production control-trip owner, the real two-pass Start, the
+    engine's scalar warning mapping, and the successful-command journal call.
+    The callback must run only after preflight; its failure neither blocks Start
+    nor disappears into the engine log.
+    """
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+    rearm_calls: list[str] = []
+
+    def broken_rearm() -> list[str]:
+        rearm_calls.append("rearm")
+        raise RuntimeError("injected re-arm failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    event_logger = AsyncMock()
+    context = _engine_command_context(manager, event_logger)
+    try:
+        result = await _handle_gui_command(_start_command(warning=""), context=context)
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        assert rearm_calls == ["rearm"], "preflight must not invoke or duplicate the re-arm hook"
+        assert "operator_warning_receipt" not in result, (
+            "the late re-arm observation must remain outside the two-phase preflight receipt"
+        )
+        warnings = result.get("operator_warnings")
+        assert type(warnings) is list and len(warnings) == 1
+        warning = warnings[0]
+        assert warning["code"] == "interlock_rearm_unconfirmed"
+        assert "heater_overtemperature" in warning["operator_text"]
+        assert "heater_overtemperature" in result.get("warning", ""), (
+            "the scalar field read by the source panel omitted the possibly blind guard"
+        )
+
+        event_logger.log_event.assert_awaited_once()
+        log_call = event_logger.log_event.await_args
+        assert log_call.args[0] == "keithley"
+        assert "heater_overtemperature" in log_call.args[1], (
+            "the run's successful-Start record omitted the possibly blind guard"
+        )
+        assert log_call.kwargs["extra_tags"] == ["interlock_rearm_unconfirmed"]
+    finally:
+        await manager.stop()
+
+
 async def test_stalled_warning_persistence_does_not_block_operator_requested_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

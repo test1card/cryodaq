@@ -3681,6 +3681,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_the_suite_was_green_while_SIGBREAK_was_unhandled_and_the_ONEDIR_smoke_could_not_distinguish_a_hung_GUI_from_an_orphan_holding_its_pipes_because_communicate_returns_on_pipe_EOF_rather_than_process_exit_the_intermittent_failure_occurred_in_4_of_the_last_24_runs_on_this_branch_and_was_previously_misdiagnosed_as_a_slow_cold_start_severing_the_descendant_assertion_at_added_line_764_one_copy_in_build_scripts_windows_onedir_smoke_py_reddened_tests_test_windows_onedir_smoke_contract_py_test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job_restored_sha256_7e14e71d16f6e9773ed8ed0219bc1596827943cd1b7f19192ab5c43071631911_29_passed_the_GUI_cell_must_fail_when_any_descendant_survives_shutdown_and_the_failure_drain_must_record_process_poll_so_the_two_modes_are_distinguishable_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: pending
+  - id: INTERLOCK-REARM-WARNING-GUARD-MISSING-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/core/test_safety_manager.py::test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_deleting_only_the_operator_warnings_append_block_at_diff_added_line_1503_left_the_start_permitted_and_the_source_active_but_reddened_test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record_on_the_missing_list_exit_1_the_inverse_patch_restored_src_cryodaq_core_safety_manager_py_to_sha256_556f85831c817a117676cda224d77c0a5c8ac8ca8695ec64ac55a90b8e2d2bfb_byte_identical
+    green_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_after_byte_identical_restore_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7423,3 +7431,23 @@ records:
         ci_partition: remaining
     red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_severing_the_SIGBREAK_registration_at_added_line_8667_one_copy_in_src_cryodaq_launcher_py_reddened_tests_test_launcher_signals_py_test_main_registers_sigbreak_to_the_shutdown_handler_on_windows_restored_sha256_1c1ec9a0b8013b709cf055a4cc8a737ac28b3ad9ab319df1009235e788697b15_2_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: pending
+
+  - id: INTERLOCK-REARM-FAILURE-SILENT-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The production SafetyManager control-trip owner, deliberate-Start interlock re-arm hook, keithley_start operator-warning projection, and successful-Start operator-journal record.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: When the production re-arm callback raised, SafetyManager wrote only an engine-file error and continued to start_source. Previously tripped control interlocks remained TRIPPED and InterlockEngine evaluates only ARMED records, so the source could run with those guards blind while the Start surface showed generic success and the run journal named none of them.
+    invariant: A failed real re-arm pass never refuses the operator's Start, but the successful Start outcome carries interlock_rearm_unconfirmed in operator_warnings with every control-interlock name observed on the real trip path; the engine renders those names into the scalar warning read by the source panel and the successful-Start operator-journal entry. The hook remains after preflight and the expected-warning comparison, so it runs once and does not retroactively falsify the two-phase warning receipt.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_safety_manager.py::test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record
+        ci_partition: core
+    red_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_deleting_only_the_operator_warnings_append_block_at_diff_added_line_1503_left_the_start_permitted_and_the_source_active_but_reddened_test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record_on_the_missing_list_exit_1_the_inverse_patch_restored_src_cryodaq_core_safety_manager_py_to_sha256_556f85831c817a117676cda224d77c0a5c8ac8ca8695ec64ac55a90b8e2d2bfb_byte_identical
+    green_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_after_byte_identical_restore_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture

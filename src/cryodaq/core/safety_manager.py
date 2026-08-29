@@ -332,6 +332,10 @@ class SafetyManager:
         # this, allowing a start after a trip - which the owner requires - would
         # leave the source with no protection for the rest of the run.
         self._interlock_rearm: Callable[[], list[str]] | None = None
+        # Names observed on the real control-trip path.  Keep them until one
+        # successful all-guard re-arm pass; if that pass raises, these are the
+        # exact guards the operator must be told may still be TRIPPED and blind.
+        self._tripped_control_interlocks: set[str] = set()
         # Does persistence report that it can write again?  Registered by the
         # engine against the writer.  DEFAULT IS REFUSE: with no hook, a
         # persistence latch keeps blocking exactly as it does today.
@@ -1485,11 +1489,36 @@ class SafetyManager:
                 try:
                     _rearmed_interlocks = self._interlock_rearm()
                 except Exception as exc:
+                    _unconfirmed_interlocks = sorted(self._tripped_control_interlocks)
+                    _unconfirmed_label = (
+                        ", ".join(_unconfirmed_interlocks)
+                        if _unconfirmed_interlocks
+                        else "имена ранее сработавших управляющих интерлоков недоступны"
+                    )
                     logger.error(
-                        "interlock re-arm hook failed: %s; guards may remain blind",
+                        "interlock re-arm hook failed: %s; guards may remain blind: %s",
                         type(exc).__name__,
+                        _unconfirmed_label,
+                    )
+                    operator_warnings.append(
+                        {
+                            "code": "interlock_rearm_unconfirmed",
+                            "operator_text": (
+                                f"ПЕРЕВЗВОД ИНТЕРЛОКОВ НЕ ПОДТВЕРЖДЁН; МОГУТ БЫТЬ СЛЕПЫ: {_unconfirmed_label}"
+                            ),
+                            "consequence": (
+                                "Пуск продолжен по решению оператора; названные интерлоки "
+                                "могут не оценивать показания этого запуска"
+                            ),
+                            "reason": (f"hook={type(exc).__name__}; unconfirmed_interlocks={_unconfirmed_label}"),
+                        }
                     )
                 else:
+                    # The callback scans every configured control interlock.
+                    # A remembered name absent from its return was already
+                    # acknowledged elsewhere, so the successful pass settles
+                    # the whole conservative set, not only the returned names.
+                    self._tripped_control_interlocks.clear()
                     if _rearmed_interlocks:
                         logger.warning(
                             "Operator start re-armed tripped control interlocks: %s",
@@ -4123,6 +4152,8 @@ class SafetyManager:
         action: str = "emergency_off",
     ) -> None:
         """Own the complete interlock action through truthful publication."""
+        if action != "warning":
+            self._tripped_control_interlocks.add(interlock_name)
         if action == "stop_source":
             # This synchronous cut reaches an in-flight request_run before the
             # owned interlock task can acquire _cmd_lock.

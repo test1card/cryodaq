@@ -732,10 +732,30 @@ async def _log_successful_keithley_command(
 ) -> None:
     """Persist the successful command after SafetyManager settles it."""
 
-    del result
     channel = cmd.get("channel", "?")
     if action == "keithley_start":
-        await event_logger.log_event("keithley", f"Keithley {channel}: запуск")
+        message = f"Keithley {channel}: запуск"
+        rearm_warning_texts: list[str] = []
+        raw_warnings = result.get("operator_warnings")
+        if type(raw_warnings) is list:
+            for warning in raw_warnings:
+                if type(warning) is not dict or warning.get("code") != "interlock_rearm_unconfirmed":
+                    continue
+                operator_text = warning.get("operator_text")
+                consequence = warning.get("consequence")
+                if type(operator_text) is str and operator_text:
+                    detail = operator_text
+                    if type(consequence) is str and consequence:
+                        detail = f"{detail}: {consequence}"
+                    rearm_warning_texts.append(detail)
+        if rearm_warning_texts:
+            await event_logger.log_event(
+                "keithley",
+                f"{message}; {'; '.join(rearm_warning_texts)}",
+                extra_tags=["interlock_rearm_unconfirmed"],
+            )
+        else:
+            await event_logger.log_event("keithley", message)
     elif action == "keithley_stop":
         await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
     elif action == "keithley_emergency_off":
