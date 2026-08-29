@@ -1588,6 +1588,59 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
         await manager.stop()
 
 
+async def test_a_committed_start_still_shows_the_operator_the_warning() -> None:
+    """A Start that succeeds must not present generic success under a warning.
+
+    Codex P1 at c9d1326ea: on the success path the Safety layer returns
+    `operator_warnings` as a LIST and no scalar `warning`; `engine.py` added the
+    scalar only for an UNCOMMITTED receipt, and `_SmuChannelBlock._on_command_result`
+    reads only `error` or `warning`.  So a predictor-unavailable Start could
+    energise the source, commit a receipt, and show the operator nothing at all
+    about the condition it ran under.
+
+    The check ran, the record exists, and he never saw it - the owner's third
+    clause, MAKE SURE HE KNOWS WHAT IS UP, failing from the silence side.
+
+    The sibling test above covers the uncommitted path, where the persistence
+    notice must be APPENDED to the real warning rather than replace it.
+    """
+
+    committed: list[str] = []
+
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogEntry:
+        committed.append(str(kwargs.get("message", "")))
+        return OperatorLogEntry(
+            id=1,
+            timestamp=datetime.now(UTC),
+            message=str(kwargs.get("message", "")),
+            author=str(kwargs.get("author", "")),
+            source=str(kwargs.get("source", "")),
+            experiment_id=kwargs.get("experiment_id"),
+            tags=tuple(kwargs.get("tags") or ()),
+        )
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
+    event_logger = AsyncMock()
+    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
+
+    result = await asyncio.wait_for(
+        _handle_gui_command(_start_command(warning=warning), context=context),
+        timeout=2.0,
+    )
+
+    assert result["ok"] is True
+    assert committed, "the receipt was not committed, so this is not the committed path"
+    assert result["operator_warning_receipt"]["committed"] is True
+    assert warning in result.get("warning", ""), (
+        f"a committed Start energised under a warning the operator never saw: warning={result.get('warning')!r}"
+    )
+
+
 async def test_stalled_warning_persistence_does_not_block_operator_requested_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1624,10 +1677,16 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
         assert persistence_entered.is_set()
         await asyncio.wait_for(persistence_cancelled.wait(), timeout=1.0)
         assert result["ok"] is True
-        assert result["warning"] == (
+        # BOTH must reach him.  This used to assert the warning was ONLY the
+        # persistence notice, which is exactly the defect Codex named at
+        # c9d1326ea: "even the uncommitted path displays only the persistence
+        # notice, not the underlying warning".  Losing the real warning in order
+        # to report a bookkeeping failure is the same silence in another coat.
+        assert "Прогноз траектории захолаживания НЕДОСТУПЕН" in result["warning"]
+        assert (
             "Долговременная запись выбора оператора после предупреждения Safety "
             "не подтверждена; запрос Start продолжен."
-        )
+        ) in result["warning"]
         assert result["operator_warning_receipt"] == {
             "schema": "cryodaq.keithley_warning_choice_receipt.v1",
             "request_id": "a" * 32,

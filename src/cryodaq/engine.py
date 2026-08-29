@@ -5562,12 +5562,32 @@ async def _handle_gui_command(
                 warning_choice_committer=warning_choice_committer,
             )
             warning_receipt = result.get("operator_warning_receipt")
+            # The Safety layer returns `operator_warnings` as a LIST, and the panel
+            # reads a SCALAR `warning` (or `error`) and otherwise shows generic
+            # success.  A Start could therefore energise, commit a receipt, and
+            # tell the operator nothing at all about the warning it ran under -
+            # the check ran, the record exists, and he never saw it.  Compose the
+            # scalar he actually reads.
+            operator_warning_texts: list[str] = []
+            raw_operator_warnings = result.get("operator_warnings")
+            if type(raw_operator_warnings) is list:
+                for raw_warning in raw_operator_warnings:
+                    if type(raw_warning) is not dict:
+                        continue
+                    operator_text = raw_warning.get("operator_text")
+                    if type(operator_text) is str and operator_text:
+                        operator_warning_texts.append(operator_text)
             if type(warning_receipt) is dict and warning_receipt.get("committed") is False:
                 logger.warning(
                     "Keithley warning-choice persistence was not confirmed: error_code=%s",
                     warning_receipt.get("error_code"),
                 )
-                result = {**result, "warning": _KEITHLEY_WARNING_PERSISTENCE_NOTICE}
+                # The persistence notice is APPENDED, not substituted: losing the
+                # underlying warning to report a bookkeeping failure would be the
+                # same silence in a different coat.
+                operator_warning_texts.append(_KEITHLEY_WARNING_PERSISTENCE_NOTICE)
+            if operator_warning_texts:
+                result = {**result, "warning": "; ".join(operator_warning_texts)}
             if result.get("ok"):
                 await _log_successful_keithley_command(action, cmd, result, event_logger)
                 if action == "keithley_emergency_off" and escalation_service is not None:
