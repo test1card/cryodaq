@@ -271,7 +271,11 @@ class SafetyManager:
         # Mature instrument-status faults are guard-blind advisories, not RUN
         # blockers.  The final flag records successful durable operator-log
         # delivery for this exact interlock/channel/reason episode.
-        self._blind_interlock_guards: dict[str, tuple[str, tuple[str, ...], bool]] = {}
+        self._blind_interlock_guards: dict[str, tuple[str, tuple[str, ...], bool, float]] = {}
+        # One active experiment exists at a time, so retaining only the latest
+        # bound experiment per channel is enough to keep this evidence O(channels)
+        # while still recording every new experiment boundary in a long episode.
+        self._blind_guard_experiment_records: dict[str, str] = {}
         # Instruments whose synthetic failed-poll samples could not obtain
         # persistence-backed publication authority. Acknowledgment clears the
         # fault latch, not this RUN blocker; only Scheduler-observed committed
@@ -3082,7 +3086,8 @@ class SafetyManager:
         if critical_blocker is not None:
             blockers.append(critical_blocker)
 
-        if self._mature_dead_interlock_channels:
+        mature_dead_channels = bool(self._mature_dead_interlock_channels)
+        if mature_dead_channels:
             channels = ", ".join(sorted(self._mature_dead_interlock_channels))
             plant.append(
                 PlantHealthFact(
@@ -3100,20 +3105,22 @@ class SafetyManager:
                     "Restore a usable persisted sample on every named protected channel",
                 )
             )
-        elif self._blind_interlock_guards:
+        if self._blind_interlock_guards:
             details = "; ".join(
                 f"{channel} ({interlock_name}: {', '.join(reasons)})"
-                for channel, (interlock_name, reasons, _recorded) in sorted(self._blind_interlock_guards.items())
+                for channel, (interlock_name, reasons, _recorded, _value) in sorted(
+                    self._blind_interlock_guards.items()
+                )
             )
             plant.append(
                 PlantHealthFact(
-                    "interlock_channels",
+                    "interlock_blind_guards" if mature_dead_channels else "interlock_channels",
                     f"Слепые защиты: {details}",
                     OperatorPresentationState.FAULT,
                     "interlock_guard_blind",
                 )
             )
-        else:
+        elif not mature_dead_channels:
             plant.append(
                 PlantHealthFact(
                     "interlock_channels",
@@ -4300,7 +4307,9 @@ class SafetyManager:
             previous = self._blind_interlock_guards.get(channel)
             episode = (interlock_name, reasons)
             recorded = previous is not None and previous[:2] == episode and previous[2]
-            self._blind_interlock_guards[channel] = (*episode, recorded)
+            if previous is None or previous[:2] != episode:
+                self._blind_guard_experiment_records.pop(channel, None)
+            self._blind_interlock_guards[channel] = (*episode, recorded, value)
             if removed is not None or previous is None or previous[:2] != episode:
                 self._refresh_operator_safety_snapshot()
             logger.warning(
@@ -4310,28 +4319,17 @@ class SafetyManager:
                 ", ".join(reasons),
             )
             if not recorded and self._fault_log_callback is not None:
-                message = (
-                    f"Слепая защита: интерлок-канал {channel} ('{interlock_name}') "
-                    f"непригоден по статусу прибора: {', '.join(reasons)}"
-                )
-                log_task = asyncio.create_task(
-                    self._fault_log_callback(
-                        source="interlock_guard_blind",
-                        message=message,
-                        channel=channel,
-                        value=value,
-                    )
-                )
-                _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
-                if error is None:
+                if await self._record_blind_guard(
+                    interlock_name=interlock_name,
+                    channel=channel,
+                    reasons=reasons,
+                    value=value,
+                ):
                     recorded = True
-                    self._blind_interlock_guards[channel] = (*episode, True)
-                else:
-                    logger.error("Failed to record blind interlock guard: %s", error)
-                if cancelled is not None:
-                    raise cancelled
+                    self._blind_interlock_guards[channel] = (*episode, True, value)
             return BlindGuardAdvisoryResult.RECORDED if recorded else BlindGuardAdvisoryResult.RETRY
         blind_guard = self._blind_interlock_guards.pop(channel, None)
+        self._blind_guard_experiment_records.pop(channel, None)
         previous_interlock = self._mature_dead_interlock_channels.get(channel)
         self._mature_dead_interlock_channels[channel] = interlock_name
         if blind_guard is not None or previous_interlock != interlock_name:
@@ -4356,10 +4354,66 @@ class SafetyManager:
         )
         return True
 
+    async def _record_blind_guard(
+        self,
+        *,
+        interlock_name: str,
+        channel: str,
+        reasons: tuple[str, ...],
+        value: float,
+        experiment_id: str | None = None,
+    ) -> bool:
+        """Settle one durable blind-guard row for an episode scope."""
+        if self._fault_log_callback is None:
+            return False
+        message = (
+            f"Слепая защита: интерлок-канал {channel} ('{interlock_name}') "
+            f"непригоден по статусу прибора: {', '.join(reasons)}"
+        )
+        callback_kwargs: dict[str, Any] = {
+            "source": "interlock_guard_blind",
+            "message": message,
+            "channel": channel,
+            "value": value,
+        }
+        if experiment_id is not None:
+            callback_kwargs["experiment_id"] = experiment_id
+        log_task = asyncio.create_task(self._fault_log_callback(**callback_kwargs))
+        _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
+        if error is not None:
+            logger.error("Failed to record blind interlock guard: %s", error)
+        if cancelled is not None:
+            raise cancelled
+        return error is None
+
+    async def record_blind_guards_for_experiment(self, experiment_id: str) -> None:
+        """Bind every active blind episode into one newly active experiment."""
+        if type(experiment_id) is not str or not experiment_id:
+            raise ValueError("blind-guard experiment binding requires an exact non-empty experiment_id")
+        failures: list[str] = []
+        for channel, episode in sorted(self._blind_interlock_guards.items()):
+            if self._blind_guard_experiment_records.get(channel) == experiment_id:
+                continue
+            interlock_name, reasons, _recorded, value = episode
+            if await self._record_blind_guard(
+                interlock_name=interlock_name,
+                channel=channel,
+                reasons=reasons,
+                value=value,
+                experiment_id=experiment_id,
+            ):
+                if self._blind_interlock_guards.get(channel) == episode:
+                    self._blind_guard_experiment_records[channel] = experiment_id
+            else:
+                failures.append(channel)
+        if failures:
+            raise RuntimeError("blind-guard experiment binding was not durable for channel(s): " + ", ".join(failures))
+
     def on_interlock_channel_recovered(self, interlock_name: str, channel: str) -> None:
         """Clear one mature blocker or blind-guard advisory after recovery."""
         recorded_interlock = self._mature_dead_interlock_channels.get(channel)
         blind_guard = self._blind_interlock_guards.pop(channel, None)
+        self._blind_guard_experiment_records.pop(channel, None)
         if recorded_interlock is None and blind_guard is None:
             return
         if recorded_interlock is not None:

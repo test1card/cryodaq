@@ -261,6 +261,28 @@ async def test_instrument_fault_operator_fact_names_blind_channel_and_reason() -
     assert "sensor_units_over_range" in blind_facts[0].display_name
 
 
+async def test_concurrent_generic_dead_channel_and_blind_guard_are_both_in_operator_snapshot() -> None:
+    mgr = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    mgr._mature_dead_interlock_channels["Т2 Криостат"] = "generic_dead_zone"
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    snapshot = mgr.snapshot_operator_safety()
+    facts = {fact.reason_code: fact for fact in snapshot.plant_health}
+    assert "Т2 Криостат" in next(
+        blocker.operator_text for blocker in snapshot.blockers if blocker.code == "mature_dead_interlock_channel"
+    )
+    assert _CHANNEL_ID in facts["interlock_guard_blind"].display_name
+    assert "sensor_units_over_range" in facts["interlock_guard_blind"].display_name
+
+
 async def test_instrument_fault_blind_guard_is_recorded_once() -> None:
     """Repeated advisory retries do not duplicate the durable run record."""
     run_records: list[dict[str, object]] = []

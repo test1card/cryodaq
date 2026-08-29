@@ -16,6 +16,7 @@ from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
@@ -257,6 +258,73 @@ async def test_experiment_start_and_finalize_commands(manager: ExperimentManager
     assert finalize["ok"] is True
     assert finalize["experiment"]["notes"] == "Completed cleanly"
     assert finalize["experiment"]["status"] == "COMPLETED"
+
+
+async def test_experiment_start_binds_an_already_settled_blind_guard_once_per_experiment(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module.asyncio, "to_thread", _inline_to_thread)
+    records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        records.append(dict(entry))
+
+    safety = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    blind_reading = Reading.now(
+        "Т1 Криостат верх",
+        380.0,
+        "K",
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+    settled = await safety.on_interlock_dead_channel(
+        "overheat_zone",
+        blind_reading.channel,
+        value=blind_reading.value,
+        reading=blind_reading,
+    )
+    assert bool(settled) is True
+    assert [record.get("experiment_id") for record in records] == [None]
+
+    context = _context(manager, safety_manager=safety)
+    first = await _execute_owned_experiment_command(
+        "experiment_start",
+        {"template_id": "cooldown_test", "title": "Blind A", "operator": "Operator"},
+        context,
+    )
+    assert first["ok"] is True, first
+    first_id = first["experiment_id"]
+    assert [record.get("experiment_id") for record in records] == [None, first_id]
+
+    await safety.record_blind_guards_for_experiment(first_id)
+    assert [record.get("experiment_id") for record in records] == [None, first_id]
+
+    finalized = await _execute_owned_experiment_command(
+        "experiment_finalize",
+        {"experiment_id": first_id, "status": "COMPLETED"},
+        context,
+    )
+    assert finalized["ok"] is True, finalized
+    second = await _execute_owned_experiment_command(
+        "experiment_start",
+        {"template_id": "cooldown_test", "title": "Blind B", "operator": "Operator"},
+        context,
+    )
+    assert second["ok"] is True, second
+    assert [record.get("experiment_id") for record in records] == [None, first_id, second["experiment_id"]]
 
 
 async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None:

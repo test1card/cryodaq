@@ -2569,6 +2569,7 @@ async def _safety_fault_log_callback(
     message: str,
     channel: str = "",
     value: float = 0.0,
+    experiment_id: str | None = None,
     *,
     context: _SafetyFaultLogContext,
 ) -> None:
@@ -2577,6 +2578,7 @@ async def _safety_fault_log_callback(
         message=message,
         author=source,
         source="machine",
+        experiment_id=experiment_id,
         tags=("safety_fault", channel) if channel else ("safety_fault",),
     )
     try:
@@ -5240,6 +5242,14 @@ async def _execute_owned_experiment_command(
                 reconciliation_failures.append(feed_failure)
 
         if action in {"experiment_start", "experiment_create"}:
+            experiment_id = receipt.get("experiment_id")
+            bind_blind_guards = getattr(context.safety_manager, "record_blind_guards_for_experiment", None)
+            if callable(bind_blind_guards):
+                await _attempt_experiment_reconciliation_async(
+                    reconciliation_failures,
+                    "blind_guard_experiment_binding",
+                    lambda: bind_blind_guards(experiment_id),
+                )
             await _attempt_experiment_reconciliation_async(
                 reconciliation_failures,
                 "calibration_acquisition_activate",

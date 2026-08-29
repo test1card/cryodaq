@@ -70,6 +70,30 @@ class _OperatorLogProbe:
         return OperatorLogCommitResult(entry=await self.append_operator_log(**kwargs), replayed=False)
 
 
+@pytest.mark.asyncio
+async def test_safety_fault_log_callback_persists_explicit_experiment_binding() -> None:
+    operator_log = _OperatorLogProbe()
+    context = _SafetyFaultLogContext(
+        writer=operator_log,
+        broker=DataBroker(),
+        alarm_dispatch_tasks=set(),
+        event_bus=EventBus(),
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-a"),
+    )
+
+    await _safety_fault_log_callback(
+        "interlock_guard_blind",
+        "blind guard remained active at experiment start",
+        channel="Т1 Криостат верх",
+        value=380.0,
+        experiment_id="experiment-a",
+        context=context,
+    )
+
+    assert len(operator_log.entries) == 1
+    assert operator_log.entries[0].experiment_id == "experiment-a"
+
+
 async def _publish_bound_interlock_reading(broker: DataBroker, value: float) -> None:
     catalog = load_live_channel_descriptor_catalog(DESCRIPTORS_PATH)
     bound = catalog.bind(

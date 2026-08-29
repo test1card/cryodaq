@@ -93,7 +93,7 @@ async def test_stalled_committer_is_bounded_and_operator_requested_start_continu
     context = _engine_command_context(
         manager,
         AsyncMock(),
-        writer=SimpleNamespace(append_operator_log=stalled_append),
+        writer=SimpleNamespace(append_operator_log_idempotent=stalled_append),
     )
     monkeypatch.setattr(
         "cryodaq.engine._KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S",
