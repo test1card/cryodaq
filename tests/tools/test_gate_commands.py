@@ -118,3 +118,43 @@ def test_the_emitted_partition_command_is_the_runner_ci_uses() -> None:
     assert "-m 'suite_" not in printed, "the tool invented a pytest marker again"
     workflow = open(WORKFLOW, encoding="utf-8").read()
     assert "tools.ci_candidate_evidence run" in workflow
+
+
+def test_the_emitted_partition_command_carries_every_required_argument() -> None:
+    """An emitted command that cannot run is the defect this tool exists to remove.
+
+    Measured 2026-08-29: the emission omitted `--artifact-name`, which the runner
+    declares REQUIRED, so running it verbatim exited with a usage error.
+
+    The required set is read out of the RUNNER'S OWN source rather than listed
+    here, for the same reason the tool reads the workflow instead of remembering
+    it: a remembered argument list is a different object from the parser, and the
+    difference is invisible until the command is run.
+    """
+
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from tools.gate_commands import main as emit
+
+    runner = (REPO_ROOT / "tools" / "ci_candidate_evidence.py").read_text(encoding="utf-8")
+    # The boundary matters: `protected_run.add_argument` CONTAINS `run.add_argument`,
+    # and without it this guard reports the protected-run subcommand's arguments as
+    # missing from a run command that never needed them.
+    required = set(
+        re.findall(
+            r'(?<![_A-Za-z])run\.add_argument\(\s*"(--[a-z-]+)"[^)]*required=True',
+            runner,
+        )
+    )
+    assert required, "no required arguments were found on the runner's run subcommand"
+    assert "--producer-root" not in required, "the protected-run subcommand's arguments leaked into the run set"
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        emit([])
+    emitted = buffer.getvalue()
+
+    assert "ci_candidate_evidence run" in emitted, "no partition command was emitted at all"
+    missing = sorted(name for name in required if name not in emitted)
+    assert missing == [], f"the emitted partition command cannot run; it omits {missing}"

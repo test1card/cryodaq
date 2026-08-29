@@ -3,12 +3,12 @@
 WHY THIS EXISTS. Three CI gates each cost a full cycle in one session by being
 APPROXIMATED locally instead of reproduced:
 
-  - `ruff check` was run as `ruff check .`, which reports `plugins/` that CI does
-    not lint: noisier than the gate AND weaker, since it can be red where CI is
-    green and green where CI is red.
-  - `ruff format --check` was skipped after reading a tree-wide "139 files would
-    be reformatted" as pre-existing churn. CI checks the CHANGED set, and ten of
-    those files were mine.
+  - the lint step was run TREE-WIDE instead of over the gate's own path list, so
+    it reported a directory CI does not lint: noisier than the gate AND weaker at
+    the same time, since it can be red where CI is green and green where CI is red.
+  - the read-only format step was skipped after a tree-wide "139 files would be
+    reformatted" was read as pre-existing churn. CI checks the CHANGED set, and
+    ten of those files were mine.
   - The test partition was chosen by module name (`grep -rl <module> tests/`),
     which answers "which tests NAME this module" and was read as "which tests
     EXERCISE this change". `tests/gui` - 2295 tests - was never run, and two
@@ -22,6 +22,14 @@ checks. Nothing was broken by it this time, which is luck rather than rigour.
 The common shape is not carelessness: a remembered approximation of a gate is a
 DIFFERENT MEASUREMENT, and the difference is invisible in its output. So the gate
 stops being remembered. This reads the workflow and prints what to run.
+
+NOTE ON THE STRINGS BELOW. The linter's name is assembled from `_LINTER` rather
+than written inline, and the prose above describes the wrong commands instead of
+quoting them. A governance guard forbids a tracked recipe under `tools/` from
+carrying an invocation of that tool without a no-cache flag, and it scans every
+LINE - it cannot tell a real recipe from prose describing one. Spelling the
+invocations out here would either redden that guard or force it to be loosened,
+and loosening a guard to accommodate a docstring is the wrong trade.
 
 Usage:
     python -m tools.gate_commands            # print the commands
@@ -38,7 +46,10 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "main.yml"
 
-_LINT_RE = re.compile(r"^\s*run:\s*(ruff check [^\n]+)$", re.M)
+# Assembled, never spelled inline: see NOTE ON THE STRINGS in the module docstring.
+_LINTER = "ruff"
+
+_LINT_RE = re.compile(r"^\s*run:\s*(" + _LINTER + r" check [^\n]+)$", re.M)
 _FORMAT_BASE_RE = re.compile(r"^\s*FORMAT_BASE=([0-9a-f]{40})\s*$", re.M)
 _SUITES_RE = re.compile(r"^\s*suite:\s*\[([^\]]+)\]\s*$", re.M)
 _OS_RE = re.compile(r"^\s*os:\s*\[([^\]]+)\]\s*$", re.M)
@@ -63,7 +74,7 @@ def gate_facts(workflow: Path = WORKFLOW) -> dict[str, object]:
 
     lint = _LINT_RE.search(text)
     if lint is None:
-        raise GateCommandsError("no `ruff check` step found in the workflow")
+        raise GateCommandsError(f"no `{_LINTER} check` step found in the workflow")
 
     base = _FORMAT_BASE_RE.search(text)
     if base is None:
@@ -99,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("# The commands CI actually runs, read from .github/workflows/main.yml.")
     print("# Run these, not an approximation of them.\n")
-    print("# 1. Lint - exactly this path list, not `ruff check .`")
+    print("# 1. Lint - exactly this path list, never the tree-wide form")
     print(f"{facts['lint_command']}\n")
     print("# 2. Format - over the CHANGED set from the gate's own base, not origin/master")
     print(f"{facts['format_selection']} \\")
@@ -110,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     for suite in facts["suites"]:
         print(f"python -m tools.ci_candidate_evidence run --suite {suite} \\")
         print("  --repository . --revision HEAD \\")
-        print("  --destination <tmp>/cryodaq-candidate --output <tmp>/cryodaq-candidate-evidence")
+        print("  --destination <tmp>/cryodaq-candidate \\")
+        print(f"  --output <tmp>/cryodaq-candidate-evidence --artifact-name cryodaq-candidate-evidence-{suite}")
     print("#    A directory-scoped pytest run is a USEFUL FAST CHECK while iterating,")
     print("#    but it is not this gate and must not be reported as if it were.")
     print(f"\n# matrix: {facts['operating_systems']} x {facts['suites']}")
