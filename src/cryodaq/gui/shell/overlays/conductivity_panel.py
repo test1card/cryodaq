@@ -104,7 +104,16 @@ _STABILITY_THRESHOLD = 0.01  # К/мин
 _BANNER_AUTO_CLEAR_MS = 4000
 _REFRESH_INTERVAL_MS = 1000
 _AUTO_TIMER_INTERVAL_MS = 1000
-_AUTO_DESCRIPTOR_WAIT_TIMEOUT_MS = 10_000
+# F81 finding, third instance - and this one was added by the same agent that
+# wrote the two notes below it.  A FIXED 10-second bound expires before the
+# first descriptor-bearing reading of an instrument whose configured
+# poll_interval_s exceeds 10 s (the registry permits up to 86_400 s and read
+# timeouts to 300 s), so a HEALTHY supported configuration returns the sweep to
+# idle instead of starting.  The bound is therefore derived from the observed
+# cadence of the channels being waited on, with this constant kept as the
+# fail-closed FLOOR for the first connection, where no cadence exists yet.
+_AUTO_DESCRIPTOR_WAIT_FLOOR_MS = 10_000
+_AUTO_DESCRIPTOR_WAIT_CADENCE_FACTOR = 3.0
 # F81 finding: a fixed freshness window silently rejects every sample of an
 # otherwise healthy instrument whose configured poll_interval_s (registry allows
 # up to 86_400 s) or successful read (up to 300 s) exceeds 10 seconds, leaving
@@ -441,7 +450,7 @@ class ConductivityPanel(QWidget):
 
         self._auto_descriptor_wait_timer = QTimer(self)
         self._auto_descriptor_wait_timer.setSingleShot(True)
-        self._auto_descriptor_wait_timer.setInterval(_AUTO_DESCRIPTOR_WAIT_TIMEOUT_MS)
+        self._auto_descriptor_wait_timer.setInterval(_AUTO_DESCRIPTOR_WAIT_FLOOR_MS)
         self._auto_descriptor_wait_timer.timeout.connect(self._on_auto_descriptor_wait_timeout)
 
     # ------------------------------------------------------------------
@@ -1748,6 +1757,7 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText(
             "Ожидание идентичности каналов текущего подключения — автоизмерение начнётся автоматически"
         )
+        self._auto_descriptor_wait_timer.setInterval(self._auto_descriptor_wait_ms())
         self._auto_descriptor_wait_timer.start()
         self._update_control_enablement()
         logger.warning("Автоизмерение ожидает идентичность каналов текущего подключения")
@@ -1785,6 +1795,33 @@ class ConductivityPanel(QWidget):
             return
         self._start_auto_sweep(powers)
 
+    def _auto_descriptor_wait_ms(self) -> int:
+        """How long to wait for channel identity, sized to the observed cadence.
+
+        A fixed bound is wrong for the same reason it is wrong for the freshness
+        window and the predictor window above: a healthy instrument may legitimately
+        be slower than the bound, and then the sweep never starts.  Uses the slowest
+        median cadence among the channels actually being waited on, so an unrelated
+        slow channel cannot inflate it, and keeps the floor for the first connection
+        where no cadence has been observed yet.
+        """
+
+        channels = list(self._auto_pending_start_temperature_channels)
+        power_channel = self._auto_pending_start_power_channel or self._power_channel
+        if power_channel:
+            channels.append(power_channel)
+        medians: list[float] = []
+        for channel in channels:
+            gaps = self._auto_cadence_gaps.get(channel)
+            if not gaps:
+                continue
+            ordered = sorted(gaps)
+            medians.append(ordered[len(ordered) // 2])
+        if not medians:
+            return int(_AUTO_DESCRIPTOR_WAIT_FLOOR_MS)
+        derived_ms = _AUTO_DESCRIPTOR_WAIT_CADENCE_FACTOR * max(medians) * 1000.0
+        return int(max(float(_AUTO_DESCRIPTOR_WAIT_FLOOR_MS), derived_ms))
+
     @Slot()
     def _on_auto_descriptor_wait_timeout(self) -> None:
         if not self._auto_waiting_for_descriptors:
@@ -1798,7 +1835,9 @@ class ConductivityPanel(QWidget):
         self._auto_state = "idle"
         suffix = f" ({', '.join(missing)})" if missing else ""
         self._refuse_auto_start(
-            f"время ожидания идентичности каналов истекло{suffix}; проверьте связь и повторите Старт"
+            f"время ожидания идентичности каналов истекло{suffix}; это возможно и при "
+            "исправной связи, если интервал опроса прибора больше времени ожидания — "
+            "проверьте интервал опроса и связь, затем повторите Старт"
         )
         self._on_channels_changed()
 
