@@ -34,7 +34,7 @@
     "tests/gui/shell/overlays/test_conductivity_panel.py": "c8165fad8f45752d9ec8a112a84876a5d6d5f297"
   },
   "guard_node_sha256": {
-    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change": "sha256:a4af16b282705e64214bcdf2ec2afd28044c4cfc92b8b868d97d3207152114ac"
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change": "sha256:40108a399ebe1d82d369a8288792c26b96bf32159a28be05d052da9ef9a34977"
   },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change"

@@ -50,9 +50,9 @@
     "tests/gui/shell/overlays/test_conductivity_panel.py": "c8165fad8f45752d9ec8a112a84876a5d6d5f297"
   },
   "guard_node_sha256": {
-    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": "sha256:6b218d048daf8ae8b0f5fedd7e731cb046274872e616ac432d2da4a2580d07f2",
-    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels": "sha256:bf89d09d558f2ec492caddfaf3cfb91be0c0e9e1ef3efac782b94d6b322aa7b3",
-    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof": "sha256:b131699f51f46d4067552ec8ffeb12bc0be5ebb4dc9e260240495233d6d27158"
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": "sha256:835fb327d9d489d8895bb2d254e7c2b75f5e60e19bfb4c92b98143d0e2b3fecb",
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels": "sha256:bc186cfe20a3a04af71806ae65f833dd4e8cac47bac606b583bc646f0b1bf03a",
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof": "sha256:78d06f3b64911ee00637ecd17fc59873a8fbe746027b97ae8137fd34a0426ffe"
   },
   "guard_nodes": [
     "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only",

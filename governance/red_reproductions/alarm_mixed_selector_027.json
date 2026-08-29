@@ -38,7 +38,7 @@
     "tests/core/test_alarm_config_validation.py": "874f549ec38babc348e152bda229cd3e478f8f9c"
   },
   "guard_node_sha256": {
-    "tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises": "sha256:16e2a5b48138410a2ca41f79f0141c38f08d2aa63a21e217720b054b328777a2"
+    "tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises": "sha256:0ee3d2e76d2189970237790e5a6a5511ed2c1e34eb928d7ccd285a74f8eda5d8"
   },
   "guard_nodes": [
     "tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises"

@@ -92,8 +92,10 @@ from cryodaq.storage.channel_descriptors import (
 )
 from cryodaq.storage.conductivity_run import (
     ConductivityRunFormatError,
+    ConductivityRunSnapshot,
     ConductivityRunWriter,
     build_conductivity_descriptor_parameters,
+    read_conductivity_run,
 )
 
 logger = logging.getLogger(__name__)
@@ -2169,8 +2171,24 @@ class ConductivityPanel(QWidget):
 
         if self._auto_terminal_failure_required:
             status = "FAILED"
+        if self._auto_run_writer is None and self._auto_binding_resolution == "reservation_failed":
+            self._auto_deferred_terminal_status = status
+            command = self._attachment_command(
+                status="RUNNING",
+                terminal=None,
+                finished_at=None,
+                reservation_state="reserved",
+            )
+            if command is not None and self._send_auto_cmd(command):
+                return
+            self._auto_pending_stop_intent = None
+            self._latch_auto_outcome_unknown(
+                "Сверка неудачного резервирования не отправлена; повторите Стоп после восстановления связи."
+            )
+            return
         if self._auto_run_writer is None and self._auto_binding_resolution in {
             "reservation_pending",
+            "reservation_reconciliation_pending",
             "reserved",
         }:
             self._auto_deferred_terminal_status = status
@@ -2207,8 +2225,82 @@ class ConductivityPanel(QWidget):
     ) -> None:
         terminal = result.get("value")
         if result.get("ok") is not True or not isinstance(terminal, dict):
-            self._block_after_terminal_persistence_failure(str(result.get("error", "ошибка терминальной записи")))
+            self._reconcile_auto_terminal_after_error(
+                status,
+                finished_at,
+                str(result.get("error", "ошибка терминальной записи")),
+            )
             return
+        self._accept_auto_terminal(status, finished_at, terminal)
+
+    def _reconcile_auto_terminal_after_error(
+        self,
+        status: str,
+        finished_at: datetime,
+        original_error: str,
+    ) -> None:
+        """Resolve an append error whose terminal fsync may already have landed."""
+
+        path = self._auto_run_path
+        writer = self._auto_run_writer
+        if path is None or writer is None:
+            self._block_after_terminal_persistence_failure(original_error)
+            return
+
+        def _read_terminal():
+            snapshot = read_conductivity_run(path)
+            if snapshot.terminal is not None:
+                writer.close()
+            return snapshot
+
+        if not self._dispatch_persistence(
+            _read_terminal,
+            lambda result: self._on_auto_terminal_reconciled(status, finished_at, original_error, result),
+            cleanup_on_interruption=writer.close,
+        ):
+            self._block_after_terminal_persistence_failure(
+                f"{original_error}; сверка терминальной записи не поставлена в очередь"
+            )
+
+    def _on_auto_terminal_reconciled(
+        self,
+        status: str,
+        finished_at: datetime,
+        original_error: str,
+        result: dict[str, Any],
+    ) -> None:
+        snapshot = result.get("value")
+        terminal = snapshot.terminal if isinstance(snapshot, ConductivityRunSnapshot) else None
+        expected_error = self._auto_persistence_error
+        expected_trailing = (
+            self._auto_trailing_write_outcome
+            if isinstance(snapshot, ConductivityRunSnapshot) and snapshot.raw_row_count != snapshot.checkpoint_count
+            else None
+        )
+        if (
+            result.get("ok") is not True
+            or not isinstance(snapshot, ConductivityRunSnapshot)
+            or not isinstance(terminal, dict)
+            or snapshot.run_id != self._auto_run_id
+            or snapshot.status != status
+            or terminal.get("finished_at") != finished_at.isoformat()
+            or terminal.get("accepted_point_count") != snapshot.checkpoint_count
+            or terminal.get("error") != expected_error
+            or terminal.get("trailing_write_outcome") != expected_trailing
+        ):
+            reconciliation_error = str(result.get("error", "терминальная запись на диске не совпала с запросом"))
+            self._block_after_terminal_persistence_failure(f"{original_error}; {reconciliation_error}")
+            return
+        self._accept_auto_terminal(status, finished_at, terminal)
+
+    def _accept_auto_terminal(
+        self,
+        status: str,
+        finished_at: datetime,
+        terminal: dict[str, Any],
+    ) -> None:
+        """Retry metadata attachment from one exact validated on-disk terminal."""
+
         attachment = self._attachment_command(status=status, terminal=terminal, finished_at=finished_at)
         if attachment is not None:
             self._auto_terminal_attachment_command = attachment
@@ -2364,9 +2456,12 @@ class ConductivityPanel(QWidget):
             self._auto_verified_off_connection_generation = None
         if cmd.get("cmd") == "experiment_attach_run_record" and cmd.get("status") == "RUNNING":
             reservation_state = (cmd.get("result_summary") or {}).get("reservation_state")
-            self._auto_binding_resolution = (
-                "artifact_attachment_pending" if reservation_state == "artifact_ready" else "reservation_pending"
-            )
+            if reservation_state == "artifact_ready":
+                self._auto_binding_resolution = "artifact_attachment_pending"
+            elif self._auto_binding_resolution == "reservation_failed":
+                self._auto_binding_resolution = "reservation_reconciliation_pending"
+            else:
+                self._auto_binding_resolution = "reservation_pending"
         worker.start()
         return True
 
@@ -2396,8 +2491,15 @@ class ConductivityPanel(QWidget):
         is_ready_attachment = (
             is_start_attachment and (command.get("result_summary") or {}).get("reservation_state") == "artifact_ready"
         )
+        reservation_reconciliation = (
+            is_start_attachment
+            and not is_ready_attachment
+            and self._auto_binding_resolution == "reservation_reconciliation_pending"
+        )
         reconcile_prearm = (
-            is_start_attachment and not is_ready_attachment and self._auto_binding_resolution == "reservation_pending"
+            is_start_attachment
+            and not is_ready_attachment
+            and self._auto_binding_resolution in {"reservation_pending", "reservation_reconciliation_pending"}
         ) or (is_ready_attachment and self._auto_binding_resolution == "artifact_attachment_pending")
         pending_token = self._auto_pending_token
         if pending_token is not None and token != pending_token and not reconcile_prearm:
@@ -2472,6 +2574,13 @@ class ConductivityPanel(QWidget):
                     if isinstance(result, dict)
                     else "некорректный ответ Engine"
                 )
+                if reservation_reconciliation:
+                    self._auto_binding_resolution = "reservation_failed"
+                    self._auto_pending_stop_intent = None
+                    self._latch_auto_outcome_unknown(
+                        f"Сверка RUNNING-резервирования не подтверждена ({error[:120]}); повторите Стоп."
+                    )
+                    return
                 self._auto_binding_resolution = "unrequested"
                 if not is_ready_attachment and self._auto_run_writer is None:
                     self._auto_state = "stabilizing"
@@ -2531,6 +2640,10 @@ class ConductivityPanel(QWidget):
                 or not experiment_id
                 or (is_ready_attachment and experiment_id != self._auto_expected_experiment_id)
             ):
+                if not is_ready_attachment:
+                    self._auto_binding_resolution = "reservation_failed"
+                    if self._auto_deferred_terminal_status is not None:
+                        self._auto_pending_stop_intent = None
                 self._latch_auto_outcome_unknown(
                     "RUNNING-привязка вернула несогласованную идентичность; мощность не изменена."
                 )

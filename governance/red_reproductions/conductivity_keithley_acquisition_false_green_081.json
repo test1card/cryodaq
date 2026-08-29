@@ -38,7 +38,7 @@
     "tests/drivers/test_keithley_disconnect_verified_off.py": "eef9e8e46c05fcc233e7615b2f215e81ca4ca84d"
   },
   "guard_node_sha256": {
-    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": "sha256:6b218d048daf8ae8b0f5fedd7e731cb046274872e616ac432d2da4a2580d07f2"
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": "sha256:835fb327d9d489d8895bb2d254e7c2b75f5e60e19bfb4c92b98143d0e2b3fecb"
   },
   "guard_nodes": [
     "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only"

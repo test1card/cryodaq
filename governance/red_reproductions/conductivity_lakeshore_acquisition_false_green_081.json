@@ -34,7 +34,7 @@
     "tests/drivers/test_lakeshore_218s.py": "4edf1a54453dcc486ad71fdb3203b66e9e6408d3"
   },
   "guard_node_sha256": {
-    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels": "sha256:bf89d09d558f2ec492caddfaf3cfb91be0c0e9e1ef3efac782b94d6b322aa7b3"
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels": "sha256:bc186cfe20a3a04af71806ae65f833dd4e8cac47bac606b583bc646f0b1bf03a"
   },
   "guard_nodes": [
     "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels"

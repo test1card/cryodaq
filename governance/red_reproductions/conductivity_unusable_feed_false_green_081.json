@@ -37,7 +37,7 @@
     "tests/gui/shell/overlays/test_conductivity_panel.py": "c8165fad8f45752d9ec8a112a84876a5d6d5f297"
   },
   "guard_node_sha256": {
-    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds": "sha256:46ba6cb8f498715c4ea68141fb26782aa8633b5d96ab90584a80c2d668824642"
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds": "sha256:5b2a388466ad96f8251cfe9fe6369293b65ee5cf43f346c91b35487e9e280887"
   },
   "guard_nodes": [
     "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds"

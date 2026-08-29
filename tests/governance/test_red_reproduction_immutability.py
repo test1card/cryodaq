@@ -16,6 +16,7 @@ from tools.ci_active_checkout_runner import (
 from tools.governance_contract import _RED_REPRODUCTION_PROVENANCE
 from tools.red_reproduction import migrate_red_reproduction_node_digests
 from tools.test_node_source import test_node_sha256 as _test_node_sha256
+from tools.test_node_source import test_node_span_sha256 as _test_node_span_sha256
 
 GUARD_FILE = "tests/governance/guard_demo.py"
 RECEIPT_PATH = "governance/red_reproductions/seed.json"
@@ -242,6 +243,28 @@ def test_accepts_only_tree_derived_legacy_to_node_digest_migration(tmp_path: Pat
     _commit(root, "derive node digest migration")
     result = compare_red_reproduction_bindings(root, candidate=_git(root, "rev-parse", "HEAD"), trusted_base=base)
     assert result["outcome"] == "passed"
+
+
+def test_accepts_only_verified_function_span_to_support_closure_migration(tmp_path: Path) -> None:
+    guard_v1 = b"def _helper():\n    return False\n\ndef test_guard():\n    assert _helper()\n"
+    root, _base = _seed_red(tmp_path, guard_v1=guard_v1)
+    receipt_path = root / RECEIPT_PATH
+    receipt = json.loads(receipt_path.read_bytes())
+    node = f"{GUARD_FILE}::test_guard"
+    receipt["schema_version"] = 2
+    receipt["guard_node_sha256"] = {node: _test_node_span_sha256(guard_v1, node)}
+    legacy_raw = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    receipt_path.write_bytes(legacy_raw)
+    _write_registry(
+        root,
+        locator=RECEIPT_PATH,
+        digest="sha256:" + hashlib.sha256(legacy_raw).hexdigest(),
+    )
+    _commit(root, "seed legacy function-span node digest")
+
+    assert migrate_red_reproduction_node_digests(root) == 1
+    migrated = json.loads(receipt_path.read_bytes())
+    assert migrated["guard_node_sha256"] == {node: _test_node_sha256(guard_v1, node)}
 
 
 def test_node_digest_migration_refuses_a_changed_named_test_without_writes(tmp_path: Path) -> None:

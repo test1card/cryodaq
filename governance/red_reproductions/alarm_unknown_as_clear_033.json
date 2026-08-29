@@ -51,8 +51,8 @@
     "tests/core/test_alarm_v2_integration.py": "0b74a8642daee53410d0eed9b920e79ea6ea7b14"
   },
   "guard_node_sha256": {
-    "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive": "sha256:fb1799e3bc65db997496211f62f297add2b4092b1ff1f9e6e98d4b7db20b5c95",
-    "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises": "sha256:abc899a24965c5bf679f2a54e7a19e007ec86723be29edfc24817fc1b32fa44a"
+    "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive": "sha256:38962698870be7e1e6919ddf380513a0349a87b3512f1786f686ff42ef125d06",
+    "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises": "sha256:fcae04d7561c6cc47c698870ac680a54d1b43ac318511421d8b1f4049213235b"
   },
   "guard_nodes": [
     "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive",

@@ -25,7 +25,12 @@ from pathlib import Path
 
 import yaml
 
-from tools.test_node_source import TestNodeSourceError, test_node_sha256, test_node_sha256_bindings
+from tools.test_node_source import (
+    TestNodeSourceError,
+    test_node_sha256,
+    test_node_sha256_bindings,
+    test_node_span_sha256,
+)
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _RECEIPT_DIRECTORY = Path("governance/red_reproductions")
@@ -301,7 +306,15 @@ def migrate_red_reproduction_node_digests(root: Path) -> int:
             derived[node] = current_digest
         existing = receipt.get("guard_node_sha256")
         if existing is not None and existing != derived:
-            raise RedReproductionError(f"receipt carries a non-derived node digest: {receipt_path.name}")
+            legacy = {
+                node: test_node_span_sha256(
+                    _git(root, "cat-file", "blob", guard_blobs[node.split("::", 1)[0]]),
+                    node,
+                )
+                for node in nodes
+            }
+            if existing != legacy:
+                raise RedReproductionError(f"receipt carries a non-derived node digest: {receipt_path.name}")
         receipt["schema_version"] = 2
         receipt["guard_node_sha256"] = derived
         relative = receipt_path.relative_to(root)

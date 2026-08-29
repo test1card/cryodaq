@@ -38,14 +38,8 @@ def _one_named(nodes: list[ast.stmt], name: str, kinds: tuple[type[ast.stmt], ..
     return matches[0]
 
 
-def test_node_source_bytes(source: bytes, node_id: str) -> bytes:
-    """Return exact bytes from the node's first decorator through its AST end.
-
-    The AST selects the owning function or method. Its span includes nested
-    helpers automatically; moving the start to the earliest decorator keeps
-    decorator behavior inside the same binding. No neighbouring top-level test
-    is part of the selected byte range.
-    """
+def _parsed_owner(source: bytes, node_id: str) -> tuple[ast.Module, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Parse *source* and resolve one exact pytest function or method owner."""
 
     _path, names = _safe_node_parts(node_id)
     try:
@@ -68,6 +62,11 @@ def test_node_source_bytes(source: bytes, node_id: str) -> bytes:
     assert isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef))
     if owner.end_lineno is None or owner.end_col_offset is None:
         raise TestNodeSourceError(f"test node has no complete source span: {node_id!r}")
+    return tree, owner
+
+
+def _exact_span(source: bytes, owner: ast.FunctionDef | ast.AsyncFunctionDef, node_id: str) -> tuple[int, int]:
+    """Return the byte offsets owned by one function, including decorators."""
 
     start_line = min([owner.lineno, *(decorator.lineno for decorator in owner.decorator_list)])
     start_column = owner.col_offset
@@ -79,14 +78,82 @@ def test_node_source_bytes(source: bytes, node_id: str) -> bytes:
         offsets.append(offsets[-1] + len(line))
     start = offsets[start_line - 1] + start_column
     end = offsets[owner.end_lineno - 1] + owner.end_col_offset
-    segment = source[start:end]
-    if not segment:
+    if start >= end:
         raise TestNodeSourceError(f"test node source span is empty: {node_id!r}")
-    return segment
+    return start, end
+
+
+def test_node_span_source_bytes(source: bytes, node_id: str) -> bytes:
+    """Return the legacy function-only node span used by schema-2 migration.
+
+    This remains available only so a migration can prove that an existing
+    receipt carried the previously derived value before replacing it. New
+    receipts and validation use :func:`test_node_source_bytes`.
+    """
+
+    _tree, owner = _parsed_owner(source, node_id)
+    start, end = _exact_span(source, owner, node_id)
+    return source[start:end]
+
+
+def _sibling_test_spans(
+    source: bytes,
+    tree: ast.Module,
+    owner: ast.FunctionDef | ast.AsyncFunctionDef,
+    node_id: str,
+) -> list[tuple[int, int]]:
+    """Select pytest siblings while leaving module/class support code intact."""
+
+    siblings: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+
+    def _visit_body(body: list[ast.stmt]) -> None:
+        for statement in body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if statement is not owner and statement.name.startswith("test"):
+                    siblings.append(statement)
+            elif isinstance(statement, ast.ClassDef):
+                _visit_body(statement.body)
+
+    _visit_body(tree.body)
+    spans = sorted(_exact_span(source, sibling, node_id) for sibling in siblings)
+    for previous, current in zip(spans, spans[1:], strict=False):
+        if previous[1] > current[0]:
+            raise TestNodeSourceError(f"test sibling spans overlap for {node_id!r}")
+    return spans
+
+
+def test_node_source_bytes(source: bytes, node_id: str) -> bytes:
+    """Return exact named-test support bytes while excluding sibling tests.
+
+    A pytest guard's behaviour is not owned by its function body alone. Module
+    helpers, explicit and autouse fixtures, imports, class support code, and a
+    containing class decorator can all change what the named test proves. The
+    dependency closure therefore retains every module/class support span and
+    removes only structurally distinct sibling test functions or methods. This
+    deliberately conservative closure avoids interprocedural false negatives
+    while preserving the node digest's reason for existing: an unrelated
+    sibling test body is not part of this named guard.
+    """
+
+    tree, owner = _parsed_owner(source, node_id)
+    spans = _sibling_test_spans(source, tree, owner, node_id)
+    parts = [b"pytest-node-support-closure-v1\0"]
+    cursor = 0
+    for start, end in spans:
+        parts.append(source[cursor:start])
+        cursor = end
+    parts.append(source[cursor:])
+    return b"".join(parts)
+
+
+def test_node_span_sha256(source: bytes, node_id: str) -> str:
+    """Derive the legacy function-only digest for verified migration only."""
+
+    return f"sha256:{hashlib.sha256(test_node_span_source_bytes(source, node_id)).hexdigest()}"
 
 
 def test_node_sha256(source: bytes, node_id: str) -> str:
-    """Derive a SHA-256 digest from one structurally selected test node."""
+    """Derive a SHA-256 digest from one test and its support closure."""
 
     return f"sha256:{hashlib.sha256(test_node_source_bytes(source, node_id)).hexdigest()}"
 
