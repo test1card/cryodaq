@@ -540,3 +540,90 @@ def test_local_non_windows_run_records_external_gate_not_a_fake_pass(tmp_path: P
     assert payload["status"] == "FAIL"
     assert payload["reason"] == "RuntimeError:WINDOWS_REQUIRED"
     assert payload["cells"] == []
+
+
+def test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it(tmp_path: Path) -> None:
+    """The hang was the ONE failure that left nothing to diagnose it with.
+
+    `communicate(timeout=...)` raises TimeoutExpired WITHOUT returning what the child
+    already wrote, and both CTRL_BREAK cells re-raised before `_write_log` ran. The
+    real Windows failure at 7b634e0098 left a `reason` string and no output at all,
+    so nobody could see why the GUI would not exit after CTRL_BREAK.
+
+    This drives a genuine TimeoutExpired against a real child that outlives a real
+    deadline, then does what the cells do on their failure path, and asserts the
+    child's output survived.
+    """
+
+    import subprocess
+    import sys
+
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys, time; "
+            "sys.stdout.write('child-stdout-marker\\n'); sys.stdout.flush(); "
+            "sys.stderr.write('child-stderr-marker\\n'); sys.stderr.flush(); "
+            "time.sleep(120)"
+        ),
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.communicate(timeout=2.0)
+        # Exactly what the cells now do before re-raising.
+        process.terminate()
+        process.wait(timeout=10)
+        smoke._preserve_failure_evidence(process, command, tmp_path, "gui_startup_offscreen")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    stdout_log = tmp_path / "gui_startup_offscreen.stdout.log"
+    stderr_log = tmp_path / "gui_startup_offscreen.stderr.log"
+    assert stdout_log.is_file(), "a timed-out cell wrote no stdout log; its failure cannot be diagnosed"
+    assert stderr_log.is_file(), "a timed-out cell wrote no stderr log; its failure cannot be diagnosed"
+    assert b"child-stdout-marker" in stdout_log.read_bytes(), "the child's stdout was discarded on the timeout path"
+    assert b"child-stderr-marker" in stderr_log.read_bytes(), "the child's stderr was discarded on the timeout path"
+
+
+def test_both_ctrl_break_cells_preserve_evidence_before_they_re_raise() -> None:
+    """Preserving evidence in one of the two cells is preserving it in neither.
+
+    Both `_run_gui_startup_cell` and `_run_assistant_cell` signal CTRL_BREAK and then
+    wait on `communicate(timeout=20)`; both had the identical gap. The call must sit
+    INSIDE the failure path and BEFORE the `raise`, or the evidence is written after
+    nothing or not at all.
+    """
+
+    import inspect
+
+    for cell in (smoke._run_gui_startup_cell, smoke._run_assistant_cell):
+        source = inspect.getsource(cell)
+        assert "communicate(timeout=20)" in source, (
+            f"{cell.__name__} no longer waits on a bounded communicate; re-check this guard"
+        )
+        assert "_preserve_failure_evidence(" in source, f"{cell.__name__} discards the child's output when it fails"
+        preserved = source.index("_preserve_failure_evidence(")
+        reraise = source.index("\n        raise\n", source.index("except BaseException:"))
+        assert preserved < reraise, f"{cell.__name__} re-raises before preserving evidence, so the log is never written"
+
+
+def test_preserving_evidence_never_replaces_the_real_failure() -> None:
+    """Bookkeeping must not become the error the operator sees.
+
+    A child that cannot be drained, or an evidence directory that cannot be written,
+    is a worse thing to report than the failure that was already happening. Every
+    step in the helper is suppressed for that reason.
+    """
+
+    class _Unusable:
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise OSError("the pipe is gone")
+
+    # An evidence directory that does not exist makes _write_log raise too.
+    smoke._preserve_failure_evidence(_Unusable(), ["x"], Path("/nonexistent-evidence-dir"), "gui_startup_offscreen")

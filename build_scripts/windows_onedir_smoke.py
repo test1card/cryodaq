@@ -479,6 +479,47 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
     }
 
 
+# Bounded so a wedged child cannot wedge the harness. This drain runs only AFTER a
+# cell has already failed and its own deadline has already been decided, so it
+# widens no cell's bound - it only decides whether the failure leaves evidence.
+_FAILURE_DRAIN_TIMEOUT_S = 10.0
+
+
+def _preserve_failure_evidence(
+    process: subprocess.Popen[bytes],
+    command: list[str],
+    evidence_dir: Path,
+    name: str,
+) -> None:
+    """Write what the child produced before this cell failed, then let it fail.
+
+    `communicate(timeout=...)` raises TimeoutExpired WITHOUT returning the output it
+    has already collected, and the failure paths here re-raised before `_write_log`
+    ran. So the one failure anyone actually needs to diagnose - a child that will not
+    exit - was the only failure that left NOTHING to diagnose it with. That is
+    exactly backwards.
+
+    Python's own guidance after a TimeoutExpired is to kill the child and call
+    `communicate()` again; the callers have already terminated and waited by the time
+    they reach here, so this second call joins the reader threads and hands back
+    whatever was buffered.
+
+    This never changes an outcome. The caller still re-raises and the cell still
+    fails; every step is suppressed so a failure to collect evidence cannot replace
+    the real error with a bookkeeping one.
+    """
+
+    stdout, stderr = b"", b""
+    with suppress(Exception):
+        stdout, stderr = process.communicate(timeout=_FAILURE_DRAIN_TIMEOUT_S)
+    with suppress(Exception):
+        _write_log(
+            evidence_dir,
+            name,
+            subprocess.CompletedProcess(command, process.returncode, stdout, stderr),
+        )
+
+
 def _run_frozen_driver_import_cell(
     executable: Path,
     root: Path,
@@ -590,6 +631,7 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
+        _preserve_failure_evidence(process, command, evidence_dir, "gui_startup_offscreen")
         raise
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
@@ -817,6 +859,7 @@ def _run_assistant_cell(
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
+        _preserve_failure_evidence(process, command, evidence_dir, name)
         raise
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     file_log = assistant_log.read_bytes() if assistant_log.is_file() else b""
