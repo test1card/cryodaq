@@ -42,7 +42,6 @@ from cryodaq.engine import (
 )
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 
-
 ROOT = Path(__file__).resolve().parents[2]
 INTERLOCKS_PATH = ROOT / "config" / "interlocks.yaml"
 DESCRIPTORS_PATH = ROOT / "config" / "channel_descriptors.yaml"
