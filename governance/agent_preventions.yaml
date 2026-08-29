@@ -3689,6 +3689,22 @@ false_green_pairs:
     ci_partition: core
     red_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_deleting_only_the_operator_warnings_append_block_at_diff_added_line_1503_left_the_start_permitted_and_the_source_active_but_reddened_test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record_on_the_missing_list_exit_1_the_inverse_patch_restored_src_cryodaq_core_safety_manager_py_to_sha256_556f85831c817a117676cda224d77c0a5c8ac8ca8695ec64ac55a90b8e2d2bfb_byte_identical
     green_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_after_byte_identical_restore_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+  - id: INTERLOCK-REARM-JOURNAL-CALL-ONLY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/core/test_safety_manager.py::test_rearm_failure_record_is_committed_by_production_writer
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_production_SQLiteWriter_and_EventLogger_changing_added_EventLogger_line_64_return_True_to_return_False_left_the_row_durably_reread_but_reddened_the_false_unconfirmed_notice_assertion_1_failed_then_restored_sha256_5ca95e0ba85fab20d651635abb4d0abf1a532d46da2eae0e07a23a7d45af8762_byte_identical_and_1_passed_changing_added_engine_line_5753_is_not_True_to_is_None_reddened_the_failed_append_operator_notice_assertion_1_failed_then_restored_sha256_6c303fa2190576d7028bb753caef5ebb9e9cb339ed52929cd5beac60d9970118_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_each_exact_core_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
+  - id: INTERLOCK-REARM-PANEL-PROJECTION-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/gui/shell/overlays/test_keithley_panel.py::test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path
+    ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_changing_the_panel_production_projection_line_756_warning_key_to_warninG_reddened_the_visible_banner_equality_assertion_1_failed_then_restored_sha256_ed9f0eaacbe0cd05e855b4fb4bde0467fb32cbb307cec0275f092876d226d42c_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_exact_gui_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7433,21 +7449,48 @@ records:
     green_evidence: pending
 
   - id: INTERLOCK-REARM-FAILURE-SILENT-001
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: The production SafetyManager control-trip owner, deliberate-Start interlock re-arm hook, keithley_start operator-warning projection, and successful-Start operator-journal record.
+    applies_to: The production SafetyManager control-trip owner, deliberate-Start interlock re-arm hook, EventLogger SQLite commit outcome, keithley_start scalar warning projection, _SmuChannelBlock._on_command_result, and the successful-Start operator-journal record.
     classification: silent_failure
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: When the production re-arm callback raised, SafetyManager wrote only an engine-file error and continued to start_source. Previously tripped control interlocks remained TRIPPED and InterlockEngine evaluates only ARMED records, so the source could run with those guards blind while the Start surface showed generic success and the run journal named none of them.
-    invariant: A failed real re-arm pass never refuses the operator's Start, but the successful Start outcome carries interlock_rearm_unconfirmed in operator_warnings with every control-interlock name observed on the real trip path; the engine renders those names into the scalar warning read by the source panel and the successful-Start operator-journal entry. The hook remains after preflight and the expected-warning comparison, so it runs once and does not retroactively falsify the two-phase warning receipt.
+    consequence: When the production re-arm callback raised, SafetyManager originally wrote only an engine-file error and continued to start_source. After the first correction, the operator surface and an AsyncMock call claimed the warning was recorded, but EventLogger swallowed a failed SQLite append and the registered core-only guard never executed the panel. The source could therefore run with blind guards while either the dataset lacked its promised record or the operator saw generic success.
+    invariant: A failed real re-arm pass never refuses the operator's Start, but the successful Start outcome carries interlock_rearm_unconfirmed with every control-interlock name observed on the real trip path. EventLogger returns an exact durable outcome; a production SQLite commit is reread from the journal, and an unconfirmed append is added after the underlying warning without changing Start success. The engine scalar reaches the production Keithley panel as a visibly retained accessible warning. The hook remains after preflight and expected-warning comparison, so it runs once and does not retroactively falsify the two-phase warning receipt.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/core/test_safety_manager.py::test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record
         ci_partition: core
-    red_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_deleting_only_the_operator_warnings_append_block_at_diff_added_line_1503_left_the_start_permitted_and_the_source_active_but_reddened_test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record_on_the_missing_list_exit_1_the_inverse_patch_restored_src_cryodaq_core_safety_manager_py_to_sha256_556f85831c817a117676cda224d77c0a5c8ac8ca8695ec64ac55a90b8e2d2bfb_byte_identical
-    green_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_after_byte_identical_restore_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+      - node: tests/core/test_safety_manager.py::test_rearm_failure_record_is_committed_by_production_writer
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_failed_rearm_journal_write_is_appended_to_warning_without_refusing_start
+        ci_partition: core
+      - node: tests/gui/shell/overlays/test_keithley_panel.py::test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path
+        ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_parse_preserving_controls_reddened_real_assertions_for_the_production_SQLite_commit_outcome_failed_append_operator_notice_and_panel_warning_projection_each_restore_was_sha256_byte_identical_details_are_bound_in_INTERLOCK_REARM_JOURNAL_CALL_ONLY_FALSE_GREEN_001_and_INTERLOCK_REARM_PANEL_PROJECTION_FALSE_GREEN_001_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_focused_production_paths_12_passed_before_final_registry_regeneration_pending_immutable_capture
+
+  - id: LAKESHORE-UNKNOWN-RDGST-ADVISORY-FAIL-OPEN-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: LakeShore218S._with_instrument_status through Reading.instrument_status_fault_reasons, InterlockEngine._handle_nonusable, and SafetyManager.on_interlock_dead_channel for every in-range RDGST bitmap containing no recognized fault bit.
+    classification: unknown_as_authority
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A reserved or future RDGST bit was converted into a nonempty exact-fault tuple, so persistent unusable input removed the generic dead-channel blocker and received the non-blocking advisory exception while a source could be active.
+    invariant: Only documented RDGST bits grant positive sensor-fault advisory evidence. A nonzero bitmap with no recognized bit remains SENSOR_ERROR but carries no exact fault-reason tuple, so persistent input follows the pre-existing generic active-source fail-closed path. Recognized bits and every debounce or physical threshold remain unchanged.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_nan_debounce.py::test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+        ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_exact_core_guard_1_passed_after_byte_identical_restore_pending_immutable_capture

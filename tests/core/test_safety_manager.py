@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Coroutine
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from cryodaq.core.broker import DataBroker, PublisherAuthority
+from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
@@ -23,6 +26,7 @@ from cryodaq.drivers.contracts import (
 )
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
 from cryodaq.engine_wiring.supervision import TaskSupervisor
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 from tests.qualification_support import issued_test_qualification_receipt
 
 
@@ -205,6 +209,29 @@ def _engine_command_context(
         multiline_burst_auto_stop_tasks={},
         mutation_capability_token="test-mutation-token-1",
     )
+
+
+async def _await_executor_progress[T](awaitable: Coroutine[object, object, T]) -> T:
+    """Keep this sandbox's loop cycling while a fast executor future settles."""
+
+    task = asyncio.create_task(awaitable)
+    progress = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    while not task.done():
+        loop.call_later(0.001, progress.set)
+        await progress.wait()
+        progress.clear()
+    return task.result()
+
+
+async def _close_test_writer_without_nested_default_executor(writer: SQLiteWriter) -> None:
+    """Settle test-owned pools without this sandbox's nested shutdown hang."""
+
+    writer._stopping = True
+    await writer._settle_owned_tasks(writer._owned_write_tasks)
+    await writer._settle_owned_tasks(writer._owned_read_tasks)
+    writer._executor.shutdown(wait=True)
+    writer._read_executor.shutdown(wait=True)
 
 
 def _start_command(*, warning: str) -> dict[str, object]:
@@ -1699,6 +1726,86 @@ async def test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operat
         assert log_call.kwargs["extra_tags"] == ["interlock_rearm_unconfirmed"]
     finally:
         await manager.stop()
+
+
+async def test_rearm_failure_record_is_committed_by_production_writer(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await _await_executor_progress(writer.start_immediate())
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+
+    def broken_rearm() -> list[str]:
+        raise RuntimeError("injected re-arm failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    event_logger = EventLogger(writer, SimpleNamespace(active_experiment_id="week-run"))
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    try:
+        result = await _await_executor_progress(_handle_gui_command(_start_command(warning=""), context=context))
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        entries = await _await_executor_progress(writer.get_operator_log(experiment_id="week-run"))
+        assert len(entries) == 1, "the production SQLite writer did not commit exactly one Start record"
+        assert "heater_overtemperature" in entries[0].message, (
+            "the durably reread Start record omitted the possibly blind guard"
+        )
+        assert entries[0].tags == ("auto", "keithley", "interlock_rearm_unconfirmed")
+        assert "журнале оператора не подтверждена" not in result.get("warning", "")
+    finally:
+        await manager.stop()
+        await _close_test_writer_without_nested_default_executor(writer)
+
+
+async def test_failed_rearm_journal_write_is_appended_to_warning_without_refusing_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await _await_executor_progress(writer.start_immediate())
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+
+    def broken_rearm() -> list[str]:
+        raise RuntimeError("injected re-arm failure")
+
+    def failed_write(**_kwargs: object) -> None:
+        raise OSError("injected operator-log volume failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    monkeypatch.setattr(writer, "_write_operator_log_entry", failed_write)
+    event_logger = EventLogger(writer, SimpleNamespace(active_experiment_id="week-run"))
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    try:
+        result = await _await_executor_progress(_handle_gui_command(_start_command(warning=""), context=context))
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        rendered = result.get("warning", "")
+        assert "heater_overtemperature" in rendered, "the underlying blind-guard warning was replaced"
+        assert "журнале оператора не подтверждена" in rendered, (
+            "the failed production journal append did not reach the operator warning"
+        )
+        assert await _await_executor_progress(writer.get_operator_log(experiment_id="week-run")) == []
+    finally:
+        await manager.stop()
+        await _close_test_writer_without_nested_default_executor(writer)
 
 
 async def test_stalled_warning_persistence_does_not_block_operator_requested_start(

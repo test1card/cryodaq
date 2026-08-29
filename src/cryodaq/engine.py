@@ -222,6 +222,10 @@ _KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S = 1.0
 _KEITHLEY_WARNING_PERSISTENCE_NOTICE = (
     "Долговременная запись выбора оператора после предупреждения Safety не подтверждена; запрос Start продолжен."
 )
+_KEITHLEY_REARM_JOURNAL_PERSISTENCE_NOTICE = (
+    "Запись предупреждения о неподтверждённом перевзводе интерлоков в журнале оператора не подтверждена; "
+    "запрос Start продолжен."
+)
 
 # Compatibility re-exports for tests and callers that import moved helpers
 # from ``cryodaq.engine``. Referenced here so linters keep the imports.
@@ -729,8 +733,8 @@ async def _log_successful_keithley_command(
     cmd: dict[str, Any],
     result: dict[str, Any],
     event_logger: Any,
-) -> None:
-    """Persist the successful command after SafetyManager settles it."""
+) -> bool | None:
+    """Persist a logged command and expose its durable outcome to the caller."""
 
     channel = cmd.get("channel", "?")
     if action == "keithley_start":
@@ -749,17 +753,17 @@ async def _log_successful_keithley_command(
                         detail = f"{detail}: {consequence}"
                     rearm_warning_texts.append(detail)
         if rearm_warning_texts:
-            await event_logger.log_event(
+            return await event_logger.log_event(
                 "keithley",
                 f"{message}; {'; '.join(rearm_warning_texts)}",
                 extra_tags=["interlock_rearm_unconfirmed"],
             )
-        else:
-            await event_logger.log_event("keithley", message)
+        return await event_logger.log_event("keithley", message)
     elif action == "keithley_stop":
-        await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
+        return await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
     elif action == "keithley_emergency_off":
-        await event_logger.log_event("keithley", f"\u26a0 Keithley {channel}: аварийное отключение")
+        return await event_logger.log_event("keithley", f"\u26a0 Keithley {channel}: аварийное отключение")
+    return None
 
 
 def _parse_log_time(raw: Any) -> datetime | None:
@@ -5741,7 +5745,17 @@ async def _handle_gui_command(
             if operator_warning_texts:
                 result = {**result, "warning": "; ".join(operator_warning_texts)}
             if result.get("ok"):
-                await _log_successful_keithley_command(action, cmd, result, event_logger)
+                journal_committed = await _log_successful_keithley_command(action, cmd, result, event_logger)
+                has_rearm_warning = type(raw_operator_warnings) is list and any(
+                    type(raw_warning) is dict and raw_warning.get("code") == "interlock_rearm_unconfirmed"
+                    for raw_warning in raw_operator_warnings
+                )
+                if has_rearm_warning and journal_committed is not True:
+                    # Start remains permissive, and the underlying blind-guard
+                    # warning remains first.  The operator must additionally know
+                    # that the week-long journal did not confirm its own record.
+                    operator_warning_texts.append(_KEITHLEY_REARM_JOURNAL_PERSISTENCE_NOTICE)
+                    result = {**result, "warning": "; ".join(operator_warning_texts)}
                 if action == "keithley_emergency_off" and escalation_service is not None:
                     ch = cmd.get("channel", "?")
                     await escalation_service.escalate(

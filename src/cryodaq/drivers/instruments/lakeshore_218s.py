@@ -34,7 +34,6 @@ _RDGST_FAULT_BITS: tuple[tuple[int, InstrumentStatusFaultReason], ...] = (
     (64, InstrumentStatusFaultReason.SENSOR_UNITS_OVER_RANGE),
     (128, InstrumentStatusFaultReason.SENSOR_UNITS_ZERO),
 )
-_RDGST_KNOWN_MASK = sum(bit for bit, _reason in _RDGST_FAULT_BITS)
 
 
 def _mock_sensor_unit(temp_k: float) -> float:
@@ -231,11 +230,13 @@ class LakeShore218S(InstrumentDriver):
             return replace(reading, metadata=metadata)
 
         reasons = [reason.value for bit, reason in _RDGST_FAULT_BITS if bitmap & bit]
-        unknown_bits = bitmap & ~_RDGST_KNOWN_MASK
-        if unknown_bits:
-            reasons.append(f"unknown_status_bits_0x{unknown_bits:02x}")
-        metadata[INSTRUMENT_STATUS_REGISTER_KEY] = LAKESHORE_218_RDGST_REGISTER
-        metadata[INSTRUMENT_STATUS_FAULT_REASONS_KEY] = reasons
+        if reasons:
+            # Only documented bits are positive evidence for the advisory
+            # sensor-fault exception. Reserved/future bits retain SENSOR_ERROR
+            # but carry no exact fault reasons, so the generic dead-channel path
+            # stays fail-closed.
+            metadata[INSTRUMENT_STATUS_REGISTER_KEY] = LAKESHORE_218_RDGST_REGISTER
+            metadata[INSTRUMENT_STATUS_FAULT_REASONS_KEY] = reasons
         if bitmap & 32 and not bitmap & 16:
             status = ChannelStatus.OVERRANGE
         elif bitmap & 16 and not bitmap & 32:

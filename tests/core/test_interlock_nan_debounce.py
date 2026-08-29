@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,6 +26,7 @@ from cryodaq.core.interlock import InterlockCondition, InterlockEngine, Interloc
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
 _BASE = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 _CHANNEL_ID = "Т5"
@@ -174,6 +177,57 @@ async def test_lost_instrument_fault_evidence_reopens_generic_escalation() -> No
     await engine._process_reading(_reading(offset_s=1.0))
 
     assert escalations == [("sensor_units_over_range",), ()]
+
+
+async def test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed() -> None:
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            return "2" if command == "RDGST? 1" else "0"
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        channel_labels={1: _CHANNEL_ID},
+        mock=False,
+    )
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    manager = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+
+    async def dead_channel_handler(condition, reading):
+        return await manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=dead_channel_handler, min_samples=1, min_duration_s=0.0)
+    try:
+        reading = (await driver.read_channels())[0]
+        assert reading.metadata["sensor_status"] == 2
+        assert reading.status is ChannelStatus.SENSOR_ERROR
+        assert math.isnan(reading.value)
+        assert reading.instrument_status_fault_reasons() == (), (
+            "an undocumented bit must not certify the recognized sensor-fault advisory"
+        )
+
+        await engine._process_reading(reading)
+
+        assert manager.state is SafetyState.FAULT_LATCHED, (
+            "unknown RDGST input must retain the generic active-source fail-closed path"
+        )
+    finally:
+        await manager.stop()
 
 
 async def test_persistent_instrument_fault_escalates_without_settling_or_revoking_controls() -> None:

@@ -396,6 +396,33 @@ def test_successful_start_surfaces_unconfirmed_warning_persistence(app):
         _restore_spy(block)
 
 
+def test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_start", "channel": "smua"}
+    warning = "ПЕРЕВЗВОД ИНТЕРЛОКОВ НЕ ПОДТВЕРЖДЁН; МОЖЕТ БЫТЬ СЛЕП: heater_overtemperature"
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+
+        block._on_command_result(
+            1,
+            command,
+            {"ok": True, "warning": warning},
+            generation,
+            dispatched.workers[0],
+        )
+
+        rendered = panel._banner_label.text()
+        assert rendered == f"Запуск канала А: Engine подтвердил выполнение. {warning}"
+        assert panel._banner_label.accessibleName() == rendered
+        assert not panel._banner_timer.isActive(), "a successful Start warning must remain visibly retained"
+    finally:
+        _restore_spy(block)
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)
