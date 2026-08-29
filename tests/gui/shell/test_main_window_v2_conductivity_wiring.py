@@ -5,13 +5,12 @@ route correctly.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-
-from PySide6.QtCore import QSettings
-
 import os
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
+
+from PySide6.QtCore import QSettings
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
