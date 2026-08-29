@@ -34,9 +34,23 @@ def set_precision_mode(enabled: bool, settings: QSettings | None = None) -> bool
     """Persist precision mode through the application's existing preference store."""
 
     store = settings or _settings()
+    # setValue mutates Qt's SHARED IN-PROCESS CACHE before sync() ever runs, so a
+    # failed sync used to leave the new value live while this returned False: the
+    # launcher would uncheck the menu item and tell the operator nothing changed,
+    # and the next render would switch precision anyway.  Capture what was there
+    # and put it back when the write does not reach disk.
+    had_previous = store.contains(PRECISION_MODE_SETTINGS_KEY)
+    previous = store.value(PRECISION_MODE_SETTINGS_KEY) if had_previous else None
     store.setValue(PRECISION_MODE_SETTINGS_KEY, bool(enabled))
     store.sync()
-    return store.status() == QSettings.Status.NoError
+    if store.status() != QSettings.Status.NoError:
+        if had_previous:
+            store.setValue(PRECISION_MODE_SETTINGS_KEY, previous)
+        else:
+            store.remove(PRECISION_MODE_SETTINGS_KEY)
+        store.sync()
+        return False
+    return True
 
 
 def format_display_value(

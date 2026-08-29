@@ -5,6 +5,10 @@ route correctly.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
+from PySide6.QtCore import QSettings
+
 import os
 import time
 from datetime import UTC, datetime
@@ -122,9 +126,35 @@ def test_tick_sets_overlay_connected_false_when_stale():
 # ----------------------------------------------------------------------
 
 
+@contextmanager
+def _concise_display():
+    """Force concise display for the duration, then restore what was there.
+
+    These guards assert the two-decimal rendering.  Without this they depend on
+    whatever `display/precision_mode` happens to hold in the developer's own
+    QSettings: with precision mode enabled the panel renders full values and the
+    guard fails though the wiring is correct.  Codex raised exactly this.
+    """
+
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    try:
+        settings.setValue(key, False)
+        settings.sync()
+        yield
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
 def test_temperature_reading_reaches_overlay():
     _app()
     w = MainWindowV2()
+    stack = _concise_display()
+    stack.__enter__()
     try:
         w._ensure_overlay("conductivity")
         from PySide6.QtCore import QCoreApplication
@@ -144,13 +174,17 @@ def test_temperature_reading_reaches_overlay():
         QCoreApplication.processEvents()
 
         # Dispatch both readings through the shell.
-        _dispatch_described(w, _temp_reading("Т1", 77.3), ChannelQuantity.TEMPERATURE)
-        _dispatch_described(w, _temp_reading("Т2", 4.2), ChannelQuantity.TEMPERATURE)
+        # PRECISION-SENSITIVE ON PURPOSE.  77.3 and 4.2 have fewer than two decimals,
+        # so an implementation that stored round(value, 2) would satisfy every
+        # assertion below and this guard would prove nothing about the contract it
+        # names.  These values differ from their own two-decimal rendering.
+        _dispatch_described(w, _temp_reading("Т1", 77.3456), ChannelQuantity.TEMPERATURE)
+        _dispatch_described(w, _temp_reading("Т2", 4.2071), ChannelQuantity.TEMPERATURE)
         QCoreApplication.processEvents()
 
         # Assert stored values (feeds table on next _refresh tick).
-        assert panel._temps.get("Т1") == 77.3
-        assert panel._temps.get("Т2") == 4.2
+        assert panel._temps.get("Т1") == 77.3456
+        assert panel._temps.get("Т2") == 4.2071
 
         # Call _refresh() to drive _update_table and verify rendered cells.
         panel._refresh()
@@ -168,18 +202,23 @@ def test_temperature_reading_reaches_overlay():
         # cells no longer render `.4f`.  The stored values asserted above are still
         # the exact readings - that is the half that must never round, and it is
         # checked before this block rather than instead of it.
-        assert t_hot_item.text() == "77.30", f"t_hot cell text wrong: {t_hot_item.text()!r}"
-        assert t_cold_item.text() == "4.20", f"t_cold cell text wrong: {t_cold_item.text()!r}"
-        # and the underlying values did not move when the rendering did
-        assert panel._temps.get("Т1") == 77.3
-        assert panel._temps.get("Т2") == 4.2
+        assert t_hot_item.text() == "77.35", f"t_hot cell text wrong: {t_hot_item.text()!r}"
+        assert t_cold_item.text() == "4.21", f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        # and the underlying values did not move when the rendering did.  These
+        # differ from the rendered text, so rounding before storage fails here.
+        assert panel._temps.get("Т1") == 77.3456
+        assert panel._temps.get("Т2") == 4.2071
     finally:
+        stack.__exit__(None, None, None)
+
         _stop_timers(w)
 
 
 def test_power_reading_reaches_overlay():
     _app()
     w = MainWindowV2()
+    stack = _concise_display()
+    stack.__enter__()
     try:
         w._ensure_overlay("conductivity")
         _dispatch_described(w, _power_reading(0.037), ChannelQuantity.POWER, source=True)
@@ -199,6 +238,8 @@ def test_power_reading_reaches_overlay():
         assert "0.04" in rendered, f"power label did not render the rounded value: {rendered!r}"
         assert w._conductivity_panel._power == 0.037, "rendering must not mutate the stored value"
     finally:
+        stack.__exit__(None, None, None)
+
         _stop_timers(w)
 
 
