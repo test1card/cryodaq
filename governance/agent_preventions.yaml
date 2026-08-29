@@ -3665,6 +3665,14 @@ false_green_pairs:
     platform: posix
     red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: ONEDIR-SMOKE-EVIDENCE-GUARD-UNBOUND-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ONEDIR-SMOKE-TIMEOUT-EVIDENCE-DISCARDED-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler
+    ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_an_asserted_mutation_moved_the_gui_preserve_failure_evidence_call_exactly_once_from_its_except_handler_to_the_pre_try_region_the_old_substring_index_guard_printed_PASS_on_that_mutant_while_test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler_reddened_one_failed_the_production_file_restored_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_and_the_ast_guard_then_passed_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7359,4 +7367,30 @@ records:
       - node: tests/core/test_safety_manager.py::test_stalled_warning_persistence_does_not_block_operator_requested_start
         ci_partition: core
     red_evidence: measured_2026_08_29_on_ubuntu_22_04_mutant_setting_raw_operator_warnings_to_none_at_its_assignment_reddens_both_guards_restored_sha256_identical_one_hundred_and_eight_passed_an_earlier_mutation_placed_before_the_real_assignment_was_overwritten_and_changed_nothing_so_that_run_proved_nothing_and_is_recorded_here_as_a_measurement_error_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ONEDIR-SMOKE-TIMEOUT-EVIDENCE-DISCARDED-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The CTRL_BREAK failure paths of _run_gui_startup_cell and _run_assistant_cell in build_scripts/windows_onedir_smoke.py, and the _preserve_failure_evidence helper that serves both.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Both cells signal CTRL_BREAK and then wait on communicate(timeout=20), and both re-raised out of except BaseException before _write_log ran. So a child that would not exit - the only failure that actually needs diagnosing, and the one that went red on 7b634e0098 - was the single failure shape that left no stdout and no stderr behind. TimeoutExpired also carries the partial output it had already collected, which was discarded as well, and when the post-mortem drain itself timed out the harness wrote EMPTY log files, which read as captured evidence rather than as absent evidence.
+    invariant: A ONEDIR smoke cell that fails after starting its child writes that child's stdout and stderr into the evidence directory before re-raising, taking the bytes from the bounded drain and from every TimeoutExpired that carried any, and the failure still fails.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_windows_onedir_smoke_contract.py::test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_a_drain_that_also_times_out_still_writes_what_was_collected
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_preserving_evidence_never_replaces_the_real_failure
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler
+        ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_three_separately_asserted_behavioral_unit_mutations_discarding_the_initial_timeout_payload_discarding_the_drain_timeout_payload_and_replacing_the_both_payload_merge_with_longest_wins_each_reddened_test_a_drain_that_also_times_out_still_writes_what_was_collected_one_failed_and_each_restore_returned_the_production_file_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_the_asserted_pre_try_call_movement_also_reddened_the_separate_structural_handler_guard_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: pending

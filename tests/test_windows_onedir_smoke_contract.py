@@ -570,12 +570,12 @@ def test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it(tmp_path
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
             process.communicate(timeout=2.0)
         # Exactly what the cells now do before re-raising.
         process.terminate()
         process.wait(timeout=10)
-        smoke._preserve_failure_evidence(process, command, tmp_path, "gui_startup_offscreen")
+        smoke._preserve_failure_evidence(process, command, tmp_path, "gui_startup_offscreen", excinfo.value)
     finally:
         if process.poll() is None:
             process.kill()
@@ -589,26 +589,90 @@ def test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it(tmp_path
     assert b"child-stderr-marker" in stderr_log.read_bytes(), "the child's stderr was discarded on the timeout path"
 
 
-def test_both_ctrl_break_cells_preserve_evidence_before_they_re_raise() -> None:
-    """Preserving evidence in one of the two cells is preserving it in neither.
+def test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler() -> None:
+    """The previous guard did not bind, and that is the defect it was guarding against.
 
-    Both `_run_gui_startup_cell` and `_run_assistant_cell` signal CTRL_BREAK and then
-    wait on `communicate(timeout=20)`; both had the identical gap. The call must sit
-    INSIDE the failure path and BEFORE the `raise`, or the evidence is written after
-    nothing or not at all.
+    It asserted only that the first `_preserve_failure_evidence(` SUBSTRING appeared
+    before the re-raise. Move either call above the `try:` - or anywhere else earlier
+    in the function - and the guard stayed green while `communicate(timeout=20)` could
+    time out without the helper ever executing. A guard that a legal rearrangement can
+    satisfy is not attached to the property it names.
+
+    So this reads control flow instead of text: the call must be a statement INSIDE
+    the `except BaseException:` handler, before the `raise`, in BOTH cells. It also
+    asserts the handler BINDS its exception and passes it on, because the timeout
+    object carries partial output on POSIX and discarding it discards evidence.
     """
 
+    import ast
     import inspect
+    import textwrap
 
     for cell in (smoke._run_gui_startup_cell, smoke._run_assistant_cell):
-        source = inspect.getsource(cell)
-        assert "communicate(timeout=20)" in source, (
-            f"{cell.__name__} no longer waits on a bounded communicate; re-check this guard"
+        function = ast.parse(textwrap.dedent(inspect.getsource(cell))).body[0]
+        assert isinstance(function, ast.FunctionDef)
+
+        guarded_tries = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Try)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "communicate"
+                and any(
+                    keyword.arg == "timeout" and isinstance(keyword.value, ast.Constant) and keyword.value.value == 20
+                    for keyword in call.keywords
+                )
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+        ]
+        assert len(guarded_tries) == 1, (
+            f"{cell.__name__} has {len(guarded_tries)} try statements containing communicate(timeout=20); "
+            "re-check this guard"
         )
-        assert "_preserve_failure_evidence(" in source, f"{cell.__name__} discards the child's output when it fails"
-        preserved = source.index("_preserve_failure_evidence(")
-        reraise = source.index("\n        raise\n", source.index("except BaseException:"))
-        assert preserved < reraise, f"{cell.__name__} re-raises before preserving evidence, so the log is never written"
+        handlers = [
+            handler
+            for handler in guarded_tries[0].handlers
+            if isinstance(handler.type, ast.Name) and handler.type.id == "BaseException"
+        ]
+        assert len(handlers) == 1, (
+            f"{cell.__name__}'s bounded communicate has {len(handlers)} BaseException handlers; re-check this guard"
+        )
+        handler = handlers[0]
+        assert handler.name is not None, (
+            f"{cell.__name__} does not bind its failure, so the timeout's own partial output is discarded"
+        )
+
+        preserved_at: int | None = None
+        preserved_call: ast.Call | None = None
+        raised_at: int | None = None
+        for index, statement in enumerate(handler.body):
+            if (
+                preserved_call is None
+                and isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id == "_preserve_failure_evidence"
+            ):
+                preserved_at, preserved_call = index, statement.value
+            if raised_at is None and isinstance(statement, ast.Raise):
+                raised_at = index
+
+        assert preserved_call is not None, (
+            f"{cell.__name__} does not preserve evidence INSIDE its BaseException handler; "
+            "a call anywhere else in the function does not run when communicate() times out"
+        )
+        assert raised_at is not None, f"{cell.__name__} no longer re-raises; its failure would be swallowed"
+        assert preserved_at < raised_at, (
+            f"{cell.__name__} re-raises before preserving evidence, so the log is never written"
+        )
+        assert (
+            preserved_call.args
+            and isinstance(preserved_call.args[-1], ast.Name)
+            and preserved_call.args[-1].id == handler.name
+        ), f"{cell.__name__} does not pass its caught failure, so a POSIX timeout's partial output is thrown away"
 
 
 def test_preserving_evidence_never_replaces_the_real_failure() -> None:
@@ -627,3 +691,67 @@ def test_preserving_evidence_never_replaces_the_real_failure() -> None:
 
     # An evidence directory that does not exist makes _write_log raise too.
     smoke._preserve_failure_evidence(_Unusable(), ["x"], Path("/nonexistent-evidence-dir"), "gui_startup_offscreen")
+
+
+def test_a_drain_that_also_times_out_still_writes_what_was_collected(tmp_path: Path) -> None:
+    """Empty logs are worse than no logs: they look like captured evidence.
+
+    An outliving descendant that inherited the parent's stdout or stderr handle keeps
+    the pipe open and the reader blocked, so the second `communicate()` times out too.
+    The first version suppressed that and wrote empty files.
+
+    `TimeoutExpired` carries `.output` and `.stderr`, so both timeouts are evidence
+    and both must be read. The cases below cover drain-only, initial-only, and
+    distinct payloads from both attempts.
+    """
+
+    import subprocess
+
+    argv = ["CryoDAQ.exe", "--mode=gui"]
+
+    class _DrainTimesOutCarryingBytes:
+        """POSIX: the drain times out but hands back what it read."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout-bytes", stderr=b"drain-stderr-bytes")
+
+    smoke._preserve_failure_evidence(_DrainTimesOutCarryingBytes(), argv, tmp_path, "drain_carried", None)
+    assert (tmp_path / "drain_carried.stdout.log").read_bytes() == b"drain-stdout-bytes"
+    assert (tmp_path / "drain_carried.stderr.log").read_bytes() == b"drain-stderr-bytes"
+
+    class _DrainTimesOutBare:
+        """Windows: `_communicate` raises TimeoutExpired with NOTHING attached."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+    initial = subprocess.TimeoutExpired(argv, 20, output=b"initial-stdout-bytes", stderr=b"initial-stderr-bytes")
+    smoke._preserve_failure_evidence(_DrainTimesOutBare(), argv, tmp_path, "drain_bare", initial)
+    assert (tmp_path / "drain_bare.stdout.log").read_bytes() == b"initial-stdout-bytes", (
+        "the initial timeout's own output was discarded, so a wedged tree leaves an empty log"
+    )
+    assert (tmp_path / "drain_bare.stderr.log").read_bytes() == b"initial-stderr-bytes"
+
+    class _DrainTimesOutWithDistinctBytes:
+        """Both attempts carry unique evidence, so neither one may win by length."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout", stderr=b"drain-stderr")
+
+    distinct_initial = subprocess.TimeoutExpired(
+        argv,
+        20,
+        output=b"initial-stdout\n",
+        stderr=b"initial-stderr\n",
+    )
+    smoke._preserve_failure_evidence(
+        _DrainTimesOutWithDistinctBytes(), argv, tmp_path, "drain_distinct", distinct_initial
+    )
+    assert (tmp_path / "drain_distinct.stdout.log").read_bytes() == b"initial-stdout\ndrain-stdout"
+    assert (tmp_path / "drain_distinct.stderr.log").read_bytes() == b"initial-stderr\ndrain-stderr"

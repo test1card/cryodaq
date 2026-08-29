@@ -485,11 +485,48 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
 _FAILURE_DRAIN_TIMEOUT_S = 10.0
 
 
+def _timeout_partial_output(error: BaseException | None) -> tuple[bytes, bytes]:
+    """What a `TimeoutExpired` had already collected before it gave up.
+
+    PLATFORM-ASYMMETRIC, which is why this is a named helper and not an inline
+    getattr. Read in CPython 3.14.6 `subprocess.py`:
+
+      - POSIX, lines 1264-1270: `_check_timeout` raises
+        `TimeoutExpired(..., output=b"".join(stdout_seq), stderr=...)`, so the
+        partial reads ARE attached.
+      - Windows, lines 1656/1664/1668: `_communicate` raises
+        `TimeoutExpired(self.args, orig_timeout)` bare. Its reader threads are
+        blocked inside a single `read()` to EOF, so the partial bytes never reach
+        `_stdout_buff` and there is nothing to attach.
+
+    So this recovers evidence wherever the runtime hands it over and returns empty
+    where the runtime never had it. It does not pretend to the caller either way.
+    """
+
+    output = getattr(error, "output", None)
+    stderr = getattr(error, "stderr", None)
+    return (
+        output if isinstance(output, bytes) else b"",
+        stderr if isinstance(stderr, bytes) else b"",
+    )
+
+
+def _merge_partial_output(initial: bytes, drained: bytes) -> bytes:
+    """Keep bytes from both timeout attempts without duplicating cumulative output."""
+
+    if initial in drained:
+        return drained
+    if drained in initial:
+        return initial
+    return initial + drained
+
+
 def _preserve_failure_evidence(
     process: subprocess.Popen[bytes],
     command: list[str],
     evidence_dir: Path,
     name: str,
+    failure: BaseException | None = None,
 ) -> None:
     """Write what the child produced before this cell failed, then let it fail.
 
@@ -509,9 +546,28 @@ def _preserve_failure_evidence(
     the real error with a bookkeeping one.
     """
 
-    stdout, stderr = b"", b""
-    with suppress(Exception):
-        stdout, stderr = process.communicate(timeout=_FAILURE_DRAIN_TIMEOUT_S)
+    stdout, stderr = _timeout_partial_output(failure)
+    drained_stdout: object = None
+    drained_stderr: object = None
+    try:
+        drained_stdout, drained_stderr = process.communicate(timeout=_FAILURE_DRAIN_TIMEOUT_S)
+    except Exception as drain_error:
+        # The DRAIN can time out too. An outliving descendant that inherited the
+        # parent's stdout or stderr handle keeps the pipe open and the reader
+        # blocked, which is exactly the wedged-process-tree shape this whole change
+        # exists to serve. Swallowing that attempt and writing empty files would be
+        # worse than the original gap, because empty files LOOK like captured
+        # evidence. Take whatever it managed to collect instead.
+        drained_stdout, drained_stderr = _timeout_partial_output(drain_error)
+    if not isinstance(drained_stdout, bytes):
+        drained_stdout = b""
+    if not isinstance(drained_stderr, bytes):
+        drained_stderr = b""
+    # A retry normally returns cumulative output, but keep both byte strings if
+    # the runtime hands us distinct partial reads. Neither timeout is allowed to
+    # discard evidence from the other.
+    stdout = _merge_partial_output(stdout, drained_stdout)
+    stderr = _merge_partial_output(stderr, drained_stderr)
     with suppress(Exception):
         _write_log(
             evidence_dir,
@@ -626,12 +682,12 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
             time.sleep(0.1)
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
-    except BaseException:
+    except BaseException as failure:
         with suppress(Exception):
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
-        _preserve_failure_evidence(process, command, evidence_dir, "gui_startup_offscreen")
+        _preserve_failure_evidence(process, command, evidence_dir, "gui_startup_offscreen", failure)
         raise
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
@@ -854,12 +910,12 @@ def _run_assistant_cell(
             raise RuntimeError("exact-off assistant unexpectedly created H3 state")
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
-    except BaseException:
+    except BaseException as failure:
         with suppress(Exception):
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
-        _preserve_failure_evidence(process, command, evidence_dir, name)
+        _preserve_failure_evidence(process, command, evidence_dir, name, failure)
         raise
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     file_log = assistant_log.read_bytes() if assistant_log.is_file() else b""
