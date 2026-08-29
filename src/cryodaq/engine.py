@@ -2558,6 +2558,20 @@ class _InterlockHandlerContext:
     alarm_state_manager: Any | None = None
 
 
+def _persistence_can_write(writer: Any) -> bool:
+    """True when the writer reports it can persist again.
+
+    `is_disk_full` is a PROPERTY, not a method - reading it is the whole check, and
+    calling it raises TypeError on a bool.  That mistake was made once here already.
+
+    Module level on purpose: `_run_engine` forbids nested defs and lambdas, and that
+    rule is right - a closure buried in a 700-line coroutine is invisible to the
+    structural guards that read this file.
+    """
+
+    return not writer.is_disk_full
+
+
 async def _interlock_noop() -> None:
     return None
 
@@ -6925,6 +6939,11 @@ async def _run_engine(
     writer.set_event_loop(asyncio.get_running_loop())
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
+    # The documented recovery for a persistence fault (acknowledge_fault, exposed as the
+    # safety_acknowledge command) has ZERO call sites in the GUI, so a disk that fills
+    # during a week-long run would end it until the application restarted.  A deliberate
+    # Start may consume that latch, but ONLY once the writer reports it can write again.
+    safety_manager.set_persistence_recovered(functools.partial(_persistence_can_write, writer))
     persistence_freshness_s = min(
         259_200.0,
         max(1.0, 3.0 * max((config.poll_interval_s for config in driver_configs), default=10.0)),

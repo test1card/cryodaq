@@ -595,3 +595,81 @@ async def test_rearm_hook_failure_does_not_block_the_operator() -> None:
         assert result["ok"] is True, result
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_recovered_persistence_latch_lets_the_operator_start_again() -> None:
+    """The disk filled, he freed space, and he can resume without restarting.
+
+    The documented recovery for a persistence fault is acknowledge_fault, exposed
+    as the safety_acknowledge command.  Measured 2026-08-29: it has ZERO call sites
+    in src/cryodaq/gui/.  So before this, a disk that filled during a week-long run
+    ended it until the application was restarted - the data-continuity event the
+    whole campaign exists to prevent, reached through the guard meant to protect
+    data.
+
+    The latch is consumable ONLY once persistence reports it can write again, so
+    the data-loss protection is kept rather than traded away.
+    """
+
+    cleared: list[str] = []
+    manager = _qualified_manager()
+    manager.set_persistence_failure_clear(lambda: cleared.append("cleared"))
+    manager.set_persistence_recovered(lambda: True)
+    await manager.start()
+    try:
+        await manager.on_persistence_failure("disk full")
+        assert manager.state is SafetyState.FAULT_LATCHED
+
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+
+        assert result["ok"] is True, result
+        assert cleared == ["cleared"], "the writer's disk-full flag was not cleared on the way through"
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_persistence_latch_still_refuses_while_the_disk_is_still_full() -> None:
+    """Recovery is the gate, not the operator's impatience.
+
+    This is the half that must never be traded away: starting a run that cannot be
+    recorded would satisfy the owner's ruling by destroying what the ruling
+    protects.  While persistence reports it still cannot write, the refusal stands.
+    """
+
+    manager = _qualified_manager()
+    manager.set_persistence_failure_clear(lambda: None)
+    manager.set_persistence_recovered(lambda: False)
+    await manager.start()
+    try:
+        await manager.on_persistence_failure("disk still full")
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert result["ok"] is False, result
+        assert manager.state is SafetyState.FAULT_LATCHED
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_recovery_query_keeps_the_latch() -> None:
+    """An exception in our own hook must fail CLOSED, not open.
+
+    This is the one place in the campaign where failing closed is right: the
+    question is whether data can be recorded, and an unanswerable question is not
+    a yes.
+    """
+
+    def _boom() -> bool:
+        raise RuntimeError("writer is unreachable")
+
+    manager = _qualified_manager()
+    manager.set_persistence_failure_clear(lambda: None)
+    manager.set_persistence_recovered(_boom)
+    await manager.start()
+    try:
+        await manager.on_persistence_failure("disk full")
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert result["ok"] is False, result
+    finally:
+        await manager.stop()

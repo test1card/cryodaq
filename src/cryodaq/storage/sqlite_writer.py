@@ -6702,10 +6702,15 @@ class SQLiteWriter:
     def clear_disk_full(self) -> None:
         """Clear the disk-full flag.
 
-        Called by DiskMonitor when free space recovers above the threshold.
-        Note: this does NOT auto-resume polling — the SafetyManager has
-        already latched a fault, and the operator must acknowledge_fault
-        explicitly. This is a deliberate guard against disk-space flapping.
+        NOT called by DiskMonitor.  DiskMonitor deliberately only LOGS recovery;
+        the sole caller is the SafetyManager hook wired in engine.py, reached
+        either by acknowledge_fault or by a deliberate operator Start that
+        consumes a persistence-only fault latch.
+
+        Clearing does not promise the disk is writable.  If it is not, the next
+        write calls the persistence-failure callback again and the fault
+        re-latches immediately, which is what keeps a flapping disk from
+        producing a run that silently fails to record.
         """
         if self._disk_full:
             logger.warning(

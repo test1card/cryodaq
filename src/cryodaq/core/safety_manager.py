@@ -313,6 +313,10 @@ class SafetyManager:
         # this, allowing a start after a trip - which the owner requires - would
         # leave the source with no protection for the rest of the run.
         self._interlock_rearm: Callable[[], list[str]] | None = None
+        # Does persistence report that it can write again?  Registered by the
+        # engine against the writer.  DEFAULT IS REFUSE: with no hook, a
+        # persistence latch keeps blocking exactly as it does today.
+        self._persistence_recovered: Callable[[], bool] | None = None
 
         # Lock that serializes _active_sources mutations across await points.
         # Multiple REQ clients (GUI subprocess + web dashboard + future
@@ -1277,20 +1281,74 @@ class SafetyManager:
                     self._pending_interlock_start_warning = None
 
             if self._state == SafetyState.FAULT_LATCHED:
-                if self._fault_sources != {"interlock"}:
+                # A latch whose ONLY origin is persistence is consumable by a
+                # deliberate Start, for the same reason the interlock latch is:
+                # nothing is silently lost.  The writer's flag is cleared on the
+                # way through, and if the disk is still full the very next write
+                # calls on_persistence_failure again and the fault re-latches -
+                # visibly, and recorded.  He never gets a run that quietly fails
+                # to record; he gets one that stops again and says why.
+                #
+                # This exists because the documented recovery is not reachable:
+                # acknowledge_fault is exposed as the safety_acknowledge command
+                # and has ZERO call sites in src/cryodaq/gui/.  Without this, a
+                # disk that fills during a week-long run ends it until the
+                # application is restarted.
+                # A persistence-only latch is consumable ONLY when persistence
+                # reports it can write again.  While the disk is still full the
+                # refusal stands, because starting a run that cannot be recorded
+                # would satisfy the owner's ruling by destroying what it protects.
+                # Default is REFUSE: no hook, or a hook that says False, blocks.
+                _persistence_only = self._fault_sources == {"persistence"}
+                if _persistence_only:
+                    try:
+                        _recovered = bool(
+                            self._persistence_recovered is not None and self._persistence_recovered()
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "persistence_recovered query failed: %s; keeping the latch",
+                            type(exc).__name__,
+                        )
+                        _recovered = False
+                    _persistence_only = _recovered
+                if self._fault_sources != {"interlock"} and not _persistence_only:
                     return {
                         "ok": False,
                         "state": self._state.value,
                         "channel": smu_channel,
                         "error": f"FAULT: {self._fault_reason}",
                     }
+                if _persistence_only:
+                    if self._persistence_failure_clear is not None:
+                        try:
+                            self._persistence_failure_clear()
+                        except Exception as exc:
+                            logger.error(
+                                "persistence_failure_clear failed during operator start: %s",
+                                type(exc).__name__,
+                            )
+                    self._persistence_fault_active = False
 
-                interlock_warning = {
-                    "code": "latched_interlock_start",
-                    "operator_text": f"ИНТЕРЛОК БЫЛ ЗАЩЁЛКНУТ: {self._fault_reason}",
-                    "consequence": "Источник был аварийно отключён; оператор намеренно продолжает запуск",
-                    "reason": self._fault_reason,
-                }
+                if _persistence_only:
+                    interlock_warning = {
+                        "code": "latched_persistence_start",
+                        "operator_text": f"ЗАПИСЬ ДАННЫХ ОТКАЗАЛА: {self._fault_reason}",
+                        "consequence": (
+                            "Оператор намеренно продолжает запуск. Если диск всё ещё полон, "
+                            "следующая запись снова остановит источник, и это будет записано."
+                        ),
+                        "reason": self._fault_reason,
+                    }
+                else:
+                    interlock_warning = {
+                        "code": "latched_interlock_start",
+                        "operator_text": f"ИНТЕРЛОК БЫЛ ЗАЩЁЛКНУТ: {self._fault_reason}",
+                        "consequence": (
+                            "Источник был аварийно отключён; оператор намеренно продолжает запуск"
+                        ),
+                        "reason": self._fault_reason,
+                    }
                 self._pending_interlock_start_warning = (
                     start_abort_generation,
                     dict(interlock_warning),
@@ -2734,6 +2792,15 @@ class SafetyManager:
         preflight.  The callback returns the names it re-armed, for the record.
         """
         self._interlock_rearm = callback
+
+    def set_persistence_recovered(self, callback: Callable[[], bool]) -> None:
+        """Register the query that answers "can persistence write again?".
+
+        Consulted only when a fault latch's ONLY origin is persistence, to decide
+        whether a deliberate operator Start may consume it.  Returning False, or
+        never registering this at all, keeps the latch blocking.
+        """
+        self._persistence_recovered = callback
 
     def set_persistence_failure_clear(self, callback: Callable[[], None]) -> None:
         """Register a sync callback that clears external persistence-failure
