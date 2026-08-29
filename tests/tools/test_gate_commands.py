@@ -227,3 +227,40 @@ def test_the_printed_matrix_can_be_run_sequentially_in_one_shell() -> None:
 
     basetemps = _re.findall(r"CRYODAQ_CANDIDATE_PYTEST_BASETEMP=(\S+)", emitted)
     assert basetemps and len(basetemps) == len(set(basetemps)), f"the local commands share a basetemp: {basetemps}"
+
+
+def test_the_remaining_partition_emits_both_of_its_halves() -> None:
+    """Codex P1 at 8314e9273: only half of `remaining` was emitted.
+
+    `ci_candidate_runner` deselects every git-index selection and reaches the
+    active-checkout runner only on protected runs, while CI runs
+    `ci_active_checkout_runner` as a separate workflow step. Emitting one half and
+    calling it the partition means a red in docs freshness, formatter policy or red
+    reproduction can pass unnoticed.
+
+    Both halves are checked against the workflow's OWN invocation rather than a
+    remembered argument list, for the same reason the rest of this module exists.
+    """
+
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from tools.gate_commands import main as emit
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        emit([])
+    emitted = buffer.getvalue()
+
+    assert "ci_candidate_runner --suite remaining --root" in emitted
+    assert "ci_active_checkout_runner" in emitted, "the exact-checkout half of `remaining` is not emitted at all"
+
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "ci_active_checkout_runner" in workflow, (
+        "the workflow no longer runs the active-checkout half; re-check this emission"
+    )
+    for flag in ("--trusted-base", "--basetemp", "--suite remaining"):
+        assert flag in emitted, f"the active-checkout command omits {flag}"
+    assert ".venv/bin/python" in emitted, (
+        "the interpreter alias the active-checkout runner refuses without is not emitted"
+    )

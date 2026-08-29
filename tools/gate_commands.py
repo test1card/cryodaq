@@ -124,6 +124,19 @@ def main(argv: list[str] | None = None) -> int:
     for suite in facts["suites"]:
         print(f"CRYODAQ_CANDIDATE_PYTEST_BASETEMP=<tmp>/cryodaq-basetemp-{suite} \\")
         print(f"  python -m tools.ci_candidate_runner --suite {suite} --root .")
+        if suite != "remaining":
+            continue
+        print("#    ^ that is only HALF of `remaining`. The runner above deselects every")
+        print("#      git-index selection, and CI runs the exact-checkout guards - docs")
+        print("#      freshness, formatter policy, red reproduction - as a SEPARATE step.")
+        print("#      Run only the half above and a red in the other half is invisible.")
+        print("#      The runner refuses without this interpreter alias:")
+        print('mkdir -m 700 -p .venv/bin && ln -s -- "$(command -v python)" .venv/bin/python')
+        print("python -m tools.ci_active_checkout_runner \\")
+        print("  --repository . --revision HEAD \\")
+        print('  --trusted-base "$(git rev-parse origin/master)" \\')
+        print("  --suite remaining \\")
+        print("  --basetemp <tmp>/cryodaq-active-remaining-pytest")
     print("#")
     print("#    What CI itself runs, for reference. Do NOT expect these to work here:")
     print("#    the publisher requires Actions-only execution identity and exits before")

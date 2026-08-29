@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+from collections import namedtuple
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -845,3 +846,89 @@ async def test_an_invalid_choice_does_not_lend_its_correlation_id() -> None:
 
     assert receipt["request_id"] != "a" * 32, "an invalid choice lent its correlation ID to the receipt"
     assert "operator_warning_unconfirmed" in writer.entries[0].tags
+
+
+def test_persistence_recovery_is_probed_not_read_off_the_latch(tmp_path, monkeypatch):
+    """Codex P1 at 8314e9273: the latch gated its own clearing.
+
+    `_disk_full` is cleared only by `clear_disk_full()`, whose sole production caller is
+    the SafetyManager hook this predicate gates. Reading `is_disk_full` here therefore
+    refused the operator forever after a real disk-full event, however much space was
+    freed - a refusal, on the criterion the owner cares most about.
+
+    This drives the PRODUCTION predicate. The previous regression replaced it with
+    `set_persistence_recovered(lambda: True)`, and a test that substitutes the unit
+    under test cannot fail when that unit is wrong.
+    """
+
+    import shutil as _shutil
+
+    from cryodaq.engine import _persistence_can_write
+
+    class _Writer:
+        def __init__(self, latched: bool) -> None:
+            self.db_path = tmp_path / "data" / "cryodaq.db"
+            self._latched = latched
+
+        @property
+        def is_disk_full(self) -> bool:
+            return self._latched
+
+    Usage = namedtuple("Usage", "total used free")
+
+    def _free(gb: float):
+        def _usage(_path):
+            return Usage(total=0, used=0, free=int(gb * (1024**3)))
+
+        return _usage
+
+    # THE DEFECT: latched, but the disk has plenty of room. Must be True - otherwise the
+    # operator can never recover without restarting the program.
+    monkeypatch.setattr(_shutil, "disk_usage", _free(500.0))
+    assert _persistence_can_write(_Writer(latched=True)) is True, (
+        "a freed disk still refused recovery because the latch was read instead of probed"
+    )
+
+    # Still genuinely full: recovery is not asserted.
+    monkeypatch.setattr(_shutil, "disk_usage", _free(0.05))
+    assert _persistence_can_write(_Writer(latched=True)) is False
+    assert _persistence_can_write(_Writer(latched=False)) is False, (
+        "an unlatched writer on a full disk must not be reported as able to write"
+    )
+
+
+def test_persistence_recovery_uses_the_disk_monitors_own_threshold():
+    """The recovery definition is borrowed, so the two cannot drift apart.
+
+    If someone retunes the monitor's warning threshold and this predicate keeps an
+    independent copy, the operator's recovery point silently stops matching the
+    condition the operator was warned about.
+    """
+
+    from cryodaq.core.disk_monitor import _WARNING_THRESHOLD_GB
+    from cryodaq.engine import _DISK_RECOVERY_THRESHOLD_GB
+
+    assert _DISK_RECOVERY_THRESHOLD_GB == _WARNING_THRESHOLD_GB
+
+
+def test_unreadable_disk_evidence_is_not_recovery(tmp_path, monkeypatch):
+    """ "Cannot tell" is not "recovered" - fail closed on unreadable evidence."""
+
+    import shutil as _shutil
+
+    from cryodaq.engine import _persistence_can_write
+
+    class _Writer:
+        db_path = tmp_path / "data" / "cryodaq.db"
+        is_disk_full = True
+
+    def _boom(_path):
+        raise OSError("stat failed")
+
+    monkeypatch.setattr(_shutil, "disk_usage", _boom)
+    assert _persistence_can_write(_Writer()) is False
+
+    class _NoPath:
+        is_disk_full = True
+
+    assert _persistence_can_write(_NoPath()) is False

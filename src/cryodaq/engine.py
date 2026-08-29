@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import secrets
+import shutil
 import signal
 import stat
 import sys
@@ -86,7 +87,7 @@ from cryodaq.core.command_authority import (
     valid_capability_token,
 )
 from cryodaq.core.cooldown_alarm import CooldownAlarm
-from cryodaq.core.disk_monitor import DiskMonitor
+from cryodaq.core.disk_monitor import _WARNING_THRESHOLD_GB, DiskMonitor
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.experiment import ExperimentIdentityMismatchError, ExperimentManager, ExperimentStatus
@@ -2594,18 +2595,44 @@ class _InterlockHandlerContext:
     alarm_state_manager: Any | None = None
 
 
-def _persistence_can_write(writer: Any) -> bool:
-    """True when the writer reports it can persist again.
+# Recovery is the disk monitor's own definition, imported so the two cannot drift.
+_DISK_RECOVERY_THRESHOLD_GB = _WARNING_THRESHOLD_GB
 
-    `is_disk_full` is a PROPERTY, not a method - reading it is the whole check, and
-    calling it raises TypeError on a bool.  That mistake was made once here already.
+
+def _persistence_can_write(writer: Any) -> bool:
+    """True when the DISK can be written again - PROBED, never inferred from the latch.
+
+    This must not read `writer.is_disk_full`.  That flag is cleared only by
+    `clear_disk_full()`, whose only production caller is the SafetyManager hook this
+    predicate gates, so reading it here made the latch gate its own clearing: after a
+    real disk-full event the operator was refused until process restart however much
+    space had been freed.  That is a refusal, which this software does not do.
+
+    The recovery definition is BORROWED, not invented: `core/disk_monitor.py` already
+    treats free space at or above its warning threshold as recovery, and deliberately
+    only logs it.  Importing that threshold keeps the two from drifting apart.
+
+    Clearing still promises nothing about writability - the writer re-latches on the
+    next failed write, which is what keeps a flapping disk from producing a run that
+    silently fails to record.  Unreadable evidence answers False, because "cannot tell"
+    is not "recovered".
 
     Module level on purpose: `_run_engine` forbids nested defs and lambdas, and that
     rule is right - a closure buried in a 700-line coroutine is invisible to the
     structural guards that read this file.
     """
 
-    return not writer.is_disk_full
+    try:
+        data_dir = Path(writer.db_path).parent
+    except (AttributeError, TypeError, ValueError):
+        return False
+    try:
+        free_gb = shutil.disk_usage(str(data_dir)).free / (1024**3)
+    except OSError:
+        return False
+    if not math.isfinite(free_gb) or free_gb < 0:
+        return False
+    return free_gb >= _DISK_RECOVERY_THRESHOLD_GB
 
 
 async def _interlock_noop() -> None:
