@@ -3673,6 +3673,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_an_asserted_mutation_moved_the_gui_preserve_failure_evidence_call_exactly_once_from_its_except_handler_to_the_pre_try_region_the_old_substring_index_guard_printed_PASS_on_that_mutant_while_test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler_reddened_one_failed_the_production_file_restored_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_and_the_ast_guard_then_passed_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: pending
+  - id: WINDOWS-SIGBREAK-ORPHAN-COVERAGE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: WINDOWS-SIGBREAK-ORPHANS-ENGINE-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job
+    ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_the_suite_was_green_while_SIGBREAK_was_unhandled_and_the_ONEDIR_smoke_could_not_distinguish_a_hung_GUI_from_an_orphan_holding_its_pipes_because_communicate_returns_on_pipe_EOF_rather_than_process_exit_the_intermittent_failure_occurred_in_4_of_the_last_24_runs_on_this_branch_and_was_previously_misdiagnosed_as_a_slow_cold_start_severing_the_descendant_assertion_at_added_line_764_one_copy_in_build_scripts_windows_onedir_smoke_py_reddened_tests_test_windows_onedir_smoke_contract_py_test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job_restored_sha256_7e14e71d16f6e9773ed8ed0219bc1596827943cd1b7f19192ab5c43071631911_29_passed_the_GUI_cell_must_fail_when_any_descendant_survives_shutdown_and_the_failure_drain_must_record_process_poll_so_the_two_modes_are_distinguishable_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7393,4 +7401,25 @@ records:
       - node: tests/test_windows_onedir_smoke_contract.py::test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler
         ci_partition: remaining
     red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_three_separately_asserted_behavioral_unit_mutations_discarding_the_initial_timeout_payload_discarding_the_drain_timeout_payload_and_replacing_the_both_payload_merge_with_longest_wins_each_reddened_test_a_drain_that_also_times_out_still_writes_what_was_collected_one_failed_and_each_restore_returned_the_production_file_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_the_asserted_pre_try_call_movement_also_reddened_the_separate_structural_handler_guard_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+  - id: WINDOWS-SIGBREAK-ORPHANS-ENGINE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The Windows CTRL_BREAK_EVENT path from main() signal registration through LauncherWindow._do_shutdown, and the frozen ONEDIR GUI cell that verifies settlement of the complete Windows Job process tree.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: On Windows CTRL_BREAK_EVENT delivers SIGBREAK, but main() registered SIGINT and registered SIGTERM only off Windows. With nothing handling SIGBREAK, the OS terminated the GUI process with STATUS_CONTROL_C_EXIT and window._do_shutdown never ran, bypassing the function whose own contract stops the engine subprocess rather than orphaning it and leaving that engine orphaned on every ungraceful Windows stop delivered through CTRL_BREAK_EVENT.
+    invariant: On Windows main() registers SIGINT and SIGBREAK to the same handler and that handler schedules window._do_shutdown on the Qt event loop. The frozen GUI cell fails when any descendant remains in its Windows Job after shutdown, and its bounded failure drain records process.poll() so a live GUI and a terminated GUI whose descendant still holds its pipes remain distinguishable.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_launcher_signals.py::test_main_registers_sigbreak_to_the_shutdown_handler_on_windows
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job
+        ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_severing_the_SIGBREAK_registration_at_added_line_8667_one_copy_in_src_cryodaq_launcher_py_reddened_tests_test_launcher_signals_py_test_main_registers_sigbreak_to_the_shutdown_handler_on_windows_restored_sha256_1c1ec9a0b8013b709cf055a4cc8a737ac28b3ad9ab319df1009235e788697b15_2_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: pending
