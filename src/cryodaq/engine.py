@@ -467,17 +467,40 @@ def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     return value
 
 
+def _operator_warning_choice_is_valid(cmd: dict[str, Any]) -> bool:
+    """Did the operator actually supply a well-formed choice for this Start?
+
+    The GUI attaches `operator_warning_choice` ONLY when the safety gate is not
+    ready, so a Start taken while Safety is READY carries none.  Recording such a
+    Start as CONFIRMED writes a decision the operator never made into the operator
+    log, which is the record the laboratory week is judged from.
+
+    Exact on every field.  A payload we cannot interpret is not a confirmation.
+    """
+
+    choice = cmd.get("operator_warning_choice")
+    if type(choice) is not dict:
+        return False
+    request_id = choice.get("request_id")
+    return (
+        choice.get("schema") == "cryodaq.keithley_warning_choice.v1"
+        and type(request_id) is str
+        and len(request_id) == 32
+        and all(character in "0123456789abcdef" for character in request_id)
+        and type(choice.get("warning")) is str
+        and choice.get("choice") == "start"
+    )
+
+
 def _warning_choice_request_id(cmd: dict[str, Any]) -> str:
     """Reuse a well-formed GUI correlation ID without making it authority."""
 
-    raw_choice = cmd.get("operator_warning_choice")
-    request_id = raw_choice.get("request_id") if type(raw_choice) is dict else None
-    if (
-        type(request_id) is str
-        and len(request_id) == 32
-        and all(character in "0123456789abcdef" for character in request_id)
-    ):
-        return request_id
+    # Only a WHOLE valid choice may lend its correlation ID.  Checking the ID's
+    # lexical form alone let a receipt carry the GUI's identifier for a choice the
+    # GUI never made, which is worse than an unknown ID: it is a wrong one.
+    if _operator_warning_choice_is_valid(cmd):
+        raw_choice = cmd["operator_warning_choice"]
+        return str(raw_choice["request_id"])
     return secrets.token_hex(16)
 
 
@@ -516,9 +539,22 @@ async def _persist_keithley_warning_choice_intent(
         f"{warning.get('operator_text', 'Предупреждение недоступно')}: {warning.get('consequence', '')}"
         for warning in warnings
     )
-    message = f"Keithley {cmd.get('channel', '?')}: намерение запуска подтверждено при предупреждении: {details}"
+    # START STAYS PERMISSIVE; only the RECORD changes.  A Start taken while Safety
+    # is READY carries no operator_warning_choice, and calling that a confirmation
+    # writes a decision the operator never made.
+    confirmed = _operator_warning_choice_is_valid(cmd)
+    channel_label = cmd.get("channel", "?")
+    if confirmed:
+        message = f"Keithley {channel_label}: намерение запуска подтверждено при предупреждении: {details}"
+        choice_tag = "operator_warning_choice"
+    else:
+        message = (
+            f"Keithley {channel_label}: запуск выполнен при предупреждении БЕЗ подтверждения "
+            f"оператора (выбор не был передан): {details}"
+        )
+        choice_tag = "operator_warning_unconfirmed"
     experiment_id = getattr(experiment_manager, "active_experiment_id", None)
-    tags = ("auto", "keithley", "start", "operator_warning_choice", *codes)
+    tags = ("auto", "keithley", "start", choice_tag, *codes)
     commit_task = asyncio.create_task(
         writer.append_operator_log(
             message=message,

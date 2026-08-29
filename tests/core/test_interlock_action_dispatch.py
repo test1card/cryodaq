@@ -741,3 +741,107 @@ async def test_the_command_boundary_expires_off_proof_itself() -> None:
         )
     finally:
         await manager.stop()
+
+
+class _WarningLogProbe:
+    """Capture exactly what would be written to the operator log."""
+
+    def __init__(self) -> None:
+        self.entries: list[OperatorLogEntry] = []
+
+    async def append_operator_log(
+        self, *, message: str, author: str, source: str, experiment_id: object, tags: tuple[str, ...]
+    ) -> OperatorLogEntry:
+        entry = OperatorLogEntry(
+            id=len(self.entries) + 1,
+            timestamp=datetime.now(UTC),
+            message=message,
+            author=author,
+            source=source,
+            experiment_id=experiment_id,
+            tags=tags,
+        )
+        self.entries.append(entry)
+        return entry
+
+
+_VALID_CHOICE = {
+    "schema": "cryodaq.keithley_warning_choice.v1",
+    "request_id": "a" * 32,
+    "warning": "predictor unavailable",
+    "choice": "start",
+}
+
+_A_WARNING = [
+    {"code": "predictor_unavailable", "operator_text": "Предиктор недоступен", "consequence": "оценка отключена"}
+]
+
+
+@pytest.mark.asyncio
+async def test_a_start_without_a_choice_is_not_recorded_as_confirmed() -> None:
+    """The operator log must not say he confirmed something he never saw.
+
+    Codex P1 at c9d1326ea: the GUI attaches `operator_warning_choice` ONLY when the
+    safety gate is not ready, so every Start taken while Safety is READY carried no
+    choice - and the log recorded «намерение запуска подтверждено», a decision the
+    operator never made.  That is data misrepresented, in the record a week-long
+    run is judged from.
+
+    Start stays permissive.  Only what is WRITTEN changes.
+    """
+
+    writer = _WarningLogProbe()
+    receipt = await _persist_keithley_warning_choice_intent(
+        _A_WARNING,
+        cmd={"channel": "smua"},  # no operator_warning_choice at all
+        writer=writer,
+        experiment_manager=SimpleNamespace(active_experiment_id="thermal-run"),
+    )
+
+    assert receipt["committed"] is True, "the record must still be written"
+    entry = writer.entries[0]
+    assert "БЕЗ подтверждения оператора" in entry.message, entry.message
+    assert "подтверждено при предупреждении" not in entry.message
+    assert "operator_warning_unconfirmed" in entry.tags
+    assert "operator_warning_choice" not in entry.tags
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_a_valid_choice_is_recorded_as_confirmed() -> None:
+    """The other direction: a real confirmation must still read as one."""
+
+    writer = _WarningLogProbe()
+    receipt = await _persist_keithley_warning_choice_intent(
+        _A_WARNING,
+        cmd={"channel": "smua", "operator_warning_choice": dict(_VALID_CHOICE)},
+        writer=writer,
+        experiment_manager=SimpleNamespace(active_experiment_id="thermal-run"),
+    )
+
+    entry = writer.entries[0]
+    assert "намерение запуска подтверждено при предупреждении" in entry.message
+    assert "operator_warning_choice" in entry.tags
+    assert receipt["request_id"] == "a" * 32, "a real choice lends its correlation ID"
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_choice_does_not_lend_its_correlation_id() -> None:
+    """A syntactically valid ID inside an invalid payload is a WRONG id, not an unknown one.
+
+    `_warning_choice_request_id` used to inspect only the ID's lexical form, so a
+    receipt could carry the GUI's correlation identifier for a choice the GUI never
+    made - and a consumer reconciling by that ID would tie the two together.
+    """
+
+    writer = _WarningLogProbe()
+    broken = dict(_VALID_CHOICE)
+    broken["schema"] = "cryodaq.keithley_warning_choice.v0"  # wrong schema, valid id
+    receipt = await _persist_keithley_warning_choice_intent(
+        _A_WARNING,
+        cmd={"channel": "smua", "operator_warning_choice": broken},
+        writer=writer,
+        experiment_manager=SimpleNamespace(active_experiment_id="thermal-run"),
+    )
+
+    assert receipt["request_id"] != "a" * 32, "an invalid choice lent its correlation ID to the receipt"
+    assert "operator_warning_unconfirmed" in writer.entries[0].tags
