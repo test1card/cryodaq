@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.core.safety_manager import BlindGuardAdvisoryResult, SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
@@ -267,7 +267,7 @@ async def test_instrument_confirmed_sensor_fault_does_not_disable_start():
             value=reading.value,
             reading=reading,
         )
-        assert settled is False
+        assert settled is BlindGuardAdvisoryResult.RETRY
         assert "mature_dead_interlock_channel" not in {
             blocker.code for blocker in mgr.snapshot_operator_safety().blockers
         }

@@ -1115,17 +1115,20 @@ async def test_keithley_start_persists_warning_choice_before_request_run(
             }
 
     class Writer:
-        async def append_operator_log(self, **kwargs: object) -> OperatorLogEntry:
+        async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
             order.append("warning_receipt")
             persisted.append(kwargs)
-            return OperatorLogEntry(
-                id=17,
-                timestamp=datetime.now(UTC),
-                experiment_id=kwargs["experiment_id"],
-                author=str(kwargs["author"]),
-                source=str(kwargs["source"]),
-                message=str(kwargs["message"]),
-                tags=tuple(kwargs["tags"]),
+            return OperatorLogCommitResult(
+                entry=OperatorLogEntry(
+                    id=17,
+                    timestamp=datetime.now(UTC),
+                    experiment_id=kwargs["experiment_id"],
+                    author=str(kwargs["author"]),
+                    source=str(kwargs["source"]),
+                    message=str(kwargs["message"]),
+                    tags=tuple(kwargs["tags"]),
+                ),
+                replayed=False,
             )
 
     context = _context(manager, writer=Writer())

@@ -1249,6 +1249,19 @@ def test_simulator_rejects_invalid_ls218_channel_operands() -> None:
         server.server_close()
 
 
+@pytest.mark.parametrize("command", ["KRDG? 0_1", "SRDG? 0_1", "RDGST? 0_1"])
+def test_simulator_rejects_python_numeric_separator_channel_operands(command: str) -> None:
+    """Python integer syntax is broader than the simulator's one-digit LS218 wire grammar."""
+
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    server = object.__new__(simulator_module.SimulatorServer)
+    server.plant = _truth_plant()
+
+    with pytest.raises(ValueError, match="LS218 channel"):
+        server.response_for(command)
+
+
 def test_simulator_accepts_ls218_channel_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     from tools import thermal_conductivity_simulator as simulator_module
 

@@ -24,7 +24,7 @@ from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.event_bus import EventBus
 from cryodaq.core.interlock import InterlockEngine, InterlockState
-from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
@@ -65,6 +65,9 @@ class _OperatorLogProbe:
         )
         self.entries.append(entry)
         return entry
+
+    async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
+        return OperatorLogCommitResult(entry=await self.append_operator_log(**kwargs), replayed=False)
 
 
 async def _publish_bound_interlock_reading(broker: DataBroker, value: float) -> None:
@@ -750,9 +753,17 @@ class _WarningLogProbe:
     def __init__(self) -> None:
         self.entries: list[OperatorLogEntry] = []
 
-    async def append_operator_log(
-        self, *, message: str, author: str, source: str, experiment_id: object, tags: tuple[str, ...]
-    ) -> OperatorLogEntry:
+    async def append_operator_log_idempotent(
+        self,
+        *,
+        message: str,
+        author: str,
+        source: str,
+        experiment_id: object,
+        tags: tuple[str, ...],
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult:
         entry = OperatorLogEntry(
             id=len(self.entries) + 1,
             timestamp=datetime.now(UTC),
@@ -763,7 +774,40 @@ class _WarningLogProbe:
             tags=tags,
         )
         self.entries.append(entry)
+        return OperatorLogCommitResult(entry=entry, replayed=False)
+
+
+class _RetryWarningLogProbe:
+    """Expose both persistence paths so the production helper chooses the authoritative one."""
+
+    def __init__(self) -> None:
+        self.entries: list[OperatorLogEntry] = []
+        self.keyed: dict[str, tuple[str, OperatorLogEntry]] = {}
+
+    async def append_operator_log(self, **kwargs: object) -> OperatorLogEntry:
+        entry = OperatorLogEntry(
+            id=len(self.entries) + 1,
+            timestamp=datetime.now(UTC),
+            message=str(kwargs["message"]),
+            author=str(kwargs["author"]),
+            source=str(kwargs["source"]),
+            experiment_id=kwargs["experiment_id"] if isinstance(kwargs["experiment_id"], str) else None,
+            tags=tuple(kwargs["tags"]),
+        )
+        self.entries.append(entry)
         return entry
+
+    async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
+        request_id = str(kwargs["request_id"])
+        fingerprint = str(kwargs["request_fingerprint"])
+        prior = self.keyed.get(request_id)
+        if prior is not None:
+            if prior[0] != fingerprint:
+                raise RuntimeError("idempotency conflict")
+            return OperatorLogCommitResult(entry=prior[1], replayed=True)
+        entry = await self.append_operator_log(**kwargs)
+        self.keyed[request_id] = (fingerprint, entry)
+        return OperatorLogCommitResult(entry=entry, replayed=False)
 
 
 _VALID_CHOICE = {
@@ -776,6 +820,33 @@ _VALID_CHOICE = {
 _A_WARNING = [
     {"code": "predictor_unavailable", "operator_text": "Предиктор недоступен", "consequence": "оценка отключена"}
 ]
+
+
+@pytest.mark.asyncio
+async def test_warning_choice_retry_uses_one_keyed_row_and_reports_replay() -> None:
+    """A lost Start reply retried with one request ID must reconcile to one operator row."""
+
+    writer = _RetryWarningLogProbe()
+    command = {"channel": "smua", "operator_warning_choice": dict(_VALID_CHOICE)}
+    experiment = SimpleNamespace(active_experiment_id="week-long-run")
+
+    first = await _persist_keithley_warning_choice_intent(
+        _A_WARNING,
+        cmd=command,
+        writer=writer,
+        experiment_manager=experiment,
+    )
+    retry = await _persist_keithley_warning_choice_intent(
+        _A_WARNING,
+        cmd=command,
+        writer=writer,
+        experiment_manager=experiment,
+    )
+
+    assert first["replayed"] is False
+    assert retry["replayed"] is True
+    assert retry["operator_log_id"] == first["operator_log_id"]
+    assert len(writer.entries) == 1
 
 
 @pytest.mark.asyncio

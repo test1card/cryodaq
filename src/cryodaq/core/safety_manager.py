@@ -72,6 +72,21 @@ class SafetyState(Enum):
     MANUAL_RECOVERY = "manual_recovery"
 
 
+class BlindGuardAdvisoryResult(Enum):
+    """Settlement truth for one instrument-confirmed blind interlock guard.
+
+    The advisory never grants actuation authority and never commands OFF.  Its
+    boolean value is only the InterlockEngine episode-settlement decision:
+    retry while the durable operator record is pending, settle once recorded.
+    """
+
+    RETRY = "retry"
+    RECORDED = "recorded"
+
+    def __bool__(self) -> bool:
+        return self is BlindGuardAdvisoryResult.RECORDED
+
+
 @dataclass(frozen=True, slots=True)
 class SafetyEvent:
     timestamp: datetime
@@ -4250,7 +4265,7 @@ class SafetyManager:
         *,
         value: float = float("nan"),
         reading: Reading | None = None,
-    ) -> bool:
+    ) -> bool | BlindGuardAdvisoryResult:
         """Escalation for a PERSISTENTLY non-usable interlock channel (P2-5).
 
         Called by InterlockEngine once a channel it protects has been
@@ -4272,10 +4287,11 @@ class SafetyManager:
 
         Returns
         -------
-        bool
-            ``True`` iff a generic mature episode latched a fault. ``False``
-            leaves the window un-escalated so a still-blind instrument-status
-            guard or declined generic escalation is retried.
+        bool | BlindGuardAdvisoryResult
+            Generic episodes return ``True`` only after a fault latched and
+            ``False`` when they must retry. Instrument-register advisories use
+            a distinct result: ``RETRY`` while durable delivery is pending and
+            ``RECORDED`` once this exact fault evidence is durable.
         """
         instrument_fault_reasons = () if reading is None else reading.instrument_status_fault_reasons()
         if instrument_fault_reasons:
@@ -4308,12 +4324,13 @@ class SafetyManager:
                 )
                 _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
                 if error is None:
+                    recorded = True
                     self._blind_interlock_guards[channel] = (*episode, True)
                 else:
                     logger.error("Failed to record blind interlock guard: %s", error)
                 if cancelled is not None:
                     raise cancelled
-            return False
+            return BlindGuardAdvisoryResult.RECORDED if recorded else BlindGuardAdvisoryResult.RETRY
         blind_guard = self._blind_interlock_guards.pop(channel, None)
         previous_interlock = self._mature_dead_interlock_channels.get(channel)
         self._mature_dead_interlock_channels[channel] = interlock_name

@@ -217,7 +217,7 @@ async def test_persistent_instrument_fault_escalates_without_settling_or_revokin
             await engine._process_reading(_reading(offset_s=offset_s, metadata=metadata))
 
         window = engine._nonusable_windows[_CHANNEL_ID]
-        assert window.escalated is False, "an advisory must not settle a still-blind guard window"
+        assert window.escalated is True, "a durably recorded advisory must settle this exact evidence episode"
         assert mgr.state is SafetyState.RUNNING, "warning about blindness must not remove operator controls"
 
         blind_facts = [
@@ -234,7 +234,7 @@ async def test_persistent_instrument_fault_escalates_without_settling_or_revokin
         assert "sensor_units_over_range" in str(run_records[0]["message"])
 
         await engine._process_reading(_reading(offset_s=15.0, metadata=metadata))
-        assert engine._nonusable_windows[_CHANNEL_ID].escalated is False
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
         assert len(run_records) == 1, "retrying the safety decision must not duplicate the durable run record"
     finally:
         await mgr.stop()
@@ -290,6 +290,69 @@ async def test_instrument_fault_blind_guard_is_recorded_once() -> None:
     assert run_records[0]["channel"] == _CHANNEL_ID
     assert _CHANNEL_ID in str(run_records[0]["message"])
     assert "sensor_units_over_range" in str(run_records[0]["message"])
+
+
+async def test_recorded_blind_guard_settles_logs_and_changed_evidence_reopens(caplog) -> None:
+    """A week-long fixed fault is bounded, while a changed register diagnosis is a new episode."""
+
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    mgr._state = SafetyState.RUNNING
+
+    async def handler(condition, reading):
+        return await mgr.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=handler, min_samples=1, min_duration_s=0.0)
+    first_evidence = {
+        "instrument_status_register": "LakeShore 218 RDGST",
+        "instrument_status_fault_reasons": ["sensor_units_over_range"],
+    }
+    changed_evidence = {
+        "instrument_status_register": "LakeShore 218 RDGST",
+        "instrument_status_fault_reasons": ["sensor_input_open"],
+    }
+
+    with caplog.at_level(logging.WARNING):
+        await engine._process_reading(_reading(metadata=first_evidence))
+        for offset_s in range(1, 21):
+            await engine._process_reading(_reading(offset_s=float(offset_s), metadata=first_evidence))
+
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
+        assert len(run_records) == 1
+        assert (
+            sum(
+                record.name == "cryodaq.core.interlock" and "эскалация в SafetyManager" in record.getMessage()
+                for record in caplog.records
+            )
+            == 1
+        )
+        assert (
+            sum(
+                record.name == "cryodaq.core.safety_manager"
+                and "прибор сообщает неисправность датчика" in record.getMessage()
+                for record in caplog.records
+            )
+            == 1
+        )
+
+        await engine._process_reading(_reading(offset_s=21.0, metadata=changed_evidence))
+
+    assert len(run_records) == 2, "changed instrument fault evidence must open and record a new episode"
+    assert "sensor_input_open" in str(run_records[1]["message"])
 
 
 # ---------------------------------------------------------------------------

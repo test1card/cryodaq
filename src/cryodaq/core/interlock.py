@@ -242,15 +242,16 @@ class _NonUsableWindow:
     непригодных показаний подряд (сбрасывается годным показанием).
     ``escalated`` — эскалация в SafetyManager уже выполнена для этого окна
     (не дублируем на каждом последующем непригодном показании).
-    ``instrument_status_fault`` distinguishes an advisory device-register
-    episode from a generic unusable episode; changing class starts a new
-    window so advisory settlement cannot suppress fail-closed escalation.
+    ``instrument_status_fault_reasons`` identifies the exact advisory
+    device-register evidence. Changing the evidence starts a new window so a
+    settled advisory cannot silence a different diagnosis or later generic
+    fail-closed escalation.
     """
 
     first_ts: datetime
     count: int = 0
     escalated: bool = False
-    instrument_status_fault: bool = False
+    instrument_status_fault_reasons: tuple[str, ...] = ()
 
 
 class InterlockEngine:
@@ -777,16 +778,24 @@ class InterlockEngine:
         измерения) → эскалация в SafetyManager (``dead_channel_handler``),
         который сам решает, латчить ли fault (в RUN_PERMITTED или RUNNING).
         """
-        instrument_status_fault = bool(reading.instrument_status_fault_reasons())
+        instrument_status_fault_reasons = reading.instrument_status_fault_reasons()
         window = self._nonusable_windows.get(reading.channel)
-        if window is None or window.instrument_status_fault != instrument_status_fault:
+        if window is None or window.instrument_status_fault_reasons != instrument_status_fault_reasons:
             window = _NonUsableWindow(
                 first_ts=reading.timestamp,
-                instrument_status_fault=instrument_status_fault,
+                instrument_status_fault_reasons=instrument_status_fault_reasons,
             )
             self._nonusable_windows[reading.channel] = window
         window.count += 1
         span_s = (reading.timestamp - window.first_ts).total_seconds()
+
+        # A fault latch or durably recorded blind-guard advisory settles this
+        # exact evidence episode. Its first alarm remains visible, but the
+        # two-second poll must not turn a week-long fixed fault into an
+        # unbounded CRITICAL/warning stream. Recovery or changed evidence
+        # creates a fresh window above and reopens delivery.
+        if window.escalated:
+            return
 
         # Транзиент: громкий лог + alarm-v2 (защитное действие НЕ выполняется).
         logger.critical(
@@ -812,7 +821,8 @@ class InterlockEngine:
                 )
 
         # Персистентность → эскалация. S1 fail-closed: окно помечается
-        # escalated ТОЛЬКО когда handler подтвердил латч fault (вернул True).
+        # escalated ТОЛЬКО когда handler подтвердил латч fault или durable
+        # settlement точного blind-guard advisory (вернул truthy result).
         # Если SafetyManager отклонил эскалацию вне активного жизненного цикла
         # источника (например, SAFE_OFF или READY), окно остаётся
         # не-escalated и КАЖДОЕ последующее непригодное показание повторяет

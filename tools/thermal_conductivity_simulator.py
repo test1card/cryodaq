@@ -134,6 +134,8 @@ def _channel_index(command_upper: str) -> int:
     """Translate a validated ``<CMD>? <channel>`` operand into a 0-based index."""
 
     operand = command_upper.split(maxsplit=1)[1]
+    if len(operand) != 1 or operand not in "12345678":
+        raise ValueError(f"invalid LS218 channel operand: {operand!r}")
     try:
         channel = int(operand)
     except ValueError:

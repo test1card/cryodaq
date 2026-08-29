@@ -117,7 +117,7 @@ from cryodaq.core.qualification import (
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
+from cryodaq.core.safety_manager import BlindGuardAdvisoryResult, SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.core.scheduler import (
     InstrumentConfig,
@@ -555,13 +555,32 @@ async def _persist_keithley_warning_choice_intent(
         choice_tag = "operator_warning_unconfirmed"
     experiment_id = getattr(experiment_manager, "active_experiment_id", None)
     tags = ("auto", "keithley", "start", choice_tag, *codes)
+    fingerprint_semantics = {
+        "schema": "cryodaq.keithley_warning_choice_log.v1",
+        "author": "system",
+        "source": "auto",
+        "experiment_id": experiment_id,
+        "message": message,
+        "tags": list(tags),
+    }
+    request_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_semantics,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
     commit_task = asyncio.create_task(
-        writer.append_operator_log(
+        writer.append_operator_log_idempotent(
             message=message,
             author="system",
             source="auto",
             experiment_id=experiment_id,
             tags=tags,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
         ),
         name=f"keithley_warning_choice_{request_id}",
     )
@@ -586,7 +605,7 @@ async def _persist_keithley_warning_choice_intent(
             "persistence_timeout",
         )
     try:
-        entry = commit_task.result()
+        commit = commit_task.result()
     except Exception:
         logger.error(
             "Keithley warning-choice persistence failed; RUN continues with an unconfirmed receipt",
@@ -596,8 +615,11 @@ async def _persist_keithley_warning_choice_intent(
             request_id,
             "persistence_failed",
         )
+    entry = commit.entry if type(commit) is OperatorLogCommitResult else None
     if (
-        type(entry) is not OperatorLogEntry
+        type(commit) is not OperatorLogCommitResult
+        or type(commit.replayed) is not bool
+        or type(entry) is not OperatorLogEntry
         or type(entry.id) is not int
         or entry.id <= 0
         or entry.message != message
@@ -618,7 +640,7 @@ async def _persist_keithley_warning_choice_intent(
         "request_id": request_id,
         "committed": True,
         "operator_log_id": entry.id,
-        "replayed": False,
+        "replayed": commit.replayed,
         "error_code": None,
     }
 
@@ -2801,12 +2823,14 @@ async def _interlock_dead_channel_handler(
 ) -> bool:
     """Route a persistently unusable protected channel, preserving retry policy."""
     try:
-        escalated = await context.safety_manager.on_interlock_dead_channel(
+        outcome = await context.safety_manager.on_interlock_dead_channel(
             condition.name,
             reading.channel,
             value=float(reading.value) if reading.value is not None else float("nan"),
             reading=reading,
         )
+        blind_advisory = type(outcome) is BlindGuardAdvisoryResult
+        escalated = bool(outcome)
     except Exception as exc:
         logger.critical(
             "Interlock dead-channel handler failed: exception=%s; escalating to fault",
@@ -2826,19 +2850,47 @@ async def _interlock_dead_channel_handler(
             )
             return False
 
-    key = f"{condition.name}:{reading.channel}"
-    if _should_dispatch_dead_channel_alarm(key, escalated, context.dead_channel_alarm_sent):
+    reasons = reading.instrument_status_fault_reasons() if blind_advisory else ()
+    if blind_advisory:
+        evidence = hashlib.sha256("\0".join(reasons).encode("utf-8")).hexdigest()
+        key = f"{condition.name}:blind:{evidence}:{reading.channel}"
+        channel_suffix = f":{reading.channel}"
+        context.dead_channel_alarm_sent.difference_update(
+            prior
+            for prior in context.dead_channel_alarm_sent
+            if ":blind:" in prior and prior.endswith(channel_suffix) and prior != key
+        )
+    else:
+        key = f"{condition.name}:{reading.channel}"
+    notification_escalated = escalated and not blind_advisory
+    if _should_dispatch_dead_channel_alarm(key, notification_escalated, context.dead_channel_alarm_sent):
+        if blind_advisory:
+            state = getattr(context.safety_manager, "state", None)
+            state_label = state.value.upper() if type(state) is SafetyState else "UNKNOWN"
+            if state is SafetyState.RUNNING:
+                source_truth = "источник продолжает работать (RUNNING)"
+            elif state is SafetyState.RUN_PERMITTED:
+                source_truth = "источник находится в активном переходе RUN_PERMITTED"
+            else:
+                source_truth = f"фактическое состояние источника: {state_label}"
+            message = (
+                f"Интерлок-канал {reading.channel} ('{condition.name}'): прибор сообщает "
+                f"неисправность датчика ({', '.join(reasons)}), температурное действие "
+                f"не выполнено; {source_truth}. Требуется решение оператора."
+            )
+        else:
+            message = (
+                f"Интерлок-канал {reading.channel} ('{condition.name}') "
+                "устойчиво непригоден, источник неактивен — fault не "
+                "латчится, но требуется внимание оператора."
+            )
         try:
             await _dispatch_alarm_notification(
                 context.event_bus,
                 context.alarm_dispatch_tasks,
                 alarm_id=f"dead_channel_{reading.channel}",
                 level="WARNING",
-                message=(
-                    f"Интерлок-канал {reading.channel} ('{condition.name}') "
-                    "устойчиво непригоден, источник неактивен — fault не "
-                    "латчится, но требуется внимание оператора."
-                ),
+                message=message,
                 experiment_id=context.experiment_manager.active_experiment_id,
                 channel=reading.channel,
                 value=float(reading.value) if reading.value is not None else float("nan"),

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.core.broker import DataBroker, PublisherAuthority
-from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
@@ -1607,16 +1607,19 @@ async def test_a_committed_start_still_shows_the_operator_the_warning() -> None:
 
     committed: list[str] = []
 
-    async def persist_warning_choice(**kwargs: object) -> OperatorLogEntry:
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogCommitResult:
         committed.append(str(kwargs.get("message", "")))
-        return OperatorLogEntry(
-            id=1,
-            timestamp=datetime.now(UTC),
-            message=str(kwargs.get("message", "")),
-            author=str(kwargs.get("author", "")),
-            source=str(kwargs.get("source", "")),
-            experiment_id=kwargs.get("experiment_id"),
-            tags=tuple(kwargs.get("tags") or ()),
+        return OperatorLogCommitResult(
+            entry=OperatorLogEntry(
+                id=1,
+                timestamp=datetime.now(UTC),
+                message=str(kwargs.get("message", "")),
+                author=str(kwargs.get("author", "")),
+                source=str(kwargs.get("source", "")),
+                experiment_id=kwargs.get("experiment_id"),
+                tags=tuple(kwargs.get("tags") or ()),
+            ),
+            replayed=False,
         )
 
     source = _ExactRunSource()
@@ -1624,7 +1627,7 @@ async def test_a_committed_start_still_shows_the_operator_the_warning() -> None:
     manager._config.critical_channels = []
     await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
-    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
     context = _engine_command_context(manager, event_logger, writer=writer)
     warning = manager._cooldown_operator_warnings()[0]["operator_text"]
 
@@ -1647,7 +1650,7 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
     persistence_entered = asyncio.Event()
     persistence_cancelled = asyncio.Event()
 
-    async def persist_warning_choice(**_kwargs: object) -> OperatorLogEntry:
+    async def persist_warning_choice(**_kwargs: object) -> OperatorLogCommitResult:
         persistence_entered.set()
         try:
             await asyncio.Event().wait()
@@ -1659,7 +1662,7 @@ async def test_stalled_warning_persistence_does_not_block_operator_requested_sta
     manager._config.critical_channels = []
     await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
-    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
     context = _engine_command_context(manager, event_logger, writer=writer)
     warning = manager._cooldown_operator_warnings()[0]["operator_text"]
     monkeypatch.setattr(
