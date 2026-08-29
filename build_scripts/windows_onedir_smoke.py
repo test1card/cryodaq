@@ -63,6 +63,7 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
 _FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
 _REQUIRED_SMOKE_CELLS = (
     "frozen_driver_imports",
     "gui_startup_offscreen",
@@ -546,6 +547,22 @@ def _preserve_failure_evidence(
     the real error with a bookkeeping one.
     """
 
+    poll_error: str | None = None
+    try:
+        returncode_at_drain = process.poll()
+    except Exception as exc:
+        returncode_at_drain = None
+        poll_error = type(exc).__name__
+    with suppress(Exception):
+        _atomic_json(
+            evidence_dir / f"{name}.failure-drain.json",
+            {
+                "schema": 1,
+                "process_poll_at_drain": returncode_at_drain,
+                "process_poll_error": poll_error,
+            },
+        )
+
     stdout, stderr = _timeout_partial_output(failure)
     drained_stdout: object = None
     drained_stderr: object = None
@@ -654,6 +671,64 @@ def _run_report_cell(
     }
 
 
+def _create_gui_job(process: subprocess.Popen[bytes]) -> Any:
+    """Assign the suspended GUI to its job before application code can run."""
+
+    from cryodaq.report_process import _create_windows_job
+
+    return _create_windows_job(process)
+
+
+def _resume_gui_process(process: subprocess.Popen[bytes]) -> None:
+    """Resume the GUI only after its descendant-tracking job owns it."""
+
+    import psutil
+
+    psutil.Process(process.pid).resume()
+
+
+def _windows_job_active_process_count(job: Any) -> int:
+    """Read the kernel-owned active member count before closing the GUI job."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_longlong),
+            ("TotalKernelTime", ctypes.c_longlong),
+            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    handle = getattr(job, "_handle", None)
+    if not handle:
+        raise RuntimeError("gui_startup_offscreen job handle is unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    information = BasicAccountingInformation()
+    if not kernel32.QueryInformationJobObject(
+        handle,
+        1,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        None,
+    ):
+        raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+    return int(information.ActiveProcesses)
+
+
 def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> dict[str, Any]:
     """Prove the bundled GUI imports and stays alive in an offscreen Qt session."""
 
@@ -672,9 +747,12 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _WINDOWS_CREATE_SUSPENDED),
     )
+    gui_job: Any = None
     try:
+        gui_job = _create_gui_job(process)
+        _resume_gui_process(process)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -682,13 +760,25 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
             time.sleep(0.1)
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
+        job_active_processes = _windows_job_active_process_count(gui_job)
+        if job_active_processes != 0:
+            raise RuntimeError(
+                f"gui_startup_offscreen descendants survived shutdown: active_processes={job_active_processes}"
+            )
     except BaseException as failure:
         with suppress(Exception):
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
+        if gui_job is not None:
+            with suppress(Exception):
+                gui_job.close()
+            gui_job = None
         _preserve_failure_evidence(process, command, evidence_dir, "gui_startup_offscreen", failure)
         raise
+    finally:
+        if gui_job is not None:
+            gui_job.close()
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
     if b"Traceback (most recent call last)" in stdout + stderr:
@@ -700,6 +790,7 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         "status": "PASS",
         "duration_s": round(time.monotonic() - started, 3),
         "argv": command,
+        "job_active_processes_after_shutdown": job_active_processes,
         "runtime": logs,
     }
 

@@ -8649,16 +8649,22 @@ def main() -> None:
         if replay_source is not None and not construction_hold:
             window.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
 
-    # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill)
-    # and SIGINT (Ctrl+C) cleanly shut down the engine subprocess rather than
-    # orphaning it. The handler is idempotent via _shutdown_requested flag;
-    # QTimer.singleShot dispatches _do_shutdown onto the Qt main thread.
+    # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill),
+    # SIGINT (Ctrl+C), and Windows SIGBREAK (CTRL_BREAK_EVENT) cleanly shut down
+    # the engine subprocess rather than orphaning it. The handler is idempotent
+    # via _shutdown_requested flag; QTimer.singleShot dispatches _do_shutdown
+    # onto the Qt main thread.
     def _signal_handler(signum: int, frame: object) -> None:
-        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        if hasattr(signal, "SIGBREAK") and signum == signal.SIGBREAK:
+            sig_name = "SIGBREAK"
+        else:
+            sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
         logger.info("Получен %s, инициирую корректное завершение", sig_name)
         QTimer.singleShot(0, window._do_shutdown)
 
     signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _signal_handler)
 

@@ -62,6 +62,85 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
 
 
+def test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Process:
+        pid = 101
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+
+        def poll(self) -> int | None:
+            events.append("poll")
+            return self.returncode
+
+        def send_signal(self, signum: int) -> None:
+            events.append("signal")
+            self.signals.append(signum)
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            events.append("communicate")
+            self.returncode = 0
+            return b"gui stdout", b"gui stderr"
+
+    class _Job:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            events.append("close")
+            self.close_calls += 1
+
+    process = _Process()
+    job = _Job()
+    creation_flags: list[int] = []
+
+    def create_job(candidate: object) -> _Job | None:
+        events.append("job")
+        return job if candidate is process else None
+
+    def active_processes(candidate: object) -> int:
+        events.append("query")
+        return 1 if candidate is job else 0
+
+    def popen(*_args: object, **kwargs: object) -> _Process:
+        events.append("popen")
+        creation_flags.append(int(kwargs["creationflags"]))
+        return process
+
+    def resume(candidate: object) -> None:
+        assert candidate is process
+        events.append("resume")
+
+    monotonic_values = iter((0.0, 0.0, 0.0, 6.0))
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", popen)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 21, raising=False)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke, "_create_gui_job", create_job)
+    monkeypatch.setattr(smoke, "_resume_gui_process", resume)
+    monkeypatch.setattr(smoke, "_windows_job_active_process_count", active_processes)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
+
+    with pytest.raises(RuntimeError, match=r"descendants survived shutdown: active_processes=1"):
+        smoke._run_gui_startup_cell(Path("CryoDAQ.exe"), tmp_path, tmp_path)
+
+    assert smoke._WINDOWS_CREATE_SUSPENDED == 0x00000004
+    assert creation_flags == [smoke.subprocess.CREATE_NEW_PROCESS_GROUP | smoke._WINDOWS_CREATE_SUSPENDED]
+    assert events.index("popen") < events.index("job") < events.index("resume") < events.index("poll")
+    assert events.index("poll") < events.index("signal")
+    assert events.index("query") < events.index("close")
+    assert process.signals == [smoke.signal.CTRL_BREAK_EVENT]
+    assert job.close_calls == 1
+    assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui stdout"
+
+
 def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
 
@@ -713,13 +792,25 @@ def test_a_drain_that_also_times_out_still_writes_what_was_collected(tmp_path: P
         """POSIX: the drain times out but hands back what it read."""
 
         returncode = None
+        poll_calls = 0
+
+        def poll(self) -> int:
+            self.poll_calls += 1
+            return 19
 
         def communicate(self, timeout=None):  # noqa: ANN001, ANN202
             raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout-bytes", stderr=b"drain-stderr-bytes")
 
-    smoke._preserve_failure_evidence(_DrainTimesOutCarryingBytes(), argv, tmp_path, "drain_carried", None)
+    drain_process = _DrainTimesOutCarryingBytes()
+    smoke._preserve_failure_evidence(drain_process, argv, tmp_path, "drain_carried", None)
     assert (tmp_path / "drain_carried.stdout.log").read_bytes() == b"drain-stdout-bytes"
     assert (tmp_path / "drain_carried.stderr.log").read_bytes() == b"drain-stderr-bytes"
+    assert json.loads((tmp_path / "drain_carried.failure-drain.json").read_text(encoding="utf-8")) == {
+        "process_poll_at_drain": 19,
+        "process_poll_error": None,
+        "schema": 1,
+    }
+    assert drain_process.poll_calls == 1
 
     class _DrainTimesOutBare:
         """Windows: `_communicate` raises TimeoutExpired with NOTHING attached."""
