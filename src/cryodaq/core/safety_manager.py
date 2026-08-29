@@ -306,6 +306,13 @@ class SafetyManager:
         # flags (Phase 2a H.1). Engine wires this to writer.clear_disk_full
         # so operator acknowledgment, not auto-recovery, resumes polling.
         self._persistence_failure_clear: Callable[[], None] | None = None
+        # Re-arm control interlocks on a deliberate start.  A tripped control
+        # interlock is excluded from evaluation until something puts it back to
+        # ARMED, and the only operator-reachable path to that (the
+        # interlock_acknowledge command) has no control in the GUI.  Without
+        # this, allowing a start after a trip - which the owner requires - would
+        # leave the source with no protection for the rest of the run.
+        self._interlock_rearm: Callable[[], list[str]] | None = None
 
         # Lock that serializes _active_sources mutations across await points.
         # Multiple REQ clients (GUI subprocess + web dashboard + future
@@ -1371,6 +1378,33 @@ class SafetyManager:
                 _operator_warning_receipt = self._unconfirmed_warning_choice_receipt(
                     "warning_changed_during_persistence",
                 )
+
+            # The operator is deliberately starting the source.  Put every tripped
+            # CONTROL interlock back to ARMED so the guards protect this run too.
+            #
+            # Placed AFTER the preflight return and after the expected-warnings
+            # comparison on purpose: re-arming must happen once, for a real start,
+            # and must not perturb the two-phase warning receipt.
+            #
+            # This does NOT clear any violation.  If the cryostat is still above a
+            # threshold, the next matching reading trips the interlock again and
+            # cuts the source again.  That is the point: the owner ruled that an
+            # alarm may warn and may stop the source but may never block his
+            # launch - he did not rule that it may stop protecting him.
+            if self._interlock_rearm is not None:
+                try:
+                    _rearmed_interlocks = self._interlock_rearm()
+                except Exception as exc:
+                    logger.error(
+                        "interlock re-arm hook failed: %s; guards may remain blind",
+                        type(exc).__name__,
+                    )
+                else:
+                    if _rearmed_interlocks:
+                        logger.warning(
+                            "Operator start re-armed tripped control interlocks: %s",
+                            ", ".join(sorted(_rearmed_interlocks)),
+                        )
 
             # A global OFF receipt cannot remain true while another channel is
             # intentionally sourcing. Before adding a second channel, obtain
@@ -2692,6 +2726,14 @@ class SafetyManager:
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
+
+    def set_interlock_rearm(self, callback: Callable[[], list[str]]) -> None:
+        """Register the hook that re-arms tripped control interlocks.
+
+        Called from ``request_run`` on a DELIBERATE start only, never on a
+        preflight.  The callback returns the names it re-armed, for the record.
+        """
+        self._interlock_rearm = callback
 
     def set_persistence_failure_clear(self, callback: Callable[[], None]) -> None:
         """Register a sync callback that clears external persistence-failure

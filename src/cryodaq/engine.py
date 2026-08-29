@@ -7115,6 +7115,12 @@ async def _run_engine(
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).
     interlock_engine.set_alarm_publisher(alarm_v2_state_mgr)
+    # A tripped control interlock is never evaluated again until it returns to
+    # ARMED, and the operator has no control that does it.  Wire the deliberate
+    # start to the re-arm so a guard cannot fire once and then go blind for the
+    # rest of a week-long run.  Wired here by setter for the same reason as the
+    # alarm publisher above: the SafetyManager is built before this engine.
+    safety_manager.set_interlock_rearm(interlock_engine.rearm_tripped_control_interlocks)
     if _alarm_v2_configs:
         logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
     else:

@@ -22,7 +22,7 @@ import pytest
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.event_bus import EventBus
-from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.interlock import InterlockEngine, InterlockState
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
@@ -423,3 +423,175 @@ async def test_interlock_engine_trip_handler_receives_full_context():
     assert received == [("stop_source", "detector_warmup", "lakeshore/Т12", 15.0)], (
         f"trip_handler did not receive expected context: {received}"
     )
+
+
+@pytest.mark.asyncio
+async def test_tripped_control_interlock_is_rearmed_and_fires_again() -> None:
+    """A control interlock that fired once must not go blind for the rest of the run.
+
+    ``_process_reading`` evaluates ARMED records only, and the sole
+    operator-reachable path back to ARMED (``interlock_acknowledge``) has no
+    control in the GUI.  Before this guard, ``source_overtemp`` and
+    ``overheat_cryostat`` each protected exactly one event per application
+    lifetime.  That was survivable only while a latched fault also blocked the
+    next Start; once the owner's ruling made the Start possible again, it became
+    a source running with no thermal protection.
+    """
+
+    broker = DataBroker()
+    actions_seen: list[str] = []
+
+    async def _emergency_off() -> None:
+        actions_seen.append("emergency_off")
+
+    async def _stop_source() -> None:
+        actions_seen.append("stop_source")
+
+    engine = InterlockEngine(
+        broker,
+        actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
+    )
+    engine.load_config(
+        INTERLOCKS_PATH,
+        descriptor_catalog=load_live_channel_descriptor_catalog(DESCRIPTORS_PATH),
+        poll_intervals_s_by_instrument=POLL_INTERVALS,
+    )
+    await engine.start()
+    try:
+        # 1. It fires, and it cuts.
+        await _publish_bound_interlock_reading(broker, 350.1)
+        await asyncio.sleep(0.05)
+        assert engine.get_state()["overheat_cryostat"] is InterlockState.TRIPPED
+        assert engine.get_state()["source_overtemp"] is InterlockState.TRIPPED
+        first_round = list(actions_seen)
+        assert first_round, "the shipped ladder did not act on its first trip"
+
+        # 2. Still hot, but every control row is latched: nothing more happens.
+        actions_seen.clear()
+        await _publish_bound_interlock_reading(broker, 350.1)
+        await asyncio.sleep(0.05)
+        assert actions_seen == [], (
+            "a latched control interlock must not act again until it is re-armed"
+        )
+
+        # 3. The operator deliberately starts again; the guards come back.
+        rearmed = engine.rearm_tripped_control_interlocks()
+        assert sorted(rearmed) == ["overheat_cryostat", "source_overtemp"]
+        assert engine.get_state()["overheat_cryostat"] is InterlockState.ARMED
+        assert engine.get_state()["source_overtemp"] is InterlockState.ARMED
+
+        # 4. THE POINT: the cryostat is still hot, so they fire AGAIN and cut AGAIN.
+        await _publish_bound_interlock_reading(broker, 350.1)
+        await asyncio.sleep(0.05)
+        assert engine.get_state()["overheat_cryostat"] is InterlockState.TRIPPED
+        assert actions_seen, (
+            "a re-armed interlock did not protect the new run while the "
+            "violation was still present"
+        )
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_leaves_observational_warning_rows_alone() -> None:
+    """Warning rows own their own recovery; the control re-arm must not touch them."""
+
+    from cryodaq.core.interlock import InterlockCondition
+
+    broker = DataBroker()
+    engine = InterlockEngine(broker, actions={"emergency_off": None, "stop_source": None})
+    engine.add_condition(
+        InterlockCondition(
+            name="synthetic_observational",
+            description="operator warning only",
+            channel_ids=frozenset({"Т11"}),
+            threshold=10.0,
+            comparison=">",
+            action="warning",
+        )
+    )
+    engine._interlocks["synthetic_observational"].state = InterlockState.TRIPPED
+
+    rearmed = engine.rearm_tripped_control_interlocks()
+
+    assert rearmed == []
+    assert engine.get_state()["synthetic_observational"] is InterlockState.TRIPPED
+
+
+def _qualified_manager() -> SafetyManager:
+    """A SafetyManager that can actually start, built like the shipped E2E guard.
+
+    The plain `mgr` fixture is refused by request_run at the laboratory
+    qualification gate long before the re-arm hook is reached. That refusal is
+    correct and is not weakened here; the guard simply supplies the reviewed
+    source binding it asks for.
+    """
+    source = MagicMock()
+    source.mock = True
+    source.connected = True
+    source.output_state_unverified = False
+    source.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    source.start_source = AsyncMock()
+    source.stop_source = AsyncMock()
+    runtime_binding = _issue_registry_runtime_binding(
+        driver=source,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:interlock-rearm",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        simulation=True,
+    )
+    manager = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=source,
+        reviewed_source_runtime_binding=runtime_binding,
+        mock=True,
+    )
+    manager._config.critical_channels = []
+    manager._config.require_reason = False
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_deliberate_start_rearms_control_interlocks() -> None:
+    """The Start that follows a trip must also put the guards back."""
+
+    calls: list[str] = []
+
+    def _probe() -> list[str]:
+        calls.append("rearm")
+        return ["overheat_cryostat"]
+
+    manager = _qualified_manager()
+    manager.set_interlock_rearm(_probe)
+    await manager.start()
+    try:
+        manager._state = SafetyState.SAFE_OFF
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert result["ok"] is True, result
+        assert calls == ["rearm"], (
+            "a deliberate start did not re-arm the control interlocks"
+        )
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_hook_failure_does_not_block_the_operator() -> None:
+    """If the re-arm hook raises, he still starts.
+
+    The owner's rule is that the software does not refuse him. A broken hook is
+    our defect, not his, and must never become a lockout.
+    """
+
+    def _boom() -> list[str]:
+        raise RuntimeError("hook is broken")
+
+    manager = _qualified_manager()
+    manager.set_interlock_rearm(_boom)
+    await manager.start()
+    try:
+        manager._state = SafetyState.SAFE_OFF
+        result = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert result["ok"] is True, result
+    finally:
+        await manager.stop()

@@ -1001,6 +1001,41 @@ class InterlockEngine:
             previous_state.value,
         )
 
+    def rearm_tripped_control_interlocks(self) -> list[str]:
+        """Re-arm every TRIPPED control interlock and return their names.
+
+        A control interlock (any action other than ``warning``) latches on trip
+        and is then excluded from evaluation by ``_process_reading``, which only
+        considers ARMED records.  Observational ``warning`` rows already re-arm
+        themselves through ``_recover_warning`` when the value returns below the
+        threshold, so they are deliberately NOT touched here.
+
+        This exists because the operator may deliberately start the source again
+        after a trip - the owner ruled that an alarm may never block his launch.
+        A guard that fired once and then went blind would turn that ruling into a
+        source running with no protection at all.
+
+        Re-arming does NOT clear the violation.  If the condition is still true,
+        the very next matching reading trips it again, cuts the source again, and
+        records again.
+        """
+        rearmed: list[str] = []
+        for name, record in self._interlocks.items():
+            if record.state is not InterlockState.TRIPPED:
+                continue
+            if record.condition.action == "warning":
+                continue
+            record.state = InterlockState.ARMED
+            rearmed.append(name)
+        if rearmed:
+            logger.warning(
+                "Блокировки переведены обратно в ARMED для намеренного пуска оператором: %s. "
+                "ПРИЧИНА СРАБАТЫВАНИЯ НЕ УСТРАНЕНА АВТОМАТИЧЕСКИ: если условие сохраняется, "
+                "защита сработает снова на следующем показании.",
+                ", ".join(sorted(rearmed)),
+            )
+        return rearmed
+
     def get_state(self) -> dict[str, InterlockState]:
         """Вернуть текущее состояние всех зарегистрированных блокировок.
 
