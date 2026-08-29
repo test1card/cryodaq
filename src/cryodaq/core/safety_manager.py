@@ -1307,7 +1307,19 @@ class SafetyManager:
                 _persistence_only = self._fault_sources == {"persistence"}
                 if _persistence_only:
                     try:
-                        _recovered = bool(self._persistence_recovered is not None and self._persistence_recovered())
+                        # The production hook probes the WRITER - one real committed
+                        # transaction - and that probe must not run on this event loop
+                        # while the command lock is held, so it answers with an
+                        # awaitable.  A plain predicate is still accepted, because
+                        # several callers legitimately wire one.  The await stays
+                        # INSIDE this try so a probe that raises still fails closed and
+                        # keeps the latch, exactly as it did when the hook was sync.
+                        _answer: Any = (
+                            self._persistence_recovered() if self._persistence_recovered is not None else False
+                        )
+                        if inspect.isawaitable(_answer):
+                            _answer = await _answer
+                        _recovered = bool(_answer)
                     except Exception as exc:
                         logger.error(
                             "persistence_recovered query failed: %s; keeping the latch",

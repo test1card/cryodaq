@@ -264,3 +264,148 @@ def test_the_remaining_partition_emits_both_of_its_halves() -> None:
     assert ".venv/bin/python" in emitted, (
         "the interpreter alias the active-checkout runner refuses without is not emitted"
     )
+
+
+def _emit() -> str:
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from tools.gate_commands import main as emit
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        emit([])
+    return buffer.getvalue()
+
+
+def _invocation(emitted: str, first_line_starts_with: str) -> str:
+    """Rebuild one backslash-continued shell invocation out of the emitted text."""
+
+    lines = emitted.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(first_line_starts_with):
+            continue
+        collected = []
+        while index < len(lines):
+            current = lines[index]
+            collected.append(current.rstrip().removesuffix("\\").rstrip())
+            if not lines[index].rstrip().endswith("\\"):
+                break
+            index += 1
+        return " ".join(collected)
+    raise AssertionError(f"no emitted line starts with {first_line_starts_with!r}")
+
+
+def test_the_emitted_active_checkout_command_is_accepted_by_the_runners_own_verifier(tmp_path: Path) -> None:
+    """Codex P1: the emitted command exited before running a single guard.
+
+    `ci_active_checkout_runner._verify_checkout` compares `git rev-parse HEAD`
+    against the `--revision` argument WITHOUT resolving it, so the literal string
+    `HEAD` this tool used to emit could never match. The command looked right, ran
+    nothing, and its failure was indistinguishable from any other early exit.
+
+    The previous guard only grepped the emitted text for flag names, which cannot
+    tell a runnable invocation from one the runner rejects. This one feeds the
+    COMPLETE invocation through the runner's own argument parser, and drives the
+    runner's own `_verify_checkout` to show it accepts the emitted revision and
+    rejects the literal that used to be emitted.
+    """
+
+    import shlex
+    import subprocess
+
+    from tools.ci_active_checkout_runner import _verify_checkout, build_parser
+
+    invocation = _invocation(_emit(), "python -m tools.ci_active_checkout_runner")
+    argv = shlex.split(invocation)
+    assert argv[:3] == ["python", "-m", "tools.ci_active_checkout_runner"], argv[:3]
+
+    # The runner's OWN contract, not a remembered argument list.
+    args = build_parser().parse_args(argv[3:])
+
+    repository_root = WORKFLOW.parent.parent.parent
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert args.revision == head, (
+        f"the emitted --revision {args.revision!r} is not what _verify_checkout compares against ({head!r})"
+    )
+
+    # Drive the REAL verifier. A scratch repo, because _verify_checkout also demands
+    # a clean tree and this working tree is not required to be one.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    for command in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "gate@example.invalid"],
+        ["git", "config", "user.name", "gate"],
+        ["git", "commit", "-q", "--allow-empty", "-m", "base"],
+    ):
+        subprocess.run(command, cwd=scratch, check=True, capture_output=True)
+    scratch_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=scratch,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    _verify_checkout(scratch, scratch_head)  # a resolved SHA is accepted
+
+    with pytest.raises(RuntimeError):
+        _verify_checkout(scratch, "HEAD")  # the literal this tool used to emit
+
+
+def test_the_emitted_trusted_base_is_never_a_default_branch_ref() -> None:
+    """Codex P2: `origin/master` is a DIFFERENT red-reproduction comparison.
+
+    The workflow binds `TRUSTED_BASE_SHA` to the event. On an ordinary
+    feature-branch push it is `github.event.before` - the previous pushed head -
+    which diverges from the default branch as soon as the branch has been pushed
+    once. Substituting `origin/master` produces evidence that looks like the gate's
+    without being it, which is worse than producing none.
+
+    No single correct value can be computed in this checkout, so the tool must
+    REFUSE rather than default, and must say where the value comes from.
+    """
+
+    from tools.gate_commands import gate_facts
+
+    emitted = _emit()
+    invocation = _invocation(emitted, "python -m tools.ci_active_checkout_runner")
+
+    assert "origin/master" not in invocation, "a default-branch ref was substituted for the CI event's base"
+    assert "CRYODAQ_TRUSTED_BASE:?" in invocation, (
+        "the trusted base is not fail-closed: running the emitted command would use some other value"
+    )
+
+    # The bindings are READ from the workflow, so they cannot drift from it.
+    sources = gate_facts()["trusted_base_sources"]
+    assert isinstance(sources, dict) and sources
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    for event, labels in sources.items():
+        assert event in emitted, f"the emitted note does not name the {event} binding"
+        for label in labels:
+            assert label in workflow, f"{label!r} is not a binding this workflow actually declares"
+            assert label in emitted, f"the emitted note does not carry the {event} source {label!r}"
+
+
+def test_the_trusted_base_bindings_cover_every_event_the_workflow_handles() -> None:
+    """A binding this tool cannot see is a binding it would silently misreport.
+
+    The first branch writes `"${EVENT_NAME:?}"` and the rest write `"$EVENT_NAME"`.
+    A pattern that reads only one of the two drops the pull_request binding without
+    any symptom, which is exactly the class of error this module exists to remove.
+    """
+
+    from tools.gate_commands import gate_facts
+
+    sources = gate_facts()["trusted_base_sources"]
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    declared = set(re.findall(r'EVENT_NAME(?::\?)?\}?"\s*==\s*"([A-Za-z_]+)"', workflow))
+    assert declared, "the workflow no longer dispatches on EVENT_NAME; re-check this parser"
+    assert set(sources) == declared, f"parsed {sorted(sources)} but the workflow handles {sorted(declared)}"

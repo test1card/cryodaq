@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,9 +55,45 @@ _FORMAT_BASE_RE = re.compile(r"^\s*FORMAT_BASE=([0-9a-f]{40})\s*$", re.M)
 _SUITES_RE = re.compile(r"^\s*suite:\s*\[([^\]]+)\]\s*$", re.M)
 _OS_RE = re.compile(r"^\s*os:\s*\[([^\]]+)\]\s*$", re.M)
 
+# The workflow binds the trusted base per EVENT. Parsed, never remembered, for the
+# same reason every other value here is: `origin/master` is not any of these.
+_EVENT_OR_BASE_RE = re.compile(
+    r"""\"\$\{?EVENT_NAME(?::\?)?\}?\"\s*==\s*\"(?P<event>[A-Za-z_]+)\"|"""
+    r"""trusted_base_sha="\$\(require_commit '(?P<source>[^']+)'"""
+)
+
 
 class GateCommandsError(RuntimeError):
     """The workflow could not be read for the facts this tool reports."""
+
+
+def _resolve_head(root: Path = WORKFLOW.parent.parent.parent) -> str:
+    """The commit this checkout is on, as a full SHA.
+
+    `ci_active_checkout_runner._verify_checkout` compares `git rev-parse HEAD`
+    against the `--revision` argument WITHOUT resolving it, so the literal string
+    `HEAD` never matches and the command it guards exits before running a single
+    guard. Emitting a symbolic ref there is emitting a command that cannot run.
+
+    Resolved here rather than left as a shell substitution so the printed command is
+    BOUND to the commit it was printed for: pasted into a different checkout it
+    refuses, instead of quietly measuring something else.
+    """
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - no git
+        raise GateCommandsError(f"cannot resolve HEAD in {root}") from exc
+    revision = completed.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise GateCommandsError(f"git rev-parse HEAD returned something that is not a commit: {revision!r}")
+    return revision
 
 
 def gate_facts(workflow: Path = WORKFLOW) -> dict[str, object]:
@@ -88,9 +125,23 @@ def gate_facts(workflow: Path = WORKFLOW) -> dict[str, object]:
     if operating_systems is None:
         raise GateCommandsError("no `os:` matrix found in the workflow")
 
+    trusted_base_sources: dict[str, list[str]] = {}
+    event: str | None = None
+    for match in _EVENT_OR_BASE_RE.finditer(text):
+        if match.group("event") is not None:
+            event = match.group("event")
+            continue
+        if event is None:
+            raise GateCommandsError("a trusted-base binding appears before any event branch")
+        trusted_base_sources.setdefault(event, []).append(match.group("source"))
+    if not trusted_base_sources:
+        raise GateCommandsError("no per-event trusted-base binding found in the workflow")
+
     return {
         "lint_command": lint.group(1).strip(),
         "format_base": base.group(1),
+        "revision": _resolve_head(),
+        "trusted_base_sources": trusted_base_sources,
         "format_selection": (f"git diff --name-only --diff-filter=ACMR {base.group(1)}...HEAD -- '*.py'"),
         "format_command": "python -m ruff format --check --no-cache --",
         "suites": [part.strip() for part in suites.group(1).split(",") if part.strip()],
@@ -132,11 +183,27 @@ def main(argv: list[str] | None = None) -> int:
         print("#      Run only the half above and a red in the other half is invisible.")
         print("#      The runner refuses without this interpreter alias:")
         print('mkdir -m 700 -p .venv/bin && ln -s -- "$(command -v python)" .venv/bin/python')
+        print("#      The revision is RESOLVED: this runner compares `git rev-parse HEAD`")
+        print("#      against --revision without resolving it, so the literal `HEAD`")
+        print("#      never matches and the command exits before running any guard.")
         print("python -m tools.ci_active_checkout_runner \\")
-        print("  --repository . --revision HEAD \\")
-        print('  --trusted-base "$(git rev-parse origin/master)" \\')
+        print(f"  --repository . --revision {facts['revision']} \\")
+        print('  --trusted-base "${CRYODAQ_TRUSTED_BASE:?read the note below - this value comes from the CI event}" \\')
         print("  --suite remaining \\")
         print("  --basetemp <tmp>/cryodaq-active-remaining-pytest")
+        print("#")
+        print("#      CRYODAQ_TRUSTED_BASE CANNOT BE PRODUCED HERE, and this tool will not")
+        print("#      substitute one. The workflow binds the trusted base to the EVENT, and")
+        print("#      `origin/master` is not what any of these resolve to - on an ordinary")
+        print("#      feature-branch push it is the previous pushed head, which diverges from")
+        print("#      the default branch the moment the branch has been pushed once. A")
+        print("#      different base is a DIFFERENT red-reproduction comparison, and its")
+        print("#      evidence would look like the gate's without being it. Read from the")
+        print("#      workflow, the bindings are:")
+        for event, sources in sorted(facts["trusted_base_sources"].items()):
+            print(f"#        {event}: {', '.join(sources)}")
+        print("#      Take the value from the CI event you are reproducing, or accept that")
+        print("#      this half of `remaining` is not reproduced locally.")
     print("#")
     print("#    What CI itself runs, for reference. Do NOT expect these to work here:")
     print("#    the publisher requires Actions-only execution identity and exits before")

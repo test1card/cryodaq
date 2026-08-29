@@ -23,7 +23,6 @@ import logging
 import math
 import os
 import secrets
-import shutil
 import signal
 import stat
 import sys
@@ -87,7 +86,7 @@ from cryodaq.core.command_authority import (
     valid_capability_token,
 )
 from cryodaq.core.cooldown_alarm import CooldownAlarm
-from cryodaq.core.disk_monitor import _WARNING_THRESHOLD_GB, DiskMonitor
+from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.experiment import ExperimentIdentityMismatchError, ExperimentManager, ExperimentStatus
@@ -2595,44 +2594,88 @@ class _InterlockHandlerContext:
     alarm_state_manager: Any | None = None
 
 
-# Recovery is the disk monitor's own definition, imported so the two cannot drift.
-_DISK_RECOVERY_THRESHOLD_GB = _WARNING_THRESHOLD_GB
+# A bound, not a budget.  The probe runs on the writer's executor thread, and a
+# stalled or disconnected mount can park that thread for as long as the kernel is
+# willing to wait.  `_request_run_locked` calls this while it holds the SafetyManager
+# command lock, so without a bound a dead mount would freeze acquisition instead of
+# answering the operator.  Passing the bound answers False, which is the same answer
+# every other unreadable-evidence path here gives.
+_PERSISTENCE_PROBE_BOUND_S = 10.0
 
 
-def _persistence_can_write(writer: Any) -> bool:
-    """True when the DISK can be written again - PROBED, never inferred from the latch.
+def _consume_late_persistence_probe(task: asyncio.Task[Any]) -> None:
+    """Retrieve the outcome of a probe that outlived its bound.
 
-    This must not read `writer.is_disk_full`.  That flag is cleared only by
+    The answer was already False by the time this runs.  This exists only so the
+    event loop does not report the late task as a detached, never-retrieved failure.
+
+    Module level on purpose, for the same reason `_persistence_can_write` is.
+    """
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        return
+
+
+async def _persistence_can_write(writer: Any) -> bool:
+    """True when the WRITER just proved it can commit - never inferred from anything.
+
+    Free space is not the question, and answering it is DANGEROUS.
+    `storage/sqlite_writer.py` latches persistence on `database is full` (SQLITE_FULL
+    from `max_page_count`), on `disk quota exceeded` (a per-user quota), and on a
+    sustained `database is locked`.  None of those three is a filesystem free-space
+    condition.  A predicate that probed `shutil.disk_usage` therefore answered True
+    with 500 GB free while every write still failed - clearing the latch, letting the
+    source energise, and producing measurements that were never recorded until the
+    next failed write re-latched.  That is the data loss the latch exists to prevent,
+    reached through the guard meant to prevent it.
+
+    Nor may it read `writer.is_disk_full`.  That flag is cleared only by
     `clear_disk_full()`, whose only production caller is the SafetyManager hook this
-    predicate gates, so reading it here made the latch gate its own clearing: after a
-    real disk-full event the operator was refused until process restart however much
-    space had been freed.  That is a refusal, which this software does not do.
+    predicate gates, so reading it made the latch gate its own clearing: after a real
+    disk-full event the operator was refused until process restart however much space
+    had been freed.  That is a refusal, which this software does not do.
 
-    The recovery definition is BORROWED, not invented: `core/disk_monitor.py` already
-    treats free space at or above its warning threshold as recovery, and deliberately
-    only logs it.  Importing that threshold keeps the two from drifting apart.
+    So the writer is asked to do the thing itself - one real transaction, committed -
+    and only its own answer is trusted.  The probe runs on the writer's executor, off
+    the event loop, and is bounded, so a dead mount cannot freeze acquisition.
 
-    Clearing still promises nothing about writability - the writer re-latches on the
-    next failed write, which is what keeps a flapping disk from producing a run that
-    silently fails to record.  Unreadable evidence answers False, because "cannot tell"
-    is not "recovered".
+    Clearing still promises nothing about the next write.  The writer re-latches on
+    the next failure, which is what keeps a flapping disk from producing a run that
+    silently fails to record.  Unreadable evidence answers False, because "cannot
+    tell" is not "recovered".
 
     Module level on purpose: `_run_engine` forbids nested defs and lambdas, and that
     rule is right - a closure buried in a 700-line coroutine is invisible to the
     structural guards that read this file.
     """
 
-    try:
-        data_dir = Path(writer.db_path).parent
-    except (AttributeError, TypeError, ValueError):
+    probe = getattr(writer, "probe_can_commit", None)
+    if probe is None:
+        # A writer that cannot be asked has not answered yes.
         return False
     try:
-        free_gb = shutil.disk_usage(str(data_dir)).free / (1024**3)
-    except OSError:
+        outcome = probe()
+    except Exception:
         return False
-    if not math.isfinite(free_gb) or free_gb < 0:
+    if not inspect.isawaitable(outcome):
+        return bool(outcome)
+    task = asyncio.ensure_future(outcome)
+    # NOT asyncio.wait_for: the writer's `_run_owned_executor` deliberately absorbs
+    # CancelledError and keeps waiting for its executor operation, so cancelling the
+    # task - which is how wait_for enforces a timeout - would never return.  Waiting
+    # without cancelling bounds the ANSWER while letting the probe settle on its own.
+    done, _pending = await asyncio.wait({task}, timeout=_PERSISTENCE_PROBE_BOUND_S)
+    if task not in done:
+        task.add_done_callback(_consume_late_persistence_probe)
         return False
-    return free_gb >= _DISK_RECOVERY_THRESHOLD_GB
+    try:
+        return bool(task.result())
+    except Exception:
+        return False
 
 
 async def _interlock_noop() -> None:

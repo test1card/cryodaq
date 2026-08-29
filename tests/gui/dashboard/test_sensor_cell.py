@@ -172,6 +172,53 @@ def test_sensor_cell_names_faulted_channel_and_instrument_reason(app, mock_chann
     assert operator_text in cell.accessibleDescription()
 
 
+def test_a_changed_instrument_diagnosis_reaches_the_visible_card(app, mock_channel_mgr, buffer_store):
+    """Codex P2: the card kept the OLD physical diagnosis.
+
+    The instrument-register diagnosis and the ChannelStatus are different axes. A
+    LakeShore channel can go from sensor-units-over-range (an open circuit) to
+    sensor-units-zero (a short) while ChannelStatus stays SENSOR_ERROR throughout.
+    The hint was rendered only inside the status-TRANSITION branch, so on the second
+    reading the accessible description silently moved to the new diagnosis while the
+    text the operator actually looks at still named the old one.
+
+    Two faults that need opposite physical responses, and the card showed the wrong
+    one with nothing on screen to say so.
+    """
+
+    def _reading(reason: str) -> Reading:
+        return Reading(
+            channel="Т2 Криостат",
+            value=float("nan"),
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.SENSOR_ERROR,
+            instrument_id="LS218_1",
+            metadata={
+                "instrument_status_register": "LakeShore 218 RDGST",
+                "instrument_status_fault_reasons": [reason],
+            },
+        )
+
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+
+    cell.update_value(_reading("sensor_units_over_range"), IdentityStatus.AUTHORITATIVE)
+    first_visible = cell._status_hint_widget.text()
+    assert first_visible in cell.accessibleDescription()
+
+    # Same ChannelStatus, different register diagnosis.
+    cell.update_value(_reading("sensor_units_zero"), IdentityStatus.AUTHORITATIVE)
+    second_visible = cell._status_hint_widget.text()
+    second_described = cell.accessibleDescription()
+
+    assert second_visible != first_visible, (
+        "the visible card still names the previous instrument diagnosis after the fault changed"
+    )
+    assert second_visible in second_described, (
+        "the visible card and the accessible description disagree about the instrument fault"
+    )
+
+
 def test_non_ok_status_survives_buffer_refresh(app, mock_channel_mgr, buffer_store):
     observed_at = datetime.now(UTC)
     reading = Reading(

@@ -107,6 +107,12 @@ class SensorCell(QFrame):
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
         self._last_status: ChannelStatus | None = None
+        # Part of the render-change key, not decoration.  The instrument-register
+        # diagnosis can change - over-range to sensor-zero, open-circuit to
+        # short-circuit - while ChannelStatus stays put, and keying the visible hint
+        # on status alone left the operator reading the OLD physical diagnosis while
+        # the accessible description had already moved to the new one.
+        self._last_fault_text: str | None = None
         self._source_status: ChannelStatus | None = None
         self._source_fault_text: str | None = None
         self._source_identity = IdentityStatus.LEGACY_ABSENT
@@ -229,6 +235,7 @@ class SensorCell(QFrame):
         self._status_hint_widget.setText(text)
         self.setAccessibleDescription(text)
         self._last_status = None
+        self._last_fault_text = None
 
     # ------------------------------------------------------------------
     # Value updates
@@ -289,10 +296,11 @@ class SensorCell(QFrame):
             self._status_hint_widget.setText(stale_text)
             self.setAccessibleDescription(stale_text)
             self._last_status = None
+            self._last_fault_text = None
             return
 
         display_status = interval_status or reading.status
-        if display_status != self._last_status or was_stale:
+        if display_status != self._last_status or self._source_fault_text != self._last_fault_text or was_stale:
             self._apply_status_style(display_status)
             status_text = self._source_fault_text or _STATUS_LABELS.get(
                 display_status,
@@ -302,6 +310,7 @@ class SensorCell(QFrame):
                 status_text = f"{status_text} (за интервал)"
             self._status_hint_widget.setText(status_text)
             self._last_status = display_status
+            self._last_fault_text = self._source_fault_text
 
     def refresh_from_buffer(self) -> None:
         """Pull latest value from the buffer on the bounded presentation tick.
@@ -346,7 +355,9 @@ class SensorCell(QFrame):
         if self._source_identity is not IdentityStatus.AUTHORITATIVE:
             self._apply_identity_state(stale=False)
             return
-        if self._source_status is not None and self._last_status is not self._source_status:
+        if self._source_status is not None and (
+            self._last_status is not self._source_status or self._source_fault_text != self._last_fault_text
+        ):
             self._apply_status_style(self._source_status)
             self._status_hint_widget.setText(
                 self._source_fault_text
@@ -354,6 +365,7 @@ class SensorCell(QFrame):
             )
             self.setAccessibleDescription(self._source_fault_text or "")
             self._last_status = self._source_status
+            self._last_fault_text = self._source_fault_text
 
     # ------------------------------------------------------------------
     # Inline rename

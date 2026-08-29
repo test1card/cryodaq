@@ -986,7 +986,16 @@ def run_suite(
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The runner's own argument contract, exposed so callers can be CHECKED against it.
+
+    Module level rather than buried in `main`: a recipe that emits an invocation of
+    this runner - `tools/gate_commands.py` does - can only be verified against the
+    real contract if the real contract is reachable without running the suite.  A
+    substring check over the emitted text cannot tell a complete invocation from one
+    that argparse would reject.
+    """
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--revision", required=True)
@@ -997,7 +1006,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--basetemp", type=Path, required=True)
     parser.add_argument("--trusted-base", required=True)
     parser.add_argument("--protected-producer-root", type=Path)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return run_suite(
         args.suite,
         root=args.repository,

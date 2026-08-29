@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections import namedtuple
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -848,87 +848,165 @@ async def test_an_invalid_choice_does_not_lend_its_correlation_id() -> None:
     assert "operator_warning_unconfirmed" in writer.entries[0].tags
 
 
-def test_persistence_recovery_is_probed_not_read_off_the_latch(tmp_path, monkeypatch):
-    """Codex P1 at 8314e9273: the latch gated its own clearing.
+@pytest.mark.asyncio
+async def test_a_writer_that_cannot_commit_is_not_recovered_however_much_space_is_free(tmp_path):
+    """Codex P1: the free-space probe answered the WRONG QUESTION, dangerously.
 
-    `_disk_full` is cleared only by `clear_disk_full()`, whose sole production caller is
-    the SafetyManager hook this predicate gates. Reading `is_disk_full` here therefore
-    refused the operator forever after a real disk-full event, however much space was
-    freed - a refusal, on the criterion the owner cares most about.
+    `storage/sqlite_writer.py` latches persistence on `database is full` - SQLITE_FULL
+    raised by `max_page_count` - and on `disk quota exceeded`.  Neither is a
+    filesystem free-space condition.  A predicate that measured free bytes therefore
+    said "recovered" on a disk with hundreds of gigabytes free while every write still
+    failed, cleared the latch, and let the source energise into a run that recorded
+    nothing until the next failed write re-latched.
 
-    This drives the PRODUCTION predicate. The previous regression replaced it with
-    `set_persistence_recovered(lambda: True)`, and a test that substitutes the unit
-    under test cannot fail when that unit is wrong.
+    This test reproduces exactly that: a database that cannot grow, on a filesystem
+    that has plenty of room.  Free space is deliberately NOT stubbed - tmp_path is a
+    real directory on a real filesystem with real space, which is the whole point.
     """
 
-    import shutil as _shutil
+    from cryodaq.engine import _persistence_can_write
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    writer = SQLiteWriter(tmp_path)
+    try:
+        # Open today's database and forbid it from allocating another page before any
+        # probe has run.  SQLite clamps max_page_count up to the current size, so this
+        # permits no growth.  The cap must go on FIRST: a probe that has already run
+        # and rolled back leaves freed pages on the freelist, and a later probe would
+        # reuse those instead of allocating - which is a real (documented) limit of
+        # this probe, not something this test should accidentally depend on.
+        conn = writer._ensure_connection(datetime.now(UTC).date())
+        conn.execute("PRAGMA max_page_count = 1;")
+
+        free_gb = shutil.disk_usage(str(tmp_path)).free / (1024**3)
+        assert free_gb > 1.0, "this test is meaningless on a genuinely full filesystem"
+
+        assert await writer.probe_can_commit() is False, (
+            "a database that cannot allocate a page reported itself writable"
+        )
+        assert await _persistence_can_write(writer) is False, (
+            "the predicate cleared the persistence latch on a writer that cannot commit"
+        )
+
+        # Same writer, same filesystem, same free bytes: only the ability to commit
+        # changed.  That is the property the free-space probe could not see.
+        conn.execute("PRAGMA max_page_count = 1073741823;")
+        assert await writer.probe_can_commit() is True, "lifting the cap did not restore the probe"
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_committing_writer_is_recovered_and_leaves_no_residue(tmp_path):
+    """The other half: a writer that CAN commit must clear the operator's refusal.
+
+    And the probe must leave nothing behind.  `storage/cold_rotation.py` refuses to
+    rotate any day whose `source_data` carries rows, so a probe row that survived its
+    own transaction would silently pin a day's database forever.
+    """
+
+    import sqlite3
+
+    from cryodaq.engine import _persistence_can_write
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    writer = SQLiteWriter(tmp_path)
+    try:
+        assert await writer.probe_can_commit() is True
+        assert await _persistence_can_write(writer) is True
+
+        db_path = Path(writer._db_path(writer._current_date))
+        probe = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            remaining = probe.execute("SELECT COUNT(*) FROM source_data").fetchone()[0]
+        finally:
+            probe.close()
+        assert remaining == 0, "the probe left rows in source_data and would block cold rotation"
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_probe_answers_false_instead_of_freezing_acquisition():
+    """Codex P2: the probe runs while the SafetyManager command lock is held.
+
+    A disconnected or stalled mount can park the probing thread indefinitely.  Without
+    a bound the operator's Start would never return and acquisition would freeze - a
+    worse outcome than the refusal it replaced.  "Cannot tell in time" is answered the
+    same way every other unreadable-evidence path here is answered: False.
+    """
+
+    from cryodaq import engine as engine_module
+    from cryodaq.engine import _persistence_can_write
+
+    started = asyncio.Event()
+
+    async def _never_answers() -> bool:
+        started.set()
+        await asyncio.sleep(3600)
+        return True
+
+    class _StalledWriter:
+        def probe_can_commit(self):
+            return _never_answers()
+
+    original_bound = engine_module._PERSISTENCE_PROBE_BOUND_S
+    engine_module._PERSISTENCE_PROBE_BOUND_S = 0.2
+    try:
+        answered = await asyncio.wait_for(_persistence_can_write(_StalledWriter()), timeout=10)
+    finally:
+        engine_module._PERSISTENCE_PROBE_BOUND_S = original_bound
+    assert started.is_set(), "the probe never actually started; the test proves nothing"
+    assert answered is False, "a stalled probe was reported as recovery"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_persistence_evidence_is_not_recovery():
+    """ "Cannot tell" is not "recovered" - fail closed on every unreadable answer."""
 
     from cryodaq.engine import _persistence_can_write
 
-    class _Writer:
-        def __init__(self, latched: bool) -> None:
-            self.db_path = tmp_path / "data" / "cryodaq.db"
-            self._latched = latched
+    class _NoProbe:
+        is_disk_full = True
 
-        @property
-        def is_disk_full(self) -> bool:
-            return self._latched
+    assert await _persistence_can_write(_NoProbe()) is False
 
-    Usage = namedtuple("Usage", "total used free")
+    class _RaisingProbe:
+        def probe_can_commit(self):
+            raise RuntimeError("writer is unreachable")
 
-    def _free(gb: float):
-        def _usage(_path):
-            return Usage(total=0, used=0, free=int(gb * (1024**3)))
+    assert await _persistence_can_write(_RaisingProbe()) is False
 
-        return _usage
+    class _AsyncRaisingProbe:
+        async def probe_can_commit(self) -> bool:
+            raise OSError("mount went away")
 
-    # THE DEFECT: latched, but the disk has plenty of room. Must be True - otherwise the
-    # operator can never recover without restarting the program.
-    monkeypatch.setattr(_shutil, "disk_usage", _free(500.0))
-    assert _persistence_can_write(_Writer(latched=True)) is True, (
-        "a freed disk still refused recovery because the latch was read instead of probed"
-    )
-
-    # Still genuinely full: recovery is not asserted.
-    monkeypatch.setattr(_shutil, "disk_usage", _free(0.05))
-    assert _persistence_can_write(_Writer(latched=True)) is False
-    assert _persistence_can_write(_Writer(latched=False)) is False, (
-        "an unlatched writer on a full disk must not be reported as able to write"
-    )
+    assert await _persistence_can_write(_AsyncRaisingProbe()) is False
 
 
-def test_persistence_recovery_uses_the_disk_monitors_own_threshold():
-    """The recovery definition is borrowed, so the two cannot drift apart.
+@pytest.mark.asyncio
+async def test_the_safety_manager_awaits_an_async_recovery_hook() -> None:
+    """The hook now answers with a coroutine, and the latch must read its VALUE.
 
-    If someone retunes the monitor's warning threshold and this predicate keeps an
-    independent copy, the operator's recovery point silently stops matching the
-    condition the operator was warned about.
+    A bare coroutine object is truthy.  If `_request_run_locked` stopped at
+    `bool(hook())` it would treat "still cannot write" as recovery and start a run
+    that records nothing - the exact failure the gate exists to prevent.
     """
 
-    from cryodaq.core.disk_monitor import _WARNING_THRESHOLD_GB
-    from cryodaq.engine import _DISK_RECOVERY_THRESHOLD_GB
+    cleared: list[str] = []
+    manager = _qualified_manager()
+    manager.set_persistence_failure_clear(lambda: cleared.append("cleared"))
 
-    assert _DISK_RECOVERY_THRESHOLD_GB == _WARNING_THRESHOLD_GB
+    async def _still_broken() -> bool:
+        return False
 
-
-def test_unreadable_disk_evidence_is_not_recovery(tmp_path, monkeypatch):
-    """ "Cannot tell" is not "recovered" - fail closed on unreadable evidence."""
-
-    import shutil as _shutil
-
-    from cryodaq.engine import _persistence_can_write
-
-    class _Writer:
-        db_path = tmp_path / "data" / "cryodaq.db"
-        is_disk_full = True
-
-    def _boom(_path):
-        raise OSError("stat failed")
-
-    monkeypatch.setattr(_shutil, "disk_usage", _boom)
-    assert _persistence_can_write(_Writer()) is False
-
-    class _NoPath:
-        is_disk_full = True
-
-    assert _persistence_can_write(_NoPath()) is False
+    manager.set_persistence_recovered(_still_broken)
+    await manager.start()
+    try:
+        await manager.on_persistence_failure("disk full")
+        refused = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert refused["ok"] is False, refused
+        assert manager.state is SafetyState.FAULT_LATCHED
+        assert cleared == [], "the latch was cleared while the writer still could not commit"
+    finally:
+        await manager.stop()
