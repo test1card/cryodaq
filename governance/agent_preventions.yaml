@@ -7293,3 +7293,70 @@ records:
         platform: windows
     red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
     green_evidence: pending
+  - id: SAFETY-EXPIRED-OFF-PROOF-AUTHORISES-START-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every path that reads SafetyManager._reviewed_source_off_evidence.verified_off for authorisation, specifically the operator snapshot in _refresh_operator_safety_snapshot and the request_run command boundary.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Verified-OFF evidence that aged past stale_timeout_s was downgraded to UNKNOWN only in the PUBLISHED READING, leaving verified_off true, so the operator snapshot and request_run continued to authorise a Start from expired proof. The GUI hid Start after receiving UNKNOWN, which made the interface the only thing standing between an expired proof and an energised source; a REQ client issuing keithley_start without reading the snapshot could energise anyway. The false-green coverage escape is registered as open debt below.
+    invariant: Retained OFF proof older than stale_timeout_s is REVOKED in the Safety-owned evidence itself, and the revocation runs at the request_run command boundary as well as in the operator snapshot, because request_run contains no snapshot refresh and a client may never read one.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_action_dispatch.py::test_expired_off_proof_is_revoked_and_current_proof_is_not
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_the_command_boundary_expires_off_proof_itself
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_two_independent_mutants_a_expiry_that_reports_revocation_but_revokes_nothing_reddens_test_expired_off_proof_is_revoked_and_current_proof_is_not_and_removing_the_request_run_boundary_call_reddens_test_the_command_boundary_expires_off_proof_itself_both_restored_sha256_identical_nineteen_passed_two_earlier_versions_of_these_guards_were_vacuous_and_passed_against_the_same_mutants_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: OPERATOR-LOG-RECORDS-UNMADE-WARNING-CHOICE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: _persist_keithley_warning_choice_intent and _warning_choice_request_id in src/cryodaq/engine.py, for every keithley_start that carries operator warnings.
+    classification: incorrect_evidence_claim
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The operator log recorded that launch intent was CONFIRMED under the warning whenever the committer ran, but the GUI attaches operator_warning_choice only when the safety gate is not ready, so every Start taken while Safety was READY wrote a confirmation the operator never made. The correlation ID was accepted on lexical form alone, so a receipt could carry the GUI identifier for a choice the GUI never sent, which a consumer reconciling by that ID would tie together. This is data misrepresented in the record a week-long run is judged from.
+    invariant: A Start is recorded as CONFIRMED only when operator_warning_choice is exactly valid in schema, request-ID form, warning type and choice value; otherwise the entry states that the Start proceeded WITHOUT operator confirmation, carries the operator_warning_unconfirmed tag, and is given a fresh correlation ID rather than borrowing one from an uninterpretable payload. Start itself is never refused.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_action_dispatch.py::test_a_start_without_a_choice_is_not_recorded_as_confirmed
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_a_start_with_a_valid_choice_is_recorded_as_confirmed
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_an_invalid_choice_does_not_lend_its_correlation_id
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_mutant_confirmed_equals_true_reddens_the_no_choice_and_invalid_id_guards_and_mutant_taking_the_correlation_id_on_lexical_form_alone_reddens_the_invalid_id_guard_restored_sha256_identical_twenty_two_passed_the_opposite_direction_is_pinned_so_a_fix_recording_everything_as_unconfirmed_also_fails_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: START-RESULT-HIDES-OPERATOR-WARNING-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The keithley_start result mapping in src/cryodaq/engine.py and every operator surface that reads the scalar warning field, including _SmuChannelBlock._on_command_result.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: SafetyManager returned operator_warnings as a list and no scalar warning on the success path, and engine.py added the scalar only for an uncommitted receipt, while the source panel reads only error or warning and otherwise presents generic success. A predictor-unavailable Start could energise the source, commit a receipt, and tell the operator nothing about the condition it ran under. On the uncommitted path the persistence notice REPLACED the underlying warning, hiding it in a second way.
+    invariant: Every Start outcome that carries operator warnings renders them into the scalar warning field the operator surface reads, and the warning-persistence notice is appended to those texts rather than substituted for them.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_safety_manager.py::test_a_committed_start_still_shows_the_operator_the_warning
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_stalled_warning_persistence_does_not_block_operator_requested_start
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_mutant_setting_raw_operator_warnings_to_none_at_its_assignment_reddens_both_guards_restored_sha256_identical_one_hundred_and_eight_passed_an_earlier_mutation_placed_before_the_real_assignment_was_overwritten_and_changed_nothing_so_that_run_proved_nothing_and_is_recorded_here_as_a_measurement_error_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
