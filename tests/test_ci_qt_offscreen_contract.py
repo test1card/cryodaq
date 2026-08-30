@@ -25,6 +25,9 @@ against the canonical `main.yml` step field by field.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -107,3 +110,85 @@ def test_qt_dependent_nightly_jobs_match_the_canonical_step() -> None:
                 f"  nightly:   {step.get(field)!r}\n"
                 f"  canonical: {canonical.get(field)!r}"
             )
+
+
+def _stub_tree(tmp_path: Path, dpkg_exit: int) -> tuple[dict[str, str], Path]:
+    """Build a PATH where dpkg reports a chosen state and apt-get records its argv.
+
+    `sudo` execs its arguments so the script's real `sudo apt-get ...` invocation
+    is followed rather than special-cased, which is the part that has to be
+    exercised: a probe that never marks anything missing skips apt entirely.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "apt-invocations.txt"
+    posix_log = log.as_posix()
+
+    stubs = {
+        "dpkg": f"#!/bin/sh\nexit {dpkg_exit}\n",
+        "sudo": '#!/bin/sh\nexec "$@"\n',
+        "apt-get": f'#!/bin/sh\necho "$@" >> "{posix_log}"\nexit 0\n',
+    }
+    for name, body in stubs.items():
+        path = bin_dir / name
+        path.write_text(body, encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir.as_posix()}{os.pathsep}{env.get('PATH', '')}"
+    return env, log
+
+
+def _run_canonical_script(tmp_path: Path, dpkg_exit: int) -> tuple[subprocess.CompletedProcess, str]:
+    bash = shutil.which("bash")
+    assert bash is not None, (
+        "bash is required to exercise the install step's own script; it is present on both "
+        "runner images this partition uses."
+    )
+    canonical = _qt_step(_workflow(MAIN_WORKFLOW), CANONICAL_JOB, MAIN_WORKFLOW)
+    env, log = _stub_tree(tmp_path, dpkg_exit)
+    completed = subprocess.run(
+        [bash, "-c", canonical["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return completed, (log.read_text(encoding="utf-8") if log.exists() else "")
+
+
+def test_the_step_actually_accumulates_missing_packages_and_installs_them(tmp_path: Path) -> None:
+    """Run the step's own script, because anchoring its text proves nothing.
+
+    Review's counter-example: replace each `dpkg -s ... || missing=...` probe
+    with `true || missing=...` and every textual assertion here stays green,
+    while `missing` never fills, apt is never called, and a runner without
+    libEGL sends both jobs straight back to import-time blindness. Only
+    executing the script catches that, so this drives the real production
+    script with `dpkg` reporting every package absent.
+    """
+    completed, apt_log = _run_canonical_script(tmp_path, dpkg_exit=1)
+
+    assert completed.returncode == 0, (
+        f"the step's script failed under stubbed tools:\n{completed.stdout}\n{completed.stderr}"
+    )
+    for package in ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3"):
+        assert package in apt_log, (
+            f"{package!r} never reached an apt-get invocation when dpkg reported it missing. "
+            "The probe is not accumulating into `missing`, so the install path is dead and the "
+            f"job would go blind on a runner that lacks it. apt-get saw: {apt_log!r}"
+        )
+
+
+def test_the_step_skips_the_network_when_every_package_is_present(tmp_path: Path) -> None:
+    """The other half: a probe that always reports missing would also be wrong.
+
+    Without this, a script that unconditionally installed would satisfy the test
+    above while reintroducing the bounded-network stall the step's own comments
+    record having cost two pull requests' evidence.
+    """
+    completed, apt_log = _run_canonical_script(tmp_path, dpkg_exit=0)
+
+    assert completed.returncode == 0, completed.stderr
+    assert apt_log == "", f"apt-get was invoked although dpkg reported every package present: {apt_log!r}"
+    assert "already present" in completed.stdout, completed.stdout
