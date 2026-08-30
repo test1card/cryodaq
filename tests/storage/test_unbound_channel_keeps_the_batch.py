@@ -33,7 +33,11 @@ from cryodaq.channels.descriptors import (
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader, BoundedReadIssueCode
-from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError, LiveChannelDescriptorCatalog
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    ChannelNotDescribedError,
+    LiveChannelDescriptorCatalog,
+)
 from cryodaq.storage.sqlite_writer import _MAX_REMEMBERED_UNBOUND_CHANNELS, SQLiteWriter
 
 TIMESTAMP = datetime(2026, 7, 12, 12, tzinfo=UTC)
@@ -766,6 +770,83 @@ async def test_the_live_path_still_refuses_a_disagreeing_instrument(tmp_path: Pa
     with pytest.raises(ChannelDescriptorStorageError):
         await writer.write_committed([_reading("sensor.main", 4.2), disagreeing])
     await writer.stop()
+
+
+def test_a_canonical_label_cannot_replace_the_described_alias_row(tmp_path: Path) -> None:
+    """A canonical id that bypasses its declared alias is described, not unbound.
+
+    The exact failure needs all three production boundaries. The live catalog maps an
+    emitted alias to a different canonical id; the writer first persists that described
+    reading, then receives an aliased reading followed by a canonical-label reading at
+    the same timestamp. Before this guard, reserved admission let the second batch commit
+    two rows with one public key and different descriptor hashes, and the bounded reader
+    replaced the valid described value with the later unbound value.
+    """
+
+    canonical_id = "sensor.canonical"
+    emitted_alias = "sensor.emitted"
+    described = _descriptor(channel_id=canonical_id)
+    owner = LiveChannelDescriptorCatalog(
+        ChannelCatalog([described]),
+        bindings={(INSTRUMENT, emitted_alias): canonical_id},
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+
+    def commit(readings: list[Reading]) -> None:
+        admitted = tuple(owner.admit(reading) for reading in readings)
+        assert writer._write_live_batch(admitted) == admitted
+
+    refusal: ChannelDescriptorStorageError | None = None
+    try:
+        commit([_reading(emitted_alias, 4.2)])
+        try:
+            commit(
+                [
+                    _reading(emitted_alias, 4.3),
+                    _reading(canonical_id, 999.0),
+                ]
+            )
+        except ChannelDescriptorStorageError as caught:
+            refusal = caught
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    persisted = _rows(tmp_path)
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    assert len(result.rows) == 1
+    assert result.rows[0].channel == canonical_id
+    assert result.rows[0].value == 4.2, "the unbound collision must not replace the described row"
+    assert result.rows[0].descriptor is not None
+    assert result.rows[0].descriptor.descriptor_hash == described.descriptor_hash
+    assert persisted == [(canonical_id, 4.2, described.descriptor_hash)]
+    assert refusal is not None, "the binding mismatch must refuse the collision batch"
+
+
+def test_live_bind_uses_the_absence_error_type_for_a_truly_undescribed_channel() -> None:
+    """Reserved admission is coupled to a symbol, never diagnostic prose.
+
+    The same synchronous production boundary also pins both sides of that decision:
+    a truly absent label is still admitted without canonical identity, while a channel
+    described under another instrument is still refused.
+    """
+
+    owner = _live()
+    absent = _reading("sensor.not.described", 4.2)
+    with pytest.raises(ChannelNotDescribedError):
+        owner.bind(absent)
+
+    admitted = owner.admit(absent)
+    assert admitted.reading.channel == absent.channel
+    assert admitted.descriptor == unbound_channel_descriptor()
+    assert owner.owns(admitted)
+
+    disagreeing = replace(_reading("sensor.main", 4.3), instrument_id="another-instrument")
+    with pytest.raises(ChannelDescriptorStorageError):
+        owner.admit(disagreeing)
 
 
 def test_the_reserved_entry_declares_nothing_and_is_visible_nowhere_public() -> None:

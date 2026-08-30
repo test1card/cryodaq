@@ -1097,11 +1097,14 @@ class LiveChannelDescriptorCatalog:
         owned = _own_live_reading(reading)
         channel_id = self._bindings.get((owned.instrument_id, owned.channel))
         if channel_id is None:
-            if any(emitted_channel == owned.channel for _, emitted_channel in self._bindings):
+            canonical_descriptor = self._catalog.by_channel_id.get(owned.channel)
+            if canonical_descriptor is not None or any(
+                emitted_channel == owned.channel for _, emitted_channel in self._bindings
+            ):
                 raise ChannelDescriptorStorageError(
                     "live reading instrument_id disagrees with the explicit descriptor binding"
                 )
-            raise ChannelDescriptorStorageError(
+            raise ChannelNotDescribedError(
                 "live reading channel is unavailable in the explicit descriptor catalog bindings"
             )
         descriptor = self._catalog.by_channel_id[channel_id]
@@ -1139,9 +1142,8 @@ class LiveChannelDescriptorCatalog:
     def admit(self, reading: object) -> DescriptorBoundReading:
         """Bind a reading, or admit it against the reserved entry when nothing describes it.
 
-        `bind` is deliberately untouched and keeps its registered fail-closed behaviour for
-        every direct caller. This is what the WRITE PATH uses, and the difference is the
-        cost of a refusal.
+        `bind` deliberately remains fail-closed for every direct caller. This is what the
+        WRITE PATH uses, and the difference is the cost of a refusal.
 
         Measured 2026-08-21 on the real path, with a control: a batch of two readings, one
         on a channel the catalog does not describe, raised at admission and left NO DATABASE
@@ -1159,9 +1161,8 @@ class LiveChannelDescriptorCatalog:
 
         try:
             return self.bind(reading)
-        except ChannelDescriptorStorageError as refusal:
-            if "unavailable in the explicit descriptor catalog bindings" not in str(refusal):
-                raise
+        except ChannelNotDescribedError:
+            pass
         owned = _own_live_reading(reading)
         descriptor = _reserved_entry_of(self._catalog)
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
