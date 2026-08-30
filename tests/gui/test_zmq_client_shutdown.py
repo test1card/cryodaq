@@ -1813,6 +1813,51 @@ def test_launcher_status_probe_plugins_follow_pytest_autoload_truthiness(
     assert plugin_args.count("-p") == 2 * expected_plugin_count
 
 
+@pytest.mark.parametrize(
+    ("autoload_disabled", "expected_plugin_args"),
+    [
+        (None, ()),
+        ("", ()),
+        ("1", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+        ("true", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+        ("0", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+    ],
+)
+def test_launcher_status_poll_wrapper_passes_required_plugins_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    autoload_disabled: str | None,
+    expected_plugin_args: tuple[str, ...],
+) -> None:
+    child_marker = "CRYODAQ_LAUNCHER_STATUS_RETENTION_PROBE"
+    monkeypatch.delenv(child_marker, raising=False)
+    if autoload_disabled is None:
+        monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", autoload_disabled)
+
+    observed_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def _record_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+        observed_calls.append((tuple(args), kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _record_run)
+
+    test_launcher_status_poll_keeps_finished_worker_children_bounded(monkeypatch, tmp_path)
+
+    assert len(observed_calls) == 1
+    command, child_options = observed_calls[0]
+    cache_plugin_index = command.index("no:cacheprovider")
+    warnings_index = command.index("-W")
+    assert command[cache_plugin_index + 1 : warnings_index] == expected_plugin_args
+    assert command.count("pytest_asyncio.plugin") == expected_plugin_args.count("pytest_asyncio.plugin")
+    assert command.count("pytest_timeout") == expected_plugin_args.count("pytest_timeout")
+    child_env = child_options["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[child_marker] == "1"
+
+
 def test_launcher_status_poll_keeps_finished_worker_children_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
