@@ -6,6 +6,7 @@ publish readings, infer vendor semantics, or grant source/control authority.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -25,12 +26,14 @@ import yaml
 from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.channels.descriptors import (
     MAX_CATALOG_DESCRIPTORS,
+    UNBOUND_CHANNEL_ID,
     ChannelCatalog,
     ChannelDescriptorError,
     ChannelDescriptorV1,
     ChannelQuantity,
     ChannelRole,
     ChannelSafetyClass,
+    unbound_channel_descriptor,
     validate_catalog_update,
 )
 from cryodaq.channels.persistence import (
@@ -51,6 +54,7 @@ MAX_LIVE_METADATA_ITEMS: Final = 1024
 MAX_LIVE_METADATA_TEXT_BYTES: Final = 65_536
 MAX_LIVE_METADATA_AGGREGATE_BYTES: Final = 1_048_576
 MAX_LIVE_READING_TEXT_BYTES: Final = 1024
+MAX_PERSISTED_READING_ID_BYTES: Final = 256
 MAX_LIVE_DESCRIPTOR_CONFIG_BYTES: Final = 256 * 1024
 MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH: Final = 8
 
@@ -179,8 +183,61 @@ CREATE TABLE readings (
 """
 
 
+UNBOUND_DESCRIPTOR_HASH: Final[str] = unbound_channel_descriptor().descriptor_hash
+"""Identity a reading carries when the catalog describes no channel for it.
+
+Published from THIS module on purpose. The archive reader needs to recognise such a row,
+and importing the channel contract there would give a second file a dependency the inert-
+activation guard exists to keep narrow. This module already owns that dependency and is
+registered for it, so the identity travels through the adapter instead of widening the
+guard. Recognition is exact equality on an opaque value; nothing here interprets it.
+"""
+
+
+def catalog_with_reserved_descriptor(catalog: object) -> ChannelCatalog:
+    """Return a persistence catalog that carries the canonical reserved descriptor.
+
+    The reserved descriptor belongs to SQLite persistence rather than to a live
+    driver roster. Keep both its construction and its channel-id interpretation
+    in this adapter, so generic writer code receives only a ready-to-install
+    catalog.
+    """
+
+    snapshot = snapshot_catalog(catalog)
+    if _carries_reserved_entry(snapshot):
+        return snapshot
+    return snapshot_catalog(ChannelCatalog([*snapshot.descriptors, unbound_channel_descriptor()]))
+
+
+def is_reserved_descriptor(descriptor: object) -> bool:
+    """Whether an opaque persisted descriptor is the canonical reserved entry.
+
+    Callers may use this result to preserve an emitted label. They must not
+    identify the entry by inspecting a channel id themselves.
+    """
+
+    return type(descriptor) is ChannelDescriptorV1 and descriptor.descriptor_hash == UNBOUND_DESCRIPTOR_HASH
+
+
 class ChannelDescriptorStorageError(RuntimeError):
     """The SQLite descriptor authority is malformed, corrupt, or ambiguous."""
+
+
+class ChannelNotDescribedError(ChannelDescriptorStorageError):
+    """The catalog describes no channel under this identity at all.
+
+    Distinct from every other descriptor failure, and distinct for one reason: an
+    ABSENT channel has no descriptor to contradict, while a channel the catalog DOES
+    describe, whose instrument or unit disagrees, may not be the quantity the descriptor
+    names. Callers that answer the two cases differently must tell them apart through
+    this type, never by comparing channel spellings themselves -- the spelling sweep
+    (tests/test_c2_repo_wide_spelling_sweep.py) rejects membership tests over identity,
+    and it is right to: the declaring authority for "is this channel described" is the
+    catalog, not the caller.
+
+    It remains a ChannelDescriptorStorageError, so every existing handler that fails
+    closed on the base class keeps failing closed on this one.
+    """
 
 
 _CHANNEL_DESCRIPTOR_PROJECTION_PROVENANCE: Final = object()
@@ -672,6 +729,24 @@ def _bounded_live_text(value: object, *, field: str, maximum: int) -> str:
     return value
 
 
+def _durable_unbound_channel_label(label: str) -> str:
+    """Keep an unknown channel useful while fitting every durable reader boundary.
+
+    Refusing an overlong unknown label here would refuse its whole acquisition batch,
+    recreating the data loss reserved admission exists to prevent. A plain prefix
+    truncation could alias two physical channels, so the durable form keeps a UTF-8-safe
+    prefix and the full digest of the exact emitted label.
+    """
+
+    encoded = label.encode("utf-8")
+    if len(encoded) <= MAX_PERSISTED_READING_ID_BYTES:
+        return label
+    suffix = f"~sha256:{hashlib.sha256(encoded).hexdigest()}"
+    prefix_budget = MAX_PERSISTED_READING_ID_BYTES - len(suffix.encode("ascii"))
+    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    return prefix + suffix
+
+
 def _freeze_live_metadata(value: object) -> _FrozenDict:
     """Validate and freeze the bounded Reading metadata data grammar.
 
@@ -846,6 +921,28 @@ class DescriptorBoundReading:
         return False
 
 
+def _carries_reserved_entry(catalog: ChannelCatalog) -> bool:
+    """Whether this catalog already carries the reserved entry.
+
+    EXACT EQUALITY, NOT MEMBERSHIP. The repository-wide spelling sweep refuses a membership
+    test over identity, and it is right to: selecting by looking a spelling up in a mapping
+    is how a channel gets identified by its name instead of by its declaration. Comparing a
+    descriptor's own channel_id with a fixed constant is the permitted form -- an exact
+    comparison of opaque values, with no lookup and no inference.
+    """
+
+    return any(descriptor.channel_id == UNBOUND_CHANNEL_ID for descriptor in catalog.descriptors)
+
+
+def _reserved_entry_of(catalog: ChannelCatalog) -> ChannelDescriptorV1:
+    """The reserved entry this catalog carries, selected by exact equality."""
+
+    for descriptor in catalog.descriptors:
+        if descriptor.channel_id == UNBOUND_CHANNEL_ID:
+            return descriptor
+    raise ChannelDescriptorStorageError("this catalog carries no reserved entry")
+
+
 class LiveChannelDescriptorCatalog:
     """Explicit, immutable catalog owner for later runtime activation.
 
@@ -868,6 +965,38 @@ class LiveChannelDescriptorCatalog:
         bindings: Mapping[tuple[str, str], str] | None = None,
     ) -> None:
         self._catalog = snapshot_catalog(catalog)
+        # STRIP THE RESERVED ENTRY ON THE WAY IN -- but only OURS. This catalog can arrive
+        # from another live catalog's snapshot, which already carries it, while the caller's
+        # bindings describe only the caller's own channels. Validating those bindings against
+        # a catalog holding an entry the caller never declared refused seven manifest tests
+        # with "live descriptor bindings must cover every current descriptor exactly once".
+        # The entry is added back after every check below: it is this class's to add, never
+        # the caller's to account for.
+        #
+        # An earlier version stripped ANY descriptor carrying the reserved channel_id. A
+        # caller whose configured manifest legitimately declares a channel under that id had
+        # it silently deleted and replaced by the canonical entry -- a configuration mistake
+        # that looked accepted, with the declared channel gone from the public roster. So the
+        # strip accepts exactly the canonical reserved entry and refuses anything else.
+        # THE SOFTWARE NEVER REFUSES applies to operators facing a missing description, not
+        # to a namespace collision between two different declared channels.
+        if _carries_reserved_entry(self._catalog):
+            supplied = _reserved_entry_of(self._catalog)
+            if supplied != unbound_channel_descriptor():
+                raise ChannelDescriptorStorageError(
+                    "reserved namespace collision -- a configured descriptor claims the reserved "
+                    f"channel_id ({UNBOUND_CHANNEL_ID!r}) with foreign fields; rename it or declare "
+                    "the canonical reserved entry exactly"
+                )
+            self._catalog = snapshot_catalog(
+                ChannelCatalog(
+                    [
+                        descriptor
+                        for descriptor in self._catalog.descriptors
+                        if descriptor.channel_id != UNBOUND_CHANNEL_ID
+                    ]
+                )
+            )
         self._owner_key = object()
         self._issued: WeakKeyDictionary[DescriptorBoundReading, _ReceiptIntegrity] = WeakKeyDictionary()
         if bindings is None:
@@ -893,6 +1022,28 @@ class LiveChannelDescriptorCatalog:
                     raise ChannelDescriptorStorageError(
                         "live descriptor binding instrument_id disagrees with its descriptor"
                     )
+        # THE RESERVED ENTRY JOINS LAST, AND ON PURPOSE. `admit` binds an undescribed
+        # reading against it so one such reading costs its own identity and not the whole
+        # batch, and that binding must be owned by this catalog or the receipt path's
+        # ownership check refuses it.
+        #
+        # It is added AFTER every check above. An earlier version added it before, and the
+        # caller's own bindings then no longer covered the catalog: seven manifest tests
+        # refused with "live descriptor bindings must cover every current descriptor exactly
+        # once". The caller's bindings describe the CALLER's catalog; this entry is not the
+        # caller's and must not be measured against them.
+        # IT JOINS THE CATALOG, NOT THE BINDINGS, and the difference is the whole point.
+        # The bindings are what the tracked manifest DECLARES: which emitted label belongs to
+        # which channel of which instrument. The reserved entry declares nothing -- it exists
+        # so that a reading with no declaration has a real descriptor to reference, which the
+        # foreign key requires. Putting it in the bindings made the live catalog claim a
+        # channel the manifest never declared, and the manifest guards said so: the binding
+        # count moved by one and the declared set no longer matched.
+        #
+        # `admit` reaches the entry through the catalog directly. `bind` never resolves it,
+        # which is correct: nothing emits it, so nothing should look it up.
+        if not _carries_reserved_entry(self._catalog):
+            self._catalog = snapshot_catalog(ChannelCatalog([*self._catalog.descriptors, unbound_channel_descriptor()]))
         self._bindings = MappingProxyType(configured)
 
     @property
@@ -901,7 +1052,13 @@ class LiveChannelDescriptorCatalog:
 
     @property
     def instrument_ids(self) -> frozenset[str]:
-        """Configured instrument identities, detached from binding internals."""
+        """Configured instrument identities, detached from binding internals.
+
+        The reserved entry cannot appear here and needs no exclusion: it joins the catalog
+        and never the bindings, and this set is derived from the bindings. An earlier version
+        put it in both and had to filter it out again, after startup refused with
+        "instrument mismatch (missing=[], extra=['cryodaq'])".
+        """
 
         return frozenset(instrument_id for instrument_id, _ in self._bindings)
 
@@ -911,9 +1068,25 @@ class LiveChannelDescriptorCatalog:
         The returned value carries descriptor data only.  It cannot bind a
         live reading or establish source/control authority; those operations
         remain owned by this instance.
+
+        THE RESERVED ENTRY IS WITHHELD. It is a persistence concern -- a real descriptor for
+        a reading whose channel nothing declares, which the readings foreign key requires --
+        and it is NOT a live channel. Callers read this snapshot to build rosters of channels
+        that exist: `validate_safety_pattern_liveness` derives its canonical-id set from it,
+        so leaving the reserved identity in made an alarm that referenced it look live at
+        startup while remaining inert, since no driver emits that spelling and undescribed
+        readings keep their own labels. A configuration mistake that looks accepted is worse
+        than one that is refused.
+
+        The writer installs the entry itself, so withholding it here costs the persistence
+        path nothing.
         """
 
-        return snapshot_catalog(self._catalog)
+        return snapshot_catalog(
+            ChannelCatalog(
+                [descriptor for descriptor in self._catalog.descriptors if descriptor.channel_id != UNBOUND_CHANNEL_ID]
+            )
+        )
 
     def emitted_channel_for_channel_id(self, channel_id: str) -> str:
         """Return the exact pre-bind emitted label for one declared channel."""
@@ -944,11 +1117,14 @@ class LiveChannelDescriptorCatalog:
         owned = _own_live_reading(reading)
         channel_id = self._bindings.get((owned.instrument_id, owned.channel))
         if channel_id is None:
-            if any(emitted_channel == owned.channel for _, emitted_channel in self._bindings):
+            canonical_descriptor = self._catalog.by_channel_id.get(owned.channel)
+            if canonical_descriptor is not None or any(
+                emitted_channel == owned.channel for _, emitted_channel in self._bindings
+            ):
                 raise ChannelDescriptorStorageError(
                     "live reading instrument_id disagrees with the explicit descriptor binding"
                 )
-            raise ChannelDescriptorStorageError(
+            raise ChannelNotDescribedError(
                 "live reading channel is unavailable in the explicit descriptor catalog bindings"
             )
         descriptor = self._catalog.by_channel_id[channel_id]
@@ -965,6 +1141,53 @@ class LiveChannelDescriptorCatalog:
         if owned.channel != channel_id:
             owned = replace(owned, channel=channel_id)
         # Snapshot the selected descriptor independently of the catalog owner.
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
+        selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
+        integrity_token = object()
+        issued = DescriptorBoundReading._issue(
+            owned,
+            selected,
+            owner_key=self._owner_key,
+            integrity_token=integrity_token,
+        )
+        self._issued[issued] = _ReceiptIntegrity(
+            payload=owned,
+            descriptor=selected,
+            payload_fingerprint=_owned_live_reading_fingerprint(owned),
+            descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(selected).canonical_json,
+            token=integrity_token,
+        )
+        return issued
+
+    def admit(self, reading: object) -> DescriptorBoundReading:
+        """Bind a reading, or admit it against the reserved entry when nothing describes it.
+
+        `bind` deliberately remains fail-closed for every direct caller. This is what the
+        WRITE PATH uses, and the difference is the cost of a refusal.
+
+        Measured 2026-08-21 on the real path, with a control: a batch of two readings, one
+        on a channel the catalog does not describe, raised at admission and left NO DATABASE
+        FILE AT ALL -- the described reading died with the undescribed one, on every
+        acquisition cycle, for as long as the catalog gap lasted. A re-wired sensor or one
+        added mid-campaign produces exactly that gap in an ordinary laboratory week.
+
+        TWO CASES, AND ONLY ONE OF THEM CHANGES. A channel with no binding at all has no
+        identity to contradict: it is admitted against the reserved entry, which grants no
+        canonical identity and states that the channel is not described. A channel the
+        catalog DOES describe under another instrument still raises -- that reading may not
+        be the quantity the descriptor names, and storing it would put a wrong number under
+        a real identity.
+        """
+
+        try:
+            return self.bind(reading)
+        except ChannelNotDescribedError:
+            pass
+        owned = _own_live_reading(reading)
+        bounded_channel = _durable_unbound_channel_label(owned.channel)
+        if bounded_channel != owned.channel:
+            owned = replace(owned, channel=bounded_channel)
+        descriptor = _reserved_entry_of(self._catalog)
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
         selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
         integrity_token = object()
@@ -1327,12 +1550,64 @@ def descriptor_hash_for_reading(
         raise ChannelDescriptorStorageError("descriptor-required reading identity must use exact strings")
     descriptor = catalog.by_channel_id.get(channel)
     if descriptor is None:
-        raise ChannelDescriptorStorageError("descriptor-required reading has an unknown channel_id")
+        raise ChannelNotDescribedError("descriptor-required reading has an unknown channel_id")
     if descriptor.instrument_id != instrument_id:
         raise ChannelDescriptorStorageError("reading instrument_id disagrees with descriptor")
     if descriptor.unit != unit:
         raise ChannelDescriptorStorageError("reading unit disagrees with descriptor")
     return descriptor.descriptor_hash
+
+
+def _verify_present_descriptor_envelope(
+    conn: sqlite3.Connection,
+    descriptor_hash: object,
+) -> PersistedChannelEnvelopeV1:
+    """Verify one PRESENT descriptor reference down to its exact stored bytes.
+
+    Schema, catalog envelopes, triggers and foreign keys are all checked, then the
+    stored row must decode to canonical bytes whose indexes agree with the reference
+    hash. This is the integrity half of :func:`resolve_sqlite_descriptor`, shared with
+    the reserved-row shortcut in :func:`read_sqlite_reading` so that no reader can
+    certify a database the full verifier rejects.
+    """
+
+    if type(descriptor_hash) is not str:
+        raise ChannelDescriptorStorageError("present descriptor_hash is not an exact string")
+    _verify_schema(conn)
+    _load_envelopes(conn)
+    if conn.execute("PRAGMA main.foreign_key_check").fetchall():
+        raise ChannelDescriptorStorageError("present descriptor reference fails foreign-key integrity")
+    row = conn.execute(
+        "SELECT descriptor_hash, channel_id, instrument_id, source_key, "
+        "descriptor_revision, envelope_json FROM main.channel_descriptors WHERE descriptor_hash = ?",
+        (descriptor_hash,),
+    ).fetchone()
+    if row is None:
+        raise ChannelDescriptorStorageError("present descriptor_hash has no catalog row")
+    sql_hash, channel_id, instrument_id, source_key, revision, payload = row
+    if type(payload) is not bytes:
+        raise ChannelDescriptorStorageError("present descriptor envelope is not exact bytes")
+    try:
+        envelope = decode_persisted_channel_envelope(payload)
+    except (TypeError, PersistedChannelEnvelopeError) as exc:
+        raise ChannelDescriptorStorageError("present descriptor envelope is corrupt") from exc
+    if payload != envelope.canonical_json:
+        raise ChannelDescriptorStorageError("present descriptor envelope is not exact canonical bytes")
+    if (
+        sql_hash,
+        channel_id,
+        instrument_id,
+        source_key,
+        revision,
+    ) != (
+        envelope.descriptor_hash,
+        envelope.channel_id,
+        envelope.instrument_id,
+        envelope.source_key,
+        envelope.descriptor_revision,
+    ):
+        raise ChannelDescriptorStorageError("present descriptor indexes disagree with envelope")
+    return envelope
 
 
 def resolve_sqlite_descriptor(
@@ -1361,36 +1636,7 @@ def resolve_sqlite_descriptor(
             legacy_channel=legacy_channel,
             legacy_unit=legacy_unit,
         )
-    if type(descriptor_hash) is not str:
-        raise ChannelDescriptorStorageError("present descriptor_hash is not an exact string")
-    _verify_schema(conn)
-    _load_envelopes(conn)
-    if conn.execute("PRAGMA main.foreign_key_check").fetchall():
-        raise ChannelDescriptorStorageError("present descriptor reference fails foreign-key integrity")
-    row = conn.execute(
-        "SELECT descriptor_hash, channel_id, instrument_id, source_key, "
-        "descriptor_revision, envelope_json FROM main.channel_descriptors WHERE descriptor_hash = ?",
-        (descriptor_hash,),
-    ).fetchone()
-    if row is None:
-        raise ChannelDescriptorStorageError("present descriptor_hash has no catalog row")
-    sql_hash, channel_id, instrument_id, source_key, revision, payload = row
-    if type(payload) is not bytes:
-        raise ChannelDescriptorStorageError("present descriptor envelope is not exact bytes")
-    try:
-        envelope = decode_persisted_channel_envelope(payload)
-    except (TypeError, PersistedChannelEnvelopeError) as exc:
-        raise ChannelDescriptorStorageError("present descriptor envelope is corrupt") from exc
-    if payload != envelope.canonical_json:
-        raise ChannelDescriptorStorageError("present descriptor envelope is not exact canonical bytes")
-    if (sql_hash, channel_id, instrument_id, source_key, revision) != (
-        envelope.descriptor_hash,
-        envelope.channel_id,
-        envelope.instrument_id,
-        envelope.source_key,
-        envelope.descriptor_revision,
-    ):
-        raise ChannelDescriptorStorageError("present descriptor indexes disagree with envelope")
+    envelope = _verify_present_descriptor_envelope(conn, descriptor_hash)
     if (
         envelope.instrument_id != legacy_instrument_id
         or envelope.channel_id != legacy_channel
@@ -1398,6 +1644,42 @@ def resolve_sqlite_descriptor(
     ):
         raise ChannelDescriptorStorageError("reading identity disagrees with present descriptor")
     return envelope.descriptor
+
+
+def _resolve_hot_row_descriptor(
+    conn: sqlite3.Connection,
+    descriptor_hash: object,
+    *,
+    instrument_id: str,
+    channel: str,
+    unit: str,
+) -> ChannelDescriptorV1 | None:
+    """Resolve one V1 hot row's descriptor, earning the reserved shortcut first.
+
+    The shortcut returns ``None`` for a row referencing the reserved entry -- that entry
+    deliberately describes no real channel, so the reading-identity comparison would
+    refuse exactly the rows it exists to keep. But the shortcut used to bypass the
+    storage verification entirely: review mutated the stored reserved envelope while
+    keeping its hash column and this reader returned the row normally while
+    :func:`verify_descriptor_storage` rejected the same database as corrupt. The
+    integrity check now runs FIRST and the stored envelope must be the canonical
+    reserved one, so no public reader certifies bytes the authority layer calls broken.
+    """
+
+    if descriptor_hash == UNBOUND_DESCRIPTOR_HASH:
+        envelope = _verify_present_descriptor_envelope(conn, descriptor_hash)
+        if envelope.descriptor != unbound_channel_descriptor():
+            raise ChannelDescriptorStorageError(
+                "reserved descriptor reference disagrees with the canonical reserved entry"
+            )
+        return None
+    return resolve_sqlite_descriptor(
+        conn,
+        descriptor_hash,
+        legacy_instrument_id=instrument_id,
+        legacy_channel=channel,
+        legacy_unit=unit,
+    )
 
 
 def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> ResolvedSQLiteReading:
@@ -1438,12 +1720,12 @@ def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> Resolve
     descriptor = (
         None
         if reading_columns == _LEGACY_READING_COLUMNS
-        else resolve_sqlite_descriptor(
+        else _resolve_hot_row_descriptor(
             conn,
             descriptor_hash,
-            legacy_instrument_id=instrument_id,
-            legacy_channel=channel,
-            legacy_unit=unit,
+            instrument_id=instrument_id,
+            channel=channel,
+            unit=unit,
         )
     )
     return ResolvedSQLiteReading(
@@ -1468,6 +1750,7 @@ __all__ = [
     "MAX_LIVE_METADATA_ITEMS",
     "MAX_LIVE_METADATA_TEXT_BYTES",
     "MAX_LIVE_READING_TEXT_BYTES",
+    "MAX_PERSISTED_READING_ID_BYTES",
     "ChannelDescriptorProjection",
     "ChannelDescriptorStorageError",
     "DescriptorBoundReading",

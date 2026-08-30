@@ -233,6 +233,8 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         ),
         "storage/channel_descriptors.py": _direct_imports(
             "cryodaq.channels.descriptors",
+            "UNBOUND_CHANNEL_ID",
+            "unbound_channel_descriptor",
             "MAX_CATALOG_DESCRIPTORS",
             "ChannelCatalog",
             "ChannelDescriptorError",
@@ -280,9 +282,28 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
             "PersistedChannelEnvelopeError",
             "decode_persisted_channel_envelope",
         ),
-        "storage/sqlite_writer.py": _direct_imports("cryodaq.channels.descriptors", "ChannelCatalog")
+        "storage/sqlite_writer.py": _direct_imports(
+            "cryodaq.channels.descriptors",
+            "ChannelCatalog",
+        )
         | _direct_imports("cryodaq.channels.persistence", "PersistedChannelEnvelopeV1"),
     }
+
+
+def test_writer_cannot_reintroduce_reserved_channel_contract_imports() -> None:
+    """The writer must receive reserved-entry facts only from its storage adapter.
+
+    Reviewer mutation: restoring the former ``UNBOUND_CHANNEL_ID`` or
+    ``unbound_channel_descriptor`` import to sqlite_writer.py makes this fail.
+    The live-writer tests separately prove the adapter result preserves every
+    undescribed reading's emitted label through the production commit path.
+    """
+
+    source_root = Path(__file__).parents[2] / "src" / "cryodaq"
+    writer_imports = _channel_contract_dependencies(source_root)["storage/sqlite_writer.py"]
+    assert writer_imports == _direct_imports("cryodaq.channels.descriptors", "ChannelCatalog") | _direct_imports(
+        "cryodaq.channels.persistence", "PersistedChannelEnvelopeV1"
+    )
 
 
 def test_channel_contract_guard_catches_static_import(tmp_path: Path) -> None:

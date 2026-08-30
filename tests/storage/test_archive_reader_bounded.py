@@ -631,9 +631,20 @@ def test_sqlite_keyset_plan_has_no_temp_btree(tmp_path: Path) -> None:
         "AND timestamp >= ? AND timestamp < ? AND id > ? ORDER BY id LIMIT ?",
         (start.timestamp(), start.timestamp() + 1, 0, 64),
     ).fetchall()
+    discovery_watermark = connection.execute("EXPLAIN QUERY PLAN SELECT MAX(id) FROM readings").fetchall()
+    post_discovery = connection.execute(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM readings NOT INDEXED WHERE id > ? "
+        "AND typeof(timestamp) IN ('real','integer') "
+        "AND timestamp >= ? AND timestamp < ? AND channel NOT IN (?) LIMIT 1",
+        (0, start.timestamp(), start.timestamp() + 1, "T"),
+    ).fetchall()
     connection.close()
     assert not any("USE TEMP B-TREE" in str(row).upper() for row in plan)
-    assert not any("USE TEMP B-TREE" in str(row).upper() for row in (*discovery_first, *discovery_next))
+    assert not any(
+        "USE TEMP B-TREE" in str(row).upper()
+        for row in (*discovery_first, *discovery_next, *discovery_watermark, *post_discovery)
+    )
+    assert any("INTEGER PRIMARY KEY" in str(row).upper() for row in post_discovery)
 
 
 @pytest.mark.parametrize(

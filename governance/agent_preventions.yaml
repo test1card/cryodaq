@@ -3713,6 +3713,38 @@ false_green_pairs:
     ci_partition: core
     red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_left_the_existing_unknown_only_node_green_but_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_1_passed_exit_1_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
+  - id: DESCRIBED-READING-RESERVED-OVERWRITE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-CHANNEL-DESCRIPTOR-ADMISSION-IDENTITY-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_canonical_label_cannot_replace_the_described_alias_row
+    ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_by_restoring_both_reviewed_defects_in_place_on_the_importable_production_blob_428fb2fcd79ba9677da08a9dc910ae5277be1571_with_guard_blob_26402f2b059a52d59ecd22290553a68d93200a5c_the_real_live_catalog_admission_writer_SQLite_and_bounded_reader_returned_value_999_0_with_descriptor_None_instead_of_the_preceding_described_value_4_2_and_the_exact_two_node_control_failed_2_in_0_14s_exit_1
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_inverse_patch_restored_production_blob_63b3255075aa1d1b56a4b5c926dd32d08486f5da_byte_identical_the_exact_two_nodes_passed_2_in_0_10s_exit_0_pending_immutable_candidate_capture
+  - id: LIVE-CHANNEL-ABSENCE-PROSE-COUPLING-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-CHANNEL-DESCRIPTOR-ADMISSION-IDENTITY-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_live_bind_uses_the_absence_error_type_for_a_truly_undescribed_channel
+    ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_by_restoring_both_reviewed_defects_in_place_on_the_importable_production_blob_428fb2fcd79ba9677da08a9dc910ae5277be1571_with_guard_blob_26402f2b059a52d59ecd22290553a68d93200a5c_a_truly_undescribed_channel_raised_base_ChannelDescriptorStorageError_instead_of_ChannelNotDescribedError_and_the_exact_two_node_control_failed_2_in_0_14s_exit_1
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_inverse_patch_restored_production_blob_63b3255075aa1d1b56a4b5c926dd32d08486f5da_byte_identical_the_exact_two_nodes_passed_2_in_0_10s_exit_0_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-BOUND-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_257_byte_unknown_label_cannot_hide_the_described_measurement
+    ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_real_live_catalog_writer_SQLite_and_bounded_reader_at_base_production_blobs_63b3255075aa1d1b56a4b5c926dd32d08486f5da_and_fee8af1a53f3838aa15d3766487357f4c0535fd1_the_valid_two_row_batch_committed_but_the_reader_returned_zero_rows_and_the_guard_failed_1_in_0_13s_exit_1_the_final_call_removal_control_reproduced_the_same_assertion_failure_1_in_0_11s_exit_1_then_restored_corrected_channel_descriptor_blob_0c9ebf8c7c994cd22a4c70e063e3dc071c2a9023_byte_identical
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_the_exact_guard_passed_1_in_0_11s_exit_0_pending_immutable_candidate_capture
+  - id: SQLITE-DISCOVERY-SNAPSHOT-RACE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-DISCOVERY-SNAPSHOT-COMPLETENESS-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_new_unknown_label_after_discovery_cannot_leave_the_read_complete
+    ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_real_live_catalog_writer_SQLite_and_bounded_reader_at_base_archive_reader_blob_fee8af1a53f3838aa15d3766487357f4c0535fd1_the_boundary_hook_committed_the_second_row_after_production_discovery_the_reader_returned_only_sensor_main_and_reported_complete_True_and_the_guard_failed_1_exit_1_the_final_append_watermark_disable_control_reproduced_that_exact_assertion_failure_1_in_0_13s_exit_1_then_restored_corrected_archive_reader_blob_80fceaa82c94e0b1389195a0d152e996ea9773c1_byte_identical
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_final_real_path_guards_passed_2_in_0_18s_exit_0_pending_immutable_candidate_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7504,3 +7536,69 @@ records:
         ci_partition: core
     red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_while_the_existing_unknown_only_node_passed_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical; prior_unknown_only_control_measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
+  - id: LIVE-CHANNEL-DESCRIPTOR-ADMISSION-IDENTITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: LiveChannelDescriptorCatalog.bind and admit through SQLiteWriter.write_committed and bounded archive reads for every explicit emitted-label to canonical-channel binding.
+    classification: data_misrepresentation
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A reading arriving under a declared canonical channel id instead of its explicit emitted alias could receive the reserved identity, commit beside a valid described reading under the same public key, and replace that described value during bounded collection. Coupling absence handling to English exception text could also restore whole-batch loss after a diagnostic-only rewording or wrapping.
+    invariant: A catalog canonical channel id and every explicit emitted label are already described identities. A reading that bypasses or disagrees with their exact instrument and binding is refused before persistence; only a label absent from both declared identity surfaces raises ChannelNotDescribedError, and reserved admission catches exactly that type while preserving the emitted label. A failing collision batch cannot replace a previously committed described row, and an entirely undescribed channel remains admitted without canonical identity.
+    rule_refs:
+      - AGENTS.md#architecture-and-extension-rules
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_canonical_label_cannot_replace_the_described_alias_row
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_live_bind_uses_the_absence_error_type_for_a_truly_undescribed_channel
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_the_live_path_keeps_the_batch_when_one_channel_is_undescribed
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_the_live_path_still_refuses_a_disagreeing_instrument
+        ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_by_restoring_both_reviewed_defects_in_place_on_the_importable_production_blob_428fb2fcd79ba9677da08a9dc910ae5277be1571_with_guard_blob_26402f2b059a52d59ecd22290553a68d93200a5c_the_exact_collision_guard_observed_the_later_999_0_unbound_row_replace_the_preceding_4_2_described_row_and_the_type_guard_observed_base_ChannelDescriptorStorageError_2_failed_in_0_14s_exit_1_then_the_inverse_patch_restored_corrected_production_blob_63b3255075aa1d1b56a4b5c926dd32d08486f5da_byte_identical
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_the_exact_two_nodes_passed_2_in_0_10s_exit_0_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: LiveChannelDescriptorCatalog.admit through SQLiteWriter._write_live_batch, hot SQLite discovery/materialisation, and subsequent cold archive reads for every reading admitted against the reserved unbound identity.
+    classification: producer_consumer_bound_divergence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A reserved reading label accepted at 257 through 1024 UTF-8 bytes could commit beside valid described readings, then exceed the bounded archive reader's 256-byte identity grammar and quarantine every row from that source, hiding the valid measurement as well as the unknown one.
+    invariant: Reserved admission emits a deterministic at-most-256-byte durable channel label. Labels already within the bound are byte-preserved; longer valid labels retain a UTF-8-safe useful prefix plus the full SHA-256 of their exact original bytes, so admission does not recreate whole-batch refusal and prefix truncation does not silently alias distinct sources. The real writer and bounded reader return both committed rows while the unbound row keeps no fabricated descriptor and completeness remains false.
+    rule_refs:
+      - AGENTS.md#architecture-and-extension-rules
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_257_byte_unknown_label_cannot_hide_the_described_measurement
+        ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_the_real_live_catalog_writer_SQLite_and_bounded_reader_committed_the_valid_described_row_and_the_otherwise_valid_257_byte_unknown_row_then_returned_zero_rows_the_combined_new_guard_run_failed_2_in_0_22s_exit_1_and_the_final_call_removal_reversion_control_failed_this_exact_node_1_in_0_11s_exit_1
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_the_collision_resistant_256_byte_admission_boundary_both_final_real_path_guards_passed_2_in_0_18s_and_after_byte_identical_control_restore_this_node_passed_1_in_0_11s_pending_immutable_candidate_capture
+  - id: SQLITE-DISCOVERY-SNAPSHOT-COMPLETENESS-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: ArchiveReader.query_reading_rows_bounded auto-discovery through _discover_sqlite_channels and _read_sqlite_bounded while the live SQLiteWriter can append to the same hot daily source.
+    classification: snapshot_completeness_race
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A new channel committed after discovery but before hot materialisation could be filtered out by the stale selected set while the returned described rows still reported complete=True, silently misrepresenting a partial week-long history projection as complete.
+    invariant: SQLite materialisation holds one explicit read transaction. For an auto-discovered query, its first snapshot comparison detects any in-range channel absent from the discovery selection and marks the result incomplete before filtered rows escape. Explicit caller-selected channel queries retain their intentional filtering semantics, and commits after the materialisation snapshot belong to a later query rather than changing this snapshot's claim.
+    rule_refs:
+      - AGENTS.md#architecture-and-extension-rules
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_new_unknown_label_after_discovery_cannot_leave_the_read_complete
+        ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_the_real_live_catalog_writer_SQLite_and_bounded_reader_committed_the_second_valid_reserved_row_inside_the_exact_post_discovery_boundary_the_reader_returned_only_sensor_main_with_complete_True_the_combined_new_guard_run_failed_2_in_0_22s_exit_1_and_the_final_append_watermark_disable_control_failed_this_exact_node_1_in_0_13s_exit_1
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_the_append_watermark_snapshot_comparison_and_integer_primary_key_plan_both_final_real_path_guards_passed_2_in_0_18s_and_the_plan_control_passed_with_the_restored_final_blob_pending_immutable_candidate_capture

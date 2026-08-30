@@ -58,12 +58,16 @@ from cryodaq.storage._windows_secure_read import (
     read_secure_relative_bytes,
 )
 from cryodaq.storage.channel_descriptors import (
+    UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
+    ChannelNotDescribedError,
     DescriptorBoundReading,
     LiveChannelDescriptorCatalog,
+    catalog_with_reserved_descriptor,
     descriptor_hash_for_reading,
     initialize_descriptor_storage,
     install_catalog,
+    is_reserved_descriptor,
     snapshot_catalog,
     verify_descriptor_storage,
 )
@@ -72,6 +76,19 @@ from cryodaq.storage.sentinel import decode, encode, is_sentinel
 logger = logging.getLogger(__name__)
 
 _MAX_COMMIT_REVISION = 2**63 - 1
+# How often one unbound channel may say so. An unbound channel produces a reading
+# every acquisition cycle, so an unrated line here would write several times a second
+# for as long as the gap lasts -- a week of that is a log nobody can open, which is
+# its own way of losing the evidence.
+_UNBOUND_CHANNEL_LOG_INTERVAL_S = 300.0
+# The channel names are supplied by drivers, so the memory of them is bounded rather
+# than trusted to stay small across a week-long run.
+_MAX_REMEMBERED_UNBOUND_CHANNELS = 256
+# A per-channel limit alone does not bound the log: a driver cycling through more
+# distinct labels than are remembered evicts each one before it returns, so every
+# reading looks new and speaks. This is the hard ceiling that rotation cannot defeat --
+# at most this many NAMED lines per interval, plus one aggregate line.
+_UNBOUND_NAMED_LINES_PER_INTERVAL = 8
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
 
@@ -2513,6 +2530,24 @@ class SQLiteWriter:
             self._channel_catalog = self._live_channel_catalog.storage_catalog_snapshot()
         else:
             self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
+        # THE RESERVED ENTRY TRAVELS WITH THE CATALOG, so a reading whose channel the
+        # catalog does not describe has a real descriptor to reference. Without it the
+        # foreign key refuses the row and the batch dies -- the defect this change
+        # exists to remove. The channel-descriptor adapter owns that entry's identity.
+        self._unbound_descriptor_hash = None
+        if self._channel_catalog is not None:
+            self._channel_catalog = catalog_with_reserved_descriptor(self._channel_catalog)
+            self._unbound_descriptor_hash = UNBOUND_DESCRIPTOR_HASH
+        # When a reading names a channel the catalog does not describe, the row is
+        # still written -- without a descriptor identity -- and the fact is said at a
+        # bounded rate and counted. See _descriptor_hash_or_none.
+        self._unbound_channel_said: dict[str, float] = {}
+        self._unbound_channel_rows = 0
+        self._unbound_window_start = time.monotonic()
+        self._unbound_window_rows = 0
+        self._unbound_window_channels: set[str] = set()
+        self._unbound_window_channels_overflowed = False
+        self._unbound_named_lines_in_window = 0
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
@@ -6901,8 +6936,14 @@ class SQLiteWriter:
         if owner_catalog is None:
             raise RuntimeError("live channel catalog is unavailable")
         snapshot = tuple(readings)
-        bind = getattr(owner_catalog, "bind", None)
-        admitted = tuple(bind(reading) for reading in snapshot) if callable(bind) else snapshot
+        # ADMIT, DO NOT BIND. `bind` refuses a channel the catalog does not describe, and
+        # this comprehension covers the WHOLE batch -- so one such reading killed every
+        # reading acquired in the same cycle. Measured 2026-08-21 with a control: the batch
+        # left no database file at all. `admit` binds what it can and puts an undescribed
+        # reading against the reserved entry, which grants no canonical identity and says
+        # that the channel is not described. An instrument disagreement still raises.
+        admit = getattr(owner_catalog, "admit", None) or getattr(owner_catalog, "bind", None)
+        admitted = tuple(admit(reading) for reading in snapshot) if callable(admit) else snapshot
         settlement = CommittedBatchSettlement()
         owner = self._remember_owned_task(
             asyncio.create_task(self._commit_owner(admitted), name="sqlite_write_committed"),
@@ -7286,6 +7327,11 @@ class SQLiteWriter:
 
         bound = batch
         by_day: dict[date, list[Reading]] = {}
+        # The descriptor ADMISSION chose, per reading, so a row cannot disagree with its
+        # own receipt when the durable unbound label it keeps would resolve elsewhere.
+        admitted_by_day: dict[date, list[str]] = {}
+        unbound_emitted_by_day: dict[date, list[str | None]] = {}
+        admitted_is_unbound_by_day: dict[date, list[bool]] = {}
         for item in bound:
             reading = item.reading
             nonfinite = not math.isfinite(reading.value)
@@ -7293,16 +7339,50 @@ class SQLiteWriter:
                 raise ValueError("descriptor-authoritative batch contains non-finite OK reading")
             if not nonfinite and is_sentinel(reading.value) and reading.status is ChannelStatus.OK:
                 raise ValueError("descriptor-authoritative batch contains sentinel OK reading")
-            stable = replace(reading, channel=item.descriptor.channel_id)
+            # The canonical channel_id replaces the emitted label for a DESCRIBED reading,
+            # which is what makes the persisted row, the receipt entry and the descriptor
+            # agree. For a reading admitted against the RESERVED entry there is no canonical
+            # identity to adopt, and the emitted label is the only truth left about which
+            # channel produced the value. Admission keeps it verbatim when it fits the
+            # durable reader grammar; otherwise it keeps a useful prefix plus the full
+            # digest, rather than refusing this reading's whole acquisition batch.
+            #
+            # THE LABEL COUNT IS NOT A BUDGET. An earlier version stored at most a bounded
+            # number of distinct labels under their own name and collapsed the rest to the
+            # reserved channel_id through a process-local set that a FAILED batch could consume
+            # before persistence and that a RESTART emptied -- review measured one physical
+            # channel stored as `cryodaq.unbound` before a restart and as its own name after
+            # it. Durable identity may never depend on process history: what an undescribed
+            # reading keeps is a deterministic function of the label the instrument emitted,
+            # on disk, for as long as the row exists. The reader side bounds how many such
+            # labels a bounded query materialises (see
+            # archive_reader._MAX_MATERIALIZED_UNBOUND_CHANNELS), which is where the roster
+            # bound belongs.
+            admitted_is_unbound = is_reserved_descriptor(item.descriptor)
+            if admitted_is_unbound:
+                stable = reading
+            else:
+                stable = replace(reading, channel=item.descriptor.channel_id)
             timestamp = (
                 reading.timestamp.astimezone(UTC)
                 if reading.timestamp.tzinfo is not None
                 else reading.timestamp.replace(tzinfo=UTC)
             )
             by_day.setdefault(timestamp.date(), []).append(stable)
+            admitted_by_day.setdefault(timestamp.date(), []).append(item.descriptor.descriptor_hash)
+            unbound_emitted_by_day.setdefault(timestamp.date(), []).append(
+                str(reading.channel) if admitted_is_unbound else None
+            )
+            admitted_is_unbound_by_day.setdefault(timestamp.date(), []).append(admitted_is_unbound)
 
         for day, stable_readings in sorted(by_day.items()):
-            if not self._write_day_batch(self._ensure_connection(day), stable_readings):
+            if not self._write_day_batch(
+                self._ensure_connection(day),
+                stable_readings,
+                admitted_by_day[day],
+                unbound_emitted_by_day[day],
+                admitted_is_unbound_by_day[day],
+            ):
                 return None
         return bound
 
@@ -7399,7 +7479,165 @@ class SQLiteWriter:
         assert isinstance(receipt, CommittedBatchReceipt)
         return receipt.entries
 
-    def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> bool:
+    def _descriptor_hash_or_none(
+        self,
+        reading: Reading,
+        unbound: list[tuple[str, BaseException]],
+    ) -> str | None:
+        """Bind a reading to its descriptor, or record that it has none.
+
+        AN UNBOUND CHANNEL MUST COST ITS OWN LABEL, NEVER THE BATCH. This used to call
+        ``descriptor_hash_for_reading`` inline, and that function raises when a channel
+        is absent from the catalog, or when the reading's instrument or unit disagrees
+        with the descriptor. Nothing on the way out caught it: neither ``_write_batch``
+        nor ``write_immediate``, which logs CRITICAL and re-raises, nor the scheduler,
+        which counts an error and refuses to publish. So ONE unbound channel abandoned
+        the whole batch -- every good reading beside it -- on every acquisition cycle,
+        for as long as the gap lasted.
+
+        Measured 2026-08-20 by driving the real resolver: three readings, one of them on
+        a channel absent from the catalog, produced one row and then stopped. The rows
+        after the unbound one were never built, and the good one before it was discarded
+        with the batch.
+
+        That breaks the invariant this method's own caller states -- "if the DataBroker
+        has a reading, SQLite has it" -- over a configuration gap. And the gap is the
+        ordinary case in a laboratory: re-wiring a sensor, adding one mid-campaign, or
+        changing a unit produces a channel the descriptor catalog does not yet describe.
+
+        An undescribed reading is an ANTICIPATED state, not a corrupt one. It is stored
+        with its timestamp, value, unit and status, under the RESERVED identity rather
+        than a null: NULL already means pre-catalog history, and the two cases could not
+        be told apart afterwards (see ``UNBOUND_DESCRIPTOR_HASH``). Read back, such a row
+        carries no descriptor at all, and the replay layer reports
+        ``DESCRIPTOR_HASH_MISSING`` for exactly that while keeping the batch honest.
+
+        CORRECTION, and the reason the reader changed in the same slice. An earlier
+        version of this docstring said the reader ALREADY reported that issue for a null
+        hash. It did not, and review was right to say so: the bounded reader resolved a
+        null through ``resolve_legacy_descriptor``, which handed the row a fabricated
+        pre-catalog identity and left the read marked complete. A newly unbound row would
+        then have been carried through descriptor reporting as ordinary described
+        history. The reader now recognises the reserved reference itself, keeps the row,
+        returns it without a descriptor and holds completeness at False; NULL keeps its
+        one meaning, pre-catalog history, everywhere. The descriptor-authoritative path
+        (``write_committed``) never reaches this resolver at all -- its readings are
+        admitted by the live catalog owner before any row is built, an undescribed one
+        against the reserved entry (see ``LiveChannelDescriptorCatalog.admit``), and only
+        a DISAGREEING instrument or unit is still refused whole there.
+        """
+
+        if self._channel_catalog is None:
+            return None
+        try:
+            return descriptor_hash_for_reading(
+                self._channel_catalog,
+                instrument_id=reading.instrument_id,
+                channel=reading.channel,
+                unit=reading.unit,
+            )
+        except ChannelNotDescribedError as absent:
+            # ABSENT, not disagreeing -- and the catalog says so, through its own error
+            # type. This writer never compares channel spellings to decide it; the
+            # declaring authority is the catalog.
+            #
+            # Every OTHER descriptor failure, including a described channel whose
+            # instrument or unit disagrees, is deliberately NOT caught: the reading may
+            # not be the quantity the descriptor names, and storing it would put a wrong
+            # number under a real identity. Those keep their registered fail-closed
+            # refusal of the whole batch.
+            unbound.append((str(reading.channel), absent))
+            # THE RESERVED ENTRY, not a null. A null already means pre-catalog history,
+            # and the two cannot be told apart afterwards -- a migrated database holds
+            # both kinds in one file, and an all-unbound day rotates with no descriptor
+            # sidecar at all. This row carries its own provenance instead.
+            assert self._unbound_descriptor_hash is not None
+            return self._unbound_descriptor_hash
+
+    def _record_unbound_channels(self, unbound: list[tuple[str, BaseException]]) -> None:
+        """Count and say what was actually STORED, after the transaction committed.
+
+        Called from the commit path, never from the row builder. A batch can still be
+        destroyed after its rows are built -- a described channel whose unit disagrees
+        raises, and a disk-full fault returns False -- and announcing "readings are being
+        saved" for rows that were then discarded would be a false statement, made worse
+        by the rate limiter holding its tongue about it for the next interval.
+        """
+
+        if not unbound:
+            return
+        self._unbound_channel_rows += len(unbound)
+        now = time.monotonic()
+        if now - self._unbound_window_start >= _UNBOUND_CHANNEL_LOG_INTERVAL_S:
+            self._close_unbound_window(now)
+        for channel, cause in unbound:
+            self._unbound_window_rows += 1
+            if len(self._unbound_window_channels) < _MAX_REMEMBERED_UNBOUND_CHANNELS:
+                self._unbound_window_channels.add(channel)
+            elif channel not in self._unbound_window_channels:
+                self._unbound_window_channels_overflowed = True
+            self._say_channel_is_unbound(channel, cause, now)
+
+    def _close_unbound_window(self, now: float) -> None:
+        """One aggregate line per interval, whatever the driver does with names."""
+
+        if self._unbound_window_rows:
+            distinct = len(self._unbound_window_channels)
+            logger.warning(
+                "Итог за интервал: %d показаний сохранены без идентичности описания, "
+                "каналов %s%d. Всего с момента запуска: %d. "
+                "Дополните каталог описаний каналов.",
+                self._unbound_window_rows,
+                "не менее " if self._unbound_window_channels_overflowed else "",
+                distinct,
+                self._unbound_channel_rows,
+            )
+        self._unbound_window_start = now
+        self._unbound_window_rows = 0
+        self._unbound_window_channels = set()
+        self._unbound_window_channels_overflowed = False
+        self._unbound_named_lines_in_window = 0
+
+    def _say_channel_is_unbound(self, channel: str, cause: BaseException, now: float) -> None:
+        """Name a channel at most once per interval, and name at most a few of them.
+
+        The per-channel limit alone is not a bound. A faulty driver cycling through more
+        distinct labels than are remembered evicts each label before it returns, so every
+        label looks new and every reading speaks. The named-line ceiling is what actually
+        holds the week: past it, the interval's aggregate line carries the rest.
+        """
+
+        previous = self._unbound_channel_said.get(channel)
+        if previous is not None and now - previous < _UNBOUND_CHANNEL_LOG_INTERVAL_S:
+            return
+        if self._unbound_named_lines_in_window >= _UNBOUND_NAMED_LINES_PER_INTERVAL:
+            return
+        unknown_channel = channel not in self._unbound_channel_said
+        if unknown_channel and len(self._unbound_channel_said) >= _MAX_REMEMBERED_UNBOUND_CHANNELS:
+            # Forget the channel that spoke longest ago.
+            self._unbound_channel_said.pop(
+                min(self._unbound_channel_said, key=self._unbound_channel_said.__getitem__),
+                None,
+            )
+        self._unbound_channel_said[channel] = now
+        self._unbound_named_lines_in_window += 1
+        logger.warning(
+            "Канал '%s' не описан в каталоге описаний каналов (%s). "
+            "Показания сохраняются, но без идентичности описания "
+            "(таких строк с момента запуска: %d). Дополните каталог описаний каналов.",
+            channel,
+            cause,
+            self._unbound_channel_rows,
+        )
+
+    def _write_day_batch(
+        self,
+        conn: sqlite3.Connection,
+        batch: list[Reading],
+        admitted_hashes: list[str] | None = None,
+        admitted_unbound_channels: list[str | None] | None = None,
+        admitted_is_unbound: list[bool] | None = None,
+    ) -> bool:
         """Write a single day's readings to the given connection.
 
         Returns True if the batch was durably committed (or there was
@@ -7426,7 +7664,13 @@ class SQLiteWriter:
         """
         rows = []
         skipped = 0
-        for r in batch:
+        # Collected while the rows are built, SAID only after the transaction commits.
+        # Counting here would announce readings that a later row in the same batch can
+        # still destroy -- a mismatch raises, a disk-full fault returns False -- and the
+        # rate limiter would then hold its tongue for the next five minutes about rows
+        # that were never stored.
+        unbound: list[tuple[str, BaseException]] = []
+        for index, r in enumerate(batch):
             if r.value is None:
                 skipped += 1
                 continue
@@ -7449,16 +7693,24 @@ class SQLiteWriter:
                 skipped += 1
                 continue
             stored_value, stored_status = encode(r.value, r.status)
-            descriptor_hash = (
-                None
-                if self._channel_catalog is None
-                else descriptor_hash_for_reading(
-                    self._channel_catalog,
-                    instrument_id=r.instrument_id,
-                    channel=r.channel,
-                    unit=r.unit,
-                )
-            )
+            if admitted_hashes is not None:
+                # THE DESCRIPTOR ADMISSION CHOSE, NOT A SECOND RESOLUTION OF THE LABEL.
+                # On the live path the label kept in the row is the one the instrument
+                # emitted, and resolving it again here can find a DIFFERENT descriptor --
+                # when a binding aliases an emitted label to another canonical id and a
+                # reading arrives under that canonical id, the second resolution succeeds
+                # and the row would store a real identity while the commit receipt carries
+                # the reserved one. The row and its receipt must not disagree.
+                descriptor_hash = admitted_hashes[index]
+                if admitted_is_unbound is not None and admitted_is_unbound[index]:
+                    unbound.append(
+                        (
+                            admitted_unbound_channels[index] if admitted_unbound_channels is not None else r.channel,
+                            ChannelNotDescribedError("live descriptor admission used the reserved unbound identity"),
+                        )
+                    )
+            else:
+                descriptor_hash = self._descriptor_hash_or_none(r, unbound)
             rows.append(
                 (
                     r.timestamp.timestamp(),
@@ -7511,6 +7763,9 @@ class SQLiteWriter:
                 # A successful write resets the locked-DB streak (roadmap A6).
                 self._locked_failure_count = 0
                 self._locked_failure_first_ts = None
+                # These rows are on disk now. The retry loop reaches this point once,
+                # so a retried transaction cannot count the same rows twice.
+                self._record_unbound_channels(unbound)
                 break
             except sqlite3.OperationalError as exc:
                 conn.rollback()

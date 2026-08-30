@@ -109,6 +109,46 @@ _UNITS_BY_QUANTITY: Final[Mapping[ChannelQuantity, frozenset[str]]] = MappingPro
     }
 )
 
+UNBOUND_CHANNEL_ID: Final = "cryodaq.unbound"
+"""Channel identity of the reserved 'this channel is not described' descriptor.
+
+WHY A RESERVED CATALOG ENTRY AND NOT A NULL. A reading whose channel the configured
+catalog does not describe must still be stored -- refusing it destroys the whole write
+batch, measured 2026-08-20. Storing it with a NULL descriptor hash was the first attempt
+and it is ambiguous: NULL already means PRE-CATALOG HISTORY, and the two cases cannot be
+told apart afterwards. A database written before catalogs existed and then reopened by a
+catalog-bearing writer holds both kinds of NULL in one file, and a day whose readings are
+ALL unbound rotates to Parquet with no descriptor sidecar at all, so no property of the
+archive can separate them.
+
+This entry gives the row its own provenance instead. It is a REAL catalog entry, not a
+forgery of a legacy one -- `ChannelCatalog` refuses synthetic legacy descriptors on
+purpose, and rightly. Its quantity and unit are the neutral pair the descriptor contract
+allows; they describe the ENTRY, not the reading, and the reading keeps its own instrument,
+channel and unit in its own columns, which is where the truth about it lives.
+"""
+
+
+def unbound_channel_descriptor() -> ChannelDescriptorV1:
+    """The reserved entry. Its hash is pinned by test; a field change orphans stored rows."""
+
+    return ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=UNBOUND_CHANNEL_ID,
+        instrument_id="cryodaq",
+        source_key="cryodaq.unbound",
+        quantity=ChannelQuantity.DERIVED,
+        unit="1",
+        role=ChannelRole.DERIVED,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Без описания",
+        display_name="Канал без описания",
+        visible_by_default=False,
+        display_order=0,
+        descriptor_revision=1,
+    )
+
+
 _SOURCE_SEGMENT = re.compile(r"[a-z0-9](?:[a-z0-9_-]{0,30}[a-z0-9])?")
 _LEGACY_SOURCE = re.compile(r"legacy-source:[0-9a-f]{64}")
 
