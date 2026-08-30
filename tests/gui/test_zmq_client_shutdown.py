@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import queue
 import subprocess
 import sys
 import threading
 import time
+import weakref
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1702,3 +1704,131 @@ def test_application_close_settles_all_real_qthreads(
             window.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
             app.processEvents()
+
+
+class _LiveLauncherStatusBridge:
+    def is_alive(self) -> bool:
+        return True
+
+    def process_pid(self) -> int:
+        return 41
+
+    def restart_count(self) -> int:
+        return 3
+
+
+def _healthy_launcher_status_reply(command: dict[str, object]) -> dict[str, object]:
+    if command == {"cmd": "safety_status"}:
+        return {
+            "ok": True,
+            "state": "ready",
+            "fault_reason": "",
+            "fault_revision": 0,
+            "fault_activated_at": 0.0,
+            "recovery_reason": "",
+            "channels_tracked": 0,
+            "keithley_connected": False,
+            "active_channels": [],
+            "mock": True,
+            "engine_instance_id": "a" * 32,
+            "proto": zmq_client.CLIENT_PROTOCOL_VERSION,
+        }
+    assert command == {"cmd": "annunciation_status"}
+    return {
+        "ok": True,
+        "engine_instance_id": "a" * 32,
+        "snapshot_revision": 1,
+        "activations": [],
+        "proto": zmq_client.CLIENT_PROTOCOL_VERSION,
+    }
+
+
+def _launcher_status_window():
+    """Build only the QObject-owned state needed by the real health tick."""
+
+    from PySide6.QtWidgets import QMainWindow
+
+    from cryodaq.launcher import LauncherWindow
+
+    window = LauncherWindow.__new__(LauncherWindow)
+    QMainWindow.__init__(window)
+    window._runtime_callbacks_open = True
+    window._runtime_callback_epoch = 7
+    window._shutdown_requested = False
+    window._assistant_enabled = False
+    window._engine_instance_id = "a" * 32
+    window._engine_unsettled_incarnation = None
+    window._bridge_restart_fault = False
+    window._bridge_restart_hold = False
+    window._restart_giving_up = False
+    window._restart_attempts = 0
+    window._last_restart_time = 0.0
+    window._tray_only = True
+    window._alarm_timer = None
+    window._engine_down_banner = None
+    window._bridge = _LiveLauncherStatusBridge()
+    window._replay_source = None
+    window._safety_status_generation = 0
+    window._annunciation_status_generation = 0
+    window._safety_worker = None
+    window._annunciation_worker = None
+    window._last_safety_state = None
+    window._last_alarm_count = None
+    window._last_reading_time = 0.0
+    window._periodic_reporting_fault = False
+    window._tray_icon_green = "green"
+    window._tray_icon_yellow = "yellow"
+    window._tray_icon_red = "red"
+    window._tray = SimpleNamespace(
+        isVisible=lambda: False,
+        setIcon=lambda _icon: None,
+        setToolTip=lambda _text: None,
+    )
+    window._is_engine_alive = lambda: True
+    return window
+
+
+def test_launcher_status_poll_keeps_finished_worker_children_bounded(monkeypatch) -> None:
+    """Repeated real launcher health ticks must not retain historical QThreads."""
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    from cryodaq.launcher import LauncherWindow
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        zmq_client,
+        "send_command",
+        lambda command, *, cancellation_requested=None: _healthy_launcher_status_reply(command),
+    )
+    window = _launcher_status_window()
+    observed_workers: list[weakref.ReferenceType[zmq_client.ZmqCommandWorker]] = []
+
+    try:
+        for tick in range(8):
+            LauncherWindow._check_engine_health(window)
+            current_workers = (window._safety_worker, window._annunciation_worker)
+            assert all(worker is not None for worker in current_workers)
+            assert all(worker.wait(2_000) for worker in current_workers if worker is not None)
+
+            deadline = time.monotonic() + 1.0
+            while zmq_client.registered_gui_command_workers() and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.001)
+            assert zmq_client.registered_gui_command_workers() == ()
+
+            observed_workers.extend(weakref.ref(worker) for worker in current_workers if worker is not None)
+            del current_workers
+            app.processEvents()
+            gc.collect()
+
+            children = window.findChildren(zmq_client.ZmqCommandWorker)
+            assert len(children) <= 2, f"launcher retained {len(children)} status workers after tick {tick + 1}"
+            assert sum(reference() is not None for reference in observed_workers) <= 2
+    finally:
+        window._safety_worker = None
+        window._annunciation_worker = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()

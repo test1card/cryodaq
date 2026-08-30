@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: LAUNCHER-STATUS-WORKER-RETENTION-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STATUS-WORKER-RETENTION-001
+    guard: tests/gui/test_zmq_client_shutdown.py::test_launcher_status_poll_keeps_finished_worker_children_bounded
+    ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_the_in_place_parent_self_reversion_on_both_real_launcher_status_constructors_retained_four_status_worker_children_by_tick_two_and_failed_the_new_boundedness_assertion_at_pytest_exit_one_then_restored_corrected_launcher_sha256_01c041779e488bacd61c29b2384b82c1e4da3d4dced38e39156313372a5ded1c_byte_identical_and_the_guard_passed_while_the_prior_gui_suite_had_no_real_poll_path_lifetime_guard_pending_immutable_capture
+    green_evidence: pending
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -7504,3 +7512,23 @@ records:
         ci_partition: core
     red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_while_the_existing_unknown_only_node_passed_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical; prior_unknown_only_control_measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
+
+  - id: LAUNCHER-STATUS-WORKER-RETENTION-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: LauncherWindow._check_engine_health safety_status and annunciation_status polling workers, the process-wide GUI worker ownership registry, and week-long tray-mode runtime memory.
+    classification: unbounded_resource_retention
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Every status poll replaced the launcher's Python attribute but left the terminal QThread parented to the week-long LauncherWindow, so Qt and PySide retained every historical worker, its command, cancellation Event, and threading internals while launcher memory grew without bound.
+    invariant: Repeated production launcher health ticks retain at most the two current status workers; the shared registry strongly owns every admitted parentless worker through queued-result disposition and thread termination, and shutdown settlement inventories that registry independently of QObject parentage.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/test_zmq_client_shutdown.py::test_launcher_status_poll_keeps_finished_worker_children_bounded
+        ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_real_launcher_check_engine_health_path_and_immediate_healthy_status_replies_the_in_place_parent_self_reversion_failed_at_tick_two_with_four_live_ZmqCommandWorker_children_pytest_exit_one_then_restored_corrected_launcher_sha256_01c041779e488bacd61c29b2384b82c1e4da3d4dced38e39156313372a5ded1c_byte_identical_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_parentless_launcher_status_workers_completed_eight_real_health_ticks_with_at_most_two_live_wrappers_and_no_window_children_one_passed_and_the_focused_registry_settlement_group_four_passed_pending_required_suites_and_immutable_capture
