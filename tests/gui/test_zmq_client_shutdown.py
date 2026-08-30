@@ -1788,6 +1788,31 @@ def _launcher_status_window():
     return window
 
 
+def _launcher_status_probe_plugin_args(env: dict[str, str]) -> tuple[str, ...]:
+    if env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD"):
+        return ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")
+    return ()
+
+
+@pytest.mark.parametrize(
+    ("autoload_disabled", "expected_plugin_count"),
+    [(None, 0), ("", 0), ("1", 1), ("true", 1), ("0", 1)],
+)
+def test_launcher_status_probe_plugins_follow_pytest_autoload_truthiness(
+    autoload_disabled: str | None,
+    expected_plugin_count: int,
+) -> None:
+    env: dict[str, str] = {}
+    if autoload_disabled is not None:
+        env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = autoload_disabled
+
+    plugin_args = _launcher_status_probe_plugin_args(env)
+
+    assert plugin_args.count("pytest_asyncio.plugin") == expected_plugin_count
+    assert plugin_args.count("pytest_timeout") == expected_plugin_count
+    assert plugin_args.count("-p") == 2 * expected_plugin_count
+
+
 def test_launcher_status_poll_keeps_finished_worker_children_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1810,11 +1835,7 @@ def test_launcher_status_poll_keeps_finished_worker_children_bounded(
         # Ordinary pytest runs load these entry points automatically. Protected
         # CI disables autoload and names the same plugins explicitly; mirror the
         # active contract so neither path registers a plugin twice or omits it.
-        plugin_args = (
-            ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")
-            if env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") == "1"
-            else ()
-        )
+        plugin_args = _launcher_status_probe_plugin_args(env)
         result = subprocess.run(
             [
                 sys.executable,
