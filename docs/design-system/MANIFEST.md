@@ -2,14 +2,14 @@
 title: Design System Manifest
 status: canonical
 last_updated: 2026-08-28
-version: 4.1.1
+version: 4.2.0
 ---
 
 # CryoDAQ Design System — Manifest
 
 **Generated:** 2026-08-28
 **Session:** v4.1.1 Keithley source-state freshness correction
-**Scope:** Design system v4.1.1 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Scope:** Design system v4.2.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 

@@ -92,7 +92,8 @@ jobs:
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \
             tools/ci_required_workflow_context.py \
-            tools/governance_contract.py; do
+            tools/governance_contract.py \
+            tools/test_node_source.py; do
             test "$(git hash-object "$path")" = "$(git rev-parse "${JUDGE_SHA:?}:$path")"
           done
 
@@ -306,7 +307,8 @@ jobs:
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \
             tools/ci_required_workflow_context.py \
-            tools/governance_contract.py; do
+            tools/governance_contract.py \
+            tools/test_node_source.py; do
             test "$(git hash-object "$path")" = "$(git rev-parse "${JUDGE_SHA:?}:$path")"
           done
 

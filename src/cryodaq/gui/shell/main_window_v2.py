@@ -36,8 +36,10 @@ from cryodaq.channels.descriptors import (
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.core.safety_manager import SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
 from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
@@ -51,7 +53,7 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
-from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
+from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel, SafetyGateCause
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
@@ -217,6 +219,7 @@ class MainWindowV2(QMainWindow):
         self._last_measurement_received_at: datetime | None = None
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
         self._last_safety_observed_at: datetime | None = None
         self._accepted_safety_bridge_instance_id: str | None = None
         self._accepted_safety_experiment_id: str | None = None
@@ -447,36 +450,65 @@ class MainWindowV2(QMainWindow):
         self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
         self._accepted_safety_bridge_instance_id = bridge_instance_id
         self._last_safety_state = readiness.lifecycle.value
-        self._last_safety_reason = (
-            readiness.status.operator_text if experiment_matches else "Эксперимент Safety изменился"
-        )
-        transport_stale = (
-            readiness.status.state
+        transport_unavailable = readiness.status.state in {
+            OperatorPresentationState.STALE,
+            OperatorPresentationState.DISCONNECTED,
+        } or bool(readiness.status.transport_reason_codes)
+        transport_unavailable = transport_unavailable or any(
+            blocker.state
             in {
                 OperatorPresentationState.STALE,
                 OperatorPresentationState.DISCONNECTED,
             }
-            or not experiment_matches
+            or bool(blocker.transport_reason_codes)
+            for blocker in readiness.blockers
         )
-        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
+        binding_current = bridge_instance_id is not None and (
+            self._latest_experiment_status is None or snapshot.experiment.experiment_id == self._active_experiment_id()
+        )
+        authoritative_blocked = (
+            not ready
+            and binding_current
+            and not self._replay_mode
+            and cut.mode is SnapshotMode.LIVE
+            and readiness.readiness is ReadinessTruth.BLOCKED
+            and readiness.lifecycle is not SafetyLifecycle.UNKNOWN
+            and bool(readiness.blockers)
+            and not transport_unavailable
+        )
+        if ready:
+            reason = ""
+        elif transport_unavailable:
+            reason = "Состояние Safety устарело"
+        elif authoritative_blocked:
+            # The composer summary text names the authority, while the
+            # blocker rows name the conditions that can stop the source.
+            # Preserve every distinct bounded protocol string in the visible
+            # warning and in the operator-choice receipt.
+            reason = "; ".join(dict.fromkeys(blocker.operator_text for blocker in readiness.blockers))
+        else:
+            reason = readiness.status.operator_text
+        cause = (
+            SafetyGateCause.AUTHORITATIVE_NOT_READY if authoritative_blocked else SafetyGateCause.AUTHORITY_UNAVAILABLE
+        )
+        self._last_safety_reason = reason
+        self._last_safety_gate_cause = cause
+        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_unavailable)
         if self._keithley_panel is not None:
-            if ready:
-                reason = ""
-            elif transport_stale:
-                reason = "Состояние Safety устарело"
-            else:
-                reason = self._last_safety_reason
-            self._keithley_panel.set_safety_ready(ready, reason)
+            self._keithley_panel.set_safety_ready(ready, reason, cause=cause)
         if (
             bridge_instance_id is not None
             and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
             and experiment_matches
+            and (ready or cause is SafetyGateCause.AUTHORITY_UNAVAILABLE)
         ):
             # Periodic typed cuts cover isolated loss of the best-effort
-            # source-state topic. READY provides verified-OFF evidence; a
-            # newer non-READY cut revokes older per-channel presentation
-            # without guessing which source is active.
+            # source-state topic. READY provides verified-OFF evidence; a cut
+            # with unavailable authority revokes older per-channel
+            # presentation without guessing which source is active. A current
+            # authoritative blocker is warning-permissive and must not erase a
+            # retained OFF state merely to disable Start indirectly.
             self._synchronize_keithley_source_state_from_typed_snapshot(
                 snapshot,
                 ready=ready,
@@ -545,8 +577,8 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < _MEASUREMENT_CONNECTION_TIMEOUT_S
             widget.set_connected(derived_connected)
-            ready, reason_text = self._current_keithley_safety_gate()
-            widget.set_safety_ready(ready, reason_text)
+            ready, reason_text, cause = self._current_keithley_safety_gate()
+            widget.set_safety_ready(ready, reason_text, cause=cause)
             self._replay_keithley_channel_state_snapshot()
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
@@ -966,9 +998,14 @@ class MainWindowV2(QMainWindow):
             "analytics/keithley_channel_state/smua",
             "analytics/keithley_channel_state/smub",
         }:
-            # Admit only events observed through a valid live bridge. Once
-            # admitted, their lifetime belongs to the engine producer.
-            if self._current_bridge_instance_id() is not None:
+            metadata = reading.metadata
+            source_state_authoritative = (
+                type(metadata) is dict
+                and metadata.get(PUBLISHER_AUTHORITY_METADATA_KEY) == SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
+            )
+            # DataBroker stamps this marker only after the exact SafetyManager
+            # capability publishes on its reserved source-state channels.
+            if self._current_bridge_instance_id() is not None and source_state_authoritative:
                 source_state_key = channel.rsplit("/", maxsplit=1)[-1]
                 self._keithley_channel_state_snapshot[source_state_key] = reading
                 self._keithley_channel_state_received_monotonic[source_state_key] = time.monotonic()
@@ -978,7 +1015,7 @@ class MainWindowV2(QMainWindow):
                     self._keithley_source_state_pending.add(source_state_key)
                 if not self._keithley_source_state_pending:
                     self._keithley_source_state_resync_not_before = None
-            if self._keithley_panel is not None:
+            if self._keithley_panel is not None and source_state_authoritative:
                 self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
@@ -1043,20 +1080,47 @@ class MainWindowV2(QMainWindow):
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
         reason = metadata.get("reason", "") or ""
+        legacy_reason = str(reason) if reason else ""
         if self._typed_safety_authority_seen:
             # READY-looking analytics cannot overwrite the coherent typed cut.
             # A negative observation is allowed to revoke it, and remains
             # visible until a newer typed cut supplies recovery authority.
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._last_safety_state = state_name
-                self._last_safety_reason = str(reason) if reason else ""
                 self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
-                self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+                current_safe_off = (
+                    state_name == SafetyLifecycle.SAFE_OFF.value
+                    and self._accepted_safety_bridge_instance_id == self._current_bridge_instance_id()
+                    and self._accepted_safety_bridge_instance_id is not None
+                    and (
+                        self._latest_experiment_status is None
+                        or self._accepted_safety_experiment_id == self._active_experiment_id()
+                    )
+                )
+                typed_gate_can_remain_authoritative = self._typed_safety_ready or (
+                    self._last_safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY
+                )
+                if current_safe_off and typed_gate_can_remain_authoritative:
+                    # The negative observation revokes readiness, not the
+                    # still-current bridge/experiment identity binding. It can
+                    # preserve an authoritative blocker, but cannot promote an
+                    # unavailable typed cut into authoritative gate evidence.
+                    self._typed_safety_ready = False
+                    self._last_safety_reason = legacy_reason
+                    self._last_safety_gate_cause = SafetyGateCause.AUTHORITATIVE_NOT_READY
+                    if self._keithley_panel is not None:
+                        self._keithley_panel.set_safety_ready(
+                            False,
+                            self._last_safety_reason or "Safety state is not ready",
+                            cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+                        )
+                elif not current_safe_off:
+                    self._invalidate_safety_authority(legacy_reason or "Safety state is not ready")
             return
 
         self._last_safety_state = state_name
-        self._last_safety_reason = str(reason) if reason else ""
+        self._last_safety_reason = legacy_reason
         self._last_safety_observed_at = observed_at
         self._bottom_bar.set_safety_state(self._last_safety_state)
 
@@ -1075,7 +1139,7 @@ class MainWindowV2(QMainWindow):
                     "No authoritative Safety state",
                 )
 
-    def _current_keithley_safety_gate(self) -> tuple[bool, str]:
+    def _current_keithley_safety_gate(self) -> tuple[bool, str, SafetyGateCause]:
         bridge_instance_id = self._current_bridge_instance_id()
         binding_current = (
             bridge_instance_id is not None
@@ -1086,15 +1150,22 @@ class MainWindowV2(QMainWindow):
             )
         )
         if self._typed_safety_authority_seen and self._typed_safety_ready and binding_current:
-            return True, ""
+            return True, "", SafetyGateCause.AUTHORITY_UNAVAILABLE
         if self._typed_safety_authority_seen:
-            return False, self._last_safety_reason or "Нет текущего состояния Safety"
-        return False, self._last_safety_reason or "Нет авторитетного состояния Safety"
+            cause = self._last_safety_gate_cause if binding_current else SafetyGateCause.AUTHORITY_UNAVAILABLE
+            return False, self._last_safety_reason or "Нет текущего состояния Safety", cause
+        return (
+            False,
+            self._last_safety_reason or "Нет авторитетного состояния Safety",
+            SafetyGateCause.AUTHORITY_UNAVAILABLE,
+        )
 
     def _invalidate_safety_authority(self, reason: str, *, disconnected: bool = False) -> None:
         self._accepted_safety_bridge_instance_id = None
         self._accepted_safety_experiment_id = None
         self._typed_safety_ready = False
+        self._last_safety_reason = reason
+        self._last_safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
         self._typed_safety_snapshot = None
         if self._last_safety_state is not None:
             self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
@@ -1168,7 +1239,7 @@ class MainWindowV2(QMainWindow):
 
         if quantity is ChannelQuantity.TEMPERATURE:
             if self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             self._analytics_temperature_snapshot[descriptor.channel_id] = reading
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
@@ -1183,7 +1254,7 @@ class MainWindowV2(QMainWindow):
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
             if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             if quantity in {
                 ChannelQuantity.VOLTAGE,
                 ChannelQuantity.CURRENT,
@@ -1603,6 +1674,13 @@ class MainWindowV2(QMainWindow):
         controller = getattr(self, "_annunciation_controller", None)
         if controller is not None:
             controller.complete_root_shutdown()
+
+    def refresh_display_precision(self) -> None:
+        """Re-render loaded operator measurement surfaces."""
+
+        self._overview_panel.refresh_display_precision()
+        if self._conductivity_panel is not None:
+            self._conductivity_panel.refresh_display_precision()
 
     def closeEvent(self, event):  # noqa: ANN001
         """Transfer a close request to the one composition-root owner.

@@ -44,7 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v4.1.1 (Keithley retained source-state presentation is
+**Current version:** v4.2.0 (Keithley retained source-state presentation is
 bound to one uninterrupted measurement-flow epoch and must be revalidated
 after a gap; flat tokens and public method signatures are unchanged).
 
@@ -85,7 +85,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.1.1 state: all four Active, no pending removals.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.2.0 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 

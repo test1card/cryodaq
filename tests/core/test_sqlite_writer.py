@@ -483,7 +483,7 @@ async def _shipped_throttle_cardinality_provenance(
                 "4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0",
                 driver_name=driver_name,
             )
-            assert commands == ("KRDG?",)
+            assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
             public_poll = [replace(reading, timestamp=timestamp) for reading in acquired]
             tracked_poll = lakeshore_throttle.filter_for_archive(public_poll)
             counted, persisted_rows = await _write_counting(
@@ -546,8 +546,11 @@ async def _read_shipped_lakeshore_response(
         async def query(self, command: str, timeout_ms: int | None = None) -> str:
             del timeout_ms
             commands.append(command)
-            assert command == "KRDG?", "an eight-channel fixture must not enter per-channel fallback"
-            return response
+            if command == "KRDG?":
+                return response
+            if command.startswith("RDGST? "):
+                return "0"
+            raise AssertionError(f"unexpected LakeShore query: {command}")
 
     driver.mock = False
     driver._connected = True
@@ -555,6 +558,9 @@ async def _read_shipped_lakeshore_response(
     driver._transport = _ResponseTransport()  # type: ignore[assignment]
     readings = await driver.read_channels()
     return readings, tuple(commands)
+
+
+_SHIPPED_LAKESHORE_POLL_COMMANDS = ("KRDG?", *(f"RDGST? {channel}" for channel in range(1, 9)))
 
 
 def _assert_single_batched_live_write(label: str, rows: int, counted: _CountingConnection, persisted_rows: int) -> None:
@@ -759,7 +765,7 @@ async def test_error_status_batches_use_one_live_transaction(
     batch = [replace(reading, timestamp=timestamp) for reading in acquired]
     statuses = tuple(reading.status for reading in batch)
     values = tuple(reading.value for reading in batch)
-    assert commands == ("KRDG?",)
+    assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
     assert len(batch) == 8
     if label == "mixed OK/error-status":
         assert statuses == (
@@ -794,7 +800,7 @@ async def test_error_status_batches_use_one_live_transaction(
         # the error batch lands on the steady-state path, where a regression
         # that splits only non-OK batches must still fail this guard.
         warm, warm_commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
-        assert warm_commands == ("KRDG?",)
+        assert warm_commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
         warm_receipt = await writer.write_committed([replace(reading, timestamp=timestamp) for reading in warm])
         assert warm_receipt is not None
         counted = get_counter()
@@ -864,7 +870,7 @@ async def test_scheduler_direct_settlement_uses_one_live_transaction(tmp_path: P
     get_counter = _install_counting(writer)
     try:
         warm, commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
-        assert commands == ("KRDG?",)
+        assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
         warm_receipt = await writer.write_committed([replace(reading, timestamp=timestamp) for reading in warm])
         assert warm_receipt is not None
         counted = get_counter()
@@ -872,7 +878,7 @@ async def test_scheduler_direct_settlement_uses_one_live_transaction(tmp_path: P
         before = _counter_snapshot(counted)
 
         acquired, commands = await _read_shipped_lakeshore_response("4.1,5.1,6.1,7.1,8.1,9.1,10.1,11.1")
-        assert commands == ("KRDG?",)
+        assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
         combined = [replace(reading, timestamp=timestamp + timedelta(seconds=1)) for reading in acquired]
         # Exact scheduler.py direct-settlement sequence (no write_committed()).
         settlement = writer.begin_committed(combined)
@@ -912,7 +918,7 @@ async def test_scheduler_process_readings_uses_one_live_transaction(tmp_path: Pa
     state = _InstrumentState(InstrumentConfig(driver=_shipped_driver("LS218_2")))
     try:
         warm, commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
-        assert commands == ("KRDG?",)
+        assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
         await scheduler._process_readings(state, [replace(reading, timestamp=timestamp) for reading in warm])
         counted = get_counter()
         assert counted is not None
@@ -921,7 +927,7 @@ async def test_scheduler_process_readings_uses_one_live_transaction(tmp_path: Pa
         # scheduler-side per-reading split that starts only once the catalog
         # is installed must fail here.
         acquired, commands = await _read_shipped_lakeshore_response("4.1,5.1,6.1,7.1,8.1,9.1,10.1,11.1")
-        assert commands == ("KRDG?",)
+        assert commands == _SHIPPED_LAKESHORE_POLL_COMMANDS
         poll = [replace(reading, timestamp=timestamp + timedelta(seconds=1)) for reading in acquired]
         await scheduler._process_readings(state, poll)
         after = _counter_snapshot(counted)
@@ -1306,11 +1312,9 @@ async def test_underrange_negative_inf_persists_as_sentinel(tmp_path: Path) -> N
     assert math.isnan(decode(rows[0][0], rows[0][1]))
 
 
-async def test_finite_value_with_error_status_persists_literally(tmp_path: Path) -> None:
-    """P2-2: a FINITE value carrying an error status keeps its finite value in
-    the DB (forensics), but decodes to NaN because status is the discriminator."""
+async def test_finite_value_with_error_status_is_not_persisted_as_temperature(tmp_path: Path) -> None:
+    """A status-flagged finite ceiling is stored as fault evidence, not data."""
     writer = SQLiteWriter(tmp_path)
-    await writer.start_immediate()
 
     r = Reading.now(
         channel="Т6 Экран",
@@ -1319,7 +1323,7 @@ async def test_finite_value_with_error_status_persists_literally(tmp_path: Path)
         instrument_id="lakeshore_218s",
         status=ChannelStatus.SENSOR_ERROR,
     )
-    await writer.write_immediate([r])
+    writer._write_batch([r])
 
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
@@ -1327,7 +1331,7 @@ async def test_finite_value_with_error_status_persists_literally(tmp_path: Path)
     rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т6 Экран'").fetchall()
     conn.close()
     assert len(rows) == 1
-    assert abs(rows[0][0] - 4.3) < 1e-9, "finite value stored as-is"
+    assert rows[0][0] == SENTINEL, "a status-flagged number must not look like a temperature in storage"
     assert rows[0][1] == "sensor_error"
     assert math.isnan(decode(rows[0][0], rows[0][1])), "error status masks to NaN"
 

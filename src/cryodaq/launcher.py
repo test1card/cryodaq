@@ -6625,6 +6625,19 @@ class LauncherWindow(QMainWindow):
         pending_id = selected if selected != current and selected in packs_by_id else None
         self._update_theme_pending_indicator(pending_id)
 
+        from cryodaq.gui.display_precision import precision_mode_enabled
+
+        settings_menu.addSeparator()
+        self._precision_mode_action = QAction(
+            "Точные значения",
+            self,
+            checkable=True,
+        )
+        self._precision_mode_action.setChecked(precision_mode_enabled())
+        self._precision_mode_action.setStatusTip("Показывать измерения с полной сохранённой точностью.")
+        self._precision_mode_action.triggered.connect(self._on_precision_mode_toggled)
+        settings_menu.addAction(self._precision_mode_action)
+
         # IV.4 F2: operator-level debug-logging toggle. Sits directly
         # under «Настройки» alongside «Тема» so it shares the same
         # menu location; state is persisted in QSettings and read by
@@ -6646,6 +6659,28 @@ class LauncherWindow(QMainWindow):
         )
         self._debug_logging_action.triggered.connect(self._on_debug_logging_toggled)
         settings_menu.addAction(self._debug_logging_action)
+
+    @Slot(bool)
+    def _on_precision_mode_toggled(self, checked: bool) -> None:
+        """Persist and immediately apply the display-only precision preference."""
+
+        if not LauncherWindow._runtime_callback_is_current(self):
+            return
+        from PySide6.QtWidgets import QMessageBox
+
+        from cryodaq.gui.display_precision import set_precision_mode
+
+        if not set_precision_mode(checked):
+            self._precision_mode_action.blockSignals(True)
+            self._precision_mode_action.setChecked(not checked)
+            self._precision_mode_action.blockSignals(False)
+            QMessageBox.critical(
+                self,
+                "Не удалось сохранить точность",
+                "Режим точных значений не изменён. Проверьте локальные настройки.",
+            )
+            return
+        self._main_window.refresh_display_precision()
 
     @Slot(bool)
     def _on_debug_logging_toggled(self, checked: bool) -> None:
@@ -8614,16 +8649,22 @@ def main() -> None:
         if replay_source is not None and not construction_hold:
             window.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
 
-    # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill)
-    # and SIGINT (Ctrl+C) cleanly shut down the engine subprocess rather than
-    # orphaning it. The handler is idempotent via _shutdown_requested flag;
-    # QTimer.singleShot dispatches _do_shutdown onto the Qt main thread.
+    # Register OS-level signal handlers so SIGTERM (systemd stop, OOM kill),
+    # SIGINT (Ctrl+C), and Windows SIGBREAK (CTRL_BREAK_EVENT) cleanly shut down
+    # the engine subprocess rather than orphaning it. The handler is idempotent
+    # via _shutdown_requested flag; QTimer.singleShot dispatches _do_shutdown
+    # onto the Qt main thread.
     def _signal_handler(signum: int, frame: object) -> None:
-        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        if hasattr(signal, "SIGBREAK") and signum == signal.SIGBREAK:
+            sig_name = "SIGBREAK"
+        else:
+            sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
         logger.info("Получен %s, инициирую корректное завершение", sig_name)
         QTimer.singleShot(0, window._do_shutdown)
 
     signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _signal_handler)
 

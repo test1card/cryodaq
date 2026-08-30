@@ -32,8 +32,8 @@ class EventLogger:
         message: str,
         *,
         extra_tags: list[str] | None = None,
-    ) -> None:
-        """Write an auto-log entry to SQLite and publish to EventBus."""
+    ) -> bool:
+        """Write an auto-log entry and report whether SQLite committed it."""
         experiment_id = self._em.active_experiment_id
         try:
             await self._writer.append_operator_log(
@@ -45,7 +45,7 @@ class EventLogger:
             )
         except Exception:
             logger.warning("Failed to auto-log event: %s", message, exc_info=True)
-            return
+            return False
 
         if self._event_bus is not None:
             from cryodaq.core.event_bus import EngineEvent
@@ -61,3 +61,4 @@ class EventLogger:
                 )
             except Exception:
                 logger.warning("EventBus publish failed in log_event", exc_info=True)
+        return True
