@@ -71,6 +71,14 @@ from cryodaq.gui.zmq_client import (
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 from cryodaq.operator_snapshot import SnapshotMode
+from cryodaq.process_lifetime import (
+    PARENT_PID_ENV,
+    WindowsKillOnCloseJob,
+    create_windows_kill_on_close_job,
+    parent_pid_environment,
+    resume_windows_process,
+    windows_job_objects_available,
+)
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -619,9 +627,10 @@ _THEME_DISPLAY_ORDER: tuple[str, ...] = (
 )
 _LIGHT_THEME_IDS: frozenset[str] = frozenset({"gost", "xcode", "braun"})
 
-# Флаги создания процесса без окна (Windows)
+# Windows process-creation flags used by launcher-owned children.
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
 _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
@@ -2440,6 +2449,7 @@ class LauncherWindow(QMainWindow):
         # Restart/backoff mirrors the engine child, but its death is NON-safety:
         # log + tray note only — no alarm, no banner, no giving-up latch.
         self._assistant_proc: subprocess.Popen | None = None
+        self._assistant_parent_job: WindowsKillOnCloseJob | None = None
         self._assistant_shutdown_path: Path | None = None
         self._assistant_shutdown_authority: _AssistantShutdownAuthority | None = None
         self._assistant_soak_duplicate_owner: _OwnedFileDescriptor | None = None
@@ -6031,6 +6041,7 @@ class LauncherWindow(QMainWindow):
             raise RuntimeError("assistant restart slot is already reserved")
         residual = (
             getattr(self, "_assistant_proc", None),
+            getattr(self, "_assistant_parent_job", None),
             getattr(self, "_assistant_shutdown_path", None),
             getattr(self, "_assistant_shutdown_authority", None),
             getattr(self, "_assistant_soak_duplicate_owner", None),
@@ -6068,6 +6079,12 @@ class LauncherWindow(QMainWindow):
             cmd = [python, "-m", "cryodaq.agents.assistant_bootstrap"]
 
         env = _without_soak_bridge_environment(os.environ)
+        # This is a per-spawn grant, never ambient inherited authority. Linux
+        # replaces it with this launcher's exact PID; Windows uses the Job
+        # handle and must not let a stale Linux grant make its child self-exit.
+        env.pop(PARENT_PID_ENV, None)
+        if sys.platform.startswith("linux"):
+            env.update(parent_pid_environment(os.getpid()))
         env["PYTHONUNBUFFERED"] = "1"
         env["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = "1" if self._assistant_experiment_mode else "0"
         env["CRYODAQ_ASSISTANT_PERIODIC_MODE"] = (
@@ -6076,13 +6093,15 @@ class LauncherWindow(QMainWindow):
         # CREATE_NO_WINDOW children do not have a console on which
         # GenerateConsoleCtrlEvent can be relied upon.  Use a private file
         # sentinel for the production graceful path; SIGBREAK remains useful
-        # for the console-enabled frozen smoke harness.
-        creationflags = _WINDOWS_CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        # for the console-enabled frozen smoke harness. CREATE_SUSPENDED keeps
+        # application code from running until the kill-on-close Job owns it.
+        creationflags = _WINDOWS_CREATE_NO_WINDOW | _WINDOWS_CREATE_SUSPENDED if sys.platform == "win32" else 0
         shutdown_authority: _AssistantShutdownAuthority | None = None
         soak_duplicate: _OwnedFileDescriptor | None = None
         soak_generation: int | None = None
         soak_capability = getattr(self, "_soak_artifact_capability", None)
         process: subprocess.Popen[Any] | None = None
+        parent_job: WindowsKillOnCloseJob | None = None
         primary_failure: BaseException | None = None
         try:
             if sys.platform == "win32":
@@ -6119,7 +6138,18 @@ class LauncherWindow(QMainWindow):
                 creationflags=creationflags,
                 **popen_kwargs,
             )
+            # Publish the exact process owner before the post-CreateProcess
+            # Job assignment, so an assignment exception cannot discard it.
             self._assistant_proc = process
+            if windows_job_objects_available():
+                # CreateProcess returns the child suspended. Publish the Job
+                # owner before resume too, so either assignment or resume
+                # failure retains every authority needed for exact cleanup.
+                parent_job = create_windows_kill_on_close_job(process)
+                self._assistant_parent_job = parent_job
+                resume_windows_process(process)
+            else:
+                self._assistant_parent_job = None
             self._assistant_shutdown_path = None if shutdown_authority is None else shutdown_authority.path
             self._assistant_shutdown_authority = shutdown_authority
             if soak_capability is not None and soak_generation is not None:
@@ -6165,18 +6195,24 @@ class LauncherWindow(QMainWindow):
             if not isinstance(primary_failure, Exception):
                 raise primary_failure
             self._assistant_proc = None
+            self._assistant_parent_job = None
             self._assistant_shutdown_path = None
             self._assistant_shutdown_authority = None
 
     def _stop_assistant(self) -> None:
         """Остановить cryodaq-assistant подпроцесс, если он запущен."""
         if self._assistant_proc is None:
+            parent_job = getattr(self, "_assistant_parent_job", None)
+            if parent_job is not None:
+                parent_job.close()
+            self._assistant_parent_job = None
             LauncherWindow._settle_assistant_soak_duplicate_owner(self)
             self._assistant_shutdown_path = None
             self._assistant_shutdown_authority = None
             self._assistant_unsettled_start_failure = None
             return
         process = self._assistant_proc
+        parent_job = getattr(self, "_assistant_parent_job", None)
         logger.info("Остановка cryodaq-assistant (PID=%d)...", process.pid)
         shutdown_path = getattr(self, "_assistant_shutdown_path", None)
         shutdown_authority = getattr(self, "_assistant_shutdown_authority", None)
@@ -6239,8 +6275,11 @@ class LauncherWindow(QMainWindow):
                         process.wait(timeout=5)
         if process.poll() is None:
             raise RuntimeError("assistant process remained alive after bounded shutdown")
+        if parent_job is not None:
+            parent_job.close()
         LauncherWindow._settle_assistant_soak_duplicate_owner(self)
         self._assistant_proc = None
+        self._assistant_parent_job = None
         # Do not unlink by pathname: Windows has no portable atomic
         # checked-unlink operation. Per-launch UUID names make the retained
         # empty sentinel inert. Authority is released only after process death.
@@ -6260,6 +6299,7 @@ class LauncherWindow(QMainWindow):
         if (
             self._assistant_proc is not None
             and self._assistant_proc.poll() is None
+            and (not windows_job_objects_available() or getattr(self, "_assistant_parent_job", None) is not None)
             and getattr(self, "_assistant_unsettled_start_failure", None) is None
         ):
             if self._assistant_periodic_requested:
@@ -6277,6 +6317,7 @@ class LauncherWindow(QMainWindow):
             value is not None
             for value in (
                 self._assistant_proc,
+                getattr(self, "_assistant_parent_job", None),
                 getattr(self, "_assistant_shutdown_path", None),
                 getattr(self, "_assistant_shutdown_authority", None),
                 getattr(self, "_assistant_soak_duplicate_owner", None),

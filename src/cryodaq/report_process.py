@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cryodaq import process_lifetime
 from cryodaq.periodic_state import (
     PeriodicArtifact,
     PeriodicContractError,
@@ -52,6 +53,8 @@ from cryodaq.reporting.periodic_input import (
     validate_result_payload,
 )
 
+_WindowsJob = process_lifetime.WindowsKillOnCloseJob
+_create_windows_job = process_lifetime.create_windows_kill_on_close_job
 DEFAULT_MANUAL_TIMEOUT_S = 48.0
 _RESULT_SCHEMA = 1
 _REPORT_FIELDS = {"docx_path", "pdf_path", "assets_dir", "sections", "skipped", "reason"}
@@ -1049,87 +1052,6 @@ def _creation_kwargs() -> dict[str, Any]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
-
-
-class _WindowsJob:
-    """Kill-on-close Windows Job Object containing a report child tree."""
-
-    def __init__(self, process: subprocess.Popen[Any]) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        class BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", BasicLimitInformation),
-                ("IoInfo", IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
-        info = ExtendedLimitInformation()
-        info.BasicLimitInformation.LimitFlags = 0x00002000
-        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
-            error = ctypes.get_last_error()
-            kernel32.CloseHandle(job)
-            raise OSError(error, "SetInformationJobObject failed")
-        process_handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
-        if not kernel32.AssignProcessToJobObject(job, process_handle):
-            error = ctypes.get_last_error()
-            kernel32.CloseHandle(job)
-            raise OSError(error, "AssignProcessToJobObject failed")
-        self._kernel32 = kernel32
-        self._handle = job
-
-    def close(self) -> None:
-        if self._handle:
-            self._kernel32.CloseHandle(self._handle)
-            self._handle = None
-
-
-def _create_windows_job(process: subprocess.Popen[Any]) -> _WindowsJob:
-    return _WindowsJob(process)
 
 
 class ReportProcessRunner:

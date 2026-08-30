@@ -55,6 +55,15 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: LAUNCHER-ASSISTANT-PARENT-DEATH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-ASSISTANT-PARENT-DEATH-001
+    guard: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_sigkill
+    ci_partition: remaining
+    platform: posix
+    red_evidence: measured_2026_08_30_python_3_14_6_against_final_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_removing_only_bind_child_lifetime_from_environment_from_importable_assistant_bootstrap_made_the_exact_real_pidfd_launcher_SIGKILL_guard_fail_1_failed_exit_1_because_the_assistant_survived_then_cleanup_killed_and_reaped_it_pending_immutable_capture
+    green_evidence: measured_2026_08_30_python_3_14_6_restored_assistant_bootstrap_sha256_c66fa17e7cd0bac838134ca34648baec2ecf56b700dbb2c54d1365732f5d0633_git_blob_952eda891b2f05b2379c8201454297acebb01a0c_byte_identical_with_final_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_and_shared_lifetime_blob_5d1a9d3a145d3d25714ff4ef699e159b3b8ca1d4_then_exact_guard_1_passed_pending_immutable_capture
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -79,6 +88,231 @@ false_green_pairs:
     guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-DEATH-PIPE-CONTROL-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_sleeping_child_outlives_its_killed_parent
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_pipe_reading_control_child_exited_on_parent_eof_so_the_lifecycle_test_stayed_green_without_reproducing_the_unbound_orphan_2026_08_23_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-DEATH-PROBE-IMPORT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_an_unbound_worker_is_refused
+    ci_partition: remaining
+    platform: windows
+    red_evidence: the_python_c_probe_child_died_during_import_so_an_absent_continuation_marker_looked_like_a_safe_refusal_without_exercising_the_binder_2026_08_23_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-WINDOWS-BRANCH-VACUITY-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_usbtmc_process_protocol.py::test_windows_lifetime_binding_refuses_unprotected_visa_worker
+    ci_partition: remaining
+    platform: windows
+    red_evidence: the_protocol_test_supplied_an_unrelated_parent_pid_so_the_reparented_child_exit_ran_before_the_windows_refusal_branch_and_the_test_stayed_green_without_observing_the_warning_or_refusal_replacing_the_real_non_linux_exit_with_return_made_the_strengthened_node_fail_2026_08_25_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-LIFECYCLE-HARNESS-PIDFD-SETUP-CLEANUP-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_setup_fails_after_spawn
+    ci_partition: remaining
+    platform: posix
+    red_evidence: after_the_parent_published_SPAWNED_a_pidfd_setup_error_left_the_exact_child_live_so_the_harness_could_error_without_settling_the_side_effect_2026_08_26_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-LIFECYCLE-HARNESS-PIDFD-POLL-CLEANUP-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup
+    ci_partition: remaining
+    platform: posix
+    red_evidence: after_parent_kill_the_cleanup_polled_before_pidfd_SIGKILL_so_an_injected_poll_error_skipped_the_kill_and_entered_unbounded_waitpid_for_the_live_600_second_child_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PIDFD-WRAPPER-ABSENCE-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_stable_identity_uses_kernel_pidfd_when_python_omits_wrapper
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_ubuntu_2204_lab_conda_python_omitted_os_pidfd_open_while_the_kernel_exposed_syscall_434_so_seven_registered_pidfd_guards_skipped_and_a_green_suite_executed_none_of_the_target_identity_lifecycle_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-KILL-REAP-OWNERSHIP-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_successful_parent_SIGKILL_followed_by_the_first_parent_wait_failure_left_parent_was_killed_false_so_cleanup_skipped_its_subreaper_owned_adopted_child_waitpid_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PIDFD-SIGKILL-RETRY-CLOSE-FALSE-GREEN-011
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_retries_exact_sigkill_before_reap_and_pidfd_close
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_failed_first_exact_identity_SIGKILL_had_no_independent_pidfd_retry_and_cleanup_could_close_the_only_stable_identity_before_exit_and_exact_reap_settled_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-STREAM-CLEANUP-SUBREAPER-RESTORE-FALSE-GREEN-012
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_restores_subreaper_after_parent_stream_close_failure
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_first_parent_stream_close_failure_skipped_later_stream_cleanup_and_the_guard_counted_one_restore_helper_call_so_a_no_op_restore_left_PR_GET_CHILD_SUBREAPER_enabled_while_remaining_green_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-STARTUP-STALL-CLEANUP-FALSE-GREEN-013
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_stalled_harness_parent_is_exactly_terminated_killed_and_waited
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_parent_stalled_before_SPAWNED_made_the_bounded_startup_read_fail_but_the_cleanup_wait_timed_out_without_terminate_kill_or_final_wait_leaving_the_parent_and_any_later_worker_live_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-ALREADY-DEAD-PARENT-REAP-FALSE-GREEN-014
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_child_when_parent_dies_before_explicit_kill
+    ci_partition: remaining
+    platform: posix
+    red_evidence: an_abrupt_parent_exit_before_the_harness_kill_left_parent_was_killed_false_so_cleanup_marked_the_pidfd_killed_adopted_child_reaped_without_any_exact_waitpid_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-PIDFD-SIGNAL-FALSE-GREEN-015
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_pins_parent_before_startup_and_signals_same_pidfd
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_harness_claimed_every_signal_used_a_preopened_pidfd_while_parent_SIGKILL_used_Popen_kill_whose_poll_then_bare_os_kill_left_a_pid_reuse_race_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PRE-SPAWN-REPORT-DESCENDANT-AUTHORITY-FALSE-GREEN-016
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_pre_spawn_report_stall_settles_immune_child_by_preopened_pidfd
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_child_could_become_SIGTERM_immune_then_the_parent_stall_before_SPAWNED_so_the_harness_had_no_child_pid_or_pidfd_and_returned_with_the_exact_worker_still_live_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-PIDFD-SETUP-CLEANUP-FALSE-GREEN-017
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_pin_failure_settles_started_parent_before_restoring_subreaper
+    ci_partition: remaining
+    platform: posix
+    red_evidence: Popen_started_the_harness_parent_then_a_real_os_pidfd_open_wrapper_failure_reached_two_aliases_of_the_same_wrapper_so_no_independent_exact_authority_settled_waited_and_reaped_the_unstarted_parent_before_subreaper_restore_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-STARTUP-PARTIAL-FRAME-DEADLINE-FALSE-GREEN-018
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_partial_startup_frame_is_deadline_bounded_and_every_process_is_settled
+    ci_partition: remaining
+    platform: posix
+    red_evidence: select_reported_one_stdout_byte_ready_then_buffered_readline_waited_without_bound_for_a_parent_that_held_a_newline_free_partial_frame_open_so_cleanup_never_settled_parent_child_pidfds_reap_or_subreaper_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-FORGED-CHILD-PID-AUTHORITY-FALSE-GREEN-019
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_forged_child_pid_is_never_signalled_or_released
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_child_writable_identity_file_could_name_an_unrelated_live_pid_and_the_harness_opened_then_signalled_that_pidfd_before_authenticating_the_report_against_the_pinned_parent_child_relationship_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-CLEANUP-MULTI-FAILURE-FALSE-GREEN-020
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_term_signal_and_first_wait_failures_still_end_in_exact_kill_and_reap
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_TERM_pidfd_send_error_or_first_parent_wait_error_short_circuited_the_cleanup_sequence_before_exact_SIGKILL_and_direct_child_reap_so_the_parent_could_remain_live_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-UNREPORTED-ADOPTED-DESCENDANT-FALSE-GREEN-021
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_worker_could_fork_a_SIGTERM_immune_descendant_before_self_reporting_and_the_harness_only_settled_the_reported_worker_then_restored_subreaper_with_the_unreported_process_live_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-SCRATCH-UNLINK-SUBREAPER-RESTORE-FALSE-GREEN-022
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_scratch_unlink_failure_cannot_skip_actual_subreaper_restoration
+    ci_partition: remaining
+    platform: posix
+    red_evidence: identity_or_gate_unlink_failure_ran_before_the_restore_try_so_PR_SET_CHILD_SUBREAPER_remained_enabled_after_the_harness_returned_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-SAME-PARENT-SPAWN-CORROBORATION-FALSE-GREEN-023
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_same_parent_sibling_forgery_never_releases_worker_gate
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_child_writable_frame_named_a_live_same_parent_sibling_so_kernel_lineage_validation_passed_and_the_harness_released_that_siblings_gate_before_reading_the_parent_owned_SPAWNED_mismatch_creating_a_RELEASED_side_effect_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-POST-START-PIDFD-OPEN-RAW-RECOVERY-FALSE-GREEN-024
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_child_and_adopted_pins_recover_raw_after_post_start_wrapper_loss
+    ci_partition: remaining
+    platform: posix
+    red_evidence: replacing_real_os_pidfd_open_only_after_the_parent_was_pinned_and_START_was_sent_made_one_wrapper_failure_abort_exact_child_pinning_and_forced_adopted_identities_to_retry_the_same_wrapper_while_the_prior_guard_only_monkeypatched__stable_identity_and_remained_false_green_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-CLEANUP-ERROR-DEFERRED-SETTLEMENT-FALSE-GREEN-025
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_signal_error_preserves_error_after_child_descendant_reap_and_fd_close
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_parent_TERM_wrapper_error_followed_by_successful_exact_SIGKILL_raised_before_returning_parent_settlement_so_cleanup_skipped_exact_child_reap_pidfd_close_and_hidden_descendant_sweep_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-ADOPTED-DESCENDANT-SIGNAL-ATTEMPT-ALL-FALSE-GREEN-026
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity
+    ci_partition: remaining
+    platform: posix
+    red_evidence: an_EIO_from_the_first_adopted_descendants_signal_wrapper_aborted_the_inventory_loop_without_raw_pidfd_SIGKILL_or_attempting_later_adopted_identities_before_subreaper_restoration_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-ADOPTED-PIN-RETRY-DIAGNOSTIC-BOUND-FALSE-GREEN-027
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated
+    ci_partition: remaining
+    platform: posix
+    red_evidence: persistent_adopted_pin_failure_retried_each_sibling_32_times_under_the_unbounded_retry_mutation_and_removing_deduplication_and_capping_expanded_the_raised_diagnostic_to_25231_characters_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PREBINDER-REPARENT-EXTERNAL-EFFECT-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-PREBINDER-REPARENT-FAIL-CLOSED-001C
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_reparented_worker_exits_before_pyvisa_open_after_prebinder_release
+    ci_partition: remaining
+    platform: posix
+    red_evidence: replacing_the_initial_parent_mismatch_exit_with_expected_parent_os_getppid_let_the_adopted_worker_bind_to_the_subreaper_and_reach_the_real_worker_open_path_while_spacing_dependent_source_inspection_could_remain_green_2026_08_26_pending_immutable_capture
     green_evidence: pending
   - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
     status: open
@@ -5433,13 +5667,63 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: USBTMC cancellation, close, handle ownership, recovery, and shutdown.
+    applies_to: USBTMC cancellation, close, handle ownership, recovery, shutdown, and VISA worker process lifetime relative to its engine parent.
     classification: retained_handle_loss
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Cancellation can clear ownership while an I/O or close operation remains live.
-    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled.
+    consequence: Cancellation can clear ownership while an I/O or close operation remains live, and an abruptly dead engine can leave a source-owning VISA worker alive past the OFF a replacement engine commands. A lifecycle harness that loses kill, reap, pidfd, stream, or process-global subreaper ownership can manufacture a clean-looking result while leaving its own worker or host state unsettled.
+    invariant: >-
+      Incomplete close retains one bounded recovery owner and visible HOLD until
+      the handle is exactly settled. The source-owning VISA worker binds its
+      lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG
+      carrying exactly SIGKILL with a post-call parent re-check and a
+      refuse-unbound failure direction -- while platforms without an equivalent
+      binding stay explicitly open gates that start no fake guarantee. The
+      lifecycle harness pins the parent before granting child-creation authority;
+      if both wrapper pin attempts fail after Popen, an independent raw kernel
+      opener obtains exact authority even when the real Python wrapper exists but
+      fails, then settles and waits the still-unstarted parent before subreaper
+      restoration. Each worker self-publishes only a candidate identity while
+      gated before signal immunity or VISA. The harness opens a pidfd and
+      authenticates its kernel-reported PID and parent relationship against the
+      still-live exact parent pidfd, retaining that pidfd only as cleanup authority.
+      The parent-owned SPAWNED frame must then name the same exact PID before the
+      gate is released; a same-parent sibling forgery therefore produces no worker
+      side effect. A forged or reused numeric PID is closed untouched and never signalled. It signals exact pidfds instead of reusable numeric PIDs
+      and settles each exact child on every error after spawn, including a stall
+      before SPAWNED, pidfd setup, and post-parent-kill poll failures. Startup
+      framing remains deadline-bounded after every partial byte; readiness never
+      licenses a blocking readline. A stalled parent receives bounded
+      exact-identity SIGTERM then SIGKILL and a final bounded wait, continuing to
+      exact SIGKILL after TERM-send or earlier wait failure. Cleanup attempts exact-child SIGKILL
+      before any fallible poll and reaps the adopted child within a fixed
+      deadline. Subreaper-owned reap responsibility is established before the
+      parent-kill attempt, and an already-dead parent can never be treated as
+      evidence that its normal Process.join reaped the child.
+      Exact child exit and exact adopted-child reap are separate settlements: a
+      failed wrapper signal gets an independent raw pidfd SIGKILL retry, and the
+      pidfd remains open until both settlements complete. Parent settlement state
+      is returned separately from preserved signal/wait errors so the first error
+      is propagated only after exact child reap, pidfd closure, and descendant
+      settlement. Parent stdin, stdout, and stderr cleanup is attempt-all and
+      independent, preserves the first failure while sanitizing later failure
+      details, and restores the prior
+      process-global subreaper state from a finally boundary even when stream or
+      scratch unlink cleanup fails. Before restoration it inventories every new
+      kernel-adopted direct descendant and pins each exact pidfd. Child and
+      descendant pinning use the independent raw pidfd_open syscall both when
+      the Python wrapper is absent and when a present wrapper fails after
+      preflight. Persistent adopted-pin failures receive at most three attempts
+      per identity with monotonic backed-off waits; diagnostics preserve the
+      first cause while deduplicating and capping retained text. Every sibling
+      is attempted before failure is propagated. A failed signal wrapper is
+      retried through the independent raw pidfd syscall, and every pinned
+      identity is killed and reaped, so an unreported pre-handshake fork cannot
+      escape. Its production-path guard reaches the real
+      USBTMC process constructor. This evidence proves process lifetime only; it
+      does not prove USB transaction settlement, physical OFF, or restart
+      authority.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5447,7 +5731,121 @@ records:
         ci_partition: remaining
       - node: tests/drivers/test_usbtmc_process_protocol.py::test_later_close_reconciles_same_owner_without_second_physical_close
         ci_partition: remaining
-    red_evidence: usbtmc_cancelled_close_lost_owner_pending_artifact_binding
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_sleeping_child_outlives_its_killed_parent
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_gil_holding_native_child_outlives_its_killed_parent
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_requests_exactly_pr_set_pdeathsig_with_sigkill
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_refuses_rather_than_running_unbound
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_parent_changing_after_the_request_is_caught
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_expected_parent_is_the_engines_pid_not_one_the_child_reads
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_runs_before_any_handle_exists
+        ci_partition: remaining
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_stalled_harness_parent_is_exactly_terminated_killed_and_waited
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_pre_spawn_report_stall_settles_immune_child_by_preopened_pidfd
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_pin_failure_settles_started_parent_before_restoring_subreaper
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_pins_parent_before_startup_and_signals_same_pidfd
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_child_when_parent_dies_before_explicit_kill
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_closes_preflight_and_child_pidfds
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_stable_identity_uses_kernel_pidfd_when_python_omits_wrapper
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_child_and_adopted_pins_recover_raw_after_post_start_wrapper_loss
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_setup_fails_after_spawn
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_retries_exact_sigkill_before_reap_and_pidfd_close
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_restores_subreaper_after_parent_stream_close_failure
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_partial_startup_frame_is_deadline_bounded_and_every_process_is_settled
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_forged_child_pid_is_never_signalled_or_released
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_term_signal_and_first_wait_failures_still_end_in_exact_kill_and_reap
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_same_parent_sibling_forgery_never_releases_worker_gate
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_parent_signal_error_preserves_error_after_child_descendant_reap_and_fd_close
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_scratch_unlink_failure_cannot_skip_actual_subreaper_restoration
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_production_settle_process_open_worker_cannot_survive_killed_parent
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_an_unbound_worker_is_refused
+        ci_partition: remaining
+        platform: windows
+      - node: tests/drivers/test_usbtmc_process_protocol.py::test_windows_lifetime_binding_refuses_unprotected_visa_worker
+        ci_partition: remaining
+        platform: windows
+    red_evidence: lane98_f3f1b45_prctl_sigterm_swap_failed_exact_args_and_sigterm_immune_children_survived_while_unstable_identity_refused_to_signal_2026_08_23_pending_immutable_capture
+    green_evidence: ubuntu_2204_python_31012_repeated_parent_death_lifecycle_green_and_windows_worker_start_probe_green_at_lane_head_pending_immutable_capture
+  - id: USBTMC-PREBINDER-REPARENT-FAIL-CLOSED-001C
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Linux USBTMC VISA worker startup through USBTMCTransport._settle_process_open, _visa_process_main, and the initial _bind_lifetime_to_parent parent-identity check before pyvisa or a VISA handle can open.
+    classification: stale_parent_rebinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A worker first scheduled after its engine dies can mistake the surviving child subreaper for its owner, open VISA from an already-buffered request, and create a second source-owning process.
+    invariant: The engine-captured parent PID remains authoritative. Under the exact Linux subreaper topology, a worker released after engine death exits on the initial mismatch before any pyvisa ResourceManager or open_resource external effect. This is process-lifetime and pre-open ordering evidence only; it does not prove USB transaction settlement, physical OFF, or restart authority.
+    rule_refs:
+      - AGENTS.md#architecture-and-extension-rules
+    guards:
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_reparented_worker_exits_before_pyvisa_open_after_prebinder_release
+        ci_partition: remaining
+        platform: posix
+    red_evidence: initial_mismatch_exit_replaced_by_expected_parent_os_getppid_reached_fake_pyvisa_resource_manager_through_the_real_settle_process_open_constructor_and_framed_open_request_2026_08_26_pending_immutable_capture
     green_evidence: pending
   - id: GPIB-HANDLE-SETTLEMENT-001C
     status: open
@@ -7295,6 +7693,46 @@ records:
     automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
     green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
+  - id: LAUNCHER-ASSISTANT-PARENT-DEATH-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The launcher-owned assistant process started by LauncherWindow._start_assistant through cryodaq.agents.assistant_bootstrap on Linux and by a retained kill-on-close Job Object on Windows.
+    classification: retained_handle_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Abrupt launcher death or failure during construction can leave a 100 MiB assistant process alive indefinitely; repeated failed launches accumulate unbounded resident memory across a laboratory week. On Windows an ordinary Popen could execute application code or create descendants before Job assignment, while fake-Popen guards reached the real kernel with invalid handles. In the Linux lifecycle harness a live stderr writer could block diagnostics forever, fallible parent creation could leave process-global subreaper state enabled, and readiness failure after an engine PID report could leak that exact engine identity.
+    invariant: The repeated retained-child class is enforced at the shared process-lifetime boundary. On Linux the launcher captures its PID before Popen, the assistant consumes that exact environment grant before acquiring logging, configuration, socket, renderer, or optional LLM runtime ownership, and PR_SET_PDEATHSIG delivers SIGKILL with both pre-call and post-call parent identity checks. The lifecycle harness bounds reads while a writer remains live, encloses every fallible step after subreaper activation in restoration, and captures, terminates, observes, closes, and reaps every reported engine identity even when readiness fails. On Windows the assistant is created suspended; the exact Popen owner is published, assigned to a JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE handle, and that Job owner is published before exactly one resume. Assignment or resume failure retains every exact cleanup owner, and fake-Popen guards model this lifecycle seam instead of reaching the kernel with invalid handles. Construction failure and exact launcher death leave no assistant alive. Engine death does not kill the assistant because the launcher, not the engine, owns it. Linux PDEATHSIG is not transitive and this record claims no coverage for launcher-owned multiprocessing siblings or assistant descendants; a Windows Job covers the assigned assistant tree but not sibling launcher children.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_construction_failure
+        ci_partition: remaining
+        platform: posix
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_sigkill
+        ci_partition: remaining
+        platform: posix
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_is_owned_by_launcher_not_engine
+        ci_partition: remaining
+        platform: posix
+      - node: tests/test_launcher_shutdown_ownership.py::test_windows_assistant_retains_kill_on_close_job_until_child_exit
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_windows_job_assignment_failure_retains_exact_assistant_owner
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_resume_windows_process_targets_exact_suspended_child
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_windows_resume_failure_retains_process_and_assigned_job
+        ci_partition: remaining
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_early_exit_diagnostic_is_bounded_while_writer_remains_open
+        ci_partition: remaining
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_parent_creation_failure_restores_subreaper
+        ci_partition: remaining
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_engine_identity_is_cleaned_if_readiness_fails_after_report
+        ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_master_9cd72a91b_twelve_children_with_dead_parent_pids_retained_1042_6_MiB_including_one_103_1_MiB_assistant_and_removing_only_the_corrected_assistant_bootstrap_binder_reproduced_a_surviving_real_assistant_under_exact_launcher_SIGKILL_1_failed_exit_1; coordinator_native_windows_control_at_exact_head_2b6445f3_restored_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_and_shared_lifetime_blob_5d1a9d3a145d3d25714ff4ef699e159b3b8ca1d4_then_the_suspended_assignment_resume_guards_failed_3_of_3_before_byte_identical_restore_pending_immutable_capture
+    green_evidence: measured_2026_08_30_python_3_14_6_final_launcher_blob_1d64962e1d27f237dcbefa95af97de70b880c1a7_shared_lifetime_blob_eca8f7df3f9dea00791723f9c549c73eb4ae63a1_and_parent_lifetime_guard_blob_0501c16637e9972fba5dfbbae84b87c08c3cd5f5_passed_the_native_windows_focused_object_34_passed_8_expected_posix_skips_and_the_ubuntu_focused_object_42_passed_with_the_five_lifecycle_nodes_repeated_10_times_50_of_50_pending_hosted_remaining_partition_and_immutable_capture
   - id: LAUNCHER-FD2-INHERITANCE-001
     status: open
     scope: product_contract

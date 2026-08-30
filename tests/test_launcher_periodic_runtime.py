@@ -4,10 +4,39 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _install_fake_windows_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    process: object,
+) -> list[str]:
+    events: list[str] = []
+    job_assigned = False
+
+    class Job:
+        def close(self) -> None:
+            events.append("close")
+
+    def create_job(candidate: object) -> Job:
+        nonlocal job_assigned
+        assert candidate is process
+        events.append("assign")
+        job_assigned = True
+        return Job()
+
+    def resume(candidate: object) -> None:
+        assert candidate is process
+        assert job_assigned is True
+        events.append("resume")
+
+    monkeypatch.setattr(module, "create_windows_kill_on_close_job", create_job)
+    monkeypatch.setattr(module, "resume_windows_process", resume, raising=False)
+    return events
 
 
 def _config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -111,10 +140,11 @@ def test_assistant_spawn_overwrites_periodic_mode_environment(
     experiment_mode: bool,
     expected: str,
 ) -> None:
-    from cryodaq.launcher import LauncherWindow
+    import cryodaq.launcher as module
 
     proc = MagicMock(pid=123)
     popen = MagicMock(return_value=proc)
+    lifetime_events = _install_fake_windows_lifetime(monkeypatch, module, proc)
     monkeypatch.setenv("CRYODAQ_ASSISTANT_PERIODIC_MODE", "stale-inherited-value")
     window = SimpleNamespace(
         _assistant_experiment_mode=experiment_mode,
@@ -123,15 +153,18 @@ def test_assistant_spawn_overwrites_periodic_mode_environment(
     )
 
     with patch("cryodaq.launcher.subprocess.Popen", popen):
-        LauncherWindow._start_assistant(window)  # type: ignore[arg-type]
+        module.LauncherWindow._start_assistant(window)  # type: ignore[arg-type]
 
     assert popen.call_args.kwargs["env"]["CRYODAQ_ASSISTANT_PERIODIC_MODE"] == expected
+    assert lifetime_events == (["assign", "resume"] if module.windows_job_objects_available() else [])
 
 
 def test_frozen_periodic_only_starts_assistant_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    from cryodaq.launcher import LauncherWindow
+    import cryodaq.launcher as module
 
-    popen = MagicMock(return_value=MagicMock(pid=123))
+    process = MagicMock(pid=123)
+    popen = MagicMock(return_value=process)
+    lifetime_events = _install_fake_windows_lifetime(monkeypatch, module, process)
     window = SimpleNamespace(
         _assistant_experiment_mode=True,
         _assistant_periodic_requested=True,
@@ -142,10 +175,11 @@ def test_frozen_periodic_only_starts_assistant_mode(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(sys, "executable", "/opt/cryodaq/cryodaq.exe")
 
     with patch("cryodaq.launcher.subprocess.Popen", popen):
-        LauncherWindow._start_assistant(window)  # type: ignore[arg-type]
+        module.LauncherWindow._start_assistant(window)  # type: ignore[arg-type]
 
     assert popen.call_args.args[0] == ["/opt/cryodaq/cryodaq.exe", "--mode=assistant"]
     assert popen.call_args.kwargs["env"]["CRYODAQ_ASSISTANT_PERIODIC_MODE"] == "1"
+    assert lifetime_events == (["assign", "resume"] if module.windows_job_objects_available() else [])
 
 
 def test_windows_assistant_spawn_uses_hidden_sentinel_control_channel(
@@ -154,7 +188,9 @@ def test_windows_assistant_spawn_uses_hidden_sentinel_control_channel(
 ) -> None:
     import cryodaq.launcher as module
 
-    popen = MagicMock(return_value=MagicMock(pid=123))
+    process = MagicMock(pid=123)
+    popen = MagicMock(return_value=process)
+    lifetime_events = _install_fake_windows_lifetime(monkeypatch, module, process)
     window = SimpleNamespace(
         _assistant_experiment_mode=True,
         _assistant_periodic_requested=False,
@@ -162,6 +198,7 @@ def test_windows_assistant_spawn_uses_hidden_sentinel_control_channel(
     )
     monkeypatch.setattr(module.sys, "platform", "win32")
     monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
 
     with patch("cryodaq.launcher.subprocess.Popen", popen):
         module.LauncherWindow._start_assistant(window)  # type: ignore[arg-type]
@@ -171,7 +208,10 @@ def test_windows_assistant_spawn_uses_hidden_sentinel_control_channel(
     assert shutdown_path.parent == tmp_path / "runtime"
     assert shutdown_path.exists() is False
     assert popen.call_args.kwargs["env"][module._ASSISTANT_SHUTDOWN_ENV] == str(shutdown_path.resolve())
-    assert popen.call_args.kwargs["creationflags"] == module._WINDOWS_CREATE_NO_WINDOW
+    assert popen.call_args.kwargs["creationflags"] == (
+        module._WINDOWS_CREATE_NO_WINDOW | module._WINDOWS_CREATE_SUSPENDED
+    )
+    assert lifetime_events == ["assign", "resume"]
 
 
 @pytest.mark.parametrize("link_data_root", [False, True], ids=["runtime-parent", "data-root"])
