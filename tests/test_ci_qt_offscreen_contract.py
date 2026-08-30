@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -75,8 +76,19 @@ NIGHTLY_JOB_NEEDS_QT = {
 #: observe that class of defect at all.
 WORKFLOW_SHELL = "bash -el {0}"
 
-#: Flags under which apt-get reports success while installing nothing.
-SIMULATION_FLAGS = frozenset({"--simulate", "-s", "--dry-run", "--just-print", "--no-act", "--recon"})
+#: Tokens the step's own script must never contain. Whether a given invocation
+#: simulates is decided by the apt stub below, which models apt's option grammar;
+#: this list is the separate, cheap assertion that the WORKFLOW never asks for a
+#: simulation in the first place, in any spelling.
+FORBIDDEN_SCRIPT_TOKENS = (
+    "--simulate",
+    "--dry-run",
+    "--just-print",
+    "--no-act",
+    "--recon",
+    "Simulate",
+    "Just-Print",
+)
 
 
 def _workflow(relative: str) -> dict:
@@ -208,49 +220,144 @@ def test_the_workflow_shell_is_the_login_shell_these_tests_reproduce() -> None:
         )
 
 
+_APT_STUB_SOURCE = r"""
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["STUB_ROOT"])
+log = root / "apt-invocations.txt"
+installed = root / "installed"
+update_seen = root / "update-seen"
+require_update = os.environ.get("STUB_REQUIRE_UPDATE") == "1"
+
+argv = sys.argv[1:]
+with log.open("a", encoding="utf-8") as handle:
+    handle.write(" ".join(argv) + "\n")
+
+ALIASES = {"--simulate", "-s", "--dry-run", "--just-print", "--no-act", "--recon"}
+KEYS = {
+    "apt::get::simulate",
+    "apt::get::just-print",
+    "apt::get::dry-run",
+    "apt::get::no-act",
+    "apt::get::recon",
+}
+TRUE_VALUES = {"true", "yes", "1", "on", "y", "t"}
+
+
+def is_simulation(args):
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in ALIASES:
+            return True
+        if token.startswith("-") and not token.startswith("--") and "=" not in token:
+            if "s" in token[1:]:
+                return True
+        assignment = None
+        if token in ("-o", "--option"):
+            index += 1
+            assignment = args[index] if index < len(args) else ""
+        elif token.startswith("-o") and len(token) > 2:
+            assignment = token[2:]
+        elif token.startswith("--option="):
+            assignment = token.split("=", 1)[1]
+        if assignment is not None:
+            key, _, value = assignment.partition("=")
+            if key.strip().lower() in KEYS and value.strip().lower() in TRUE_VALUES:
+                return True
+        index += 1
+    return False
+
+
+def packages(args):
+    names = []
+    skip = False
+    for token in args:
+        if skip:
+            skip = False
+            continue
+        if token in ("-o", "--option"):
+            skip = True
+            continue
+        if token.startswith("-") or token in ("install", "update", "upgrade"):
+            continue
+        names.append(token)
+    return names
+
+
+if "update" in argv:
+    update_seen.write_text("seen", encoding="utf-8")
+    sys.exit(0)
+
+if "install" in argv:
+    if require_update and not update_seen.exists():
+        sys.exit(100)
+    if is_simulation(argv):
+        sys.exit(0)
+    installed.mkdir(exist_ok=True)
+    for name in packages(argv):
+        (installed / name).write_text("installed", encoding="utf-8")
+    sys.exit(0)
+
+sys.exit(0)
+"""
+
+_DPKG_STUB_SOURCE = r"""
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["STUB_ROOT"])
+installed = root / "installed"
+absent = set(filter(None, os.environ.get("STUB_ABSENT", "").split()))
+
+package = sys.argv[2] if len(sys.argv) > 2 else ""
+if package in absent and not (installed / package).exists():
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
 def _write_stub(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8", newline="\n")
     path.chmod(0o755)
 
 
-def _stub_tree(tmp_path: Path, missing: tuple[str, ...], fail_first_install: bool) -> tuple[dict, Path]:
-    """A PATH where dpkg reports a chosen SUBSET absent and apt-get records argv.
+def _stub_tree(tmp_path: Path, missing: tuple[str, ...], require_update: bool) -> tuple[dict, Path]:
+    """A PATH whose apt-get MODELS apt, so EFFECT can be asserted instead of argv.
+
+    Deciding whether an install really happened by reading the recorded command
+    line is the inference review bypassed twice, most recently with
+    `apt-get -o APT::Get::Simulate=true install`, which exits 0 and prints its
+    Inst and Conf plan while changing nothing. apt's option grammar is therefore
+    modelled once, here, and the tests look at what ended up installed.
 
     `sudo` execs its arguments rather than being special-cased, so the script's
     real `sudo apt-get ...` invocation is followed all the way through.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    log = tmp_path / "apt-invocations.txt"
-    marker = tmp_path / "first-install-consumed"
+    helpers = tmp_path / "helpers"
+    helpers.mkdir(exist_ok=True)
 
-    wanted = " ".join(missing) if missing else "__none_missing__"
-    _write_stub(
-        bin_dir / "dpkg",
-        f'#!/bin/sh\nfor want in {wanted}; do\n  if [ "$2" = "$want" ]; then exit 1; fi\ndone\nexit 0\n',
-    )
+    apt_helper = helpers / "apt_stub.py"
+    apt_helper.write_text(_APT_STUB_SOURCE, encoding="utf-8", newline="\n")
+    dpkg_helper = helpers / "dpkg_stub.py"
+    dpkg_helper.write_text(_DPKG_STUB_SOURCE, encoding="utf-8", newline="\n")
+
+    interpreter = Path(sys.executable).as_posix()
+    _write_stub(bin_dir / "apt-get", f'#!/bin/sh\nexec "{interpreter}" "{apt_helper.as_posix()}" "$@"\n')
+    _write_stub(bin_dir / "dpkg", f'#!/bin/sh\nexec "{interpreter}" "{dpkg_helper.as_posix()}" "$@"\n')
     _write_stub(bin_dir / "sudo", '#!/bin/sh\nexec "$@"\n')
-
-    fail_clause = ""
-    if fail_first_install:
-        fail_clause = (
-            'case " $* " in\n'
-            '  *" install "*)\n'
-            f'    if [ ! -f "{marker.as_posix()}" ]; then\n'
-            f'      : > "{marker.as_posix()}"\n'
-            "      exit 100\n"
-            "    fi\n"
-            "    ;;\n"
-            "esac\n"
-        )
-    _write_stub(
-        bin_dir / "apt-get",
-        f'#!/bin/sh\necho "$@" >> "{log.as_posix()}"\n{fail_clause}exit 0\n',
-    )
 
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir.as_posix()}{os.pathsep}{env.get('PATH', '')}"
-    return env, log
+    env["STUB_ROOT"] = tmp_path.as_posix()
+    env["STUB_ABSENT"] = " ".join(missing)
+    env["STUB_REQUIRE_UPDATE"] = "1" if require_update else "0"
+    return env, tmp_path / "apt-invocations.txt"
 
 
 def _apt_invocations(log: Path) -> list[list[str]]:
@@ -259,21 +366,19 @@ def _apt_invocations(log: Path) -> list[list[str]]:
     return [line.split() for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _real_installs(invocations: list[list[str]]) -> list[list[str]]:
-    """Only invocations that would really install something.
-
-    `apt-get --simulate install -y ...` logs the package names and succeeds while
-    installing nothing, which is indistinguishable from a real install if the
-    recorded argv is searched as flat text.
-    """
-    return [argv for argv in invocations if "install" in argv and not (SIMULATION_FLAGS & set(argv))]
+def _installed_packages(tmp_path: Path) -> set[str]:
+    """What the run actually INSTALLED, which is the only thing that matters."""
+    installed = tmp_path / "installed"
+    if not installed.exists():
+        return set()
+    return {entry.name for entry in installed.iterdir()}
 
 
 def _run_canonical_script(
     tmp_path: Path,
     missing: tuple[str, ...],
-    fail_first_install: bool = False,
-) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    require_update: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]], set[str]]:
     """Run the step's script the way the workflow runs it: `bash -el <file>`."""
     bash = shutil.which("bash")
     assert bash is not None, (
@@ -283,7 +388,7 @@ def _run_canonical_script(
     script = tmp_path / "step.sh"
     script.write_text(_canonical_step()["run"], encoding="utf-8", newline="\n")
 
-    env, log = _stub_tree(tmp_path, missing, fail_first_install)
+    env, log = _stub_tree(tmp_path, missing, require_update)
     completed = subprocess.run(
         [bash, "-el", script.as_posix()],
         cwd=tmp_path,
@@ -291,62 +396,78 @@ def _run_canonical_script(
         capture_output=True,
         text=True,
     )
-    return completed, _apt_invocations(log)
+    return completed, _apt_invocations(log), _installed_packages(tmp_path)
+
+
+def test_the_script_asks_for_no_simulation_in_any_spelling() -> None:
+    """The cheap structural half, separate from the modelled stub.
+
+    The stub catches a simulated install by its absent effect. This refuses to
+    let the workflow ask for one at all, including the configuration-option form
+    that has no standalone flag to match.
+    """
+    script = _canonical_step()["run"]
+    body = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    for token in FORBIDDEN_SCRIPT_TOKENS:
+        assert token not in body, (
+            f"the install step's script contains {token!r}. apt would then report success while "
+            "installing nothing, and the job would reach the Qt command without the library."
+        )
 
 
 @pytest.mark.parametrize("package", QT_PACKAGES)
-def test_each_package_alone_reaches_a_real_install(tmp_path: Path, package: str) -> None:
-    """One package absent at a time, because uniform outcomes hide a fixed list.
+def test_each_package_alone_is_really_installed(tmp_path: Path, package: str) -> None:
+    """One package absent at a time, asserted by EFFECT rather than by argv.
 
     A script that probed only `libegl1` and then hardcoded all four names into
     `missing` passes a test that reports every package absent together, while a
     runner with `libegl1` present and a sibling absent skips apt entirely.
     """
-    completed, invocations = _run_canonical_script(tmp_path, missing=(package,))
+    completed, invocations, installed = _run_canonical_script(tmp_path, missing=(package,))
 
     assert completed.returncode == 0, (
         f"the step's script failed under stubbed tools:\n{completed.stdout}\n{completed.stderr}"
     )
-    installs = _real_installs(invocations)
-    assert installs, (
-        f"{package!r} was reported absent and no real apt-get install followed. The probe is not "
-        f"accumulating into `missing`, so the install path is dead. apt-get saw: {invocations!r}"
-    )
-    assert any(package in argv for argv in installs), (
-        f"{package!r} was reported absent but never reached a real install: {installs!r}"
+    assert package in installed, (
+        f"{package!r} was reported absent and was never actually installed. Either the probe is not "
+        "accumulating into `missing`, or apt was asked to simulate. apt-get saw: "
+        f"{invocations!r}; installed: {sorted(installed)}"
     )
 
 
-def test_all_missing_packages_reach_one_real_install(tmp_path: Path) -> None:
-    completed, invocations = _run_canonical_script(tmp_path, missing=QT_PACKAGES)
+def test_every_missing_package_is_really_installed(tmp_path: Path) -> None:
+    completed, invocations, installed = _run_canonical_script(tmp_path, missing=QT_PACKAGES)
 
     assert completed.returncode == 0, completed.stderr
-    installs = _real_installs(invocations)
-    assert installs, f"no real, non-simulated install occurred; apt-get saw: {invocations!r}"
-    assert any(all(package in argv for package in QT_PACKAGES) for argv in installs), (
-        f"no single real install carried the whole package set: {installs!r}"
+    assert set(QT_PACKAGES) <= installed, (
+        "the whole package set was reported absent but was not installed. "
+        f"apt-get saw: {invocations!r}; installed: {sorted(installed)}"
     )
 
 
-def test_the_documented_refresh_and_retry_branch_really_installs(tmp_path: Path) -> None:
-    """Exercise the fallback the step documents, not only the happy path.
+def test_the_refresh_precedes_the_retry_and_the_retry_really_installs(tmp_path: Path) -> None:
+    """The documented fallback, asserted as an ORDER and not as a set.
 
-    The comments record run 32303335407, where the index already on the image did
-    not satisfy the request. If that branch stopped installing, the step would
-    still report success while the libraries stayed absent.
+    Requiring only that an update and a second install both occurred let the two
+    be swapped: with a stub that failed just the first attempt, a retry placed
+    BEFORE the refresh succeeded artificially. Here every install keeps failing
+    until an update has been observed, so a script that retries first cannot
+    recover at all, and the recorded sequence is checked explicitly.
     """
-    completed, invocations = _run_canonical_script(tmp_path, missing=QT_PACKAGES, fail_first_install=True)
+    completed, invocations, installed = _run_canonical_script(tmp_path, missing=QT_PACKAGES, require_update=True)
 
     assert completed.returncode == 0, (
-        f"the script did not recover when the first install failed:\n{completed.stdout}\n{completed.stderr}"
+        "the script did not recover when the cached index could not satisfy the first install:\n"
+        f"{completed.stdout}\n{completed.stderr}"
     )
-    assert any("update" in argv for argv in invocations), (
-        f"the first install failed and no index refresh followed: {invocations!r}"
+    assert set(QT_PACKAGES) <= installed, (
+        f"the retry did not actually install the package set; installed: {sorted(installed)}"
     )
-    installs = _real_installs(invocations)
-    assert len(installs) >= 2, f"no retry install after the refresh: {invocations!r}"
-    assert any(all(package in argv for package in QT_PACKAGES) for argv in installs[1:]), (
-        f"the retry install did not carry the package set: {installs!r}"
+
+    kinds = ["update" if "update" in argv else "install" if "install" in argv else "other" for argv in invocations]
+    assert kinds[:3] == ["install", "update", "install"], (
+        "the fallback must be a failed install, THEN a refresh, THEN a real retry. "
+        f"observed sequence: {kinds} from {invocations!r}"
     )
 
 
@@ -357,10 +478,11 @@ def test_the_step_skips_the_network_when_every_package_is_present(tmp_path: Path
     test above while reintroducing the bounded-network stall the step's own
     comments record having cost two pull requests' evidence.
     """
-    completed, invocations = _run_canonical_script(tmp_path, missing=())
+    completed, invocations, installed = _run_canonical_script(tmp_path, missing=())
 
     assert completed.returncode == 0, completed.stderr
     assert invocations == [], f"apt-get was invoked although dpkg reported every package present: {invocations!r}"
+    assert installed == set(), f"something was installed with nothing missing: {sorted(installed)}"
     assert "already present" in completed.stdout, completed.stdout
 
 

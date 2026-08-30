@@ -55,6 +55,70 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NIGHTLY-QT-DIVERGENT-STEP-COPY-FALSE-GREEN-401
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_qt_dependent_nightly_steps_equal_the_canonical_step_entirely
+    ci_partition: remaining
+    red_evidence: three_confirmed_escapes_closed_by_whole_step_mapping_equality; asserting_the_package_line_SOMEWHERE_in_nightly_yml_let_the_loop_be_narrowed_in_golden_replay_ALONE_because_the_per_job_check_looked_only_at_the_step_NAME_and_the_file_wide_check_found_the_intact_line_in_the_other_job; asserting_only_the_step_NAME_let_its_entire_script_be_replaced; comparing_a_CHOSEN_LIST_of_fields_let_continue_on_error_true_be_added_to_a_copy_so_a_failed_install_no_longer_stopped_the_job_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-SIMULATED-OR-TEXT-BOUND-INSTALL-FALSE-GREEN-402
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_every_missing_package_is_really_installed
+    ci_partition: remaining
+    red_evidence: two_confirmed_escapes_closed_by_asserting_the_INSTALLED_SET_instead_of_the_recorded_argv; binding_the_script_as_TEXT_let_the_dpkg_probe_be_replaced_by_true_so_missing_never_filled_and_apt_was_never_called; searching_the_argv_as_flat_text_treated_apt_get_simulate_install_as_a_real_install_because_the_package_names_appear_in_the_logged_command_line_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-UNIFORM-DPKG-OUTCOMES-FALSE-GREEN-403
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_each_package_alone_is_really_installed
+    ci_partition: remaining
+    red_evidence: reporting_every_package_absent_TOGETHER_hid_a_script_that_probes_only_libegl1_and_hardcodes_all_four_names_which_skips_apt_entirely_on_a_runner_where_libegl1_is_present_and_a_sibling_is_absent_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-STEP-ORDERED-AFTER-CONSUMER-FALSE-GREEN-404
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_the_install_step_precedes_every_step_that_runs_python
+    ci_partition: remaining
+    red_evidence: presence_and_content_were_bound_but_not_POSITION_so_moving_the_unchanged_step_to_the_end_of_the_job_left_every_content_assertion_green_while_the_lane_that_needs_the_libraries_had_already_run_and_failed_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-UNCLASSIFIED-NIGHTLY-JOB-FALSE-GREEN-405
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_every_nightly_job_is_classified_for_qt
+    ci_partition: remaining
+    red_evidence: the_guarded_set_was_a_hand_maintained_list_of_qt_dependent_jobs_so_a_NEW_nightly_job_carrying_no_install_step_was_never_inspected_by_any_assertion_at_all_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-FALLBACK-ORDER-AND-REACH-FALSE-GREEN-406
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_the_refresh_precedes_the_retry_and_the_retry_really_installs
+    ci_partition: remaining
+    red_evidence: two_confirmed_escapes_closed_by_failing_every_install_until_an_update_is_observed_and_asserting_the_exact_sequence; an_apt_stub_that_always_succeeded_never_entered_the_documented_refresh_and_retry_branch_so_replacing_both_fallback_calls_with_true_stayed_green; requiring_only_that_an_update_and_a_second_install_both_OCCURRED_never_compared_their_ORDER_so_swapping_the_retry_before_the_refresh_passed_because_a_stub_failing_only_the_FIRST_attempt_let_the_unchanged_second_attempt_succeed_artificially_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-EXIT-IN-SCRIPT-FALSE-GREEN-407
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_the_step_script_never_calls_exit
+    ci_partition: remaining
+    red_evidence: executing_the_script_cannot_carry_this_invariant_on_every_platform_appending_exit_0_left_ALL_TWELVE_executed_script_nodes_green_on_WINDOWS_because_the_failing_clear_console_in_bash_logout_is_a_property_of_the_UBUNTU_runner_image_so_the_rule_the_steps_own_comments_open_with_is_asserted_structurally_instead_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
+  - id: NIGHTLY-QT-SIMULATE-OPTION-FORM-FALSE-GREEN-408
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_the_script_asks_for_no_simulation_in_any_spelling
+    ci_partition: remaining
+    red_evidence: rejecting_only_standalone_simulation_ALIASES_let_the_configuration_option_form_apt_get_o_APT_Get_Simulate_true_install_through_which_exits_0_and_prints_its_Inst_and_Conf_plan_without_installing_anything_measured_2026_08_30_pending_immutable_capture
+    green_evidence: pending
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -7529,15 +7593,17 @@ records:
         ci_partition: remaining
       - node: tests/test_ci_qt_offscreen_contract.py::test_the_workflow_shell_is_the_login_shell_these_tests_reproduce
         ci_partition: remaining
-      - node: tests/test_ci_qt_offscreen_contract.py::test_each_package_alone_reaches_a_real_install
+      - node: tests/test_ci_qt_offscreen_contract.py::test_the_script_asks_for_no_simulation_in_any_spelling
         ci_partition: remaining
-      - node: tests/test_ci_qt_offscreen_contract.py::test_all_missing_packages_reach_one_real_install
+      - node: tests/test_ci_qt_offscreen_contract.py::test_each_package_alone_is_really_installed
         ci_partition: remaining
-      - node: tests/test_ci_qt_offscreen_contract.py::test_the_documented_refresh_and_retry_branch_really_installs
+      - node: tests/test_ci_qt_offscreen_contract.py::test_every_missing_package_is_really_installed
+        ci_partition: remaining
+      - node: tests/test_ci_qt_offscreen_contract.py::test_the_refresh_precedes_the_retry_and_the_retry_really_installs
         ci_partition: remaining
       - node: tests/test_ci_qt_offscreen_contract.py::test_the_step_skips_the_network_when_every_package_is_present
         ci_partition: remaining
       - node: tests/test_ci_qt_offscreen_contract.py::test_the_step_script_never_calls_exit
         ci_partition: remaining
-    red_evidence: measured_2026_08_30_on_python_3_14_6_seven_controls_one_per_review_finding_each_left_both_workflows_parsable_as_yaml_and_each_red_was_pytest_exit_1_a_real_assertionerror_rather_than_a_collection_error_and_every_restore_was_byte_identical; moving_the_unchanged_install_step_to_the_end_of_golden_replay_reddened_the_ordering_node_1_failed_11_passed; adding_continue_on_error_true_to_one_copy_reddened_the_whole_mapping_node_1_failed_11_passed; adding_a_new_unclassified_nightly_job_reddened_the_classification_node_1_failed_11_passed; turning_the_first_install_into_apt_get_simulate_in_both_files_reddened_six_nodes_6_failed_6_passed; probing_only_libegl1_and_hardcoding_all_four_names_reddened_three_nodes_3_failed_9_passed; replacing_the_refresh_and_retry_branch_with_true_reddened_the_fallback_node_1_failed_11_passed; appending_exit_0_to_the_script_left_all_twelve_executed_script_nodes_green_on_windows_because_the_failing_clear_console_in_bash_logout_is_a_property_of_the_ubuntu_runner_image_so_that_invariant_is_asserted_structurally_instead_and_the_same_mutation_then_reddened_1_failed_12_passed; no_immutable_receipt_is_bound_yet_pending_immutable_capture
-    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_all_thirteen_exact_remaining_nodes_13_passed_on_windows_the_riskier_of_the_two_platforms_this_partition_runs_on_and_the_branch_dispatch_33290570326_ran_golden_run_replay_regression_d4_and_bounded_mock_soak_to_success_after_d4_had_executed_no_tests_for_at_least_five_days_pending_immutable_capture
+    red_evidence: measured_2026_08_30_on_python_3_14_6_nine_controls_one_per_accepted_review_finding_each_left_both_workflows_parsable_as_yaml_each_red_was_pytest_exit_1_a_real_assertionerror_rather_than_a_collection_error_and_every_restore_was_byte_identical; moving_the_unchanged_install_step_to_the_end_of_golden_replay_1_failed_13_passed; adding_continue_on_error_true_to_one_copy_1_failed_13_passed; adding_a_new_unclassified_nightly_job_1_failed_13_passed; turning_the_first_install_into_the_simulate_FLAG_form_in_both_files_6_failed_8_passed; probing_only_libegl1_and_hardcoding_all_four_names_3_failed_11_passed; replacing_the_refresh_and_retry_branch_with_true_1_failed_13_passed; appending_exit_0_to_the_script_1_failed_13_passed_via_the_structural_assertion_because_the_executed_script_nodes_stay_green_on_windows; adding_o_APT_Get_Simulate_true_to_apt_options_in_both_files_7_failed_7_passed; placing_the_retry_install_BEFORE_the_refresh_in_both_files_1_failed_13_passed; no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_all_fourteen_exact_remaining_nodes_14_passed_on_windows_the_riskier_of_the_two_platforms_this_partition_runs_on_and_the_branch_dispatch_33290570326_ran_golden_run_replay_regression_d4_and_bounded_mock_soak_to_success_after_d4_had_executed_no_tests_for_at_least_five_days_pending_immutable_capture
