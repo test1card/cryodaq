@@ -298,26 +298,26 @@ def _wait_for_path(path: Path) -> None:
 def _install_periodic_child_observer(
     hook_dir: Path,
     data_dir: Path,
-    staging_marker: Path,
-    render_release: Path,
+    promotion_ready_marker: Path,
+    promotion_commit_release: Path,
     promotion_marker: Path,
     promotion_release: Path,
 ) -> None:
     hook_dir.mkdir()
-    staging_parent = periodic_staging_dir(data_dir, "a" * 32).parent.resolve()
     generations_parent = periodic_generation_dir(data_dir, "a" * 32).parent.resolve()
+    # Pause at the real promotion syscall, after rendering has used its bounded
+    # budget. Pausing staging.mkdir() consumed the child's five-second deadline
+    # while this test killed the leader and observed its replacement.
     source = [
         "import os",
         "import time",
         "from pathlib import Path",
         "",
-        f"_STAGING_PARENT = Path({str(staging_parent)!r})",
         f"_GENERATIONS_PARENT = Path({str(generations_parent)!r})",
-        f"_STAGING_MARKER = Path({str(staging_marker.resolve())!r})",
-        f"_RENDER_RELEASE = Path({str(render_release.resolve())!r})",
+        f"_PROMOTION_READY_MARKER = Path({str(promotion_ready_marker.resolve())!r})",
+        f"_PROMOTION_COMMIT_RELEASE = Path({str(promotion_commit_release.resolve())!r})",
         f"_PROMOTION_MARKER = Path({str(promotion_marker.resolve())!r})",
         f"_PROMOTION_RELEASE = Path({str(promotion_release.resolve())!r})",
-        "_REAL_MKDIR = os.mkdir",
         "_REAL_RENAME = os.rename",
         "",
         "def _publish(path):",
@@ -343,32 +343,56 @@ def _install_periodic_child_observer(
         "            raise TimeoutError('periodic child observation gate timed out')",
         "        time.sleep(0.005)",
         "",
-        "def _mkdir(path, mode=0o777, *, dir_fd=None):",
-        "    if dir_fd is None:",
-        "        result = _REAL_MKDIR(path, mode)",
-        "    else:",
-        "        result = _REAL_MKDIR(path, mode, dir_fd=dir_fd)",
-        "    if dir_fd is None and Path(path).resolve().parent == _STAGING_PARENT:",
-        "        if _publish(_STAGING_MARKER):",
-        "            _wait(_RENDER_RELEASE)",
-        "    return result",
-        "",
         "def _rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):",
         "    kwargs = {}",
         "    if src_dir_fd is not None:",
         "        kwargs['src_dir_fd'] = src_dir_fd",
         "    if dst_dir_fd is not None:",
         "        kwargs['dst_dir_fd'] = dst_dir_fd",
+        "    observed_promotion = not kwargs and Path(dst).resolve().parent == _GENERATIONS_PARENT",
+        "    if observed_promotion and _publish(_PROMOTION_READY_MARKER):",
+        "        _wait(_PROMOTION_COMMIT_RELEASE)",
         "    result = _REAL_RENAME(src, dst, **kwargs)",
-        "    if not kwargs and Path(dst).resolve().parent == _GENERATIONS_PARENT:",
+        "    if observed_promotion:",
         "        if _publish(_PROMOTION_MARKER):",
         "            _wait(_PROMOTION_RELEASE)",
         "    return result",
         "",
-        "os.mkdir = _mkdir",
         "os.rename = _rename",
     ]
     (hook_dir / "sitecustomize.py").write_text("\n".join(source) + "\n", encoding="utf-8")
+
+
+def _wait_for_promotion_or_renderer_exit(
+    promotion_marker: Path,
+    render_process: psutil.Process,
+    *,
+    timeout_s: float,
+) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_s
+    while not promotion_marker.exists() and time.monotonic() < deadline:
+        try:
+            running = render_process.is_running()
+            status = render_process.status() if running else "not-running"
+        except psutil.NoSuchProcess:
+            if promotion_marker.exists():
+                break
+            return False, f"renderer pid={render_process.pid} disappeared before promotion"
+        except psutil.Error as error:
+            if promotion_marker.exists():
+                break
+            return False, f"renderer pid={render_process.pid} status became unreadable: {error!r}"
+        if not running or status == psutil.STATUS_ZOMBIE:
+            if promotion_marker.exists():
+                break
+            return False, f"renderer pid={render_process.pid} exited before promotion; status={status!r}"
+        time.sleep(0.01)
+    if promotion_marker.exists():
+        return True, f"promotion marker observed from renderer pid={render_process.pid}"
+    return False, (
+        f"promotion marker was not observed within {timeout_s:g}s "
+        f"while renderer pid={render_process.pid} remained alive"
+    )
 
 
 def _require_periodic_render_process(process: psutil.Process, generation_id: str) -> None:
@@ -1444,16 +1468,16 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     stop_path = joined_dir / "stop"
     takeover_release = joined_dir / "takeover-release"
     initial_path = joined_dir / "initial-leader.pid"
-    staging_marker = joined_dir / "render-staging-ready"
-    render_release = joined_dir / "render-release"
+    promotion_ready_marker = joined_dir / "render-promotion-ready"
+    promotion_commit_release = joined_dir / "promotion-commit-release"
     promotion_marker = joined_dir / "promotion-complete"
     promotion_release = joined_dir / "promotion-release"
     hook_dir = tmp_path / "child-observer"
     _install_periodic_child_observer(
         hook_dir,
         data_dir,
-        staging_marker,
-        render_release,
+        promotion_ready_marker,
+        promotion_commit_release,
         promotion_marker,
         promotion_release,
     )
@@ -1492,8 +1516,8 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
             process.start()
             started.append(process)
 
-        _wait_for_path(staging_marker)
-        render_process = psutil.Process(int(staging_marker.read_text(encoding="ascii")))
+        _wait_for_path(promotion_ready_marker)
+        render_process = psutil.Process(int(promotion_ready_marker.read_text(encoding="ascii")))
         render_processes.append(render_process)
         candidate = load_periodic_state(data_dir).payload.get("active")
         assert isinstance(candidate, dict) and candidate.get("status") == "RENDERING"
@@ -1514,6 +1538,7 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
 
         killed.kill()
         _reap(killed, expected=None)
+        _write_durable(promotion_commit_release, "continue")
 
         deadline = time.monotonic() + _IPC_TIMEOUT_S
         takeover_factory_pids = prekill_factory_pids
@@ -1522,19 +1547,14 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
             time.sleep(0.01)
         assert takeover_factory_pids == {process.pid for process in contenders}
 
-        _write_durable(render_release, "continue")
-        deadline = time.monotonic() + 25.0
-        while not promotion_marker.exists() and time.monotonic() < deadline:
-            try:
-                if not render_process.is_running() or render_process.status() == psutil.STATUS_ZOMBIE:
-                    break
-            except psutil.Error:
-                break
-            time.sleep(0.01)
-        old_promoted = promotion_marker.exists()
+        old_promoted, promotion_observation = _wait_for_promotion_or_renderer_exit(
+            promotion_marker,
+            render_process,
+            timeout_s=25.0,
+        )
         assert old_promoted is (os.name != "nt"), (
             "interrupted renderer violated the platform lifecycle contract: "
-            f"os.name={os.name!r}, old_promoted={old_promoted}"
+            f"os.name={os.name!r}, old_promoted={old_promoted}; {promotion_observation}"
         )
 
         if old_promoted:
@@ -1573,7 +1593,7 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
         assert send[1] != initial_pid
         state = _wait_terminal(data_dir)
     finally:
-        _write_durable(render_release, "continue")
+        _write_durable(promotion_commit_release, "continue")
         _write_durable(promotion_release, "continue")
         _write_durable(takeover_release, "continue")
         _write_durable(stop_path, "stop")
