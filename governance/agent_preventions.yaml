@@ -3705,6 +3705,14 @@ false_green_pairs:
     ci_partition: gui
     red_evidence: measured_2026_08_30_on_python_3_14_6_changing_the_panel_production_projection_line_756_warning_key_to_warninG_reddened_the_visible_banner_equality_assertion_1_failed_then_restored_sha256_ed9f0eaacbe0cd05e855b4fb4bde0467fb32cbb307cec0275f092876d226d42c_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
     green_evidence: measured_2026_08_30_on_python_3_14_6_exact_gui_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
+  - id: LAKESHORE-MIXED-RDGST-GUARD-GAP-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAKESHORE-UNKNOWN-RDGST-ADVISORY-FAIL-OPEN-001
+    guard: tests/core/test_interlock_nan_debounce.py::test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_left_the_existing_unknown_only_node_green_but_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_1_passed_exit_1_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7478,13 +7486,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: LakeShore218S._with_instrument_status through Reading.instrument_status_fault_reasons, InterlockEngine._handle_nonusable, and SafetyManager.on_interlock_dead_channel for every in-range RDGST bitmap containing no recognized fault bit.
+    applies_to: LakeShore218S._with_instrument_status through Reading.instrument_status_fault_reasons, InterlockEngine._handle_nonusable, and SafetyManager.on_interlock_dead_channel for every in-range RDGST bitmap containing at least one undocumented bit, alone or mixed with documented fault bits.
     classification: unknown_as_authority
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A reserved or future RDGST bit was converted into a nonempty exact-fault tuple, so persistent unusable input removed the generic dead-channel blocker and received the non-blocking advisory exception while a source could be active.
-    invariant: Only documented RDGST bits grant positive sensor-fault advisory evidence. A nonzero bitmap with no recognized bit remains SENSOR_ERROR but carries no exact fault-reason tuple, so persistent input follows the pre-existing generic active-source fail-closed path. Recognized bits and every debounce or physical threshold remain unchanged.
+    consequence: A reserved or future RDGST bit, alone or mixed with a documented fault, could be discarded while a nonempty exact-fault tuple was published, so persistent unusable input removed the generic dead-channel blocker and received the non-blocking advisory exception while a source could be active.
+    invariant: An exact advisory requires the entire RDGST bitmap to contain only documented bits. Any nonzero bitmap containing an undocumented bit preserves the raw bitmap, failed reading status, and NaN value but carries no exact fault-reason tuple, so persistent input follows the pre-existing generic active-source fail-closed path. Every debounce and physical threshold remains unchanged.
     rule_refs:
       - AGENTS.md#mission-and-safety-boundary
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
@@ -7492,5 +7500,7 @@ records:
     guards:
       - node: tests/core/test_interlock_nan_debounce.py::test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
         ci_partition: core
-    red_evidence: measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
-    green_evidence: measured_2026_08_30_on_python_3_14_6_exact_core_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
+      - node: tests/core/test_interlock_nan_debounce.py::test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+        ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_while_the_existing_unknown_only_node_passed_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical; prior_unknown_only_control_measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture

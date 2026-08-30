@@ -230,6 +230,57 @@ async def test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
         await manager.stop()
 
 
+async def test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed() -> None:
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            return str(0x42) if command == "RDGST? 1" else "0"
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        channel_labels={1: _CHANNEL_ID},
+        mock=False,
+    )
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    manager = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+
+    async def dead_channel_handler(condition, reading):
+        return await manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=dead_channel_handler, min_samples=1, min_duration_s=0.0)
+    try:
+        reading = (await driver.read_channels())[0]
+        assert reading.metadata["sensor_status"] == 0x42
+        assert reading.status is ChannelStatus.SENSOR_ERROR
+        assert math.isnan(reading.value)
+        assert reading.instrument_status_fault_reasons() == (), (
+            "one undocumented bit must withhold certification of otherwise recognized advisory evidence"
+        )
+
+        await engine._process_reading(reading)
+
+        assert manager.state is SafetyState.FAULT_LATCHED, (
+            "mixed known and unknown RDGST input must retain the generic active-source fail-closed path"
+        )
+    finally:
+        await manager.stop()
+
+
 async def test_persistent_instrument_fault_escalates_without_settling_or_revoking_controls() -> None:
     """A protected guard-blind episode stays visible, recorded, and retryable."""
     broker = SafetyBroker()
