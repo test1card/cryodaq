@@ -36,6 +36,7 @@ from cryodaq.report_state import (
     resolve_report_artifact,
     resolve_report_paths,
     validate_active_experiment_state,
+    validate_active_experiment_transition_receipt,
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
@@ -1675,56 +1676,16 @@ class ExperimentManager:
             ):
                 raise RuntimeError("Experiment state terminal receipt fingerprint is invalid.")
             if receipt is not None:
-                receipt_keys = {
-                    "schema",
-                    "manager_incarnation",
-                    "request_id",
-                    "request_fingerprint",
-                    "operation",
-                    "experiment_id",
-                    "experiment_fingerprint",
-                    "predecessor_revision",
-                    "predecessor_state_fingerprint",
-                    "result_revision",
-                    "result_active_experiment_id",
-                    "result_state_fingerprint",
-                }
-                if (
-                    set(receipt) != receipt_keys
-                    or receipt.get("schema") != "experiment_transition_receipt_v2"
-                    or receipt.get("manager_incarnation") != self._manager_incarnation
-                    or not _is_lower_hex(receipt.get("request_id"), _HEX_ID_LENGTH)
-                    or not _is_lower_hex(
-                        receipt.get("request_fingerprint"),
-                        _SHA256_LENGTH,
+                try:
+                    validate_active_experiment_transition_receipt(
+                        receipt,
+                        manager_incarnation=self._manager_incarnation,
+                        revision=revision,
+                        active_experiment_id=active_experiment_id,
+                        state_fingerprint=expected_fingerprint,
                     )
-                    or not _is_lower_hex(
-                        receipt.get("experiment_fingerprint"),
-                        _SHA256_LENGTH,
-                    )
-                    or not _is_lower_hex(
-                        receipt.get("predecessor_state_fingerprint"),
-                        _SHA256_LENGTH,
-                    )
-                    or receipt.get("operation") not in {"create", "update", "finalize"}
-                    or type(receipt.get("experiment_id")) is not str
-                    or not receipt.get("experiment_id")
-                    or type(receipt.get("predecessor_revision")) is not int
-                    or receipt.get("predecessor_revision") < 0
-                    or receipt.get("result_revision") != receipt.get("predecessor_revision") + 1
-                    or receipt.get("result_revision") != revision
-                    or receipt.get("result_active_experiment_id") != active_experiment_id
-                    or receipt.get("result_state_fingerprint") != expected_fingerprint
-                    or (
-                        receipt.get("operation") == "finalize"
-                        and receipt.get("result_active_experiment_id") is not None
-                    )
-                    or (
-                        receipt.get("operation") in {"create", "update"}
-                        and receipt.get("result_active_experiment_id") != receipt.get("experiment_id")
-                    )
-                ):
-                    raise RuntimeError("Experiment state terminal receipt is invalid.")
+                except ReportContractError as exc:
+                    raise RuntimeError("Experiment state terminal receipt is invalid.") from exc
         elif self._transition_path.exists():
             # A legacy journal cannot be upgraded safely because it has no
             # predecessor cut. Preserve both files for operator recovery.

@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: EXPERIMENT-STATE-RECEIPT-READER-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/reporting/test_report_state.py::test_receipt_semantics_are_shared_by_authority_and_report_reader
+    ci_partition: agents
+    red_evidence: the_existing_envelope_contract_guard_only_drove_a_valid_real_manager_file_so_a_self_consistently_fingerprinted_empty_receipt_left_the_report_reader_accepting_while_the_manager_refused_the_same_bytes_the_in_place_control_removed_only_the_report_side_shared_semantic_call_and_this_node_failed_at_pytest_exit_1_2026_08_30_pending_immutable_capture
+    green_evidence: pending
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -5131,13 +5139,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Experiment identity, lifecycle mutations, quick-log attribution, replay phase validation and timestamps, detached replay state, recording, journaling, receipts, archive export, and replay.
+    applies_to: Experiment identity, lifecycle mutations, quick-log attribution, replay phase validation and timestamps, detached replay state, recording, journaling, receipts, out-of-process report guard state, archive export, and replay.
     classification: identity_replay
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Delayed or replayed commands can mutate the wrong experiment, invalid replay phases or aliased nested state can be persisted, phase duration can use the wrong epoch, and archive/export callers can read or emit cold data without proving expected identity.
-    invariant: Every mutation binds exact experiment and manager incarnation, predecessor revision, request ID, payload fingerprint, canonical phase, exact transition timestamp, recursively detached returned state, and durable result; every hot/cold archive read and export binds and validates a non-null expected experiment identity.
+    consequence: Delayed or replayed commands can mutate the wrong experiment, invalid replay phases or aliased nested state can be persisted, phase duration can use the wrong epoch, a reporting reader can treat the active-experiment guard as inactive while the authoritative manager refuses the same state bytes, and archive/export callers can read or emit cold data without proving expected identity.
+    invariant: Every mutation binds exact experiment and manager incarnation, predecessor revision, request ID, payload fingerprint, canonical phase, exact transition timestamp, recursively detached returned state, and durable result; every reader of the v2 experiment-state authority imports one exact envelope and receipt-relationship validator; every hot/cold archive read and export binds and validates a non-null expected experiment identity.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5145,6 +5153,12 @@ records:
         ci_partition: core
       - node: tests/core/test_experiment_adversarial.py::test_stale_journal_and_restart_replay_fail_durable_cas
         ci_partition: core
+      - node: tests/core/test_experiment_adversarial.py::test_state_writer_refuses_envelope_outside_shared_contract
+        ci_partition: core
+      - node: tests/reporting/test_report_state.py::test_real_experiment_manager_state_is_readable_by_report_contract
+        ci_partition: agents
+      - node: tests/reporting/test_report_state.py::test_receipt_semantics_are_shared_by_authority_and_report_reader
+        ci_partition: agents
       - node: tests/core/test_experiment_commands.py::test_delayed_quick_log_cannot_attach_to_replacement_experiment
         ci_partition: core
       - node: tests/core/test_experiment_commands.py::test_async_quick_log_cas_blocks_replacement_during_durable_await

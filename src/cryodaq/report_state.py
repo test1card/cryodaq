@@ -37,6 +37,22 @@ ACTIVE_EXPERIMENT_STATE_FIELDS = frozenset(
         "updated_at",
     }
 )
+ACTIVE_EXPERIMENT_TRANSITION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "manager_incarnation",
+        "request_id",
+        "request_fingerprint",
+        "operation",
+        "experiment_id",
+        "experiment_fingerprint",
+        "predecessor_revision",
+        "predecessor_state_fingerprint",
+        "result_revision",
+        "result_active_experiment_id",
+        "result_state_fingerprint",
+    }
+)
 MAX_JSON_BYTES = 128 * 1024
 MAX_SOURCE_FILES = 2_048
 MAX_SOURCE_FILE_BYTES = 256 * 1024 * 1024
@@ -115,6 +131,42 @@ def active_experiment_state_fingerprint(
     )
 
 
+def validate_active_experiment_transition_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    manager_incarnation: str,
+    revision: int,
+    active_experiment_id: str | None,
+    state_fingerprint: str,
+) -> None:
+    """Validate a receipt against the exact experiment-state cut it produced."""
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != ACTIVE_EXPERIMENT_TRANSITION_RECEIPT_FIELDS
+        or receipt.get("schema") != "experiment_transition_receipt_v2"
+        or receipt.get("manager_incarnation") != manager_incarnation
+        or not _is_lower_hex(receipt.get("request_id"), 32)
+        or not _is_lower_hex(receipt.get("request_fingerprint"), 64)
+        or not _is_lower_hex(receipt.get("experiment_fingerprint"), 64)
+        or not _is_lower_hex(receipt.get("predecessor_state_fingerprint"), 64)
+        or receipt.get("operation") not in {"create", "update", "finalize"}
+        or type(receipt.get("experiment_id")) is not str
+        or not receipt.get("experiment_id")
+        or type(receipt.get("predecessor_revision")) is not int
+        or receipt.get("predecessor_revision") < 0
+        or receipt.get("result_revision") != receipt.get("predecessor_revision") + 1
+        or receipt.get("result_revision") != revision
+        or receipt.get("result_active_experiment_id") != active_experiment_id
+        or receipt.get("result_state_fingerprint") != state_fingerprint
+        or (receipt.get("operation") == "finalize" and receipt.get("result_active_experiment_id") is not None)
+        or (
+            receipt.get("operation") in {"create", "update"}
+            and receipt.get("result_active_experiment_id") != receipt.get("experiment_id")
+        )
+    ):
+        raise ReportContractError("active experiment transition receipt is invalid")
+
+
 def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
     """Validate the exact ExperimentManager state envelope and return its active ID."""
     if not isinstance(payload, dict):
@@ -168,6 +220,14 @@ def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
         receipt_fingerprint is not None and not _is_lower_hex(receipt_fingerprint, 64)
     ):
         raise ReportContractError("active experiment transition receipt fingerprint is invalid")
+    if receipt is not None:
+        validate_active_experiment_transition_receipt(
+            receipt,
+            manager_incarnation=manager_incarnation,
+            revision=revision,
+            active_experiment_id=value,
+            state_fingerprint=state_fingerprint,
+        )
     return value
 
 

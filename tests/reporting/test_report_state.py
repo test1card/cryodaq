@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -344,6 +345,29 @@ def test_real_experiment_manager_state_is_readable_by_report_contract(tmp_path: 
     active = manager.create_experiment("writer-reader-contract", "operator")
 
     assert load_active_experiment_id(tmp_path) == active.experiment_id
+
+
+def test_receipt_semantics_are_shared_by_authority_and_report_reader(tmp_path: Path) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    active = manager.create_experiment("receipt-contract", "operator")
+    manager.finalize_experiment(active.experiment_id)
+    state_path = tmp_path / "experiment_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["active_experiment_id"] is None
+    assert payload["last_transition_receipt"]["operation"] == "finalize"
+
+    payload["last_transition_receipt"] = {}
+    payload["last_transition_receipt_fingerprint"] = hashlib.sha256(b"{}").hexdigest()
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    malformed_state = state_path.read_bytes()
+
+    with pytest.raises(ReportContractError, match="transition receipt is invalid"):
+        load_active_experiment_id(tmp_path)
+    with pytest.raises(RuntimeError, match="terminal receipt is invalid"):
+        ExperimentManager(tmp_path, instruments)
+    assert state_path.read_bytes() == malformed_state
 
 
 def test_reports_root_rejects_symlinked_reports_and_children(tmp_path: Path) -> None:
