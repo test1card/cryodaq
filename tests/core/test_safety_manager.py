@@ -232,6 +232,14 @@ async def _close_test_writer_without_nested_default_executor(writer: SQLiteWrite
     await writer._settle_owned_tasks(writer._owned_read_tasks)
     writer._executor.shutdown(wait=True)
     writer._read_executor.shutdown(wait=True)
+    # Bypassing stop() also bypasses its connection settlement, so a live sqlite3
+    # handle would survive this helper. Its ResourceWarning is raised wherever the
+    # collector happens to reach it, which reads as a failure of an unrelated test.
+    writer._retry_control_connection_settlement_sync()
+    owned_connection = writer._conn
+    if owned_connection is not None:
+        owned_connection.close()
+        writer._conn = None
 
 
 def _start_command(*, warning: str) -> dict[str, object]:
