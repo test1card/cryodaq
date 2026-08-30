@@ -28,6 +28,16 @@ REQUIRED_PUBLICATION_TIMEOUT_S = 5.0
 # Reading copy, and the ZMQ publisher must strip it from its own metadata copy
 # before encoding public metadata.
 PERSISTENCE_AUTHORITATIVE_METADATA_KEY = "_cryodaq_persistence_authoritative"
+PUBLISHER_AUTHORITY_METADATA_KEY = "_cryodaq_publisher_authority"
+
+
+@dataclass(frozen=True, slots=True)
+class PublisherAuthority:
+    """Opaque capability for one broker-reserved channel set."""
+
+    name: str
+    channels: frozenset[str]
+    _authority: object = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +205,26 @@ class DataBroker:
         self._total_published: int = 0
         self._required_publisher_name: str | None = None
         self._required_publication_authority = object()
+        self._reserved_publishers: dict[str, PublisherAuthority] = {}
+
+    def reserve_publisher(self, name: str, channels: tuple[str, ...]) -> PublisherAuthority:
+        """Reserve exact channels for one capability-bearing producer."""
+
+        if type(name) is not str or not name or name != name.strip():
+            raise ValueError("publisher authority name must be exact non-empty text")
+        if (
+            type(channels) is not tuple
+            or not channels
+            or any(type(channel) is not str or not channel or channel != channel.strip() for channel in channels)
+            or len(set(channels)) != len(channels)
+        ):
+            raise ValueError("publisher authority channels must be unique exact non-empty text")
+        conflicts = sorted(set(channels) & self._reserved_publishers.keys())
+        if conflicts:
+            raise RuntimeError(f"publisher authority channels are already reserved: {', '.join(conflicts)}")
+        authority = PublisherAuthority(name, frozenset(channels), object())
+        self._reserved_publishers.update({channel: authority for channel in channels})
+        return authority
 
     async def subscribe(
         self,
@@ -360,6 +390,7 @@ class DataBroker:
         *,
         persistence_authoritative: bool = False,
         descriptor_envelope: bytes | None = None,
+        publisher_authority: PublisherAuthority | None = None,
     ) -> None:
         """Разослать Reading всем подписчикам.
 
@@ -386,6 +417,14 @@ class DataBroker:
             descriptor_envelope = None
         metadata = copy.deepcopy(reading.metadata)
         metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, None)
+        metadata.pop(PUBLISHER_AUTHORITY_METADATA_KEY, None)
+        reserved_authority = self._reserved_publishers.get(reading.channel)
+        if reserved_authority is not None:
+            if publisher_authority is not reserved_authority:
+                raise RuntimeError(f"channel {reading.channel!r} requires its reserved publisher authority")
+            metadata[PUBLISHER_AUTHORITY_METADATA_KEY] = reserved_authority.name
+        elif publisher_authority is not None:
+            raise RuntimeError("publisher authority cannot mark an unreserved channel")
         if persistence_authoritative:
             metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] = persistence_authoritative
         delivered = replace(

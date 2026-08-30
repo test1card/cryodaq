@@ -68,6 +68,15 @@ def test_scan_log_allowlists_detector_warmup_action_confirmation_by_default():
     assert soak.scan_log(text) == []
 
 
+def test_scan_log_flags_detector_warmup_warning_recovery_failure():
+    text = _line(
+        "ERROR",
+        "warning_recovery_handler failed for interlock 'detector_warmup': transport unavailable",
+        name="cryodaq.core.interlock",
+    )
+    assert soak.scan_log(text) == [text]
+
+
 def test_scan_log_still_flags_unrelated_critical_despite_default_allowlist():
     text = _line("CRITICAL", "unrelated meltdown, nothing to do with interlocks")
     assert soak.scan_log(text) == [text]

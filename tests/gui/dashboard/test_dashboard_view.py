@@ -563,11 +563,13 @@ def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
             IdentityStatus.AUTHORITATIVE,
         )
 
-    assert [value for _, value in view._buffer_store.get_history("\u04221")] == [
-        77.0,
-        500.0,
-        78.0,
+    stored = list(view._buffer_store._buffers["\u04221"])
+    assert [(value, status) for _, value, status in stored] == [
+        (77.0, ChannelStatus.OK),
+        (500.0, ChannelStatus.OVERRANGE),
+        (78.0, ChannelStatus.OK),
     ]
+    assert [value for _, value in view._buffer_store.get_history("\u04221")] == [77.0, 78.0]
     assert view._sensor_grid is not None
     pending = view._sensor_grid._pending_readings["\u04221"]
     assert pending.count == 3
@@ -580,7 +582,7 @@ def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
 
     assert view._temp_plot is not None
     plotted = view._temp_plot._plot_items["\u04221"]
-    assert list(plotted.yData) == [77.0, 500.0, 78.0]
+    assert list(plotted.yData) == [77.0, 78.0]
     cell = view._sensor_grid._cells["\u04221"]
     assert cell._value_widget.text() == "78.00"
     assert cell._status_hint_widget.text() == "Перегрузка (за интервал)"

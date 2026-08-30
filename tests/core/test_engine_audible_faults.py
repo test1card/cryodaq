@@ -15,12 +15,17 @@ logic is exercised directly (same rationale as ``_drain_dispatch_tasks`` /
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from cryodaq.core.event_bus import EventBus
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.engine import (
     _dispatch_alarm_notification,
+    _interlock_dead_channel_handler,
     _interlock_dead_channel_recovery_handler,
     _InterlockHandlerContext,
     _should_dispatch_dead_channel_alarm,
@@ -134,6 +139,51 @@ async def test_dispatch_no_telegram_when_bot_not_configured() -> None:
     )
 
     assert tasks == set(), "no telegram_bot configured -> no dispatch task created"
+
+
+async def test_running_blind_guard_warning_reports_the_energised_source_truth() -> None:
+    """The production handler must never describe a deliberately running source as inactive."""
+
+    async def record_blind_guard(**_entry: object) -> None:
+        return None
+
+    safety = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    safety._state = SafetyState.RUNNING
+    bus = EventBus()
+    queue = await bus.subscribe("running-blind-guard")
+    context = _InterlockHandlerContext(
+        safety_manager=safety,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent=set(),
+        event_bus=bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="week-long-run"),
+    )
+    condition = SimpleNamespace(name="overheat_zone")
+    reading = Reading.now(
+        "Т5",
+        float("nan"),
+        "K",
+        instrument_id="LS218_1",
+        status=ChannelStatus.SENSOR_ERROR,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    settled = await _interlock_dead_channel_handler(condition, reading, context=context)
+
+    event = queue.get_nowait()
+    message = event.payload["message"]
+    assert settled is True, "a durably recorded advisory must settle its poll episode"
+    assert "RUNNING" in message
+    assert "продолжает работать" in message
+    assert "источник неактивен" not in message
 
 
 # ---------------------------------------------------------------------------
