@@ -129,6 +129,23 @@ _ENGINE_READER_SETTLEMENT_TICK_MS = 200
 # this covers the whole worker -- every join plus the stream/handler closes --
 # with slack, and its expiry is fail-closed (owners retained, explicit failure).
 _ENGINE_READER_SETTLEMENT_BOUND_S = 8.0
+# A cold engine establishes persistence and safety owners before it can emit
+# the exact readiness receipt, and the previous 10 x 0.5 s budget was too tight
+# for that.  Measured 2026-08-30 on Windows with --mock, from a clean slate with
+# every cryodaq process killed between attempts: three starts, ONE of which
+# never reached readiness at all, and both successes needed attempt 6 of 10 --
+# about three seconds of a five-second budget, with the failure above it.  The
+# spread, not the mean, is what has to fit, so the bound is raised well clear of
+# it rather than trimmed to the observed maximum; its expiry now reports a stuck
+# child at roughly one minute instead of failing bare at five seconds.  No
+# Ubuntu 22.04 figure is claimed here: the target platform has not been measured
+# this way yet, and the < 2 s in the design-system performance budget is a
+# target for the app becoming interactive, not a measurement of this receipt.
+# The monotonic deadline below also bounds a receipt whose REP endpoints never
+# become challengeable.
+_ENGINE_STARTUP_READY_MAX_ATTEMPTS = 120
+_ENGINE_STARTUP_READY_POLL_INTERVAL_S = 0.5
+_ENGINE_RUNTIME_READY_TICK_MS = 100
 _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
@@ -2367,6 +2384,7 @@ class LauncherWindow(QMainWindow):
         self._replay_ready_nonce: str | None = None
         self._replay_session_id: str | None = None
         self._replay_session_verified: bool = False
+        self._runtime_engine_readiness_state: dict[str, Any] | None = None
         self._engine_external = False  # True если engine запущен кем-то другим
         # A4: exponential backoff for engine restart attempts. Retry FOREVER —
         # a dead overnight acquisition with nobody told is worse than any
@@ -2736,7 +2754,7 @@ class LauncherWindow(QMainWindow):
             type(failure).__name__,
         )
 
-    def _start_engine(self) -> None:
+    def _start_engine(self, *, wait_for_ready: bool = True) -> None:
         """Запустить engine как подпроцесс (или подключиться к существующему)."""
         unsettled = getattr(self, "_engine_unsettled_incarnation", None)
         if unsettled is not None:
@@ -3168,10 +3186,17 @@ class LauncherWindow(QMainWindow):
             raise
         logger.info("Engine запущен, PID=%d; stderr capture active", process.pid)
 
-        # Every owned child must prove its exact private/public incarnation
-        # before the caller may attach the bridge.  There is intentionally no
-        # construction-only or compatibility bypass for this safety gate.
+        # Construction waits here before app.exec(), while a runtime restart
+        # transfers this same exact wait to _begin_runtime_engine_readiness so
+        # the Qt thread remains available for alarms, repaint and shutdown.
+        # Neither route may attach the bridge before the proof succeeds.
+        if not wait_for_ready:
+            return
         self._wait_engine_ready()
+        LauncherWindow._bind_verified_replay_session_after_readiness(self)
+
+    def _bind_verified_replay_session_after_readiness(self) -> None:
+        """Publish replay authority only after exact readiness succeeds."""
         if self._replay_source is not None:
             session_id = self._replay_session_id
             if type(session_id) is not str:
@@ -3182,6 +3207,131 @@ class LauncherWindow(QMainWindow):
                 speed=float(self._replay_speed),
             )
             self._replay_session_verified = True
+
+    def _begin_runtime_engine_readiness(
+        self,
+        *,
+        restart_generation: int,
+        restart_epoch: int,
+        on_ready: Callable[[], None],
+        on_failed: Callable[[Exception], None],
+    ) -> bool:
+        """Wait for a replacement engine without blocking the Qt thread.
+
+        The worker performs only the already-bounded exact readiness wait. Qt
+        observes its completion through an Event and short singleShot ticks;
+        bridge attachment and operator-visible state changes remain on the Qt
+        thread. One published state owns the flight so another restart cannot
+        overlap it, and a stale generation/epoch can never attach a bridge.
+        """
+
+        if type(getattr(self, "_runtime_engine_readiness_state", None)) is dict:
+            return False
+        state: dict[str, Any] = {
+            "done": threading.Event(),
+            "error": None,
+            "worker": None,
+        }
+        self._runtime_engine_readiness_state = state
+
+        def _work() -> None:
+            try:
+                self._wait_engine_ready()
+            except BaseException as exc:
+                state["error"] = exc
+            finally:
+                state["done"].set()
+
+        def _advance() -> None:
+            if getattr(self, "_runtime_engine_readiness_state", None) is not state:
+                return
+            done = state.get("done")
+            if not isinstance(done, threading.Event) or not done.is_set():
+                QTimer.singleShot(_ENGINE_RUNTIME_READY_TICK_MS, _advance)
+                return
+            self._runtime_engine_readiness_state = None
+            if vars(self).get(
+                "_restart_generation", 0
+            ) != restart_generation or not LauncherWindow._runtime_callback_is_current(self, restart_epoch):
+                return
+            failure = state.get("error")
+            if failure is not None:
+                if isinstance(failure, Exception):
+                    on_failed(failure)
+                else:
+                    wrapped = RuntimeError("engine readiness worker raised a base exception")
+                    wrapped.__cause__ = failure
+                    on_failed(wrapped)
+                return
+            on_ready()
+
+        try:
+            worker = threading.Thread(
+                target=_work,
+                name="engine-runtime-readiness",
+                daemon=True,
+            )
+            state["worker"] = worker
+            worker.start()
+        except Exception as exc:
+            self._runtime_engine_readiness_state = None
+            on_failed(exc)
+            return True
+        QTimer.singleShot(_ENGINE_RUNTIME_READY_TICK_MS, _advance)
+        return True
+
+    def _begin_engine_restart_readiness(
+        self,
+        *,
+        restart_generation: int,
+        restart_epoch: int,
+        raise_on_hold: bool,
+    ) -> None:
+        """Complete one manual or automatic replacement after exact readiness."""
+
+        def _readiness_failed(restart_error: Exception) -> None:
+            LauncherWindow._recover_failed_engine_restart(
+                self,
+                phase="readiness",
+                failure=restart_error,
+                child_start_attempted=True,
+                settle_bridge=True,
+                raise_on_hold=raise_on_hold,
+            )
+
+        def _readiness_succeeded() -> None:
+            completion_phase = "replay-session-bind"
+            try:
+                LauncherWindow._bind_verified_replay_session_after_readiness(self)
+                completion_phase = "bridge-attach"
+                self._bridge.start()
+                LauncherWindow._announce_soak_bridge_turnover(self)
+                completion_phase = "ui-authority-bind"
+                LauncherWindow._publish_replay_ui_authority(self)
+            except Exception as restart_error:
+                LauncherWindow._recover_failed_engine_restart(
+                    self,
+                    phase=completion_phase,
+                    failure=restart_error,
+                    child_start_attempted=True,
+                    settle_bridge=True,
+                    raise_on_hold=raise_on_hold,
+                )
+                return
+            self._restart_pending = False
+            self._restart_giving_up = False
+            self._clear_engine_down_banner()
+            self._data_timer.start()
+            self._health_timer.start()
+
+        if not LauncherWindow._begin_runtime_engine_readiness(
+            self,
+            restart_generation=restart_generation,
+            restart_epoch=restart_epoch,
+            on_ready=_readiness_succeeded,
+            on_failed=_readiness_failed,
+        ):
+            _readiness_failed(RuntimeError("engine runtime readiness already has an owner"))
 
     def _close_engine_stderr_stream(self) -> None:
         errors: list[Exception] = []
@@ -3678,10 +3828,28 @@ class LauncherWindow(QMainWindow):
             if context is not None:
                 context.term()
 
-    def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
+    def _wait_engine_ready(
+        self,
+        max_attempts: int = _ENGINE_STARTUP_READY_MAX_ATTEMPTS,
+        interval_s: float = _ENGINE_STARTUP_READY_POLL_INTERVAL_S,
+    ) -> None:
         """Wait for exact child/session readiness, never port occupancy alone."""
+        started_at = time.monotonic()
+        budget_s = max_attempts * interval_s
+        deadline = started_at + budget_s
+        next_progress_log_s = 10.0
+        child_label = "Replay engine" if self._replay_source is not None else "Engine"
+        logger.info(
+            "%s выполняет fail-closed инициализацию; ожидание точной готовности ограничено %.1f с",
+            child_label,
+            budget_s,
+        )
         for attempt in range(max_attempts):
-            time.sleep(interval_s)
+            if attempt:
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0:
+                    break
+                time.sleep(min(interval_s, remaining_s))
             if self._replay_source is not None:
                 process = self._engine_proc
                 if process is None or process.poll() is not None:
@@ -3700,22 +3868,33 @@ class LauncherWindow(QMainWindow):
                         process.pid,
                     )
                     return
-                continue
-            process = self._engine_proc
-            if process is None or process.poll() is not None:
-                raise RuntimeError("live engine child exited before exact readiness")
-            if self._engine_ready.is_set():
-                with self._engine_ready_lock:
-                    if self._engine_ready_state.get("error") is not None:
-                        raise RuntimeError("live engine child emitted an invalid readiness receipt")
-            if self._probe_exact_live_engine_session():
+            else:
+                process = self._engine_proc
+                if process is None or process.poll() is not None:
+                    raise RuntimeError("live engine child exited before exact readiness")
+                if self._engine_ready.is_set():
+                    with self._engine_ready_lock:
+                        if self._engine_ready_state.get("error") is not None:
+                            raise RuntimeError("live engine child emitted an invalid readiness receipt")
+                if self._probe_exact_live_engine_session():
+                    logger.info(
+                        "Live engine exact child/incarnation readiness established (attempt %d/%d, pid=%d)",
+                        attempt + 1,
+                        max_attempts,
+                        process.pid,
+                    )
+                    return
+            elapsed_s = time.monotonic() - started_at
+            if elapsed_s >= next_progress_log_s:
                 logger.info(
-                    "Live engine exact child/incarnation readiness established (attempt %d/%d, pid=%d)",
-                    attempt + 1,
-                    max_attempts,
-                    process.pid,
+                    "%s ещё запускается: дочерний процесс активен, точная готовность ожидается (%.1f/%.1f с)",
+                    child_label,
+                    elapsed_s,
+                    budget_s,
                 )
-                return
+                next_progress_log_s += 10.0
+            if time.monotonic() >= deadline:
+                break
         if self._replay_source is not None:
             self._replay_engine_failed = True
             raise RuntimeError("replay child did not establish exact session readiness")
@@ -5826,6 +6005,9 @@ class LauncherWindow(QMainWindow):
         if getattr(self, "_shutdown_requested", False):
             logger.warning("Engine restart refused while launcher shutdown is pending")
             return
+        if type(getattr(self, "_runtime_engine_readiness_state", None)) is dict:
+            logger.warning("Engine restart refused while replacement readiness is already pending")
+            return
         if getattr(self, "_engine_unsettled_incarnation", None) is not None:
             raise RuntimeError(
                 "prior engine incarnation lacks exact shutdown settlement; manual restart remains in HOLD"
@@ -5889,7 +6071,7 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=False,
                 )
             return
-        LauncherWindow._advance_restart_generation(self)
+        restart_generation = LauncherWindow._advance_restart_generation(self)
         try:
             self._bridge.shutdown()
         except Exception as exc:
@@ -5904,8 +6086,10 @@ class LauncherWindow(QMainWindow):
             return
         time.sleep(1)
         self._engine_external = False
+        self._restart_pending = True
+        restart_epoch = self._runtime_callback_epoch
         try:
-            self._start_engine()
+            self._start_engine(wait_for_ready=False)
         except Exception as exc:
             LauncherWindow._recover_failed_engine_restart(
                 self,
@@ -5916,24 +6100,12 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=False,
             )
             return
-        try:
-            self._bridge.start()
-            LauncherWindow._announce_soak_bridge_turnover(self)
-            LauncherWindow._publish_replay_ui_authority(self)
-        except Exception as exc:
-            LauncherWindow._recover_failed_engine_restart(
-                self,
-                phase="bridge-attach",
-                failure=exc,
-                child_start_attempted=True,
-                settle_bridge=True,
-                raise_on_hold=False,
-            )
-            return
-        self._restart_giving_up = False
-        self._clear_engine_down_banner()
-        self._data_timer.start()
-        self._health_timer.start()
+        LauncherWindow._begin_engine_restart_readiness(
+            self,
+            restart_generation=restart_generation,
+            restart_epoch=restart_epoch,
+            raise_on_hold=False,
+        )
 
     def _engine_settlement_pending(self) -> bool:
         """True while a prior incarnation's shutdown evidence has not settled.
@@ -5991,6 +6163,8 @@ class LauncherWindow(QMainWindow):
             observed = self._probe_external_engine_incarnation(receipt["pid"])
             return observed == receipt
         if self._engine_proc is None:
+            return False
+        if type(getattr(self, "_runtime_engine_readiness_state", None)) is dict:
             return False
         if (
             getattr(self, "_replay_source", None) is not None
@@ -7453,10 +7627,43 @@ class LauncherWindow(QMainWindow):
                     raise RuntimeError("operator snapshot ingress remained active")
             except Exception as exc:
                 errors["operator_snapshot_ingress"] = exc
+        try:
+            LauncherWindow._ensure_runtime_readiness_shutdown_transport(self)
+        except Exception as exc:
+            errors["engine_shutdown_transport"] = exc
         if not errors:
             self._shutdown_quiesced = True
             self._shutdown_settled.add("operator_snapshot_ingress")
         return errors
+
+    def _ensure_runtime_readiness_shutdown_transport(self) -> None:
+        """Restore only the transport needed to settle an unready live child.
+
+        A runtime replacement deliberately retires the old bridge before it
+        can prove readiness. If launcher shutdown wins that race, ordinary GUI
+        admission and runtime callbacks are already closed by quiescence, but
+        ``_stop_engine`` still needs the bridge's reserved launcher-shutdown
+        lane to obtain the exact verified-OFF receipt. Restart that retained
+        bridge owner without publishing readiness or reopening GUI callbacks.
+        """
+
+        if type(getattr(self, "_runtime_engine_readiness_state", None)) is not dict:
+            return
+        process = getattr(self, "_engine_proc", None)
+        if process is None or process.poll() is not None:
+            return
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            raise RuntimeError("runtime readiness child has no shutdown bridge owner")
+        bridge_alive = bridge.is_alive()
+        if type(bridge_alive) is not bool:
+            raise RuntimeError("runtime readiness shutdown bridge liveness is invalid")
+        if bridge_alive:
+            return
+        bridge.start()
+        if bridge.is_alive() is not True:
+            raise RuntimeError("runtime readiness shutdown bridge did not become live")
+        logger.info("Restored reserved launcher-shutdown transport for an unready replacement child")
 
     def _settle_safety_worker(self) -> None:
         unsettled: list[str] = []
@@ -8155,12 +8362,7 @@ class LauncherWindow(QMainWindow):
                 self._bridge.shutdown()
                 phase = "readiness"
                 child_start_attempted = True
-                self._start_engine()
-                phase = "bridge-attach"
-                self._bridge.start()
-                LauncherWindow._announce_soak_bridge_turnover(self)
-                phase = "ui-authority-bind"
-                LauncherWindow._publish_replay_ui_authority(self)
+                self._start_engine(wait_for_ready=False)
             except Exception as restart_error:
                 LauncherWindow._recover_failed_engine_restart(
                     self,
@@ -8171,11 +8373,13 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=True,
                 )
                 return
-            self._restart_pending = False
-            self._restart_giving_up = False
-            self._clear_engine_down_banner()
-            self._data_timer.start()
-            self._health_timer.start()
+
+            LauncherWindow._begin_engine_restart_readiness(
+                self,
+                restart_generation=restart_generation,
+                restart_epoch=restart_epoch,
+                raise_on_hold=True,
+            )
 
         QTimer.singleShot(delay_s * 1000, _do_restart)
 

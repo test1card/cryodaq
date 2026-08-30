@@ -332,6 +332,20 @@ def test_registry_schema_ids_and_references_are_exact() -> None:
     assert all(pair["runtime_prevention_id"] in record_ids for pair in payload["false_green_pairs"])
 
 
+def test_cold_start_prevention_registers_exact_launcher_guards() -> None:
+    """PR112's startup correction cannot outlive its prevention mapping."""
+    payload = validate_registry(_registry())
+    record = next(item for item in payload["records"] if item["id"] == "LAUNCHER-COLD-START-READINESS-001")
+
+    assert {guard["node"] for guard in record["guards"]} == {
+        "tests/launcher/test_launcher_cold_start_budget.py::test_cold_start_evidence_names_measured_platforms",
+        "tests/launcher/test_launcher_cold_start_budget.py::test_launcher_waits_past_old_budget_for_exact_cold_start_readiness",
+        "tests/launcher/test_launcher_cold_start_budget.py::test_launcher_cold_start_wait_remains_elapsed_time_bounded",
+        "tests/launcher/test_launcher_cold_start_budget.py::test_runtime_restart_keeps_cold_readiness_wait_off_qt_callback",
+    }
+    assert {guard["ci_partition"] for guard in record["guards"]} == {"remaining"}
+
+
 def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidence() -> None:
     payload = _registry()
     validate_registry(payload)
