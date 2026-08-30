@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import threading
 import time
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -214,6 +215,14 @@ def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
     loop.run_forever()
 
 
+def _stop_join_close_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
+    """Stop the fixture loop, settle its thread, then release loop-owned sockets."""
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "ZMQ harness event-loop thread did not stop within 5 seconds"
+    loop.close()
+
+
 @pytest.fixture()
 def zmq_harness() -> Generator[ZmqHarness, None, None]:
     """Provide a fully started ZMQPublisher + ZmqBridge on an ephemeral loopback port.
@@ -222,8 +231,6 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
     Each fixture invocation gets its own port, loop thread, publisher, and bridge
     subprocess — no shared state between tests.
     """
-    import threading
-
     pub_addr = allocate_pub_addr()
 
     # Start a dedicated event loop in a background thread.
@@ -279,8 +286,7 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
     if not _sentinel_arrived:
         bridge.shutdown()
         asyncio.run_coroutine_threadsafe(publisher.stop(), loop).result(timeout=3.0)
-        loop.call_soon_threadsafe(loop.stop)
-        t.join(timeout=3.0)
+        _stop_join_close_loop(loop, t)
         pytest.fail("ZmqBridge SUB socket did not receive sentinel reading within 15 s")
 
     harness = ZmqHarness(
@@ -294,4 +300,4 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
     yield harness
 
     harness.teardown()
-    t.join(timeout=5.0)
+    _stop_join_close_loop(loop, t)
