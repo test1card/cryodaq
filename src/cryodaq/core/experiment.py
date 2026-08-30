@@ -25,12 +25,17 @@ from typing import Any
 import yaml
 
 from cryodaq.report_state import (
+    ACTIVE_EXPERIMENT_STATE_FIELDS,
+    ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION,
     ReportContractError,
+    active_experiment_state_fingerprint,
+    build_active_experiment_state,
     load_current_manifest,
     load_report_state,
     report_force_context,
     resolve_report_artifact,
     resolve_report_paths,
+    validate_active_experiment_state,
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
@@ -76,7 +81,7 @@ _LIFECYCLE_LOCKS_GUARD = threading.Lock()
 _LIFECYCLE_LOCKS: dict[str, threading.RLock] = {}
 
 _TRANSITION_SCHEMA_VERSION = 2
-_STATE_SCHEMA_VERSION = 2
+_STATE_SCHEMA_VERSION = ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION
 _HEX_ID_LENGTH = 32
 _SHA256_LENGTH = 64
 _UNSET = object()
@@ -1565,14 +1570,11 @@ class ExperimentManager:
         app_mode: AppMode,
         active_experiment_id: str | None,
     ) -> str:
-        return _canonical_digest(
-            {
-                "schema_version": _STATE_SCHEMA_VERSION,
-                "manager_incarnation": self._manager_incarnation,
-                "revision": revision,
-                "app_mode": app_mode.value,
-                "active_experiment_id": active_experiment_id,
-            }
+        return active_experiment_state_fingerprint(
+            manager_incarnation=self._manager_incarnation,
+            revision=revision,
+            app_mode=app_mode.value,
+            active_experiment_id=active_experiment_id,
         )
 
     def _state_cut(self) -> dict[str, Any]:
@@ -1625,17 +1627,7 @@ class ExperimentManager:
             "active_experiment_id",
             "updated_at",
         }
-        v2_keys = {
-            "schema_version",
-            "app_mode",
-            "active_experiment_id",
-            "revision",
-            "state_fingerprint",
-            "last_transition_receipt",
-            "last_transition_receipt_fingerprint",
-            "manager_incarnation",
-            "updated_at",
-        }
+        v2_keys = ACTIVE_EXPERIMENT_STATE_FIELDS
         expected_keys = legacy_keys if schema_version == 1 else v2_keys
         if set(payload) != expected_keys:
             raise RuntimeError("Experiment state authority envelope is ambiguous.")
@@ -1770,22 +1762,15 @@ class ExperimentManager:
         next_receipt = None if transition_receipt is _UNSET else transition_receipt
         if next_receipt is not None and not isinstance(next_receipt, dict):
             raise RuntimeError("Experiment state terminal receipt is invalid.")
-        payload = {
-            "schema_version": _STATE_SCHEMA_VERSION,
-            **self._state.to_payload(),
-            "revision": next_revision,
-            "state_fingerprint": self._state_fingerprint(
-                revision=next_revision,
-                app_mode=self._state.app_mode,
-                active_experiment_id=self._state.active_experiment_id,
-            ),
-            "last_transition_receipt": next_receipt,
-            "last_transition_receipt_fingerprint": (
-                _canonical_digest(next_receipt) if next_receipt is not None else None
-            ),
-            "manager_incarnation": self._manager_incarnation,
-            "updated_at": datetime.now(UTC).isoformat(),
-        }
+        payload = build_active_experiment_state(
+            app_mode=self._state.app_mode.value,
+            active_experiment_id=self._state.active_experiment_id,
+            revision=next_revision,
+            manager_incarnation=self._manager_incarnation,
+            last_transition_receipt=next_receipt,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        validate_active_experiment_state(payload)
         from cryodaq.core.atomic_write import atomic_write_text
 
         atomic_write_text(self._state_path, json.dumps(payload, ensure_ascii=False, indent=2))

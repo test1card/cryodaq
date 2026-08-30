@@ -12,6 +12,7 @@ import pytest
 
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 from cryodaq.report_state import (
+    build_active_experiment_state,
     experiment_lock_name,
     load_report_state,
     new_pending_state,
@@ -47,6 +48,23 @@ def _terminal_experiment(
         encoding="utf-8",
     )
     return root
+
+
+def _write_active_experiment_state(
+    data_dir: Path,
+    active_experiment_id: str | None,
+    *,
+    updated_at: str,
+) -> None:
+    payload = build_active_experiment_state(
+        app_mode="experiment",
+        active_experiment_id=active_experiment_id,
+        revision=1,
+        manager_incarnation="1" * 32,
+        last_transition_receipt=None,
+        updated_at=updated_at,
+    )
+    (data_dir / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 async def test_lexical_cursor_is_persistent_bounded_and_eventually_covers_archive(
@@ -838,17 +856,10 @@ async def test_active_terminal_metadata_is_not_fingerprinted_until_active_state_
         experiment_id,
         ended_at="2026-07-09T00:00:00+00:00",
     )
-    state_path = tmp_path / "experiment_state.json"
-    state_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "app_mode": "experiment",
-                "active_experiment_id": experiment_id,
-                "updated_at": "2026-07-09T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
+    _write_active_experiment_state(
+        tmp_path,
+        experiment_id,
+        updated_at="2026-07-09T00:00:00+00:00",
     )
     fingerprints: list[str] = []
     renders: list[str] = []
@@ -871,16 +882,10 @@ async def test_active_terminal_metadata_is_not_fingerprinted_until_active_state_
     assert fingerprints == []
     assert renders == []
 
-    state_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "app_mode": "experiment",
-                "active_experiment_id": None,
-                "updated_at": "2026-07-09T00:00:01+00:00",
-            }
-        ),
-        encoding="utf-8",
+    _write_active_experiment_state(
+        tmp_path,
+        None,
+        updated_at="2026-07-09T00:00:01+00:00",
     )
     coordinator.notify_terminal(experiment_id)
     await coordinator.reconcile_once()
