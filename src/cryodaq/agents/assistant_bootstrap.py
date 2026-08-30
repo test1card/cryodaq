@@ -28,6 +28,7 @@ from cryodaq.agents.assistant.report_coordinator import (
     load_report_coordinator_config,
 )
 from cryodaq.paths import get_config_dir, get_data_dir
+from cryodaq.process_lifetime import bind_child_lifetime_from_environment
 
 logger = logging.getLogger("cryodaq.assistant.bootstrap")
 
@@ -603,6 +604,11 @@ async def run(
 
 def main() -> None:
     """Process entrypoint used by development and frozen launchers."""
+    # This is before logging, configuration, sockets, renderers, or optional
+    # LLM imports can acquire runtime ownership. A child first scheduled after
+    # launcher death exits on the captured-parent mismatch.
+    bind_child_lifetime_from_environment()
+
     from cryodaq.logging_setup import resolve_log_level, setup_logging
 
     parser = argparse.ArgumentParser(description="CryoDAQ report coordinator and assistant")

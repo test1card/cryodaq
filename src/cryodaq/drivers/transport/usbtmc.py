@@ -10,12 +10,17 @@ import logging
 import multiprocessing
 import os
 import re
-import signal
 import sys
 from dataclasses import dataclass
 from typing import Any
 
+from cryodaq.process_lifetime import (
+    PR_SET_PDEATHSIG,
+    bind_child_lifetime_to_parent,
+)
+
 log = logging.getLogger(__name__)
+_PR_SET_PDEATHSIG = PR_SET_PDEATHSIG
 
 # Имитированные ответы Keithley 2604B для mock-режима
 _MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
@@ -454,9 +459,6 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
 # therefore refuses to start while the platform remains an explicitly OPEN gate until a real
 # binding (a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) plus a real
 # parent-death test exist. A failed open is safe; an unbound worker is not.
-_PR_SET_PDEATHSIG = 1
-
-
 def _bind_lifetime_to_parent(expected_parent: int) -> None:
     """Bind the VISA worker lifetime to its engine or exit before opening VISA.
 
@@ -468,35 +470,14 @@ def _bind_lifetime_to_parent(expected_parent: int) -> None:
     before. The soak runner IS such a subreaper, so this is not hypothetical.
     """
 
-    if type(expected_parent) is not int or expected_parent <= 1:
-        os._exit(0)
-    if os.getppid() != expected_parent:
-        # Reparented before the first instruction: the engine is already gone.
-        os._exit(0)
-    if not sys.platform.startswith("linux"):
-        # Explicitly OPEN gate, not support: without lifetime binding an abruptly dead
-        # engine can orphan this source-owning child. Refuse before VISA can open until a
-        # Windows Job Object or equivalent plus a real parent-death test closes the gate.
-        log.warning(
-            "USBTMC: платформа %s без привязки VISA-процесса к родителю — воркер не стартует (открытый шлюз)",
-            sys.platform,
-        )
-        os._exit(0)
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
-            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
-    except Exception:
-        # A source-owning child that cannot be bound to its parent must not run at all.
-        # Refusing here costs one failed open, which the transport reports; continuing
-        # would risk the orphan this exists to prevent.
-        os._exit(0)
-    if os.getppid() != expected_parent:
-        # The race: the parent died between the check above and the prctl, so the signal we
-        # just asked for will never arrive. Leave now, by ourselves.
-        os._exit(0)
+    bind_child_lifetime_to_parent(
+        expected_parent,
+        platform=sys.platform,
+        refusal_logger=log,
+        refusal_message=(
+            "USBTMC: платформа %s без привязки VISA-процесса к родителю — воркер не стартует (открытый шлюз)"
+        ),
+    )
 
 
 def _visa_process_main(connection: Any, expected_parent: int) -> None:

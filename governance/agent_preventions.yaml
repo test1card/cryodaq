@@ -55,6 +55,15 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: LAUNCHER-ASSISTANT-PARENT-DEATH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-ASSISTANT-PARENT-DEATH-001
+    guard: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_sigkill
+    ci_partition: remaining
+    platform: posix
+    red_evidence: measured_2026_08_30_python_3_14_6_against_final_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_removing_only_bind_child_lifetime_from_environment_from_importable_assistant_bootstrap_made_the_exact_real_pidfd_launcher_SIGKILL_guard_fail_1_failed_exit_1_because_the_assistant_survived_then_cleanup_killed_and_reaped_it_pending_immutable_capture
+    green_evidence: measured_2026_08_30_python_3_14_6_restored_assistant_bootstrap_sha256_c66fa17e7cd0bac838134ca34648baec2ecf56b700dbb2c54d1365732f5d0633_git_blob_952eda891b2f05b2379c8201454297acebb01a0c_byte_identical_with_final_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_and_shared_lifetime_blob_5d1a9d3a145d3d25714ff4ef699e159b3b8ca1d4_then_exact_guard_1_passed_pending_immutable_capture
   - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -7684,6 +7693,36 @@ records:
     automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
     green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
+  - id: LAUNCHER-ASSISTANT-PARENT-DEATH-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The launcher-owned assistant process started by LauncherWindow._start_assistant through cryodaq.agents.assistant_bootstrap on Linux and by a retained kill-on-close Job Object on Windows.
+    classification: retained_handle_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Abrupt launcher death or failure during construction can leave a 100 MiB assistant process alive indefinitely; repeated failed launches accumulate unbounded resident memory across a laboratory week.
+    invariant: The repeated retained-child class is enforced at the shared process-lifetime boundary. On Linux the launcher captures its PID before Popen, the assistant consumes that exact environment grant before acquiring logging, configuration, socket, renderer, or optional LLM runtime ownership, and PR_SET_PDEATHSIG delivers SIGKILL with both pre-call and post-call parent identity checks. On Windows the launcher retains one JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE handle assigned to the exact assistant incarnation until terminal child exit, and assignment failure never discards the Popen owner. Construction failure and exact launcher death leave no assistant alive. Engine death does not kill the assistant because the launcher, not the engine, owns it. Linux PDEATHSIG is not transitive and this record claims no coverage for launcher-owned multiprocessing siblings or assistant descendants; a Windows Job covers the assigned assistant tree but not sibling launcher children.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_construction_failure
+        ci_partition: remaining
+        platform: posix
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_cannot_survive_launcher_sigkill
+        ci_partition: remaining
+        platform: posix
+      - node: tests/launcher/test_assistant_parent_lifetime.py::test_assistant_is_owned_by_launcher_not_engine
+        ci_partition: remaining
+        platform: posix
+      - node: tests/test_launcher_shutdown_ownership.py::test_windows_assistant_retains_kill_on_close_job_until_child_exit
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_windows_job_assignment_failure_retains_exact_assistant_owner
+        ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_master_9cd72a91b_twelve_children_with_dead_parent_pids_retained_1042_6_MiB_including_one_103_1_MiB_assistant_and_removing_only_the_corrected_assistant_bootstrap_binder_reproduced_a_surviving_real_assistant_under_exact_launcher_SIGKILL_1_failed_exit_1_pending_immutable_capture
+    green_evidence: measured_2026_08_30_python_3_14_6_final_launcher_and_guard_suite_207_passed_report_and_USBTMC_protocol_suite_128_passed_1_windows_skip_and_real_source_parent_lifecycle_suite_36_passed_1_windows_skip_with_assistant_bootstrap_restored_byte_identical_sha256_c66fa17e7cd0bac838134ca34648baec2ecf56b700dbb2c54d1365732f5d0633_launcher_blob_2aa45931e338ff7971db42119c82e09fbdacd42e_shared_lifetime_blob_5d1a9d3a145d3d25714ff4ef699e159b3b8ca1d4_pending_immutable_capture
   - id: LAUNCHER-FD2-INHERITANCE-001
     status: open
     scope: product_contract

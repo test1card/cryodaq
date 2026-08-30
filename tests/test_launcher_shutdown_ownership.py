@@ -14,6 +14,108 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 
+def test_windows_assistant_retains_kill_on_close_job_until_child_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    events: list[str] = []
+    process = MagicMock(pid=7318)
+    process.poll.return_value = 0
+
+    class Job:
+        def close(self) -> None:
+            events.append("close-job")
+
+    job = Job()
+    popen_calls: list[dict[str, object]] = []
+    host = SimpleNamespace(
+        _assistant_experiment_mode=False,
+        _assistant_periodic_requested=False,
+        _assistant_periodic_health=None,
+        _assistant_proc=None,
+        _assistant_parent_job=None,
+        _assistant_shutdown_path=None,
+        _assistant_shutdown_authority=None,
+        _assistant_soak_duplicate_owner=None,
+        _assistant_unsettled_start_failure=None,
+        _assistant_restart_pending=False,
+        _soak_artifact_capability=None,
+    )
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setenv(module.PARENT_PID_ENV, "stale-linux-parent")
+    monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
+    monkeypatch.setattr(
+        module.subprocess,
+        "Popen",
+        lambda *_args, **kwargs: popen_calls.append(kwargs) or process,
+    )
+    monkeypatch.setattr(
+        module,
+        "create_windows_kill_on_close_job",
+        lambda candidate: events.append(f"assign:{candidate.pid}") or job,
+    )
+
+    module.LauncherWindow._start_assistant(host)
+
+    assert host._assistant_proc is process
+    assert host._assistant_parent_job is job
+    assert events == ["assign:7318"]
+    assert module.PARENT_PID_ENV not in popen_calls[0]["env"]
+
+    module.LauncherWindow._stop_assistant(host)
+
+    assert events == ["assign:7318", "close-job"]
+    assert host._assistant_proc is None
+    assert host._assistant_parent_job is None
+
+
+def test_windows_job_assignment_failure_retains_exact_assistant_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    process = MagicMock(pid=7317)
+    process.poll.return_value = None
+    host = SimpleNamespace(
+        _assistant_experiment_mode=False,
+        _assistant_periodic_requested=False,
+        _assistant_periodic_health=None,
+        _assistant_proc=None,
+        _assistant_parent_job=None,
+        _assistant_shutdown_path=None,
+        _assistant_shutdown_authority=None,
+        _assistant_soak_duplicate_owner=None,
+        _assistant_unsettled_start_failure=None,
+        _assistant_restart_pending=False,
+        _soak_artifact_capability=None,
+    )
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        module,
+        "create_windows_kill_on_close_job",
+        lambda _process: (_ for _ in ()).throw(OSError("job assignment failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="post-spawn construction failed"):
+        module.LauncherWindow._start_assistant(host)
+
+    assert host._assistant_proc is process
+    assert host._assistant_parent_job is None
+    assert isinstance(host._assistant_unsettled_start_failure, OSError)
+
+    process.poll.return_value = 0
+    module.LauncherWindow._stop_assistant(host)
+    assert host._assistant_proc is None
+    assert host._assistant_unsettled_start_failure is None
+
+
 def test_assistant_post_spawn_failure_retains_process_until_exact_stop(monkeypatch) -> None:
     import cryodaq.launcher as module
 
@@ -48,6 +150,7 @@ def test_assistant_post_spawn_failure_retains_process_until_exact_stop(monkeypat
         _assistant_periodic_requested=False,
         _assistant_periodic_health=None,
         _assistant_proc=None,
+        _assistant_parent_job=None,
         _assistant_shutdown_path=None,
         _assistant_shutdown_authority=None,
         _soak_artifact_capability=capability,
