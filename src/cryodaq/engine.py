@@ -64,7 +64,7 @@ from cryodaq.core.alarm_ack_codec import (
 )
 from cryodaq.core.alarm_config import AlarmConfig, AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
@@ -117,7 +117,7 @@ from cryodaq.core.qualification import (
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
+from cryodaq.core.safety_manager import BlindGuardAdvisoryResult, SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.core.scheduler import (
     InstrumentConfig,
@@ -217,6 +217,15 @@ from cryodaq.storage.sqlite_writer import (
 )
 
 logger = logging.getLogger("cryodaq.engine")
+
+_KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S = 1.0
+_KEITHLEY_WARNING_PERSISTENCE_NOTICE = (
+    "Долговременная запись выбора оператора после предупреждения Safety не подтверждена; запрос Start продолжен."
+)
+_KEITHLEY_REARM_JOURNAL_PERSISTENCE_NOTICE = (
+    "Запись предупреждения о неподтверждённом перевзводе интерлоков в журнале оператора не подтверждена; "
+    "запрос Start продолжен."
+)
 
 # Compatibility re-exports for tests and callers that import moved helpers
 # from ``cryodaq.engine``. Referenced here so linters keep the imports.
@@ -435,6 +444,19 @@ def _consume_engine_launch_authority(
         raise
 
 
+def _requires_launcher_fd2_isolation(
+    engine_instance_id: str,
+    shutdown_capability: str,
+    engine_ready_nonce: str,
+    engine_ready_channel_fd: int | None,
+) -> bool:
+    """True only for a launcher-owned POSIX engine child, before any descendant spawn."""
+
+    return sys.platform != "win32" and bool(
+        engine_instance_id and shutdown_capability and engine_ready_nonce and type(engine_ready_channel_fd) is int
+    )
+
+
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     """Coerce a command setpoint to ``float`` and reject non-finite values.
 
@@ -449,10 +471,194 @@ def _coerce_finite_setpoint(raw: Any, name: str) -> float:
     return value
 
 
+def _operator_warning_choice_is_valid(cmd: dict[str, Any]) -> bool:
+    """Did the operator actually supply a well-formed choice for this Start?
+
+    The GUI attaches `operator_warning_choice` ONLY when the safety gate is not
+    ready, so a Start taken while Safety is READY carries none.  Recording such a
+    Start as CONFIRMED writes a decision the operator never made into the operator
+    log, which is the record the laboratory week is judged from.
+
+    Exact on every field.  A payload we cannot interpret is not a confirmation.
+    """
+
+    choice = cmd.get("operator_warning_choice")
+    if type(choice) is not dict:
+        return False
+    request_id = choice.get("request_id")
+    return (
+        choice.get("schema") == "cryodaq.keithley_warning_choice.v1"
+        and type(request_id) is str
+        and len(request_id) == 32
+        and all(character in "0123456789abcdef" for character in request_id)
+        and type(choice.get("warning")) is str
+        and choice.get("choice") == "start"
+    )
+
+
+def _warning_choice_request_id(cmd: dict[str, Any]) -> str:
+    """Reuse a well-formed GUI correlation ID without making it authority."""
+
+    # Only a WHOLE valid choice may lend its correlation ID.  Checking the ID's
+    # lexical form alone let a receipt carry the GUI's identifier for a choice the
+    # GUI never made, which is worse than an unknown ID: it is a wrong one.
+    if _operator_warning_choice_is_valid(cmd):
+        raw_choice = cmd["operator_warning_choice"]
+        return str(raw_choice["request_id"])
+    return secrets.token_hex(16)
+
+
+def _unconfirmed_keithley_warning_receipt(
+    request_id: str | None,
+    error_code: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": request_id,
+        "committed": False,
+        "operator_log_id": None,
+        "replayed": None,
+        "error_code": error_code,
+    }
+
+
+async def _persist_keithley_warning_choice_intent(
+    warnings: list[dict[str, str]],
+    *,
+    cmd: dict[str, Any],
+    writer: Any,
+    experiment_manager: Any,
+) -> dict[str, Any]:
+    """Bound one best-effort warning receipt without holding source authority."""
+
+    request_id = _warning_choice_request_id(cmd)
+    if writer is None:
+        return _unconfirmed_keithley_warning_receipt(
+            request_id,
+            "persistence_unavailable",
+        )
+
+    codes = [warning.get("code", "analytics_warning") for warning in warnings]
+    details = "; ".join(
+        f"{warning.get('operator_text', 'Предупреждение недоступно')}: {warning.get('consequence', '')}"
+        for warning in warnings
+    )
+    # START STAYS PERMISSIVE; only the RECORD changes.  A Start taken while Safety
+    # is READY carries no operator_warning_choice, and calling that a confirmation
+    # writes a decision the operator never made.
+    confirmed = _operator_warning_choice_is_valid(cmd)
+    channel_label = cmd.get("channel", "?")
+    if confirmed:
+        message = f"Keithley {channel_label}: намерение запуска подтверждено при предупреждении: {details}"
+        choice_tag = "operator_warning_choice"
+    else:
+        message = (
+            f"Keithley {channel_label}: запуск выполнен при предупреждении БЕЗ подтверждения "
+            f"оператора (выбор не был передан): {details}"
+        )
+        choice_tag = "operator_warning_unconfirmed"
+    experiment_id = getattr(experiment_manager, "active_experiment_id", None)
+    tags = ("auto", "keithley", "start", choice_tag, *codes)
+    fingerprint_semantics = {
+        "schema": "cryodaq.keithley_warning_choice_log.v1",
+        "author": "system",
+        "source": "auto",
+        "experiment_id": experiment_id,
+        "message": message,
+        "tags": list(tags),
+    }
+    request_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_semantics,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    commit_task = asyncio.create_task(
+        writer.append_operator_log_idempotent(
+            message=message,
+            author="system",
+            source="auto",
+            experiment_id=experiment_id,
+            tags=tags,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        ),
+        name=f"keithley_warning_choice_{request_id}",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {commit_task},
+            timeout=_KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S,
+        )
+    except BaseException:
+        commit_task.cancel()
+        commit_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None,
+        )
+        raise
+    if not done:
+        commit_task.cancel()
+        commit_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None,
+        )
+        return _unconfirmed_keithley_warning_receipt(
+            request_id,
+            "persistence_timeout",
+        )
+    try:
+        commit = commit_task.result()
+    except Exception:
+        logger.error(
+            "Keithley warning-choice persistence failed; RUN continues with an unconfirmed receipt",
+            exc_info=True,
+        )
+        return _unconfirmed_keithley_warning_receipt(
+            request_id,
+            "persistence_failed",
+        )
+    entry = commit.entry if type(commit) is OperatorLogCommitResult else None
+    if (
+        type(commit) is not OperatorLogCommitResult
+        or type(commit.replayed) is not bool
+        or type(entry) is not OperatorLogEntry
+        or type(entry.id) is not int
+        or entry.id <= 0
+        or entry.message != message
+        or entry.author != "system"
+        or entry.source != "auto"
+        or entry.experiment_id != experiment_id
+        or entry.tags != tags
+    ):
+        logger.error(
+            "Keithley warning-choice persistence returned an invalid receipt; RUN continues with an unconfirmed receipt"
+        )
+        return _unconfirmed_keithley_warning_receipt(
+            request_id,
+            "persistence_receipt_invalid",
+        )
+    return {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": request_id,
+        "committed": True,
+        "operator_log_id": entry.id,
+        "replayed": commit.replayed,
+        "error_code": None,
+    }
+
+
 async def _run_keithley_command(
     action: str,
     cmd: dict[str, Any],
     safety_manager: SafetyManager,
+    *,
+    warning_choice_committer: Callable[
+        [list[dict[str, str]]],
+        Awaitable[dict[str, Any]],
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Dispatch channel-scoped Keithley commands to SafetyManager."""
     channel = cmd.get("channel")
@@ -470,7 +676,15 @@ async def _run_keithley_command(
                 "error_code": "keithley_parameters_invalid",
                 "error": "Keithley command parameters are invalid.",
             }
-        return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        if warning_choice_committer is None:
+            return await safety_manager.request_run(p, v, i, channel=smu_channel)
+        return await safety_manager.request_run(
+            p,
+            v,
+            i,
+            channel=smu_channel,
+            warning_choice_committer=warning_choice_committer,
+        )
 
     if action == "keithley_stop":
         smu_channel = normalize_smu_channel(channel)
@@ -512,6 +726,44 @@ async def _run_keithley_command(
         return await safety_manager.update_limits(channel=smu_channel, v_comp=v, i_comp=i)
 
     raise ValueError(f"Unsupported Keithley command: {action}")
+
+
+async def _log_successful_keithley_command(
+    action: str,
+    cmd: dict[str, Any],
+    result: dict[str, Any],
+    event_logger: Any,
+) -> bool | None:
+    """Persist a logged command and expose its durable outcome to the caller."""
+
+    channel = cmd.get("channel", "?")
+    if action == "keithley_start":
+        message = f"Keithley {channel}: запуск"
+        rearm_warning_texts: list[str] = []
+        raw_warnings = result.get("operator_warnings")
+        if type(raw_warnings) is list:
+            for warning in raw_warnings:
+                if type(warning) is not dict or warning.get("code") != "interlock_rearm_unconfirmed":
+                    continue
+                operator_text = warning.get("operator_text")
+                consequence = warning.get("consequence")
+                if type(operator_text) is str and operator_text:
+                    detail = operator_text
+                    if type(consequence) is str and consequence:
+                        detail = f"{detail}: {consequence}"
+                    rearm_warning_texts.append(detail)
+        if rearm_warning_texts:
+            return await event_logger.log_event(
+                "keithley",
+                f"{message}; {'; '.join(rearm_warning_texts)}",
+                extra_tags=["interlock_rearm_unconfirmed"],
+            )
+        return await event_logger.log_event("keithley", message)
+    elif action == "keithley_stop":
+        return await event_logger.log_event("keithley", f"Keithley {channel}: остановка")
+    elif action == "keithley_emergency_off":
+        return await event_logger.log_event("keithley", f"\u26a0 Keithley {channel}: аварийное отключение")
+    return None
 
 
 def _parse_log_time(raw: Any) -> datetime | None:
@@ -2341,6 +2593,7 @@ async def _safety_fault_log_callback(
     message: str,
     channel: str = "",
     value: float = 0.0,
+    experiment_id: str | None = None,
     *,
     context: _SafetyFaultLogContext,
 ) -> None:
@@ -2349,6 +2602,7 @@ async def _safety_fault_log_callback(
         message=message,
         author=source,
         source="machine",
+        experiment_id=experiment_id,
         tags=("safety_fault", channel) if channel else ("safety_fault",),
     )
     try:
@@ -2385,6 +2639,91 @@ class _InterlockHandlerContext:
     dead_channel_alarm_sent: set[str]
     event_bus: Any | None = None
     experiment_manager: Any | None = None
+    alarm_state_manager: Any | None = None
+
+
+# A bound, not a budget.  The probe runs on the writer's executor thread, and a
+# stalled or disconnected mount can park that thread for as long as the kernel is
+# willing to wait.  `_request_run_locked` calls this while it holds the SafetyManager
+# command lock, so without a bound a dead mount would freeze acquisition instead of
+# answering the operator.  Passing the bound answers False, which is the same answer
+# every other unreadable-evidence path here gives.
+_PERSISTENCE_PROBE_BOUND_S = 10.0
+
+
+def _consume_late_persistence_probe(task: asyncio.Task[Any]) -> None:
+    """Retrieve the outcome of a probe that outlived its bound.
+
+    The answer was already False by the time this runs.  This exists only so the
+    event loop does not report the late task as a detached, never-retrieved failure.
+
+    Module level on purpose, for the same reason `_persistence_can_write` is.
+    """
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except BaseException:
+        return
+
+
+async def _persistence_can_write(writer: Any) -> bool:
+    """True when the WRITER just proved it can commit - never inferred from anything.
+
+    Free space is not the question, and answering it is DANGEROUS.
+    `storage/sqlite_writer.py` latches persistence on `database is full` (SQLITE_FULL
+    from `max_page_count`), on `disk quota exceeded` (a per-user quota), and on a
+    sustained `database is locked`.  None of those three is a filesystem free-space
+    condition.  A predicate that probed `shutil.disk_usage` therefore answered True
+    with 500 GB free while every write still failed - clearing the latch, letting the
+    source energise, and producing measurements that were never recorded until the
+    next failed write re-latched.  That is the data loss the latch exists to prevent,
+    reached through the guard meant to prevent it.
+
+    Nor may it read `writer.is_disk_full`.  That flag is cleared only by
+    `clear_disk_full()`, whose only production caller is the SafetyManager hook this
+    predicate gates, so reading it made the latch gate its own clearing: after a real
+    disk-full event the operator was refused until process restart however much space
+    had been freed.  That is a refusal, which this software does not do.
+
+    So the writer is asked to do the thing itself - one real transaction, committed -
+    and only its own answer is trusted.  The probe runs on the writer's executor, off
+    the event loop, and is bounded, so a dead mount cannot freeze acquisition.
+
+    Clearing still promises nothing about the next write.  The writer re-latches on
+    the next failure, which is what keeps a flapping disk from producing a run that
+    silently fails to record.  Unreadable evidence answers False, because "cannot
+    tell" is not "recovered".
+
+    Module level on purpose: `_run_engine` forbids nested defs and lambdas, and that
+    rule is right - a closure buried in a 700-line coroutine is invisible to the
+    structural guards that read this file.
+    """
+
+    probe = getattr(writer, "probe_can_commit", None)
+    if probe is None:
+        # A writer that cannot be asked has not answered yes.
+        return False
+    try:
+        outcome = probe()
+    except Exception:
+        return False
+    if not inspect.isawaitable(outcome):
+        return bool(outcome)
+    task = asyncio.ensure_future(outcome)
+    # NOT asyncio.wait_for: the writer's `_run_owned_executor` deliberately absorbs
+    # CancelledError and keeps waiting for its executor operation, so cancelling the
+    # task - which is how wait_for enforces a timeout - would never return.  Waiting
+    # without cancelling bounds the ANSWER while letting the probe settle on its own.
+    done, _pending = await asyncio.wait({task}, timeout=_PERSISTENCE_PROBE_BOUND_S)
+    if task not in done:
+        task.add_done_callback(_consume_late_persistence_probe)
+        return False
+    try:
+        return bool(task.result())
+    except Exception:
+        return False
 
 
 async def _interlock_noop() -> None:
@@ -2397,7 +2736,45 @@ async def _interlock_trip_handler(
     *,
     context: _InterlockHandlerContext,
 ) -> None:
-    """Route an interlock trip to SafetyManager, failing closed on errors."""
+    """Route control actions to SafetyManager and warnings to operator alarms."""
+    if condition.action == "warning":
+        try:
+            if context.event_bus is None or context.experiment_manager is None or context.alarm_state_manager is None:
+                raise RuntimeError("interlock warning publication path is unavailable")
+            transition = context.alarm_state_manager.process(
+                condition.name,
+                AlarmEvent(
+                    alarm_id=condition.name,
+                    level="WARNING",
+                    message=condition.description,
+                    triggered_at=time.time(),
+                    channels=[reading.channel],
+                    values={
+                        reading.channel: float(reading.value) if reading.value is not None else 0.0,
+                    },
+                ),
+                {},
+            )
+            if transition != "TRIGGERED":
+                return
+            await _dispatch_alarm_notification(
+                context.event_bus,
+                context.alarm_dispatch_tasks,
+                alarm_id=condition.name,
+                level="WARNING",
+                message=condition.description,
+                experiment_id=context.experiment_manager.active_experiment_id,
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else 0.0,
+            )
+        except Exception as exc:
+            logger.error(
+                "Interlock warning publication failed; interlock=%s exception=%s; no safety escalation",
+                condition.name,
+                type(exc).__name__,
+            )
+        return
+
     try:
         await context.safety_manager.on_interlock_trip(
             interlock_name=condition.name,
@@ -2425,6 +2802,45 @@ async def _interlock_trip_handler(
             )
 
 
+def _interlock_trip_admission(
+    condition: Any,
+    _reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> bool:
+    """Admit soft-stop conditions only in the source-active lifecycle."""
+    if condition.action != "stop_source":
+        return True
+    state = context.safety_manager.get_status().get("state")
+    if state in {"safe_off", "ready", "fault_latched", "manual_recovery"}:
+        return False
+    return True
+
+
+async def _interlock_warning_recovery_handler(
+    condition: Any,
+    _reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Remove a recovered warning and publish its clear transition."""
+    if condition.action != "warning":
+        return
+    if context.alarm_state_manager is None or context.event_bus is None or context.experiment_manager is None:
+        raise RuntimeError("interlock warning recovery path is unavailable")
+    transition = context.alarm_state_manager.process(condition.name, None, {})
+    if transition != "CLEARED":
+        return
+    await context.event_bus.publish(
+        EngineEvent(
+            event_type="alarm_cleared",
+            timestamp=datetime.now(UTC),
+            payload={"alarm_id": condition.name},
+            experiment_id=context.experiment_manager.active_experiment_id,
+        )
+    )
+
+
 async def _interlock_dead_channel_handler(
     condition: Any,
     reading: Any,
@@ -2433,11 +2849,14 @@ async def _interlock_dead_channel_handler(
 ) -> bool:
     """Route a persistently unusable protected channel, preserving retry policy."""
     try:
-        escalated = await context.safety_manager.on_interlock_dead_channel(
+        outcome = await context.safety_manager.on_interlock_dead_channel(
             condition.name,
             reading.channel,
             value=float(reading.value) if reading.value is not None else float("nan"),
+            reading=reading,
         )
+        blind_advisory = type(outcome) is BlindGuardAdvisoryResult
+        escalated = bool(outcome)
     except Exception as exc:
         logger.critical(
             "Interlock dead-channel handler failed: exception=%s; escalating to fault",
@@ -2457,19 +2876,47 @@ async def _interlock_dead_channel_handler(
             )
             return False
 
-    key = f"{condition.name}:{reading.channel}"
-    if _should_dispatch_dead_channel_alarm(key, escalated, context.dead_channel_alarm_sent):
+    reasons = reading.instrument_status_fault_reasons() if blind_advisory else ()
+    if blind_advisory:
+        evidence = hashlib.sha256("\0".join(reasons).encode("utf-8")).hexdigest()
+        key = f"{condition.name}:blind:{evidence}:{reading.channel}"
+        channel_suffix = f":{reading.channel}"
+        context.dead_channel_alarm_sent.difference_update(
+            prior
+            for prior in context.dead_channel_alarm_sent
+            if ":blind:" in prior and prior.endswith(channel_suffix) and prior != key
+        )
+    else:
+        key = f"{condition.name}:{reading.channel}"
+    notification_escalated = escalated and not blind_advisory
+    if _should_dispatch_dead_channel_alarm(key, notification_escalated, context.dead_channel_alarm_sent):
+        if blind_advisory:
+            state = getattr(context.safety_manager, "state", None)
+            state_label = state.value.upper() if type(state) is SafetyState else "UNKNOWN"
+            if state is SafetyState.RUNNING:
+                source_truth = "источник продолжает работать (RUNNING)"
+            elif state is SafetyState.RUN_PERMITTED:
+                source_truth = "источник находится в активном переходе RUN_PERMITTED"
+            else:
+                source_truth = f"фактическое состояние источника: {state_label}"
+            message = (
+                f"Интерлок-канал {reading.channel} ('{condition.name}'): прибор сообщает "
+                f"неисправность датчика ({', '.join(reasons)}), температурное действие "
+                f"не выполнено; {source_truth}. Требуется решение оператора."
+            )
+        else:
+            message = (
+                f"Интерлок-канал {reading.channel} ('{condition.name}') "
+                "устойчиво непригоден, источник неактивен — fault не "
+                "латчится, но требуется внимание оператора."
+            )
         try:
             await _dispatch_alarm_notification(
                 context.event_bus,
                 context.alarm_dispatch_tasks,
                 alarm_id=f"dead_channel_{reading.channel}",
                 level="WARNING",
-                message=(
-                    f"Интерлок-канал {reading.channel} ('{condition.name}') "
-                    "устойчиво непригоден, источник неактивен — fault не "
-                    "латчится, но требуется внимание оператора."
-                ),
+                message=message,
                 experiment_id=context.experiment_manager.active_experiment_id,
                 channel=reading.channel,
                 value=float(reading.value) if reading.value is not None else float("nan"),
@@ -4749,6 +5196,33 @@ async def _execute_owned_experiment_command(
 
     async with context.experiment_command_lock:
         experiment_manager = context.experiment_manager
+        if action == "experiment_abort" and await asyncio.to_thread(
+            experiment_manager.has_restart_recoverable_conductivity_runs,
+            str(cmd.get("experiment_id", "")).strip() or None,
+        ):
+            off_result = await _run_keithley_command(
+                "keithley_emergency_off",
+                {"cmd": "keithley_emergency_off"},
+                context.safety_manager,
+            )
+            off_evidence = parse_global_off_evidence(off_result.get("off_evidence"))
+            if (
+                off_result.get("ok") is not True
+                or off_result.get("active_channels") != []
+                or off_evidence is None
+                or not off_evidence.verified_off
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "conductivity_recovery_global_off_unverified",
+                    "error": "restart autosweep recovery is held because exact global OFF was not verified",
+                    "retry_safe": True,
+                }
+            await asyncio.to_thread(
+                experiment_manager.recover_conductivity_runs_after_verified_off,
+                str(cmd.get("experiment_id", "")).strip() or None,
+                verified_off=True,
+            )
         experiment_call = asyncio.to_thread(
             _run_experiment_command,
             action,
@@ -4792,6 +5266,14 @@ async def _execute_owned_experiment_command(
                 reconciliation_failures.append(feed_failure)
 
         if action in {"experiment_start", "experiment_create"}:
+            experiment_id = receipt.get("experiment_id")
+            bind_blind_guards = getattr(context.safety_manager, "record_blind_guards_for_experiment", None)
+            if callable(bind_blind_guards):
+                await _attempt_experiment_reconciliation_async(
+                    reconciliation_failures,
+                    "blind_guard_experiment_binding",
+                    lambda: bind_blind_guards(experiment_id),
+                )
             await _attempt_experiment_reconciliation_async(
                 reconciliation_failures,
                 "calibration_acquisition_activate",
@@ -5221,20 +5703,65 @@ async def _handle_gui_command(
             "keithley_set_target",
             "keithley_set_limits",
         }:
-            result = await _run_keithley_command(action, cmd, safety_manager)
+            warning_choice_committer = None
+            if action == "keithley_start":
+                warning_choice_committer = functools.partial(
+                    _persist_keithley_warning_choice_intent,
+                    cmd=cmd,
+                    writer=writer,
+                    experiment_manager=experiment_manager,
+                )
+            result = await _run_keithley_command(
+                action,
+                cmd,
+                safety_manager,
+                warning_choice_committer=warning_choice_committer,
+            )
+            warning_receipt = result.get("operator_warning_receipt")
+            # The Safety layer returns `operator_warnings` as a LIST, and the panel
+            # reads a SCALAR `warning` (or `error`) and otherwise shows generic
+            # success.  A Start could therefore energise, commit a receipt, and
+            # tell the operator nothing at all about the warning it ran under -
+            # the check ran, the record exists, and he never saw it.  Compose the
+            # scalar he actually reads.
+            operator_warning_texts: list[str] = []
+            raw_operator_warnings = result.get("operator_warnings")
+            if type(raw_operator_warnings) is list:
+                for raw_warning in raw_operator_warnings:
+                    if type(raw_warning) is not dict:
+                        continue
+                    operator_text = raw_warning.get("operator_text")
+                    if type(operator_text) is str and operator_text:
+                        operator_warning_texts.append(operator_text)
+            if type(warning_receipt) is dict and warning_receipt.get("committed") is False:
+                logger.warning(
+                    "Keithley warning-choice persistence was not confirmed: error_code=%s",
+                    warning_receipt.get("error_code"),
+                )
+                # The persistence notice is APPENDED, not substituted: losing the
+                # underlying warning to report a bookkeeping failure would be the
+                # same silence in a different coat.
+                operator_warning_texts.append(_KEITHLEY_WARNING_PERSISTENCE_NOTICE)
+            if operator_warning_texts:
+                result = {**result, "warning": "; ".join(operator_warning_texts)}
             if result.get("ok"):
-                ch = cmd.get("channel", "?")
-                if action == "keithley_start":
-                    await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
-                elif action == "keithley_stop":
-                    await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
-                elif action == "keithley_emergency_off":
-                    await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
-                    if escalation_service is not None:
-                        await escalation_service.escalate(
-                            "emergency",
-                            f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
-                        )
+                journal_committed = await _log_successful_keithley_command(action, cmd, result, event_logger)
+                has_rearm_warning = type(raw_operator_warnings) is list and any(
+                    type(raw_warning) is dict and raw_warning.get("code") == "interlock_rearm_unconfirmed"
+                    for raw_warning in raw_operator_warnings
+                )
+                if has_rearm_warning and journal_committed is not True:
+                    # Start remains permissive, and the underlying blind-guard
+                    # warning remains first.  The operator must additionally know
+                    # that the week-long journal did not confirm its own record.
+                    operator_warning_texts.append(_KEITHLEY_REARM_JOURNAL_PERSISTENCE_NOTICE)
+                    result = {**result, "warning": "; ".join(operator_warning_texts)}
+                if action == "keithley_emergency_off" and escalation_service is not None:
+                    ch = cmd.get("channel", "?")
+                    await escalation_service.escalate(
+                        "emergency",
+                        f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
+                    )
             return result
         if action == "safety_status":
             return {
@@ -6634,6 +7161,11 @@ async def _run_engine(
     writer.set_event_loop(asyncio.get_running_loop())
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
+    # The documented recovery for a persistence fault (acknowledge_fault, exposed as the
+    # safety_acknowledge command) has ZERO call sites in the GUI, so a disk that fills
+    # during a week-long run would end it until the application restarted.  A deliberate
+    # Start may consume that latch, but ONLY once the writer reports it can write again.
+    safety_manager.set_persistence_recovered(functools.partial(_persistence_can_write, writer))
     persistence_freshness_s = min(
         259_200.0,
         max(1.0, 3.0 * max((config.poll_interval_s for config in driver_configs), default=10.0)),
@@ -6734,6 +7266,14 @@ async def _run_engine(
             _interlock_dead_channel_recovery_handler,
             context=interlock_handler_context,
         ),
+        trip_admission=functools.partial(
+            _interlock_trip_admission,
+            context=interlock_handler_context,
+        ),
+        warning_recovery_handler=functools.partial(
+            _interlock_warning_recovery_handler,
+            context=interlock_handler_context,
+        ),
     )
     _log_physical_policy_receipt(
         "interlocks",
@@ -6807,6 +7347,7 @@ async def _run_engine(
     _alarm_v2_setpoint = ExperimentSetpointProvider(experiment_manager, _alarm_v2_engine_cfg.setpoints)
     alarm_v2_evaluator = AlarmEvaluator(_alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint)
     alarm_v2_state_mgr = AlarmStateManager()
+    interlock_handler_context.alarm_state_manager = alarm_v2_state_mgr
     zmq_pub.configure_periodic_authority(
         reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
         alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
@@ -6815,6 +7356,12 @@ async def _run_engine(
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).
     interlock_engine.set_alarm_publisher(alarm_v2_state_mgr)
+    # A tripped control interlock is never evaluated again until it returns to
+    # ARMED, and the operator has no control that does it.  Wire the deliberate
+    # start to the re-arm so a guard cannot fire once and then go blind for the
+    # rest of a week-long run.  Wired here by setter for the same reason as the
+    # alarm publisher above: the SafetyManager is built before this engine.
+    safety_manager.set_interlock_rearm(interlock_engine.rearm_tripped_control_interlocks)
     if _alarm_v2_configs:
         logger.info("Alarm Engine v2: загружено %d алармов", len(_alarm_v2_configs))
     else:
@@ -7901,6 +8448,15 @@ def main() -> None:
     engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd = (
         _consume_engine_launch_authority()
     )
+    if _requires_launcher_fd2_isolation(
+        engine_instance_id,
+        shutdown_capability,
+        engine_ready_nonce,
+        engine_ready_channel_fd,
+    ):
+        from cryodaq._fd2_bootstrap import isolate_launcher_stderr_fd2
+
+        isolate_launcher_stderr_fd2()
     import argparse
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")

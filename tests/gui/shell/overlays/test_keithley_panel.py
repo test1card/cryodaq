@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
+import re
 import time
 from datetime import UTC, datetime
 
@@ -14,10 +16,14 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import cryodaq.gui.shell.overlays.keithley_panel as _kp_mod
+from cryodaq.core.broker import DataBroker
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.keithley_panel import (
     KeithleyPanel,
+    SafetyGateCause,
     _SmuChannelBlock,
 )
 
@@ -225,19 +231,66 @@ def test_connected_off_state_enables_spins_and_start(app):
 # ----------------------------------------------------------------------
 
 
-def test_safety_not_ready_disables_controls_except_emergency(app):
+def _panel_with_authoritative_safety_warning() -> KeithleyPanel:
     panel = KeithleyPanel()
     _connect_authorized(panel)
-    panel.set_safety_ready(False, reason="fault_latched: канал Т11")
-    assert not panel._smua_block._start_btn.isEnabled()
-    assert not panel._smua_block._p_spin.isEnabled()
+    panel.set_safety_ready(
+        False,
+        reason="Interlock stop_source: detector_warmup",
+        cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+    )
+    return panel
+
+
+def test_authoritative_safety_condition_leaves_start_enabled(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    assert panel._safety_ready is False
+    assert panel._smua_block._start_btn.isEnabled()
+
+
+def test_authoritative_safety_condition_leaves_parameter_spins_enabled(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    assert panel._smua_block._p_spin.isEnabled()
+    assert panel._smua_block._v_spin.isEnabled()
+    assert panel._smua_block._i_spin.isEnabled()
+
+
+def test_authoritative_safety_condition_shows_visible_warning(app):
+    panel = _panel_with_authoritative_safety_warning()
+
+    # Use isHidden() — offscreen Qt reports isVisible()=False for unparented widgets.
+    assert not panel._gate_reason_label.isHidden()
+    assert "ПРЕДУПРЕЖДЕНИЕ" in panel._gate_reason_label.text()
+    assert "Interlock stop_source: detector_warmup" in panel._gate_reason_label.text()
+    assert "работающий источник" in panel._gate_reason_label.text()
+    assert "заблокировано" not in panel._gate_reason_label.text()
+
+
+def test_emergency_off_stays_enabled_during_authoritative_safety_warning(app):
+    panel = _panel_with_authoritative_safety_warning()
+
     # Emergency is the escape hatch and stays enabled while connected.
     assert panel._smua_block._emergency_btn.isEnabled()
     assert panel._emergency_both_btn.isEnabled()
-    # Use isHidden() — offscreen Qt reports isVisible()=False for unparented widgets.
-    assert not panel._gate_reason_label.isHidden()
+
+
+def test_missing_safety_authority_still_disables_controls_except_emergency(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+
+    panel.set_safety_ready(False, reason="Нет авторитетного состояния Safety")
+
+    assert panel._safety_ready is False
+    assert not panel._smua_block._start_btn.isEnabled()
+    assert not panel._smua_block._p_spin.isEnabled()
+    assert not panel._smua_block._v_spin.isEnabled()
+    assert not panel._smua_block._i_spin.isEnabled()
+    assert panel._smua_block._emergency_btn.isEnabled()
+    assert panel._emergency_both_btn.isEnabled()
     assert "Управление заблокировано" in panel._gate_reason_label.text()
-    assert "fault_latched" in panel._gate_reason_label.text()
+    assert "Нет авторитетного состояния Safety" in panel._gate_reason_label.text()
 
 
 def test_safety_ready_restores_controls(app):
@@ -314,6 +367,62 @@ def test_start_and_stop_success_banners_are_unchanged(app, command, expected):
     assert panel._banner_label.text() == expected
 
 
+def test_successful_start_surfaces_unconfirmed_warning_persistence(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_start", "channel": "smua"}
+    warning = (
+        "Долговременная запись выбора оператора после предупреждения Safety не подтверждена; запрос Start продолжен."
+    )
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+
+        block._on_command_result(
+            1,
+            command,
+            {"ok": True, "warning": warning},
+            generation,
+            dispatched.workers[0],
+        )
+
+        text = panel._banner_label.text()
+        assert text == f"Запуск канала А: Engine подтвердил выполнение. {warning}"
+        assert panel._banner_label.accessibleName() == text
+        assert not panel._banner_timer.isActive()
+    finally:
+        _restore_spy(block)
+
+
+def test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_start", "channel": "smua"}
+    warning = "ПЕРЕВЗВОД ИНТЕРЛОКОВ НЕ ПОДТВЕРЖДЁН; МОЖЕТ БЫТЬ СЛЕП: heater_overtemperature"
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+
+        block._on_command_result(
+            1,
+            command,
+            {"ok": True, "warning": warning},
+            generation,
+            dispatched.workers[0],
+        )
+
+        rendered = panel._banner_label.text()
+        assert rendered == f"Запуск канала А: Engine подтвердил выполнение. {warning}"
+        assert panel._banner_label.accessibleName() == rendered
+        assert not panel._banner_timer.isActive(), "a successful Start warning must remain visibly retained"
+    finally:
+        _restore_spy(block)
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)
@@ -330,6 +439,28 @@ def test_start_click_emits_signal_with_default_spin_values(app):
         ]
         # SAFETY: ZmqCommandWorker.start() must have been called (worker actually launched).
         assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
+    finally:
+        _restore_spy(panel._smua_block)
+
+
+def test_start_with_safety_warning_dispatches_operator_choice_receipt(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    panel.set_safety_ready(
+        False,
+        reason="Interlock stop_source: detector_warmup",
+        cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+    )
+    dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        panel._smua_block._start_btn.click()
+
+        assert len(dispatched) == 1
+        receipt = dispatched[0]["operator_warning_choice"]
+        assert receipt["schema"] == "cryodaq.keithley_warning_choice.v1"
+        assert re.fullmatch(r"[0-9a-f]{32}", receipt["request_id"])
+        assert receipt["warning"] == "Interlock stop_source: detector_warmup"
+        assert receipt["choice"] == "start"
     finally:
         _restore_spy(panel._smua_block)
 
@@ -1182,6 +1313,158 @@ def test_timeout_blocks_normal_control_until_fresh_state_and_safety(app):
         assert panel._unresolved_outcomes == {}
     finally:
         _restore_spy(block)
+
+
+async def test_periodic_source_retransmission_cannot_reconcile_unknown_target_outcome(app):
+    data_broker = DataBroker()
+    source_states = await data_broker.subscribe(
+        "test_keithley_panel_source_observation_revision",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel == "analytics/keithley_channel_state/smua",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    panel = KeithleyPanel()
+    panel.set_connected(True)
+    panel.set_safety_ready(True)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_set_target",
+        "channel": "smua",
+        "p_target": 0.75,
+    }
+
+    try:
+        await manager.start()
+        await asyncio.wait_for(source_states.get(), timeout=0.5)
+        started = await manager.request_run(0.5, 40.0, 1.0, channel="smua")
+        assert started["ok"] is True
+        run_state = await asyncio.wait_for(source_states.get(), timeout=0.5)
+        panel.on_reading(run_state)
+
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        worker = dispatched.workers[0]
+        block._on_command_result(
+            1,
+            command,
+            {"ok": False, "_handler_timeout": True, "error": "Engine timed out"},
+            generation,
+            worker,
+        )
+        assert block._unknown_outcome_requires is not None
+
+        await manager._publish_keithley_channel_states("periodic")
+        retransmission = await asyncio.wait_for(source_states.get(), timeout=0.5)
+        panel.on_reading(retransmission)
+        panel.set_safety_ready(True)
+
+        assert block._unknown_outcome_requires is not None
+        assert "предыдущая команда имеет неизвестный исход" in block.authorization_reason("keithley_stop")
+        assert (
+            retransmission.metadata["source_observation_revision"] == run_state.metadata["source_observation_revision"]
+        )
+
+        stopped = await manager.emergency_off(channel="smua")
+        assert stopped["ok"] is True
+        off_state = await asyncio.wait_for(source_states.get(), timeout=0.5)
+        panel.on_reading(off_state)
+        panel.set_safety_ready(True)
+        assert block._unknown_outcome_requires is None
+        assert off_state.metadata["source_observation_revision"] > run_state.metadata["source_observation_revision"]
+    finally:
+        _restore_spy(block)
+        await manager.stop()
+
+
+def test_restarted_engine_first_source_observation_reconciles_prior_generation(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    block.apply_state("off", source_observation_revision=12)
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": 0.5,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        block._on_command_result(
+            1,
+            command,
+            {"ok": False, "_handler_timeout": True, "error": "Engine timed out"},
+            generation,
+            dispatched.workers[0],
+        )
+        assert block._unknown_outcome_requires is not None
+
+        panel.set_connected(False)
+        panel.set_connected(True)
+        block.apply_state("off", source_observation_revision=1)
+        panel.set_safety_ready(True)
+
+        assert block._unknown_outcome_requires is None
+        assert block._start_btn.isEnabled()
+    finally:
+        _restore_spy(block)
+
+
+async def test_emergency_off_same_state_observation_reconciles_unknown_start_outcome(app):
+    data_broker = DataBroker()
+    source_states = await data_broker.subscribe(
+        "test_emergency_off_same_state_observation",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel == "analytics/keithley_channel_state/smua",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    panel = KeithleyPanel()
+    panel.set_connected(True)
+    panel.set_safety_ready(True)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": 0.5,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
+    try:
+        await manager.start()
+        initial_off = await asyncio.wait_for(source_states.get(), timeout=0.5)
+        assert initial_off.metadata["state"] == "off"
+        panel.on_reading(initial_off)
+
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        block._on_command_result(
+            1,
+            command,
+            {"ok": False, "_handler_timeout": True, "error": "Engine timed out"},
+            generation,
+            dispatched.workers[0],
+        )
+        assert block._unknown_outcome_requires is not None
+
+        stopped = await manager.emergency_off(channel="smua")
+        assert stopped["ok"] is True
+        decisive_off = await asyncio.wait_for(source_states.get(), timeout=0.5)
+        assert decisive_off.metadata["state"] == initial_off.metadata["state"] == "off"
+        panel.on_reading(decisive_off)
+        panel.set_safety_ready(True)
+
+        assert (
+            decisive_off.metadata["source_observation_revision"] > initial_off.metadata["source_observation_revision"]
+        )
+        assert block._unknown_outcome_requires is None
+        assert block._start_btn.isEnabled()
+    finally:
+        _restore_spy(block)
+        await manager.stop()
 
 
 def test_timeout_latch_surfaces_proactive_tooltip_on_blocked_controls(app):

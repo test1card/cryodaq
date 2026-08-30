@@ -200,6 +200,13 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         ),
         "core/zmq_bridge.py": _direct_imports("cryodaq.channels.persistence", "MAX_PERSISTED_ENVELOPE_BYTES"),
         "core/zmq_subprocess.py": _direct_imports("cryodaq.channels.persistence", "MAX_PERSISTED_ENVELOPE_BYTES"),
+        # Registered 2026-08-29 with the display-precision change (owner: two decimals on
+        # screen, full precision on disk).  Both read ChannelQuantity to decide how many
+        # digits a quantity shows; neither writes, persists or publishes.  This allow-list
+        # exists so a new importer of the channel contract is a DELIBERATE entry rather than
+        # an accident, and this is that deliberate entry.
+        "gui/dashboard/sensor_cell.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
+        "gui/display_precision.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "gui/shell/main_window_v2.py": _direct_imports(
             "cryodaq.channels.descriptors",
             "ChannelDescriptorV1",
@@ -207,6 +214,7 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
             "ChannelRole",
             "ChannelSafetyClass",
         ),
+        "gui/shell/overlays/conductivity_panel.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "gui/shell/overlays/instruments_panel.py": _direct_imports(
             "cryodaq.channels.descriptors", "MAX_CATALOG_DESCRIPTORS", "ChannelDescriptorV1"
         ),

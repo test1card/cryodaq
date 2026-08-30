@@ -10,9 +10,9 @@ an error state.
 Two pure functions form the whole contract:
 
 - :func:`encode` — Reading ``(value, status)`` → stored ``(value, status)`` pair.
-  Any non-finite value collapses to ``SENTINEL``; the status passes through
-  verbatim (the driver has already paired the non-finite value with a non-OK
-  status).
+  Any non-finite value or non-OK status collapses to ``SENTINEL``; the status
+  passes through verbatim.  A finite device ceiling carrying a fault status is
+  fault evidence, never a temperature value.
 - :func:`decode` — stored ``(value, status)`` → presentation value. A non-OK
   status (or a raw sentinel/non-finite) presents as ``NaN`` — a non-finite
   reading must never surface downstream as a real number.
@@ -45,10 +45,11 @@ def is_sentinel(value: float | None) -> bool:
 def encode(value: float | None, status: ChannelStatus) -> tuple[float, str]:
     """Reading ``(value, status)`` → stored ``(value, status)`` pair.
 
-    A non-finite (or missing) value becomes ``SENTINEL``; a finite value is
-    stored as-is. The status string is stored verbatim as the discriminator.
+    A non-finite/missing value or any non-OK status becomes ``SENTINEL``; only
+    a finite OK value is stored as-is. The status string is stored verbatim as
+    the discriminator.
     """
-    if value is None or not math.isfinite(value):
+    if status is not ChannelStatus.OK or value is None or not math.isfinite(value):
         return SENTINEL, status.value
     return float(value), status.value
 

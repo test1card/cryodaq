@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,6 +26,7 @@ from cryodaq.core.interlock import InterlockCondition, InterlockEngine, Interloc
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
 _BASE = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 _CHANNEL_ID = "Т5"
@@ -51,6 +54,7 @@ def _reading(
     offset_s: float = 0.0,
     status: ChannelStatus = ChannelStatus.SENSOR_ERROR,
     unit: str = "K",
+    metadata: dict | None = None,
 ) -> Reading:
     return Reading(
         timestamp=_BASE + timedelta(seconds=offset_s),
@@ -59,6 +63,7 @@ def _reading(
         value=value,
         unit=unit,
         status=status,
+        metadata={} if metadata is None else metadata,
     )
 
 
@@ -149,6 +154,332 @@ async def test_persistent_nonusable_escalates() -> None:
     # Further non-usable samples do NOT re-escalate (window already escalated).
     await engine._process_reading(_reading(value=float("nan"), offset_s=15.0))
     assert len(escalations) == 1, "escalation must fire at most once per window"
+
+
+async def test_lost_instrument_fault_evidence_reopens_generic_escalation() -> None:
+    """An advisory window cannot suppress later non-instrument failure."""
+    escalations: list[tuple[str, ...]] = []
+
+    async def handler(_condition, reading):
+        reasons = reading.instrument_status_fault_reasons()
+        escalations.append(reasons)
+        return True
+
+    engine = _make_engine(handler=handler, min_samples=1, min_duration_s=0.0)
+    await engine._process_reading(
+        _reading(
+            metadata={
+                "instrument_status_register": "LakeShore 218 RDGST",
+                "instrument_status_fault_reasons": ["sensor_units_over_range"],
+            }
+        )
+    )
+    await engine._process_reading(_reading(offset_s=1.0))
+
+    assert escalations == [("sensor_units_over_range",), ()]
+
+
+async def test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed() -> None:
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            return "2" if command == "RDGST? 1" else "0"
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        channel_labels={1: _CHANNEL_ID},
+        mock=False,
+    )
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    manager = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+
+    async def dead_channel_handler(condition, reading):
+        return await manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=dead_channel_handler, min_samples=1, min_duration_s=0.0)
+    try:
+        reading = (await driver.read_channels())[0]
+        assert reading.metadata["sensor_status"] == 2
+        assert reading.status is ChannelStatus.SENSOR_ERROR
+        assert math.isnan(reading.value)
+        assert reading.instrument_status_fault_reasons() == (), (
+            "an undocumented bit must not certify the recognized sensor-fault advisory"
+        )
+
+        await engine._process_reading(reading)
+
+        assert manager.state is SafetyState.FAULT_LATCHED, (
+            "unknown RDGST input must retain the generic active-source fail-closed path"
+        )
+    finally:
+        await manager.stop()
+
+
+async def test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed() -> None:
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            return str(0x42) if command == "RDGST? 1" else "0"
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        channel_labels={1: _CHANNEL_ID},
+        mock=False,
+    )
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    manager = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+
+    async def dead_channel_handler(condition, reading):
+        return await manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=dead_channel_handler, min_samples=1, min_duration_s=0.0)
+    try:
+        reading = (await driver.read_channels())[0]
+        assert reading.metadata["sensor_status"] == 0x42
+        assert reading.status is ChannelStatus.SENSOR_ERROR
+        assert math.isnan(reading.value)
+        assert reading.instrument_status_fault_reasons() == (), (
+            "one undocumented bit must withhold certification of otherwise recognized advisory evidence"
+        )
+
+        await engine._process_reading(reading)
+
+        assert manager.state is SafetyState.FAULT_LATCHED, (
+            "mixed known and unknown RDGST input must retain the generic active-source fail-closed path"
+        )
+    finally:
+        await manager.stop()
+
+
+async def test_persistent_instrument_fault_escalates_without_settling_or_revoking_controls() -> None:
+    """A protected guard-blind episode stays visible, recorded, and retryable."""
+    broker = SafetyBroker()
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        broker,
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    mgr._config.require_keithley_for_run = False
+    mgr._config.critical_channels = []
+    await mgr.start()
+    try:
+        await broker.publish(Reading.now("Т1 верх", 4.5, "K", instrument_id="test"))
+        await asyncio.sleep(1.5)
+        started = await mgr.request_run(0.5, 40.0, 1.0)
+        assert started["ok"] is True
+        assert mgr.state is SafetyState.RUNNING
+
+        async def handler(condition, reading):
+            return await mgr.on_interlock_dead_channel(
+                condition.name,
+                reading.channel,
+                value=reading.value,
+                reading=reading,
+            )
+
+        engine = _make_engine(handler=handler, min_samples=5, min_duration_s=10.0)
+        metadata = {
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        }
+        for offset_s in (0.0, 3.0, 6.0, 9.0, 12.0):
+            await engine._process_reading(_reading(offset_s=offset_s, metadata=metadata))
+
+        window = engine._nonusable_windows[_CHANNEL_ID]
+        assert window.escalated is True, "a durably recorded advisory must settle this exact evidence episode"
+        assert mgr.state is SafetyState.RUNNING, "warning about blindness must not remove operator controls"
+
+        blind_facts = [
+            fact for fact in mgr.snapshot_operator_safety().plant_health if fact.reason_code == "interlock_guard_blind"
+        ]
+        assert len(blind_facts) == 1
+        assert _CHANNEL_ID in blind_facts[0].display_name
+        assert "sensor_units_over_range" in blind_facts[0].display_name
+
+        assert len(run_records) == 1
+        assert run_records[0]["source"] == "interlock_guard_blind"
+        assert run_records[0]["channel"] == _CHANNEL_ID
+        assert _CHANNEL_ID in str(run_records[0]["message"])
+        assert "sensor_units_over_range" in str(run_records[0]["message"])
+
+        await engine._process_reading(_reading(offset_s=15.0, metadata=metadata))
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
+        assert len(run_records) == 1, "retrying the safety decision must not duplicate the durable run record"
+    finally:
+        await mgr.stop()
+
+
+async def test_instrument_fault_operator_fact_names_blind_channel_and_reason() -> None:
+    """The mature advisory is explicit in the operator safety owner cut."""
+    mgr = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    blind_facts = [
+        fact for fact in mgr.snapshot_operator_safety().plant_health if fact.reason_code == "interlock_guard_blind"
+    ]
+    assert len(blind_facts) == 1
+    assert _CHANNEL_ID in blind_facts[0].display_name
+    assert "sensor_units_over_range" in blind_facts[0].display_name
+
+
+async def test_concurrent_generic_dead_channel_and_blind_guard_are_both_in_operator_snapshot() -> None:
+    mgr = SafetyManager(SafetyBroker(), keithley_driver=None, mock=True)
+    mgr._mature_dead_interlock_channels["Т2 Криостат"] = "generic_dead_zone"
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    snapshot = mgr.snapshot_operator_safety()
+    facts = {fact.reason_code: fact for fact in snapshot.plant_health}
+    assert "Т2 Криостат" in next(
+        blocker.operator_text for blocker in snapshot.blockers if blocker.code == "mature_dead_interlock_channel"
+    )
+    assert _CHANNEL_ID in facts["interlock_guard_blind"].display_name
+    assert "sensor_units_over_range" in facts["interlock_guard_blind"].display_name
+
+
+async def test_instrument_fault_blind_guard_is_recorded_once() -> None:
+    """Repeated advisory retries do not duplicate the durable run record."""
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    reading = _reading(
+        offset_s=12.0,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    for _ in range(2):
+        await mgr.on_interlock_dead_channel("overheat_zone", _CHANNEL_ID, value=reading.value, reading=reading)
+
+    assert len(run_records) == 1
+    assert run_records[0]["source"] == "interlock_guard_blind"
+    assert run_records[0]["channel"] == _CHANNEL_ID
+    assert _CHANNEL_ID in str(run_records[0]["message"])
+    assert "sensor_units_over_range" in str(run_records[0]["message"])
+
+
+async def test_recorded_blind_guard_settles_logs_and_changed_evidence_reopens(caplog) -> None:
+    """A week-long fixed fault is bounded, while a changed register diagnosis is a new episode."""
+
+    run_records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        run_records.append(dict(entry))
+
+    mgr = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    mgr._state = SafetyState.RUNNING
+
+    async def handler(condition, reading):
+        return await mgr.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=reading.value,
+            reading=reading,
+        )
+
+    engine = _make_engine(handler=handler, min_samples=1, min_duration_s=0.0)
+    first_evidence = {
+        "instrument_status_register": "LakeShore 218 RDGST",
+        "instrument_status_fault_reasons": ["sensor_units_over_range"],
+    }
+    changed_evidence = {
+        "instrument_status_register": "LakeShore 218 RDGST",
+        "instrument_status_fault_reasons": ["sensor_input_open"],
+    }
+
+    with caplog.at_level(logging.WARNING):
+        await engine._process_reading(_reading(metadata=first_evidence))
+        for offset_s in range(1, 21):
+            await engine._process_reading(_reading(offset_s=float(offset_s), metadata=first_evidence))
+
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
+        assert len(run_records) == 1
+        assert (
+            sum(
+                record.name == "cryodaq.core.interlock" and "эскалация в SafetyManager" in record.getMessage()
+                for record in caplog.records
+            )
+            == 1
+        )
+        assert (
+            sum(
+                record.name == "cryodaq.core.safety_manager"
+                and "прибор сообщает неисправность датчика" in record.getMessage()
+                for record in caplog.records
+            )
+            == 1
+        )
+
+        await engine._process_reading(_reading(offset_s=21.0, metadata=changed_evidence))
+
+    assert len(run_records) == 2, "changed instrument fault evidence must open and record a new episode"
+    assert "sensor_input_open" in str(run_records[1]["message"])
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +747,8 @@ async def test_nonusable_window_matures_for_sibling_after_condition_trips() -> N
 
 
 # ---------------------------------------------------------------------------
-# S2 (HIGH): +inf overrange on an above-threshold interlock is direct evidence
-# of the guarded hazard — insta-trip, do NOT wait out the non-usable debounce.
+# Instrument/range status is a quality discriminator, not temperature evidence.
+# Every non-usable reading follows the existing debounce regardless of direction.
 # ---------------------------------------------------------------------------
 
 
@@ -445,20 +776,20 @@ def _trip_engine(*, comparison: str, threshold: float, handler=None) -> tuple[In
     return engine, tripped
 
 
-async def test_positive_inf_overrange_insta_trips_above_threshold() -> None:
+async def test_positive_inf_overrange_debounces_above_threshold() -> None:
     engine, tripped = _trip_engine(comparison=">", threshold=350.0)
-    # A normal below-threshold reading, then +inf/OVERRANGE (sensor pegged HIGH).
     await engine._process_reading(_reading(value=300.0, offset_s=0.0, status=ChannelStatus.OK))
     assert tripped == [], "below-threshold reading must not trip"
     await engine._process_reading(_reading(value=float("inf"), offset_s=0.5, status=ChannelStatus.OVERRANGE))
-    assert tripped == [True], "+inf on an above-threshold interlock must trip at once, not wait for debounce"
+    assert tripped == [], "a range-fault status must not be compared as temperature"
+    assert engine._nonusable_windows[_CHANNEL_ID].count == 1
 
 
-async def test_negative_inf_insta_trips_below_threshold() -> None:
+async def test_negative_inf_underrange_debounces_below_threshold() -> None:
     engine, tripped = _trip_engine(comparison="<", threshold=1.0)
-    # -inf (pegged LOW) on a below-threshold interlock is the dangerous side.
     await engine._process_reading(_reading(value=float("-inf"), offset_s=0.0, status=ChannelStatus.UNDERRANGE))
-    assert tripped == [True], "-inf on a below-threshold interlock must insta-trip (symmetric)"
+    assert tripped == [], "a range-fault status must not be compared as temperature"
+    assert engine._nonusable_windows[_CHANNEL_ID].count == 1
 
 
 async def test_positive_inf_safe_side_debounces() -> None:

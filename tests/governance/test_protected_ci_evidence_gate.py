@@ -130,6 +130,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert producer_paths == _expected_immutable_paths()
     assert "tools/ci_active_checkout_runner.py" in producer_paths
     assert "tools/ci_required_workflow_context.py" in producer_paths
+    assert "tools/test_node_source.py" in producer_paths
 
     setup = next(step for step in steps if step.get("uses", "").startswith("conda-incubator/setup-miniconda@"))
     assert setup["with"]["environment-file"] == "judge/environment.yml"
