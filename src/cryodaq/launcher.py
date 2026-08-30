@@ -130,10 +130,18 @@ _ENGINE_READER_SETTLEMENT_TICK_MS = 200
 # with slack, and its expiry is fail-closed (owners retained, explicit failure).
 _ENGINE_READER_SETTLEMENT_BOUND_S = 8.0
 # A cold engine establishes persistence and safety owners before it can emit
-# the exact readiness receipt.  A Windows --mock cold-start measurement was
-# about ten seconds (Ubuntu 22.04 was about two seconds), so retain a six-times
-# margin while still reporting a stuck child at roughly one minute.  The
-# monotonic deadline below also bounds a receipt whose REP endpoints never
+# the exact readiness receipt, and the previous 10 x 0.5 s budget was too tight
+# for that.  Measured 2026-08-30 on Windows with --mock, from a clean slate with
+# every cryodaq process killed between attempts: three starts, ONE of which
+# never reached readiness at all, and both successes needed attempt 6 of 10 --
+# about three seconds of a five-second budget, with the failure above it.  The
+# spread, not the mean, is what has to fit, so the bound is raised well clear of
+# it rather than trimmed to the observed maximum; its expiry now reports a stuck
+# child at roughly one minute instead of failing bare at five seconds.  No
+# Ubuntu 22.04 figure is claimed here: the target platform has not been measured
+# this way yet, and the < 2 s in the design-system performance budget is a
+# target for the app becoming interactive, not a measurement of this receipt.
+# The monotonic deadline below also bounds a receipt whose REP endpoints never
 # become challengeable.
 _ENGINE_STARTUP_READY_MAX_ATTEMPTS = 120
 _ENGINE_STARTUP_READY_POLL_INTERVAL_S = 0.5

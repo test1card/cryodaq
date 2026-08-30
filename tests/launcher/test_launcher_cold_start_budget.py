@@ -10,14 +10,34 @@ import pytest
 
 
 def test_cold_start_evidence_names_measured_platforms() -> None:
-    """The tuning note must not turn the Windows observation into Ubuntu evidence."""
+    """The tuning note must state a measurement, not borrow one it never made.
+
+    A bound justified by a number nobody measured is the failure this guard
+    exists to prevent, so it pins the PROPERTIES of the note rather than its
+    prose: the note says which platform and which mode were measured, when,
+    and what the sample was, and it refuses to present the untested target
+    platform or a design-system target as a measurement of this receipt.
+    """
     import cryodaq.launcher as launcher_module
 
     source = Path(launcher_module.__file__).read_text(encoding="utf-8")
+    head, _, _ = source.partition("_ENGINE_STARTUP_READY_MAX_ATTEMPTS = ")
+    note = head[head.rfind("# A cold engine") :]
+    assert note, "the budget constant must carry a tuning note directly above it"
 
-    assert "A Windows --mock cold-start measurement was" in source
-    assert "Ubuntu 22.04 was about two seconds" in source
-    assert "laboratory Ubuntu cold-start measurement" not in source
+    assert "Measured 2026-08-30 on Windows with --mock" in note
+    assert "attempt 6 of 10" in note
+    assert "never reached readiness" in note
+    unwrapped = " ".join(line.lstrip("# ").strip() for line in note.splitlines())
+    assert "No Ubuntu 22.04 figure is claimed here" in unwrapped
+
+    forbidden = (
+        "Ubuntu 22.04 was about two seconds",
+        "laboratory Ubuntu cold-start measurement",
+        "measured on Ubuntu",
+    )
+    for claim in forbidden:
+        assert claim not in unwrapped, f"the note must not assert {claim!r}"
 
 
 @pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
