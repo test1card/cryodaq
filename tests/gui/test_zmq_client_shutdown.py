@@ -1807,6 +1807,14 @@ def test_launcher_status_poll_keeps_finished_worker_children_bounded(
         env["QT_QPA_PLATFORM"] = "offscreen"
         repo_root = Path(__file__).resolve().parents[2]
         env["PYTHONPATH"] = str(repo_root / "src")
+        # Ordinary pytest runs load these entry points automatically. Protected
+        # CI disables autoload and names the same plugins explicitly; mirror the
+        # active contract so neither path registers a plugin twice or omits it.
+        plugin_args = (
+            ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")
+            if env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") == "1"
+            else ()
+        )
         result = subprocess.run(
             [
                 sys.executable,
@@ -1815,10 +1823,7 @@ def test_launcher_status_poll_keeps_finished_worker_children_bounded(
                 "pytest",
                 "-p",
                 "no:cacheprovider",
-                "-p",
-                "pytest_asyncio.plugin",
-                "-p",
-                "pytest_timeout",
+                *plugin_args,
                 "-W",
                 "error",
                 "--basetemp",
