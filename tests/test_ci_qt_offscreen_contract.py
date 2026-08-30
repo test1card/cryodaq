@@ -39,10 +39,13 @@ a distinct way the jobs go blind again underneath a green guard:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -78,6 +81,47 @@ NIGHTLY_JOB_NEEDS_QT = {
 #: status replaced the script's own. Exercising the script any other way cannot
 #: observe that class of defect at all.
 WORKFLOW_SHELL = "bash -el {0}"
+
+NIGHTLY_ACCEPTANCE_STEPS = {
+    "golden-replay": {
+        "name": "Golden replay lane",
+        "run": "pytest tests/ -m golden -v --tb=short",
+    },
+    "mock-stack-short-soak": {
+        "name": "Run short mock-stack soak",
+        "run": (
+            "mkdir -p artifacts/mock-stack-soak\n"
+            ".venv/bin/python -m scripts.soak_mock_stack \\\n"
+            "  --profile short \\\n"
+            '  --evidence-dir "artifacts/mock-stack-soak/${GITHUB_SHA}"\n'
+        ),
+    },
+}
+
+NIGHTLY_ACCEPTANCE_JOB_ENV = {"PYTHONUTF8": "1"}
+NIGHTLY_AUTOMATIC_SCHEDULE = [{"cron": "17 3 * * *"}]
+NIGHTLY_ACCEPTANCE_PRECEDING_USES = {
+    job_id: (
+        "actions/checkout@v4",
+        "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5",
+    )
+    for job_id in NIGHTLY_ACCEPTANCE_STEPS
+}
+NIGHTLY_ACCEPTANCE_PRECEDING_STEPS_SHA256 = {
+    "golden-replay": "7317ba61612d8724570391368c4b22b40e4672da729f5476991a0b1440693460",
+    "mock-stack-short-soak": "ad1026787d8298be0bc472560321e27207446adf5920e84abdaaf24313d3c26f",
+}
+
+PERSISTENT_COMMAND_OVERRIDE_TOKENS = (
+    "GITHUB_ENV",
+    "GITHUB_PATH",
+    "PYTEST_ADDOPTS",
+    "BASH_ENV",
+)
+PERSISTENT_COMMAND_OVERRIDE_EXPRESSIONS = (
+    "${{github.env}}",
+    "${{github.path}}",
+)
 
 #: Tokens the step's own script must never contain. Whether a given invocation
 #: simulates is decided by the apt stub below, which models apt's option grammar;
@@ -125,6 +169,166 @@ def _canonical_step() -> dict:
 
 def _qt_dependent_jobs() -> tuple[str, ...]:
     return tuple(job for job, needs in NIGHTLY_JOB_NEEDS_QT.items() if needs)
+
+
+def _effective_shell(job: dict, step: dict) -> object:
+    """The shell Actions will use after applying a step-level override."""
+    return step.get("shell", job.get("defaults", {}).get("run", {}).get("shell"))
+
+
+def _assert_effective_shell(workflow: dict, job_id: str, step: dict, relative: str) -> None:
+    shell = _effective_shell(workflow["jobs"][job_id], step)
+    assert shell == WORKFLOW_SHELL, (
+        f"{relative} job {job_id!r} step {step.get('name')!r} runs under effective shell "
+        f"{shell!r}, not {WORKFLOW_SHELL!r}. A step-level shell overrides the job default, "
+        "so checking only defaults can certify a command that Actions never actually runs."
+    )
+
+
+def _workflow_triggers(workflow: dict) -> object:
+    """Return the root Actions trigger mapping under YAML 1.1 or 1.2 parsing."""
+    if "on" in workflow:
+        return workflow["on"]
+    return workflow.get(True)
+
+
+def _assert_automatic_schedule(workflow: dict) -> None:
+    """Require a non-empty root schedule, not merely manual dispatch."""
+    triggers = _workflow_triggers(workflow)
+    assert type(triggers) is dict, "nightly workflow has no root `on` trigger mapping"
+    schedule = triggers.get("schedule")
+    assert type(schedule) is list and schedule, (
+        "nightly workflow has no automatic root `on.schedule`; workflow_dispatch alone "
+        "cannot run the replay and soak acceptance consumers unattended"
+    )
+    assert schedule == NIGHTLY_AUTOMATIC_SCHEDULE, (
+        "nightly workflow root `on.schedule` is not the exact reviewed automatic trigger; "
+        f"expected {NIGHTLY_AUTOMATIC_SCHEDULE!r}, got {schedule!r}"
+    )
+
+
+def _assert_acceptance_execution_context(workflow: dict, job_id: str, step: dict) -> None:
+    """Bind environment and directory inputs that can replace the exact command."""
+    assert "env" not in workflow, (
+        "nightly workflow has root `env`; inherited variables such as PYTEST_ADDOPTS or "
+        "BASH_ENV can replace what the exact acceptance command executes"
+    )
+    job = workflow["jobs"][job_id]
+    assert job.get("env") == NIGHTLY_ACCEPTANCE_JOB_ENV, (
+        f"nightly acceptance job {job_id!r} env is not the exact reviewed mapping; "
+        "PYTEST_ADDOPTS can turn pytest into collection-only and BASH_ENV can replace "
+        "the login-shell script before its command runs"
+    )
+    assert "container" not in job, (
+        f"nightly acceptance job {job_id!r} runs in a job container; container.env can "
+        "inject PYTEST_ADDOPTS or BASH_ENV outside the exact reviewed job env mapping"
+    )
+    assert "env" not in step, (
+        f"nightly acceptance step {step.get('name')!r} has step-level env; it can replace "
+        "what the exact command executes"
+    )
+
+    workflow_run_defaults = workflow.get("defaults", {}).get("run", {})
+    job_run_defaults = job.get("defaults", {}).get("run", {})
+    assert "working-directory" not in workflow_run_defaults, (
+        "nightly workflow sets a default working-directory, so the exact acceptance "
+        "command no longer runs from the checked-out repository root"
+    )
+    assert "working-directory" not in job_run_defaults, (
+        f"nightly acceptance job {job_id!r} sets a default working-directory, so its "
+        "exact command no longer runs from the checked-out repository root"
+    )
+    assert "working-directory" not in step, (
+        f"nightly acceptance step {step.get('name')!r} sets working-directory, so its "
+        "exact command no longer runs from the checked-out repository root"
+    )
+
+
+def _assert_preceding_steps_cannot_replace_command(steps: list[dict], acceptance_at: int, job_id: str) -> None:
+    """Bind persistent inputs inherited by the exact acceptance command."""
+    preceding = steps[:acceptance_at]
+    observed_uses = tuple(step.get("uses") for step in preceding if "uses" in step)
+    expected_uses = NIGHTLY_ACCEPTANCE_PRECEDING_USES[job_id]
+    assert observed_uses == expected_uses, (
+        f"nightly acceptance job {job_id!r} has unreviewed `uses` steps before its consumer; "
+        "an action or local composite can persist environment or PATH changes into the exact "
+        f"command. Expected {expected_uses!r}, got {observed_uses!r}"
+    )
+
+    for prior in preceding:
+        script = str(prior.get("run", ""))
+        compact_script = "".join(script.split()).lower()
+        found = [token for token in PERSISTENT_COMMAND_OVERRIDE_TOKENS if token.lower() in script.lower()]
+        found += [
+            expression for expression in PERSISTENT_COMMAND_OVERRIDE_EXPRESSIONS if expression.lower() in compact_script
+        ]
+        assert not found, (
+            f"nightly acceptance job {job_id!r} step {prior.get('name')!r} references persistent "
+            f"command override channel(s) {found!r}. A prior step can leave PYTEST_ADDOPTS or "
+            "BASH_ENV in GITHUB_ENV, or prepend a decoy executable through GITHUB_PATH, while "
+            "the later consumer still carries the exact reviewed command"
+        )
+
+    prefix_digest = hashlib.sha256(
+        json.dumps(
+            preceding,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert prefix_digest == NIGHTLY_ACCEPTANCE_PRECEDING_STEPS_SHA256[job_id], (
+        f"nightly acceptance job {job_id!r} changed its reviewed step prefix before the "
+        "consumer. Exact prefix binding is required because shell text can construct "
+        "GITHUB_ENV, GITHUB_PATH, PYTEST_ADDOPTS, or BASH_ENV indirectly and evade a "
+        "token search."
+    )
+
+
+def _named_step(steps: list[dict], job_id: str, name: str) -> tuple[int, dict]:
+    found = [(index, step) for index, step in enumerate(steps) if step.get("name") == name]
+    assert len(found) == 1, (
+        f"nightly job {job_id!r} carries {len(found)} steps named {name!r}, expected exactly 1. "
+        "The acceptance command must remain bound to this exact named step."
+    )
+    return found[0]
+
+
+def _assert_acceptance_job(workflow: dict, job_id: str) -> None:
+    _assert_automatic_schedule(workflow)
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    job = workflow["jobs"][job_id]
+    assert "if" not in job, (
+        f"nightly acceptance job {job_id!r} has a job-level `if`. It can then be skipped without "
+        "running the acceptance measurement."
+    )
+    assert "continue-on-error" not in job, (
+        f"nightly acceptance job {job_id!r} has job-level `continue-on-error`; a failed "
+        "acceptance measurement can no longer fail the workflow."
+    )
+    assert "needs" not in job, (
+        f"nightly acceptance job {job_id!r} has `needs`; a skipped or failed dependency can "
+        "prevent this fixed acceptance job from running."
+    )
+
+    steps = list(job["steps"])
+    acceptance_at, step = _named_step(steps, job_id, expected["name"])
+    _assert_preceding_steps_cannot_replace_command(steps, acceptance_at, job_id)
+    install_at = _qt_step_index(steps, job_id, NIGHTLY_WORKFLOW)
+    assert install_at < acceptance_at, f"nightly job {job_id!r} runs {expected['name']!r} before the Qt install step."
+    assert "if" not in step, f"nightly acceptance step {expected['name']!r} has a step-level `if` and can be skipped."
+    assert "continue-on-error" not in step, (
+        f"nightly acceptance step {expected['name']!r} has step-level `continue-on-error`; its failure "
+        "can no longer fail the job."
+    )
+    assert step.get("run") == expected["run"], (
+        f"nightly acceptance step {expected['name']!r} is not bound to its exact measured "
+        f"command. Expected {expected['run']!r}, got {step.get('run')!r}. A decoy command in "
+        "another step does not make this named consumer run."
+    )
+    _assert_effective_shell(workflow, job_id, step, NIGHTLY_WORKFLOW)
+    _assert_acceptance_execution_context(workflow, job_id, step)
 
 
 def test_every_nightly_job_is_classified_for_qt() -> None:
@@ -221,6 +425,286 @@ def test_the_workflow_shell_is_the_login_shell_these_tests_reproduce() -> None:
             f"{relative} job {job_id!r} runs steps under shell {shell!r}, not {WORKFLOW_SHELL!r}. "
             "The executed-script guards in this file reproduce the login shell deliberately."
         )
+        _assert_effective_shell(workflow, job_id, _qt_step(workflow, job_id, relative), relative)
+
+
+def test_install_step_guard_rejects_a_step_level_shell_override() -> None:
+    workflow = deepcopy(_workflow(MAIN_WORKFLOW))
+    step = _qt_step(workflow, CANONICAL_JOB, MAIN_WORKFLOW)
+    step["shell"] = "/usr/bin/true {0}"
+    assert step["shell"] == "/usr/bin/true {0}"
+
+    with pytest.raises(AssertionError, match="effective shell"):
+        _assert_effective_shell(workflow, CANONICAL_JOB, step, MAIN_WORKFLOW)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_jobs_are_unconditional_exact_commands(job_id: str) -> None:
+    _assert_acceptance_job(_workflow(NIGHTLY_WORKFLOW), job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_run_true_even_with_a_command_decoy(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    steps = workflow["jobs"][job_id]["steps"]
+    _, acceptance = _named_step(steps, job_id, expected["name"])
+    acceptance["run"] = True
+    steps.append({"name": "Decoy acceptance command", "run": expected["run"]})
+    assert acceptance["run"] is True
+    assert any(step.get("run") == expected["run"] for step in steps if step is not acceptance)
+
+    with pytest.raises(AssertionError, match="exact measured command"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_uses_even_with_a_command_decoy(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    steps = workflow["jobs"][job_id]["steps"]
+    _, acceptance = _named_step(steps, job_id, expected["name"])
+    acceptance.pop("run")
+    acceptance["uses"] = "actions/checkout@v4"
+    steps.append({"name": "Decoy acceptance command", "run": expected["run"]})
+    assert acceptance["uses"] == "actions/checkout@v4"
+    assert any(step.get("run") == expected["run"] for step in steps if step is not acceptance)
+
+    with pytest.raises(AssertionError, match="exact measured command"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_direct_job_if_false(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    workflow["jobs"][job_id]["if"] = "${{ false }}"
+    assert workflow["jobs"][job_id]["if"] == "${{ false }}"
+
+    with pytest.raises(AssertionError, match="job-level `if`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_direct_step_if_false(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    _, step = _named_step(workflow["jobs"][job_id]["steps"], job_id, expected["name"])
+    step["if"] = "${{ false }}"
+    assert step["if"] == "${{ false }}"
+
+    with pytest.raises(AssertionError, match="step-level `if`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_job_continue_on_error(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    workflow["jobs"][job_id]["continue-on-error"] = True
+    assert workflow["jobs"][job_id]["continue-on-error"] is True
+
+    with pytest.raises(AssertionError, match="job-level `continue-on-error`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_step_continue_on_error(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    _, step = _named_step(workflow["jobs"][job_id]["steps"], job_id, expected["name"])
+    step["continue-on-error"] = True
+    assert step["continue-on-error"] is True
+
+    with pytest.raises(AssertionError, match="step-level `continue-on-error`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_needs_dependency(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    workflow["jobs"][job_id]["needs"] = "mock-soak"
+    assert workflow["jobs"][job_id]["needs"] == "mock-soak"
+
+    with pytest.raises(AssertionError, match="has `needs`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_a_step_level_shell_override(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    _, step = _named_step(workflow["jobs"][job_id]["steps"], job_id, expected["name"])
+    step["shell"] = "/usr/bin/true {0}"
+    assert step["shell"] == "/usr/bin/true {0}"
+
+    with pytest.raises(AssertionError, match="effective shell"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    (
+        ("PYTEST_ADDOPTS", "--collect-only"),
+        ("BASH_ENV", "/tmp/replace-acceptance-command.sh"),
+    ),
+)
+@pytest.mark.parametrize("scope", ("workflow", "job", "step"))
+def test_acceptance_guard_rejects_environment_command_overrides(
+    job_id: str,
+    variable: str,
+    value: str,
+    scope: str,
+) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    _, step = _named_step(workflow["jobs"][job_id]["steps"], job_id, expected["name"])
+    if scope == "workflow":
+        owner = workflow
+    elif scope == "job":
+        owner = workflow["jobs"][job_id]
+    else:
+        owner = step
+    owner.setdefault("env", {})[variable] = value
+    assert owner["env"][variable] == value
+
+    with pytest.raises(AssertionError, match="env"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_container_environment_override(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    workflow["jobs"][job_id]["container"] = {
+        "image": "python:3.14",
+        "env": {"PYTEST_ADDOPTS": "--collect-only"},
+    }
+    assert workflow["jobs"][job_id]["container"]["env"]["PYTEST_ADDOPTS"] == "--collect-only"
+
+    with pytest.raises(AssertionError, match="job container"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+@pytest.mark.parametrize(
+    "poisoning_step",
+    (
+        {
+            "name": "Persist collection-only pytest mode",
+            "run": 'printf "%s\\n" "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"',
+        },
+        {
+            "name": "Replace the later login-shell script",
+            "run": 'printf "%s\\n" "BASH_ENV=/tmp/no-op.sh" >> "${{ github.env }}"',
+        },
+        {
+            "name": "Prepend a decoy executable",
+            "run": 'printf "%s\\n" "/tmp/decoy-bin" >> "$GITHUB_PATH"',
+        },
+        {
+            "name": "Prepend a decoy executable through the expression context",
+            "run": 'printf "%s\\n" "/tmp/decoy-bin" >> "${{github.path}}"',
+        },
+    ),
+)
+def test_acceptance_guard_rejects_persistent_prior_step_command_overrides(
+    job_id: str,
+    poisoning_step: dict,
+) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    steps = workflow["jobs"][job_id]["steps"]
+    acceptance_at, acceptance = _named_step(steps, job_id, expected["name"])
+    steps.insert(acceptance_at, deepcopy(poisoning_step))
+    assert acceptance["run"] == expected["run"]
+    assert steps[acceptance_at] == poisoning_step
+
+    with pytest.raises(AssertionError, match="persistent command override"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_an_unreviewed_preceding_action(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    steps = workflow["jobs"][job_id]["steps"]
+    acceptance_at, acceptance = _named_step(steps, job_id, expected["name"])
+    poisoning_action = {
+        "name": "Composite action that persists a command override",
+        "uses": "./.github/actions/poison-acceptance-environment",
+    }
+    steps.insert(acceptance_at, poisoning_action)
+    assert acceptance["run"] == expected["run"]
+    assert steps[acceptance_at] == poisoning_action
+
+    with pytest.raises(AssertionError, match="unreviewed `uses`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_an_indirect_persistent_override(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    steps = workflow["jobs"][job_id]["steps"]
+    acceptance_at, acceptance = _named_step(steps, job_id, expected["name"])
+    poisoning_step = {
+        "name": "Construct the persistent environment channel indirectly",
+        "run": (
+            'channel="GITHUB_"ENV\n'
+            'variable="PYTEST_"ADDOPTS\n'
+            'printf "%s\\n" "${variable}=--collect-only" >> "${!channel}"'
+        ),
+    }
+    steps.insert(acceptance_at, poisoning_step)
+    assert acceptance["run"] == expected["run"]
+    assert not any(token in poisoning_step["run"] for token in PERSISTENT_COMMAND_OVERRIDE_TOKENS)
+
+    with pytest.raises(AssertionError, match="reviewed step prefix"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+@pytest.mark.parametrize("scope", ("workflow", "job", "step"))
+def test_acceptance_guard_rejects_working_directory_overrides(job_id: str, scope: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    expected = NIGHTLY_ACCEPTANCE_STEPS[job_id]
+    _, step = _named_step(workflow["jobs"][job_id]["steps"], job_id, expected["name"])
+    if scope == "workflow":
+        owner = workflow.setdefault("defaults", {}).setdefault("run", {})
+    elif scope == "job":
+        owner = workflow["jobs"][job_id].setdefault("defaults", {}).setdefault("run", {})
+    else:
+        owner = step
+    owner["working-directory"] = "empty-decoy-directory"
+    assert owner["working-directory"] == "empty-decoy-directory"
+
+    with pytest.raises(AssertionError, match="working-directory"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_manual_dispatch_without_root_schedule(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    assert True in workflow and "on" not in workflow, "control must exercise PyYAML's boolean `on` key"
+    triggers = _workflow_triggers(workflow)
+    assert type(triggers) is dict
+    removed = triggers.pop("schedule")
+    assert removed
+    assert "workflow_dispatch" in triggers
+
+    with pytest.raises(AssertionError, match="automatic root `on.schedule`"):
+        _assert_acceptance_job(workflow, job_id)
+
+
+@pytest.mark.parametrize("job_id", tuple(NIGHTLY_ACCEPTANCE_STEPS))
+def test_acceptance_guard_rejects_a_non_cron_schedule_placeholder(job_id: str) -> None:
+    workflow = deepcopy(_workflow(NIGHTLY_WORKFLOW))
+    triggers = _workflow_triggers(workflow)
+    assert type(triggers) is dict
+    triggers["schedule"] = [{"cron": "not an Actions cron expression"}]
+    assert triggers["schedule"] == [{"cron": "not an Actions cron expression"}]
+
+    with pytest.raises(AssertionError, match="exact reviewed automatic trigger"):
+        _assert_acceptance_job(workflow, job_id)
 
 
 _APT_STUB_SOURCE = r"""
