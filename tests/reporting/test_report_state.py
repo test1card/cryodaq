@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -7,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.core.experiment import ExperimentManager
 from cryodaq.report_state import (
     ReportContractError,
+    build_active_experiment_state,
     build_current_manifest,
     compute_source_fingerprint,
     experiment_lock_name,
@@ -290,48 +293,81 @@ def test_report_state_rejects_impossible_relations(mutate) -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("mutate", "message"),
     [
-        {},
-        {
-            "schema_version": True,
-            "app_mode": "experiment",
-            "active_experiment_id": None,
-            "updated_at": "2026-07-09T00:00:00+00:00",
-        },
-        {
-            "schema_version": 1,
-            "app_mode": "invalid",
-            "active_experiment_id": None,
-            "updated_at": "2026-07-09T00:00:00+00:00",
-        },
-        {
-            "schema_version": 1,
-            "app_mode": "experiment",
-            "active_experiment_id": 42,
-            "updated_at": "2026-07-09T00:00:00+00:00",
-        },
+        (lambda payload: payload.clear(), "unexpected fields"),
+        (lambda payload: payload.pop("revision"), "unexpected fields"),
+        (lambda payload: payload.__setitem__("foreign", "field"), "unexpected fields"),
+        (lambda payload: payload.__setitem__("schema_version", True), "schema"),
+        (lambda payload: payload.__setitem__("app_mode", "invalid"), "app_mode"),
+        (lambda payload: payload.__setitem__("active_experiment_id", 42), "active_experiment_id"),
     ],
+    ids=["empty", "truncated", "foreign", "schema", "app-mode", "active-id"],
 )
 def test_active_experiment_state_requires_exact_writer_contract(
     tmp_path: Path,
-    payload: dict,
+    mutate,
+    message: str,
 ) -> None:
+    payload = build_active_experiment_state(
+        app_mode="experiment",
+        active_experiment_id=None,
+        revision=0,
+        manager_incarnation="1" * 32,
+        last_transition_receipt=None,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+    mutate(payload)
     (tmp_path / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ReportContractError):
+    with pytest.raises(ReportContractError, match=message):
         load_active_experiment_id(tmp_path)
 
 
 def test_active_experiment_state_rejects_future_timestamp(tmp_path: Path) -> None:
-    payload = {
-        "schema_version": 1,
-        "app_mode": "experiment",
-        "active_experiment_id": None,
-        "updated_at": datetime.fromtimestamp(time.time() + 600, tz=UTC).isoformat(),
-    }
+    payload = build_active_experiment_state(
+        app_mode="experiment",
+        active_experiment_id=None,
+        revision=0,
+        manager_incarnation="1" * 32,
+        last_transition_receipt=None,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+    payload["updated_at"] = datetime.fromtimestamp(time.time() + 600, tz=UTC).isoformat()
     (tmp_path / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ReportContractError, match="updated_at"):
         load_active_experiment_id(tmp_path)
+
+
+def test_real_experiment_manager_state_is_readable_by_report_contract(tmp_path: Path) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    active = manager.create_experiment("writer-reader-contract", "operator")
+
+    assert load_active_experiment_id(tmp_path) == active.experiment_id
+
+
+def test_receipt_semantics_are_shared_by_authority_and_report_reader(tmp_path: Path) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    active = manager.create_experiment("receipt-contract", "operator")
+    manager.finalize_experiment(active.experiment_id)
+    state_path = tmp_path / "experiment_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["active_experiment_id"] is None
+    assert payload["last_transition_receipt"]["operation"] == "finalize"
+
+    payload["last_transition_receipt"] = {}
+    payload["last_transition_receipt_fingerprint"] = hashlib.sha256(b"{}").hexdigest()
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    malformed_state = state_path.read_bytes()
+
+    with pytest.raises(ReportContractError, match="transition receipt is invalid"):
+        load_active_experiment_id(tmp_path)
+    with pytest.raises(RuntimeError, match="terminal receipt is invalid"):
+        ExperimentManager(tmp_path, instruments)
+    assert state_path.read_bytes() == malformed_state
 
 
 def test_reports_root_rejects_symlinked_reports_and_children(tmp_path: Path) -> None:

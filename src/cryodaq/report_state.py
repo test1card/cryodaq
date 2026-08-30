@@ -23,6 +23,36 @@ from typing import Any
 from cryodaq.core.atomic_write import atomic_write_text
 
 SCHEMA_VERSION = 1
+ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION = 2
+ACTIVE_EXPERIMENT_STATE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "app_mode",
+        "active_experiment_id",
+        "revision",
+        "state_fingerprint",
+        "last_transition_receipt",
+        "last_transition_receipt_fingerprint",
+        "manager_incarnation",
+        "updated_at",
+    }
+)
+ACTIVE_EXPERIMENT_TRANSITION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "manager_incarnation",
+        "request_id",
+        "request_fingerprint",
+        "operation",
+        "experiment_id",
+        "experiment_fingerprint",
+        "predecessor_revision",
+        "predecessor_state_fingerprint",
+        "result_revision",
+        "result_active_experiment_id",
+        "result_state_fingerprint",
+    }
+)
 MAX_JSON_BYTES = 128 * 1024
 MAX_SOURCE_FILES = 2_048
 MAX_SOURCE_FILE_BYTES = 256 * 1024 * 1024
@@ -59,26 +89,97 @@ class ReportIOError(ReportContractError):
     """A retryable filesystem/text-decoding failure, not invalid durable content."""
 
 
-def load_active_experiment_id(data_dir: Path) -> str | None:
-    """Read the atomic active-experiment guard, failing closed on corruption."""
-    root = Path(data_dir).resolve()
-    path = root / "experiment_state.json"
-    if not path.exists():
-        return None
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
-        raise ReportContractError("active experiment state must be a bounded regular file")
+def _active_experiment_state_digest(payload: Mapping[str, Any]) -> str:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ReportContractError("active experiment state is invalid JSON") from exc
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ReportContractError("active experiment state contains non-canonical data") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_lower_hex(value: Any, length: int) -> bool:
+    return (
+        type(value) is str
+        and len(value) == length
+        and value == value.lower()
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def active_experiment_state_fingerprint(
+    *,
+    manager_incarnation: str,
+    revision: int,
+    app_mode: str,
+    active_experiment_id: str | None,
+) -> str:
+    """Return the canonical integrity fingerprint for one experiment-state cut."""
+    return _active_experiment_state_digest(
+        {
+            "schema_version": ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION,
+            "manager_incarnation": manager_incarnation,
+            "revision": revision,
+            "app_mode": app_mode,
+            "active_experiment_id": active_experiment_id,
+        }
+    )
+
+
+def validate_active_experiment_transition_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    manager_incarnation: str,
+    revision: int,
+    active_experiment_id: str | None,
+    state_fingerprint: str,
+) -> None:
+    """Validate a receipt against the exact experiment-state cut it produced."""
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != ACTIVE_EXPERIMENT_TRANSITION_RECEIPT_FIELDS
+        or receipt.get("schema") != "experiment_transition_receipt_v2"
+        or receipt.get("manager_incarnation") != manager_incarnation
+        or not _is_lower_hex(receipt.get("request_id"), 32)
+        or not _is_lower_hex(receipt.get("request_fingerprint"), 64)
+        or not _is_lower_hex(receipt.get("experiment_fingerprint"), 64)
+        or not _is_lower_hex(receipt.get("predecessor_state_fingerprint"), 64)
+        or receipt.get("operation") not in {"create", "update", "finalize"}
+        or type(receipt.get("experiment_id")) is not str
+        or not receipt.get("experiment_id")
+        or type(receipt.get("predecessor_revision")) is not int
+        or receipt.get("predecessor_revision") < 0
+        or receipt.get("result_revision") != receipt.get("predecessor_revision") + 1
+        or receipt.get("result_revision") != revision
+        or receipt.get("result_active_experiment_id") != active_experiment_id
+        or receipt.get("result_state_fingerprint") != state_fingerprint
+        or (receipt.get("operation") == "finalize" and receipt.get("result_active_experiment_id") is not None)
+        or (
+            receipt.get("operation") in {"create", "update"}
+            and receipt.get("result_active_experiment_id") != receipt.get("experiment_id")
+        )
+    ):
+        raise ReportContractError("active experiment transition receipt is invalid")
+
+
+def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
+    """Validate the exact ExperimentManager state envelope and return its active ID."""
     if not isinstance(payload, dict):
         raise ReportContractError("active experiment state root must be a mapping")
-    required = {"schema_version", "app_mode", "active_experiment_id", "updated_at"}
-    if set(payload) != required:
+    if set(payload) != ACTIVE_EXPERIMENT_STATE_FIELDS:
         raise ReportContractError("active experiment state has unexpected fields")
-    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION
+    ):
         raise ReportContractError("active experiment state schema is invalid")
-    if payload["app_mode"] not in {"experiment", "debug"}:
+    app_mode = payload["app_mode"]
+    if type(app_mode) is not str or app_mode not in {"experiment", "debug"}:
         raise ReportContractError("active experiment app_mode is invalid")
     updated_at = payload["updated_at"]
     if not isinstance(updated_at, str) or not updated_at.strip():
@@ -91,11 +192,91 @@ def load_active_experiment_id(data_dir: Path) -> str | None:
     except (OverflowError, ValueError) as exc:
         raise ReportContractError("active experiment updated_at is invalid") from exc
     value = payload["active_experiment_id"]
-    if value is None:
+    if value is not None:
+        if not isinstance(value, str):
+            raise ReportContractError("active_experiment_id must be a string or null")
+        value = validate_experiment_id(value)
+    revision = payload["revision"]
+    if type(revision) is not int or revision < 0:
+        raise ReportContractError("active experiment state revision is invalid")
+    manager_incarnation = payload["manager_incarnation"]
+    if not _is_lower_hex(manager_incarnation, 32):
+        raise ReportContractError("active experiment manager incarnation is invalid")
+    expected_state_fingerprint = active_experiment_state_fingerprint(
+        manager_incarnation=manager_incarnation,
+        revision=revision,
+        app_mode=app_mode,
+        active_experiment_id=value,
+    )
+    state_fingerprint = payload["state_fingerprint"]
+    if not _is_lower_hex(state_fingerprint, 64) or state_fingerprint != expected_state_fingerprint:
+        raise ReportContractError("active experiment state fingerprint is invalid")
+    receipt = payload["last_transition_receipt"]
+    if receipt is not None and not isinstance(receipt, dict):
+        raise ReportContractError("active experiment transition receipt is invalid")
+    expected_receipt_fingerprint = _active_experiment_state_digest(receipt) if receipt is not None else None
+    receipt_fingerprint = payload["last_transition_receipt_fingerprint"]
+    if receipt_fingerprint != expected_receipt_fingerprint or (
+        receipt_fingerprint is not None and not _is_lower_hex(receipt_fingerprint, 64)
+    ):
+        raise ReportContractError("active experiment transition receipt fingerprint is invalid")
+    if receipt is not None:
+        validate_active_experiment_transition_receipt(
+            receipt,
+            manager_incarnation=manager_incarnation,
+            revision=revision,
+            active_experiment_id=value,
+            state_fingerprint=state_fingerprint,
+        )
+    return value
+
+
+def build_active_experiment_state(
+    *,
+    app_mode: str,
+    active_experiment_id: str | None,
+    revision: int,
+    manager_incarnation: str,
+    last_transition_receipt: dict[str, Any] | None,
+    updated_at: str,
+) -> dict[str, Any]:
+    """Build the sole exact state envelope accepted by writer and readers."""
+    receipt = dict(last_transition_receipt) if last_transition_receipt is not None else None
+    payload = {
+        "schema_version": ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION,
+        "app_mode": app_mode,
+        "active_experiment_id": active_experiment_id,
+        "revision": revision,
+        "state_fingerprint": active_experiment_state_fingerprint(
+            manager_incarnation=manager_incarnation,
+            revision=revision,
+            app_mode=app_mode,
+            active_experiment_id=active_experiment_id,
+        ),
+        "last_transition_receipt": receipt,
+        "last_transition_receipt_fingerprint": (
+            _active_experiment_state_digest(receipt) if receipt is not None else None
+        ),
+        "manager_incarnation": manager_incarnation,
+        "updated_at": updated_at,
+    }
+    validate_active_experiment_state(payload)
+    return payload
+
+
+def load_active_experiment_id(data_dir: Path) -> str | None:
+    """Read the atomic active-experiment guard, failing closed on corruption."""
+    root = Path(data_dir).resolve()
+    path = root / "experiment_state.json"
+    if not path.exists():
         return None
-    if not isinstance(value, str):
-        raise ReportContractError("active_experiment_id must be a string or null")
-    return validate_experiment_id(value)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
+        raise ReportContractError("active experiment state must be a bounded regular file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReportContractError("active experiment state is invalid JSON") from exc
+    return validate_active_experiment_state(payload)
 
 
 def automatic_report_eligible(

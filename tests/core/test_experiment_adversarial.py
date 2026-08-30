@@ -10,12 +10,14 @@ from pathlib import Path
 
 import pytest
 
+import cryodaq.core.experiment as experiment_module
 from cryodaq.core.experiment import (
     ExperimentIdentityMismatchError,
     ExperimentManager,
     ExperimentStatus,
     RunRecord,
 )
+from cryodaq.report_state import ReportContractError
 from cryodaq.storage._sqlite import sqlite3
 
 
@@ -24,6 +26,35 @@ def _manager(data_dir: Path) -> ExperimentManager:
     instruments.parent.mkdir(parents=True, exist_ok=True)
     instruments.write_text("instruments: []\n", encoding="utf-8")
     return ExperimentManager(data_dir, instruments)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.__setitem__("foreign", "field"),
+        lambda payload: payload.pop("revision"),
+    ],
+    ids=["foreign", "truncated"],
+)
+def test_state_writer_refuses_envelope_outside_shared_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    build_valid = experiment_module.build_active_experiment_state
+
+    def build_invalid(**kwargs):
+        payload = build_valid(**kwargs)
+        mutate(payload)
+        return payload
+
+    monkeypatch.setattr(experiment_module, "build_active_experiment_state", build_invalid)
+
+    with pytest.raises(ReportContractError, match="unexpected fields"):
+        ExperimentManager(tmp_path, instruments)
+    assert not (tmp_path / "experiment_state.json").exists()
 
 
 def test_concurrent_managers_persist_exactly_one_running_experiment(tmp_path: Path) -> None:

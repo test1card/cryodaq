@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from cryodaq.report_process import read_result_file, result_file_path
 from cryodaq.report_state import (
+    build_active_experiment_state,
     compute_source_fingerprint,
     load_current_manifest,
     load_report_state,
@@ -39,6 +40,18 @@ def _experiment(data_dir: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+def _write_active_experiment_state(data_dir: Path, experiment_id: str) -> None:
+    payload = build_active_experiment_state(
+        app_mode="experiment",
+        active_experiment_id=experiment_id,
+        revision=1,
+        manager_incarnation="1" * 32,
+        last_transition_receipt=None,
+        updated_at="2026-07-09T00:00:00+00:00",
+    )
+    (data_dir / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _args(
@@ -132,17 +145,7 @@ def test_automatic_child_rejects_still_active_experiment_before_fingerprint(
     monkeypatch,
 ) -> None:
     _experiment(tmp_path)
-    (tmp_path / "experiment_state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "app_mode": "experiment",
-                "active_experiment_id": "exp-1",
-                "updated_at": "2026-07-09T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_active_experiment_state(tmp_path, "exp-1")
     monkeypatch.setattr(
         child,
         "compute_source_fingerprint",
@@ -622,17 +625,7 @@ def test_force_rejects_active_experiment_before_fingerprint(
     monkeypatch,
 ) -> None:
     _experiment(tmp_path)
-    (tmp_path / "experiment_state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "app_mode": "experiment",
-                "active_experiment_id": "exp-1",
-                "updated_at": "2026-07-09T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_active_experiment_state(tmp_path, "exp-1")
     monkeypatch.setattr(
         child,
         "compute_source_fingerprint",
