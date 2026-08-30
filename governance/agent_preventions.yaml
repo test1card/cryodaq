@@ -3556,6 +3556,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: PERIODIC-RUNTIME-REASON-FALSE-GREEN-055
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-RUNTIME-REASON-DURABLE-055
+    guard: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_the_production_failure_branches_persist_distinct_labels
+    ci_partition: agents
+    red_evidence: the_prior_guards_inspected_helpers_or_counted_generic_outputs_so_a_pre_election_loader_fault_wrote_no_durable_health_a_long_path_removed_the_exception_a_preserved_live_source_record_discarded_the_real_cause_and_same_class_details_shared_one_limiter_identity_while_the_suite_remained_green_pending_immutable_capture_and_the_registered_node_itself_remained_green_when_election_was_bypassed_when_limiter_detail_was_unbounded_and_when_the_leader_was_released_before_the_receipt_write_and_when_a_standby_with_an_incumbent_replaced_the_seeded_file_with_byte_identical_content_through_a_direct_lower_level_writer_outside_run_blocking_local_strengthened_node_red_for_all_mutations_on_windows_and_ubuntu_22_04_pending_exact_candidate_binding
+    green_evidence: local_strengthened_exact_registered_node_one_passed_on_windows_and_ubuntu_22_04_and_bound_exact_bytes_payload_file_identity_and_high_resolution_metadata_pending_exact_candidate_and_hosted_agents_partition
   - id: LAUNCHER-STALE-OWNER-SUCCESSOR-SIDE-EFFECT-FALSE-GREEN-357
     status: open
     scope: product_contract
@@ -7209,6 +7217,50 @@ records:
     automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: PERIODIC-RUNTIME-REASON-DURABLE-055
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: PeriodicPngSupervisor runtime-failure paths from configuration loading, coordinator construction, monitor shutdown, and the durable periodic health writer.
+    classification: runtime_reason_persistence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An unrenderable exception, unsafe or oversized branch context, absent pre-election writer, a receipt written after releasing authority, indistinguishable runtime branch, overwritten monitor reason, discarded live-source cause, or unbounded changing details can leave stale or unowned health, conceal the cause, grow memory, or flood operator logs while ordinary tests remain green.
+    invariant: The pre-election configuration-loader failure performs the ordinary lock election and only its winner writes durable non-ready health before backoff; standby processes never write without authority, and a distinct process remains unable to acquire the leader lock at the actual write_periodic_state side effect. With a distinct incumbent, the seeded durable artifact retains its exact bytes, parsed payload, file identity, size, and high-resolution modification/change metadata, and the production module writer binding is not invoked. Durable runtime health reserves bounded state-safe space for the branch, exception type, and meaningful detail, with rendering fallback to the type. Only live-source monitor health is preserved, and its real bounded redacted cause remains in the rate-limited trace. Limiter identity and the emitted detail both use the same bounded detail, retain at most 64 signatures, and emit at most 8 novel lines per 60-second window on the production supervisor path.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_the_production_failure_branches_persist_distinct_labels
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_production_loader_reserves_type_and_detail_when_config_path_is_long
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_a_credential_bearing_exception_is_persisted_safely_by_the_production_writer
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_an_unrenderable_exception_still_replaces_stale_health
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_production_writer_replaces_invalid_unicode_in_failure_reasons
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_production_writer_bounds_long_whitespace_free_failure_reasons
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_monitor_failure_orchestration_preserves_only_live_source_health
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_alternating_persisting_failures_are_limited_per_signature
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_limiter_distinguishes_details_but_bounds_state_and_novel_line_burst
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_every_runtime_failure_entry_point_is_rate_limited
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_png_supervisor.py::test_raising_config_loader_backs_off_then_recovers_to_idle
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_png_supervisor.py::test_critical_runtime_failure_marks_nonready_before_re_election
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_png_supervisor.py::test_live_source_failure_preserves_health_and_logs_real_cause_before_re_election
+        ci_partition: agents
+    red_evidence: unrenderable_exception_propagated_from_bounded_reason_before_the_writer_replaced_starting_health_a_loader_path_containing_api_telegram_org_bot_was_rejected_by_periodic_state_a_pre_election_loader_fault_left_no_durable_receipt_a_long_path_removed_the_exception_the_preserved_live_source_branch_discarded_its_real_cause_and_same_class_details_shared_one_unbounded_limiter_identity_while_narrower_tests_stayed_green_pending_immutable_capture_and_local_strengthened_registered_node_red_when_acquisition_returned_none_when_bounded_detail_was_replaced_by_raw_exception_text_and_when_release_preceded_write_with_the_distinct_process_acquiring_the_kernel_lock_and_when_a_standby_with_an_incumbent_replaced_the_seeded_file_with_byte_identical_content_through_a_direct_lower_level_writer_outside_run_blocking_on_windows_and_ubuntu_22_04_pending_exact_candidate_binding
+    green_evidence: local_strengthened_exact_registered_node_one_passed_on_windows_and_ubuntu_22_04_and_bound_exact_bytes_payload_file_identity_and_high_resolution_metadata_pending_exact_candidate_and_hosted_agents_partition
   - id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
     status: open
     scope: product_contract

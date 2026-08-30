@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -390,7 +391,7 @@ async def test_unexplained_coordinator_disappearance_is_degraded_not_orderly(
             assert coordinator is not None
             await coordinator.stop()
             self._coordinator = None
-            return "poll"
+            return "poll", None
 
     class BackoffClock(Clock):
         def __init__(self) -> None:
@@ -755,7 +756,7 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
 ) -> None:
     class FailedCoordinator(Coordinator):
         async def wait(self) -> None:
-            raise RuntimeError("critical loop failed")
+            raise ValueError("sqlite write exploded")
 
     class BackoffClock(Clock):
         def __init__(self) -> None:
@@ -781,13 +782,77 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
         if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
-    assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("degraded_runtime")
+    health = (await _load_stable(tmp_path)).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert "ValueError" in health["error_text"]
+    assert "sqlite write exploded" in health["error_text"]
     fd = None
     for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
         await asyncio.sleep(0.001)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+    await supervisor.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_live_source_failure_preserves_health_and_logs_real_cause_before_re_election(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailedLiveSourceCoordinator(Coordinator):
+        async def wait(self) -> None:
+            state = load_periodic_state(tmp_path)
+            write_periodic_state(
+                tmp_path,
+                set_periodic_health(
+                    state,
+                    status="degraded_source",
+                    code="periodic_live_source_stopped",
+                    text="periodic live source stopped unexpectedly",
+                    now=1.0,
+                ),
+            )
+            raise ValueError("ZMQ subscription socket died")
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    clock = BackoffClock()
+    coordinator = FailedLiveSourceCoordinator()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: coordinator,
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    with caplog.at_level(logging.ERROR, logger="cryodaq.agents.assistant.periodic_png"):
+        task = asyncio.create_task(supervisor.run())
+        for _ in _settle_attempts():
+            health = (await _load_stable(tmp_path)).payload["health"]
+            messages = [record.getMessage() for record in caplog.records]
+            if health["error_code"] == "periodic_live_source_stopped" and any(
+                "ValueError" in message and "ZMQ subscription socket died" in message for message in messages
+            ):
+                break
+            await asyncio.sleep(0.001)
+
+    health = (await _load_stable(tmp_path)).payload["health"]
+    assert health["error_code"] == "periodic_live_source_stopped"
+    assert health["error_text"] == "periodic live source stopped unexpectedly"
+    assert any("ValueError" in message and "ZMQ subscription socket died" in message for message in messages)
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
     assert fd is not None
     release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
     await supervisor.stop()
@@ -824,6 +889,74 @@ async def test_cancelled_leader_acquisition_releases_late_fd(tmp_path: Path) -> 
     fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
     assert fd is not None
     release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failure_writer_settles_before_leader_release(
+    tmp_path: Path,
+) -> None:
+    first_write_entered = asyncio.Event()
+    release_first_write = asyncio.Event()
+    detached_writes: list[asyncio.Task[None]] = []
+    write_calls = 0
+
+    async def executor_like_blocking(fn, *args, **kwargs):
+        nonlocal write_calls
+        if fn is write_periodic_state:
+            write_calls += 1
+            if write_calls == 1:
+
+                async def delayed_side_effect() -> None:
+                    first_write_entered.set()
+                    await release_first_write.wait()
+                    fn(*args, **kwargs)
+
+                worker = asyncio.create_task(delayed_side_effect())
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    detached_writes.append(worker)
+                    raise
+        return fn(*args, **kwargs)
+
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: Coordinator(),
+        config_loader=lambda _path: (_ for _ in ()).throw(RuntimeError("loader failed")),
+        clock=Clock(),
+        run_blocking=executor_like_blocking,
+    )
+    run_task = asyncio.create_task(supervisor.run())
+    await first_write_entered.wait()
+    run_task.cancel()
+    await asyncio.sleep(0)
+
+    competing_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    escaped_before_settlement = competing_owner is not None
+    try:
+        assert not run_task.done()
+        assert competing_owner is None
+    finally:
+        release_first_write.set()
+        await asyncio.gather(*detached_writes, return_exceptions=True)
+        if competing_owner is not None:
+            release_lock(
+                competing_owner,
+                PERIODIC_LEADER_LOCK,
+                unlink=False,
+                lock_dir=tmp_path,
+            )
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    assert not escaped_before_settlement
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "stopped"
+    settled_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert settled_owner is not None
+    release_lock(settled_owner, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
 
 
 @pytest.mark.asyncio
@@ -1035,8 +1168,16 @@ async def test_raising_config_loader_backs_off_then_recovers_to_idle(
     await clock.entered.wait()
     assert calls == 1
     assert made == 0
-    assert not (tmp_path / ".report-locks").exists()
-    assert not (tmp_path / "reporting").exists()
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert health["error_code"] == "periodic_runtime_failed"
+    assert "RuntimeError" in health["error_text"]
+    assert "config loader failed" in health["error_text"]
+    assert (tmp_path / ".report-locks").exists()
+    assert (tmp_path / "reporting").exists()
+    fault_receipt_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fault_receipt_owner is not None
+    release_lock(fault_receipt_owner, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
     assert not task.done()
     clock.entered.clear()
     clock.release.set()
@@ -1046,6 +1187,67 @@ async def test_raising_config_loader_backs_off_then_recovers_to_idle(
         await asyncio.sleep(0.001)
     assert calls == 2
     assert not task.done()
+    await supervisor.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_loader_failure_then_unrequested_replaces_owned_receipt_with_disabled(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def loader(_path: Path) -> PeriodicPngConfigLoad:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient loader failure")
+        return PeriodicPngConfigLoad(
+            selected_path=None,
+            requested=False,
+            runnable=False,
+            config=None,
+            error_code=None,
+            error_text="",
+        )
+
+    class FailureThenDisabledClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sleeps = 0
+            self.disabled_sleep = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.sleeps += 1
+            if self.sleeps == 1:
+                return
+            self.disabled_sleep.set()
+            await asyncio.Event().wait()
+
+    async def direct_blocking(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    clock = FailureThenDisabledClock()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: pytest.fail("factory must not run"),
+        config_loader=loader,
+        clock=clock,
+        run_blocking=direct_blocking,
+    )
+    task = asyncio.create_task(supervisor.run())
+    await clock.disabled_sleep.wait()
+
+    assert calls == 2
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "disabled"
+    assert health["error_code"] == "periodic_disabled"
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
     await supervisor.stop()
     await task
 
