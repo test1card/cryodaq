@@ -221,6 +221,9 @@ def _assert_standby_loader_failure_never_writes_durable_health(tmp_path, monkeyp
         except subprocess.TimeoutExpired:
             holder.kill()
             holder.wait(timeout=10)
+        for stream in (holder.stdout, holder.stderr):
+            if stream is not None:
+                stream.close()
     assert holder.returncode == 0
 
 
