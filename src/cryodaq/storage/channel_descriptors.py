@@ -6,6 +6,7 @@ publish readings, infer vendor semantics, or grant source/control authority.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -55,6 +56,7 @@ MAX_LIVE_METADATA_TEXT_BYTES: Final = 65_536
 MAX_LIVE_METADATA_AGGREGATE_BYTES: Final = 1_048_576
 MAX_LIVE_READING_TEXT_BYTES: Final = 1024
 MAX_PERSISTED_READING_ID_BYTES: Final = 256
+MAX_PERSISTED_READING_UNIT_BYTES: Final = 64
 MAX_LIVE_DESCRIPTOR_CONFIG_BYTES: Final = 256 * 1024
 MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH: Final = 8
 
@@ -78,6 +80,7 @@ _LIVE_DESCRIPTOR_KEYS: Final = frozenset(
 )
 _LIVE_BINDING_KEYS: Final = frozenset({"instrument_id", "emitted_channel", "channel_id"})
 _BOUND_READING_PROVENANCE: Final = object()
+_DURABLE_UNBOUND_TEXT_NAMESPACE: Final = "~sha256b64:"
 
 SCHEMA_DESCRIPTOR_META: Final = """
 CREATE TABLE IF NOT EXISTS channel_descriptor_meta (
@@ -729,22 +732,78 @@ def _bounded_live_text(value: object, *, field: str, maximum: int) -> str:
     return value
 
 
-def _durable_unbound_channel_label(label: str) -> str:
-    """Keep an unknown channel useful while fitting every durable reader boundary.
+def _durable_unbound_text(value: str, *, maximum: int) -> str:
+    """Return one bounded, namespace-disjoint spelling for unbound row text.
 
-    Refusing an overlong unknown label here would refuse its whole acquisition batch,
-    recreating the data loss reserved admission exists to prevent. A plain prefix
-    truncation could alias two physical channels, so the durable form keeps a UTF-8-safe
-    prefix and the full digest of the exact emitted label.
+    Reserved admission cannot refuse an otherwise valid batch merely because a live
+    identifier is wider than a durable reader field. The generated spelling starts in
+    an explicit namespace and carries the full SHA-256 digest plus a UTF-8-safe visible
+    prefix. A short emitted value already in that namespace is encoded too, so it cannot
+    alias the generated spelling of another value.
     """
 
-    encoded = label.encode("utf-8")
-    if len(encoded) <= MAX_PERSISTED_READING_ID_BYTES:
-        return label
-    suffix = f"~sha256:{hashlib.sha256(encoded).hexdigest()}"
-    prefix_budget = MAX_PERSISTED_READING_ID_BYTES - len(suffix.encode("ascii"))
-    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
-    return prefix + suffix
+    encoded = value.encode("utf-8")
+    if len(encoded) <= maximum and not value.startswith(_DURABLE_UNBOUND_TEXT_NAMESPACE):
+        return value
+    digest = base64.urlsafe_b64encode(hashlib.sha256(encoded).digest()).rstrip(b"=").decode("ascii")
+    header = f"{_DURABLE_UNBOUND_TEXT_NAMESPACE}{digest}:"
+    prefix_budget = maximum - len(header.encode("ascii"))
+    if prefix_budget < 0:
+        raise AssertionError("durable unbound text bound cannot carry the reserved namespace")
+    visible_prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    return header + visible_prefix
+
+
+def durable_unbound_reading_fields(
+    instrument_id: str,
+    channel: str,
+    unit: str,
+) -> tuple[str, str, str]:
+    """Return the one durable text representation for an unbound reading.
+
+    Both the receipt-bearing live path and the legacy immediate-write path can
+    admit an undescribed reading.  Keeping the three persisted fields behind
+    this single helper prevents either path from storing text that the bounded
+    reader must quarantine, while retaining a collision-resistant identity for
+    every original value.
+    """
+
+    for field, value in (
+        ("instrument_id", instrument_id),
+        ("channel", channel),
+        ("unit", unit),
+    ):
+        if type(value) is not str:
+            raise ChannelDescriptorStorageError(f"unbound reading {field} must be an exact string")
+
+    return (
+        _durable_unbound_text(instrument_id, maximum=MAX_PERSISTED_READING_ID_BYTES),
+        _durable_unbound_text(channel, maximum=MAX_PERSISTED_READING_ID_BYTES),
+        _durable_unbound_text(unit, maximum=MAX_PERSISTED_READING_UNIT_BYTES),
+    )
+
+
+def normalize_persisted_unbound_reading_fields(
+    instrument_id: str,
+    channel: str,
+    unit: str,
+) -> tuple[str, str, str]:
+    """Bound pre-contract reserved rows without rewriting current durable text."""
+
+    fields = (
+        ("instrument_id", instrument_id, MAX_PERSISTED_READING_ID_BYTES),
+        ("channel", channel, MAX_PERSISTED_READING_ID_BYTES),
+        ("unit", unit, MAX_PERSISTED_READING_UNIT_BYTES),
+    )
+    normalized: list[str] = []
+    for field, value, maximum in fields:
+        if type(value) is not str:
+            raise ChannelDescriptorStorageError(f"persisted unbound reading {field} must be an exact string")
+        if len(value.encode("utf-8")) <= maximum:
+            normalized.append(value)
+        else:
+            normalized.append(_durable_unbound_text(value, maximum=maximum))
+    return normalized[0], normalized[1], normalized[2]
 
 
 def _freeze_live_metadata(value: object) -> _FrozenDict:
@@ -1184,9 +1243,12 @@ class LiveChannelDescriptorCatalog:
         except ChannelNotDescribedError:
             pass
         owned = _own_live_reading(reading)
-        bounded_channel = _durable_unbound_channel_label(owned.channel)
-        if bounded_channel != owned.channel:
-            owned = replace(owned, channel=bounded_channel)
+        instrument_id, channel, unit = durable_unbound_reading_fields(
+            owned.instrument_id,
+            owned.channel,
+            owned.unit,
+        )
+        owned = replace(owned, instrument_id=instrument_id, channel=channel, unit=unit)
         descriptor = _reserved_entry_of(self._catalog)
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
         selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
@@ -1751,15 +1813,18 @@ __all__ = [
     "MAX_LIVE_METADATA_TEXT_BYTES",
     "MAX_LIVE_READING_TEXT_BYTES",
     "MAX_PERSISTED_READING_ID_BYTES",
+    "MAX_PERSISTED_READING_UNIT_BYTES",
     "ChannelDescriptorProjection",
     "ChannelDescriptorStorageError",
     "DescriptorBoundReading",
     "LiveChannelDescriptorCatalog",
     "ResolvedSQLiteReading",
     "descriptor_hash_for_reading",
+    "durable_unbound_reading_fields",
     "initialize_descriptor_storage",
     "install_catalog",
     "load_live_channel_descriptor_catalog",
+    "normalize_persisted_unbound_reading_fields",
     "project_channel_descriptor",
     "project_channel_descriptor_payload",
     "read_sqlite_reading",

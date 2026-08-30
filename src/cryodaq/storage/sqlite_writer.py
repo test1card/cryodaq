@@ -65,6 +65,7 @@ from cryodaq.storage.channel_descriptors import (
     LiveChannelDescriptorCatalog,
     catalog_with_reserved_descriptor,
     descriptor_hash_for_reading,
+    durable_unbound_reading_fields,
     initialize_descriptor_storage,
     install_catalog,
     is_reserved_descriptor,
@@ -7711,6 +7712,13 @@ class SQLiteWriter:
                     )
             else:
                 descriptor_hash = self._descriptor_hash_or_none(r, unbound)
+                if descriptor_hash == self._unbound_descriptor_hash:
+                    instrument_id, channel, unit = durable_unbound_reading_fields(
+                        r.instrument_id,
+                        r.channel,
+                        r.unit,
+                    )
+                    r = replace(r, instrument_id=instrument_id, channel=channel, unit=unit)
             rows.append(
                 (
                     r.timestamp.timestamp(),

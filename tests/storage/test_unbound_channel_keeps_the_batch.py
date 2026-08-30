@@ -12,6 +12,7 @@ the truth about it, and the fact is said and counted.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import tempfile
@@ -38,6 +39,7 @@ from cryodaq.storage.channel_descriptors import (
     ChannelNotDescribedError,
     LiveChannelDescriptorCatalog,
 )
+from cryodaq.storage.csv_export import CSVExporter
 from cryodaq.storage.sqlite_writer import _MAX_REMEMBERED_UNBOUND_CHANNELS, SQLiteWriter
 
 TIMESTAMP = datetime(2026, 7, 12, 12, tzinfo=UTC)
@@ -722,6 +724,7 @@ def test_a_257_byte_unknown_label_cannot_hide_the_described_measurement(
     the reader's 256-byte grammar, without relabelling the row as described.
     """
 
+    import base64
     import hashlib
 
     long_label = "sensor." + "x" * (257 - len("sensor."))
@@ -748,12 +751,243 @@ def test_a_257_byte_unknown_label_cannot_hide_the_described_measurement(
     assert by_value[4.2].descriptor is not None
     assert 4.3 in by_value, "the bounded unknown identity must remain materialisable"
     bounded_label = by_value[4.3].channel
-    assert bounded_label.startswith("sensor."), "the bounded form must still name the channel usefully"
     assert bounded_label != long_label
     assert len(bounded_label.encode("utf-8")) <= 256
-    assert bounded_label.endswith(hashlib.sha256(long_label.encode("utf-8")).hexdigest())
+    digest = base64.urlsafe_b64encode(hashlib.sha256(long_label.encode("utf-8")).digest()).rstrip(b"=").decode()
+    namespace, stored_digest, visible_prefix = bounded_label.split(":", maxsplit=2)
+    assert namespace == "~sha256b64"
+    assert stored_digest == digest
+    assert visible_prefix.startswith("sensor."), "the bounded form must still name the channel usefully"
     assert by_value[4.3].descriptor is None
     assert result.complete is False
+
+
+@pytest.mark.parametrize(
+    ("field", "oversized_value"),
+    (
+        ("instrument_id", "instrument." + "i" * (257 - len("instrument."))),
+        ("unit", "unit." + "u" * (65 - len("unit."))),
+    ),
+)
+def test_an_oversized_unknown_field_cannot_quarantine_its_described_neighbor(
+    tmp_path: Path,
+    field: str,
+    oversized_value: str,
+) -> None:
+    """Every reserved row field must fit the bounded reader that consumes it.
+
+    The writer commits the described and undescribed readings in one SQLite source.
+    A single oversized field must not make the bounded reader quarantine that whole
+    source and hide the neighboring described measurement.
+    """
+
+    owner = _live()
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    unknown = replace(_reading("sensor.unknown", 4.3), **{field: oversized_value})
+    try:
+        admitted = tuple(owner.admit(reading) for reading in (_reading("sensor.main", 4.2), unknown))
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    assert len(_rows(tmp_path)) == 2, "the fixture must commit both neighboring rows"
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    by_value = {row.value: row for row in result.rows}
+    assert 4.2 in by_value, "one oversized unknown field must not quarantine the described row"
+    assert by_value[4.2].descriptor is not None
+    assert 4.3 in by_value, "the bounded representation of the unknown row must remain readable"
+    assert by_value[4.3].descriptor is None
+    assert result.complete is False
+
+
+@pytest.mark.parametrize(
+    ("field", "oversized_value"),
+    (
+        ("instrument_id", "legacy.instrument." + "i" * 300),
+        ("unit", "legacy-unit-" + "u" * 80),
+    ),
+)
+def test_an_upgrade_normalizes_legacy_oversized_unbound_fields_before_bounded_read(
+    tmp_path: Path,
+    field: str,
+    oversized_value: str,
+) -> None:
+    """Pre-upgrade reserved rows cannot quarantine their valid neighbours."""
+
+    owner = _live()
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    try:
+        readings = (_reading("sensor.main", 4.2), _reading("sensor.unknown", 4.3))
+        admitted = tuple(owner.admit(reading) for reading in readings)
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    try:
+        if field == "instrument_id":
+            conn.execute("UPDATE readings SET instrument_id = ? WHERE value = ?", (oversized_value, 4.3))
+        else:
+            conn.execute("UPDATE readings SET unit = ? WHERE value = ?", (oversized_value, 4.3))
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    by_value = {row.value: row for row in result.rows}
+    assert set(by_value) == {4.2, 4.3}, "a legacy reserved row must not quarantine its described neighbour"
+    assert by_value[4.2].descriptor is not None
+    assert by_value[4.3].descriptor is None
+    assert getattr(by_value[4.3], field).startswith("~sha256b64:")
+    assert result.complete is False
+
+
+def test_a_literal_reserved_form_cannot_alias_the_long_label_that_generated_it(
+    tmp_path: Path,
+) -> None:
+    """Generated identities and emitted labels occupy disjoint namespaces.
+
+    The second label is deliberately the exact durable spelling generated for the
+    first one. If a short emitted label may pass through that spelling unchanged,
+    SQLite sees one channel identity and the later value replaces the earlier one.
+    """
+
+    owner = _live()
+    long_label = "sensor." + "x" * 300
+    long_admission = owner.admit(_reading(long_label, 4.2))
+    generated_label = long_admission.reading.channel
+    assert generated_label != long_label
+    assert len(generated_label.encode("utf-8")) <= 256
+
+    literal_admission = owner.admit(_reading(generated_label, 4.3))
+    assert literal_admission.reading.channel != generated_label, (
+        "an emitted label in the generated namespace must be escaped before persistence"
+    )
+    assert literal_admission.reading.channel != long_admission.reading.channel
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    try:
+        admitted = (long_admission, literal_admission)
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    assert len(_rows(tmp_path)) == 2, "distinct emitted labels must remain distinct durable rows"
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    assert {row.value for row in result.rows} == {4.2, 4.3}
+    assert all(row.descriptor is None for row in result.rows)
+    assert result.complete is False
+
+
+@pytest.mark.parametrize(
+    ("field", "oversized_value", "maximum"),
+    (
+        ("instrument_id", "测" * 86, 256),
+        ("channel", "温" * 86, 256),
+        ("unit", "°" * 33, 64),
+    ),
+)
+async def test_write_immediate_bounds_every_unbound_field_before_durable_insert(
+    tmp_path: Path,
+    field: str,
+    oversized_value: str,
+    maximum: int,
+) -> None:
+    """The scheduler/calibration write API cannot let one row quarantine its day."""
+
+    assert len(oversized_value.encode("utf-8")) > maximum
+    unknown = replace(_reading("sensor.unknown", 4.3), **{field: oversized_value})
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
+    try:
+        assert await writer.write_immediate([_reading("sensor.main", 4.2), unknown]) is True
+    finally:
+        await writer.stop()
+
+    assert len(_rows(tmp_path)) == 2, "both neighboring rows must reach durable SQLite"
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    by_value = {row.value: row for row in result.rows}
+    assert set(by_value) == {4.2, 4.3}, "the oversized unknown row must not quarantine the valid neighbor"
+    assert by_value[4.2].descriptor is not None
+    unbound = by_value[4.3]
+    assert unbound.descriptor is None
+    assert len(getattr(unbound, field).encode("utf-8")) <= maximum
+    assert getattr(unbound, field).startswith("~sha256b64:")
+    assert result.complete is False
+
+
+async def test_csv_history_keeps_distinct_unbound_channels_at_one_timestamp(
+    tmp_path: Path,
+) -> None:
+    """A shared reserved descriptor is not the physical identity of unbound rows."""
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
+    try:
+        assert (
+            await writer.write_immediate([_reading("sensor.unbound.one", 4.2), _reading("sensor.unbound.two", 4.3)])
+            is True
+        )
+    finally:
+        await writer.stop()
+
+    output = tmp_path / "export" / "history.csv"
+    assert CSVExporter(tmp_path, tmp_path / "archive").export(output) == 2
+    with output.open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert {(row["channel"], float(row["value"])) for row in rows} == {
+        ("sensor.unbound.one", 4.2),
+        ("sensor.unbound.two", 4.3),
+    }, "two physical channels must remain two exported history rows"
+
+
+async def test_a_corrupt_empty_descriptor_hash_cannot_collapse_distinct_channels(
+    tmp_path: Path,
+) -> None:
+    """Damaged descriptor metadata may not silently remove a physical row."""
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
+    try:
+        assert await writer.write_immediate([_reading("sensor.one", 4.2), _reading("sensor.two", 4.3)]) is True
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    try:
+        conn.execute("UPDATE readings SET descriptor_hash = ''")
+        conn.commit()
+    finally:
+        conn.close()
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+    rows = ArchiveReader(tmp_path, archive).query_rows(None, None, None)
+    assert {(row[2], row[3]) for row in rows} == {("sensor.one", 4.2), ("sensor.two", 4.3)}
+
+
+async def test_catalogless_immediate_write_rejects_non_string_unbound_fields_with_a_typed_error(
+    tmp_path: Path,
+) -> None:
+    """A malformed legacy Reading fails closed without an AttributeError escape."""
+
+    writer = SQLiteWriter(tmp_path)
+    invalid = replace(_reading("sensor.unknown", 4.3), unit=None)
+    try:
+        with pytest.raises(ChannelDescriptorStorageError, match="unit must be an exact string"):
+            await writer.write_immediate([invalid])
+    finally:
+        await writer.stop()
 
 
 def test_a_new_unknown_label_after_discovery_cannot_leave_the_read_complete(

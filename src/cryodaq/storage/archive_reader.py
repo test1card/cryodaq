@@ -27,8 +27,10 @@ from urllib.parse import quote
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
     MAX_PERSISTED_READING_ID_BYTES,
+    MAX_PERSISTED_READING_UNIT_BYTES,
     UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
+    normalize_persisted_unbound_reading_fields,
     verify_descriptor_storage,
 )
 from cryodaq.storage.descriptor_archive import (
@@ -1474,6 +1476,12 @@ class ArchiveReader:
                                 timestamp_us = _sqlite_epoch_microseconds(timestamp)
                                 if not start_us <= timestamp_us < end_us:
                                     raise ValueError("timestamp outside normalized interval")
+                                if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                    instrument, raw_channel, unit = normalize_persisted_unbound_reading_fields(
+                                        instrument,
+                                        raw_channel,
+                                        unit,
+                                    )
                                 instrument_text = _bounded_text(
                                     instrument,
                                     minimum=1,
@@ -1484,7 +1492,11 @@ class ArchiveReader:
                                     minimum=1,
                                     maximum=MAX_PERSISTED_READING_ID_BYTES,
                                 )
-                                unit_text = _bounded_text(unit, minimum=0, maximum=64)
+                                unit_text = _bounded_text(
+                                    unit,
+                                    minimum=0,
+                                    maximum=MAX_PERSISTED_READING_UNIT_BYTES,
+                                )
                                 status_text = _bounded_text(status_value, minimum=0, maximum=64)
                                 decoded = _bounded_value(value, status_text)
                                 if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
@@ -2254,32 +2266,43 @@ class ArchiveReader:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             if not start_us <= timestamp_us < end_us:
                                 raise ValueError("timestamp outside normalized interval")
+                            raw_instrument = filtered["instrument_id"][index].as_py()
+                            raw_channel = filtered["channel"][index].as_py()
+                            raw_unit = filtered["unit"][index].as_py()
+                            descriptor_hash = (
+                                filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
+                            )
+                            if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                raw_instrument, raw_channel, raw_unit = normalize_persisted_unbound_reading_fields(
+                                    raw_instrument,
+                                    raw_channel,
+                                    raw_unit,
+                                )
                             instrument = _bounded_text(
-                                filtered["instrument_id"][index].as_py(),
+                                raw_instrument,
                                 minimum=1,
                                 maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             channel = _bounded_text(
-                                filtered["channel"][index].as_py(),
+                                raw_channel,
                                 minimum=1,
                                 maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
-                            unit = _bounded_text(filtered["unit"][index].as_py(), minimum=0, maximum=64)
+                            unit = _bounded_text(
+                                raw_unit,
+                                minimum=0,
+                                maximum=MAX_PERSISTED_READING_UNIT_BYTES,
+                            )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             status_value = _bounded_text(filtered["status"][index].as_py(), minimum=0, maximum=64)
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             value = _bounded_value(filtered["value"][index].as_py(), status_value)
-                            if time.monotonic() >= deadline_monotonic:
-                                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
-                            descriptor_hash = (
-                                filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
-                            )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
@@ -2481,7 +2504,7 @@ class ArchiveReader:
                 continue
             if to_day is not None and day > to_day:
                 continue
-            day_rows: dict[tuple[object, str, str], FullRow] = {}
+            day_rows: dict[tuple[object, str, tuple[str, str]], FullRow] = {}
             # Parquet source(s) read first → archived wins across sources.
             # Within every source, the last physical row wins so the same hot
             # SQLite duplicate resolves identically after cold rotation.
@@ -2501,9 +2524,15 @@ class ArchiveReader:
                     )
                 else:
                     self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, source_rows)
-                source_latest: dict[tuple[object, str, str], FullRow] = {}
+                source_latest: dict[tuple[object, str, tuple[str, str]], FullRow] = {}
                 for row in source_rows:
-                    identity = row[6] or row[2]
+                    descriptor_hash = row[6]
+                    if descriptor_hash is None or not isinstance(descriptor_hash, str) or not descriptor_hash:
+                        identity = ("legacy-channel", row[2])
+                    elif descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                        identity = ("unbound-channel", row[2])
+                    else:
+                        identity = ("descriptor", descriptor_hash)
                     source_latest[(row[0], row[1], identity)] = row
                 for key, row in source_latest.items():
                     day_rows.setdefault(key, row)
