@@ -2578,6 +2578,32 @@ def _reopen_history_bound_closures(registry_path: Path) -> None:
     registry_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
+def test_red_reproduction_blob_refusals_run_only_from_the_git_checkout(tmp_path: Path) -> None:
+    """Blob-object refusal reasons require the candidate's Git object database."""
+
+    nodes = (
+        (
+            "tests/governance/test_red_reproduction.py"
+            "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-mismatch]"
+        ),
+        (
+            "tests/governance/test_red_reproduction.py"
+            "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-node-mismatch]"
+        ),
+    )
+    selection = checkout_execution_selection("remaining")
+    assert selection is not None
+    assert set(nodes) <= set(selection.nodes)
+
+    command = ci_candidate_runner._suite_commands(
+        "remaining",
+        root=ROOT,
+        basetemp=tmp_path / "candidate-red-reproduction-selection",
+    )[0]
+    for node in nodes:
+        assert ("--deselect", node) in tuple(zip(command, command[1:], strict=False))
+
+
 def test_exported_candidate_runner_emits_structural_failure_receipt_after_environment_sanitization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2591,6 +2617,7 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
         "tools/ci_execution_roots.py",
         "tools/ci_guard_execution.py",
         "tools/governance_contract.py",
+        "tools/test_node_source.py",
         "governance/agent_preventions.yaml",
         "governance/red_reproductions/alarm_mixed_selector_027.json",
         "governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json",

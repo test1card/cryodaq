@@ -21,10 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
-from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.base import ChannelStatus, InstrumentStatusFaultReason, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.display_precision import MISSING_VALUE_TEXT, format_display_value
 from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,29 @@ _STATUS_COLORS: dict[ChannelStatus, str] = {
     ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
     ChannelStatus.TIMEOUT: theme.STATUS_STALE,
 }
+
+_FAULT_REASON_OPERATOR_LABELS: dict[InstrumentStatusFaultReason, str] = {
+    InstrumentStatusFaultReason.INVALID_READING: "недействительное показание прибора",
+    InstrumentStatusFaultReason.TEMPERATURE_UNDER_RANGE: "температура ниже диапазона прибора",
+    InstrumentStatusFaultReason.TEMPERATURE_OVER_RANGE: "температура выше диапазона прибора",
+    InstrumentStatusFaultReason.SENSOR_UNITS_OVER_RANGE: "сигнал датчика выше диапазона (возможен обрыв)",
+    InstrumentStatusFaultReason.SENSOR_UNITS_ZERO: "нулевой сигнал датчика (возможно короткое замыкание)",
+}
+
+
+def _instrument_fault_operator_text(reading: Reading) -> str | None:
+    reasons = reading.instrument_status_fault_reasons()
+    if not reasons:
+        return None
+    rendered: list[str] = []
+    for reason in reasons:
+        try:
+            declared_reason = InstrumentStatusFaultReason(reason)
+        except ValueError:
+            rendered.append("неизвестный флаг статуса прибора")
+        else:
+            rendered.append(_FAULT_REASON_OPERATOR_LABELS[declared_reason])
+    return f"{reading.channel}: {'; '.join(rendered)}"
 
 
 class SensorCell(QFrame):
@@ -82,12 +107,20 @@ class SensorCell(QFrame):
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
         self._last_status: ChannelStatus | None = None
+        # Part of the render-change key, not decoration.  The instrument-register
+        # diagnosis can change - over-range to sensor-zero, open-circuit to
+        # short-circuit - while ChannelStatus stays put, and keying the visible hint
+        # on status alone left the operator reading the OLD physical diagnosis while
+        # the accessible description had already moved to the new one.
+        self._last_fault_text: str | None = None
         self._source_status: ChannelStatus | None = None
+        self._source_fault_text: str | None = None
         self._source_identity = IdentityStatus.LEGACY_ABSENT
         self._data_stale = True
         self._read_only = False
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
+        self._display_value: float | None = None
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -202,10 +235,27 @@ class SensorCell(QFrame):
         self._status_hint_widget.setText(text)
         self.setAccessibleDescription(text)
         self._last_status = None
+        self._last_fault_text = None
 
     # ------------------------------------------------------------------
     # Value updates
     # ------------------------------------------------------------------
+
+    def _render_display_value(self) -> None:
+        if self._display_value is None:
+            self._value_widget.setText(MISSING_VALUE_TEXT)
+            return
+        self._value_widget.setText(
+            format_display_value(
+                self._display_value,
+                quantity=ChannelQuantity.TEMPERATURE,
+            )
+        )
+
+    def refresh_display_precision(self) -> None:
+        """Re-render the current value after the display preference changes."""
+
+        self._render_display_value()
 
     def update_value(
         self,
@@ -219,17 +269,15 @@ class SensorCell(QFrame):
             return
 
         value = reading.value
-        if isinstance(value, (int, float)) and not math.isnan(value):
-            if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
-                text = f"{value:.2e}"
-            else:
-                text = f"{value:.2f}"
-            self._value_widget.setText(text)
+        if reading.is_usable():
+            self._display_value = float(value)
         else:
-            self._value_widget.setText("\u2014")
+            self._display_value = None
+        self._render_display_value()
 
         self._unit_widget.setText(reading.unit or "")
         self._source_status = reading.status
+        self._source_fault_text = _instrument_fault_operator_text(reading)
         self._source_identity = identity_status
         was_stale = self._data_stale
         self._data_stale = time.time() - reading.timestamp.timestamp() > _STALE_THRESHOLD_S
@@ -238,18 +286,23 @@ class SensorCell(QFrame):
             self._apply_identity_state(stale=self._data_stale)
             return
 
-        self.setAccessibleDescription("")
+        self.setAccessibleDescription(self._source_fault_text or "")
 
         if self._data_stale:
             self._apply_stale_style()
-            self._status_hint_widget.setText("\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e")
+            stale_text = "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
+            if self._source_fault_text:
+                stale_text = f"{self._source_fault_text} · {stale_text}"
+            self._status_hint_widget.setText(stale_text)
+            self.setAccessibleDescription(stale_text)
             self._last_status = None
+            self._last_fault_text = None
             return
 
         display_status = interval_status or reading.status
-        if display_status != self._last_status or was_stale:
+        if display_status != self._last_status or self._source_fault_text != self._last_fault_text or was_stale:
             self._apply_status_style(display_status)
-            status_text = _STATUS_LABELS.get(
+            status_text = self._source_fault_text or _STATUS_LABELS.get(
                 display_status,
                 "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",  # Нет данных
             )
@@ -257,18 +310,19 @@ class SensorCell(QFrame):
                 status_text = f"{status_text} (за интервал)"
             self._status_hint_widget.setText(status_text)
             self._last_status = display_status
+            self._last_fault_text = self._source_fault_text
 
     def refresh_from_buffer(self) -> None:
         """Pull latest value from the buffer on the bounded presentation tick.
 
-        Buffer stores only (timestamp, value) — no ChannelStatus.
-        This path tracks staleness by data age; full status comes
-        through the update_value() push path.
+        The buffer keeps timestamp, value, and ChannelStatus as one latest
+        sample so a presentation tick cannot resurrect an unusable raw value.
         """
-        last = self._buffer.get_last(self._channel_id)
+        last = self._buffer.get_last_with_status(self._channel_id)
         if last is None:
             if not self._data_stale:
-                self._value_widget.setText("\u2014")
+                self._display_value = None
+                self._render_display_value()
                 self._unit_widget.setText("")
                 self._apply_stale_style()
                 self._status_hint_widget.setText(
@@ -277,7 +331,7 @@ class SensorCell(QFrame):
                 self._data_stale = True
             return
 
-        timestamp_epoch, value = last
+        timestamp_epoch, value, status = last
         age = time.time() - timestamp_epoch
         if age > _STALE_THRESHOLD_S:
             if not self._data_stale:
@@ -291,22 +345,27 @@ class SensorCell(QFrame):
                     self._apply_identity_state(stale=True)
             return
 
-        if isinstance(value, (int, float)) and not math.isnan(value):
-            if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
-                text = f"{value:.2e}"
-            else:
-                text = f"{value:.2f}"
-            self._value_widget.setText(text)
+        self._source_status = status
+        if status is ChannelStatus.OK and isinstance(value, (int, float)) and math.isfinite(value):
+            self._display_value = float(value)
+        else:
+            self._display_value = None
+        self._render_display_value()
         self._data_stale = False
         if self._source_identity is not IdentityStatus.AUTHORITATIVE:
             self._apply_identity_state(stale=False)
             return
-        if self._source_status is not None and self._last_status is not self._source_status:
+        if self._source_status is not None and (
+            self._last_status is not self._source_status or self._source_fault_text != self._last_fault_text
+        ):
             self._apply_status_style(self._source_status)
             self._status_hint_widget.setText(
-                _STATUS_LABELS.get(self._source_status, "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445")
+                self._source_fault_text
+                or _STATUS_LABELS.get(self._source_status, "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445")
             )
+            self.setAccessibleDescription(self._source_fault_text or "")
             self._last_status = self._source_status
+            self._last_fault_text = self._source_fault_text
 
     # ------------------------------------------------------------------
     # Inline rename

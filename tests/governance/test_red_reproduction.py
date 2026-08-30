@@ -13,7 +13,8 @@ from typing import Any
 import pytest
 import yaml
 
-from tools.governance_contract import GovernanceContractError, closure_semantics_sha256, validate_registry
+from tools.governance_contract import GovernanceContractError, _git_blob_id, closure_semantics_sha256, validate_registry
+from tools.test_node_source import test_node_sha256 as _test_node_sha256
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "governance" / "agent_preventions.yaml"
@@ -67,6 +68,17 @@ def _rewrite_receipt(payload: dict[str, Any], directory: Path, filename: str, re
     _refresh_locator_digest(payload, filename, raw)
 
 
+def _rebind_receipt_guard_files_to_current_tree(payload: dict[str, Any], directory: Path) -> None:
+    """Make an isolated control start green without accepting a claimed blob."""
+
+    for receipt_path in sorted(directory.glob("*.json")):
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["guard_blobs"] = {
+            path: _git_blob_id((ROOT / path).read_bytes()) for path in sorted(receipt["guard_blobs"])
+        }
+        _rewrite_receipt(payload, directory, receipt_path.name, receipt)
+
+
 def test_live_red_reproduction_receipts_bind_executed_preserved_defects() -> None:
     payload = validate_registry(_registry())
     typed = {
@@ -102,12 +114,95 @@ def test_validate_registry_refuses_implicit_root_outside_module_tree(
         validate_registry(_registry())
 
 
+def test_red_reproduction_named_test_change_still_reddens_receipt(tmp_path: Path) -> None:
+    """A receipt's binding must still fail when the exact test it names changes."""
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    guard_path = tmp_path / "tests" / "drivers" / "test_lakeshore_218s.py"
+    source = guard_path.read_text(encoding="utf-8")
+    named_start = source.index("async def test_mock_returns_8_channels()")
+    neighbour_start = source.index("async def test_mock_returns_raw_sensor_channels()", named_start)
+    named_source = source[named_start:neighbour_start]
+    changed_named_source = named_source.replace("assert len(readings) == 8", "assert len(readings) == 7", 1)
+    assert changed_named_source != named_source
+    guard_path.write_text(
+        source[:named_start] + changed_named_source + source[neighbour_start:],
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(GovernanceContractError, match="receipt guard .* does not match"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_red_reproduction_neighbour_change_reddens_receipt(tmp_path: Path) -> None:
+    """A neighbour change DOES redden the receipt, and that is the accepted cost.
+
+    THIS TEST WAS INVERTED, NOT WEAKENED, on 2026-08-29. It previously asserted
+    that a neighbouring test was "outside the receipt's binding" - the guard FOR
+    the node-level narrowing. The owner gave that narrowing up the same day,
+    choosing between three written options: "Go back to the old safe way".
+
+    His reason, measured: 11 of 13 receipt-bound guards call a module-level helper,
+    class or fixture OUTSIDE the hashed function range, so a function-only digest
+    let a weakened shared helper keep its receipt. Whole-file hashing gives false
+    INVALIDATION - noisy, and safe. Function-only hashing gives false RETENTION -
+    quiet, and unsafe. Before a week-long laboratory run the quiet failure is the
+    one that matters.
+
+    The noise is real and is pinned here deliberately: an unrelated edit in the
+    same file DOES invalidate the receipt and DOES demand a re-run. Keeping that
+    visible is the point - it is the price of the safety, not a defect to be
+    quietly optimised away again.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    guard_path = tmp_path / "tests" / "drivers" / "test_lakeshore_218s.py"
+    with guard_path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n\nasync def test_receipt_unrelated_neighbour() -> None:\n    assert True\n")
+
+    with pytest.raises(GovernanceContractError, match="guard blob does not match registry guard file"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_node_digest_owns_decorators_and_nested_helpers_but_not_neighbours() -> None:
+    node = "tests/governance/test_example.py::TestReceipt::test_guard"
+    source = b"""\
+class TestReceipt:
+    @pytest.mark.parametrize("value", [1])
+    def test_guard(self, value):
+        def nested_helper():
+            return value
+
+        assert nested_helper() == 1
+
+    def test_neighbour(self):
+        assert True
+"""
+    digest = _test_node_sha256(source, node)
+
+    assert _test_node_sha256(source.replace(b"assert True", b"assert 1 == 1"), node) == digest
+    assert _test_node_sha256(source.replace(b"[1]", b"[2]"), node) != digest
+    assert _test_node_sha256(source.replace(b"return value", b"return value + 1"), node) != digest
+
+
 Mutation = Callable[[dict[str, Any]], None]
 
 
 def _wrong_guard_blob(receipt: dict[str, Any]) -> None:
     path = next(iter(receipt["guard_blobs"]))
     receipt["guard_blobs"][path] = "0" * 40
+
+
+def _different_resolving_guard_blob(receipt: dict[str, Any]) -> None:
+    path = next(iter(receipt["guard_blobs"]))
+    receipt["guard_blobs"][path] = next(iter(receipt["defective_source_blobs"].values()))
 
 
 def _missing_commit(receipt: dict[str, Any]) -> None:
@@ -138,6 +233,10 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
     ("mutate", "message"),
     [
         (_wrong_guard_blob, "guard blob does not match registry guard file"),
+        # Whole-file binding was restored 2026-08-29, so the FILE-level check now
+        # fires before the node-level one. The refusal is earlier and stricter, not
+        # absent; the node check below it remains enforced as an additional constraint.
+        (_different_resolving_guard_blob, "guard blob does not match registry guard file"),
         (_missing_commit, "does not resolve to a local Git commit object"),
         (_wrong_tree, "defective tree does not match its defective commit"),
         (_successful_exit, "exit code indicates success"),
@@ -147,6 +246,7 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
     ],
     ids=(
         "guard-blob-mismatch",
+        "guard-blob-node-mismatch",
         "missing-defective-commit",
         "wrong-defective-tree",
         "successful-red-run",
@@ -177,4 +277,82 @@ def test_red_reproduction_receipt_refusals_are_independent(
         # from the judge checkout, which holds none of the candidate's objects. The
         # repository is now STATED rather than inferred. The asserted refusals are
         # unchanged: every mutation must still raise.
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_migration_branch_accepts_a_rerun_whose_guard_blobs_moved(tmp_path: Path) -> None:
+    """A node binding may arrive together with the re-run that node forced.
+
+    When a named guard's source moves, tools/red_reproduction.py REFUSES to stamp
+    a digest for it and demands a re-run.  If the trusted-base comparison then
+    treated every node-binding arrival as a pure migration -- receipt bytes
+    frozen, digests only added -- that re-run could never merge, and no change to
+    any receipt-bound guard test could ever land.  The comparison tells the two
+    apart by the guard blobs the receipt RECORDS: if they moved, the receipt
+    describes something that moved.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_migration_branch_still_refuses_a_repoint_whose_guard_blobs_stand_still(tmp_path: Path) -> None:
+    """Changing a receipt while everything it describes stands still stays refused.
+
+    This is the direction that must never be relaxed.  A receipt whose recorded
+    guard blobs are unchanged, but whose claims about the run have moved, is a
+    re-point: the evidence is being made to fit a demand rather than re-earned.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    receipt_path = next(iter(directory.glob("*.json")))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["stdout_sha256"] = "0" * 64
+    receipt_path.write_text(
+        json.dumps(receipt, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(GovernanceContractError):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_refuses_a_guard_file_that_moved_outside_its_named_test(tmp_path: Path) -> None:
+    """A helper beside the guard is part of the guard.
+
+    THE HOLE THIS CLOSES, measured on the candidate 2026-08-29: 11 of 13
+    receipt-bound guards call a module-level helper, class or fixture that lives
+    OUTSIDE the hashed function range - `_make_stack`, `_reading`, `_write_yaml`,
+    `_stub_channels`, the `app` fixture. Under function-only binding, weakening any
+    of them left the node digest identical, so the receipt kept vouching for a
+    guard whose effective behaviour had moved.
+
+    Whole-file hashing gives false INVALIDATION - noisy, and safe. Function-only
+    hashing gives false RETENTION - quiet, and unsafe. The owner chose the noisy one
+    for the laboratory run, 2026-08-29: "Go back to the old safe way".
+
+    The node digests are NOT removed by that choice; they stay enforced as an
+    additional constraint. This guard pins the half that had gone missing: nothing
+    inside any named test changes here, so ONLY the whole-file check can catch it.
+    """
+
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    _rebind_receipt_guard_files_to_current_tree(payload, directory)
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    receipt_path = sorted(directory.glob("*.json"))[0]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    guard_file = tmp_path / sorted(receipt["guard_blobs"])[0]
+
+    # Append a module-level comment. No test function's source changes, so every
+    # node digest is untouched and function-only binding would see nothing at all.
+    moved = guard_file.read_bytes() + b"# a helper beside the guard moved" + bytes([10])
+    guard_file.write_bytes(moved)
+
+    with pytest.raises(GovernanceContractError, match="guard blob does not match registry guard file"):
         validate_registry(payload, root=tmp_path, git_repository=ROOT)

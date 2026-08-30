@@ -9,7 +9,7 @@ import math
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -18,11 +18,12 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.broker import PublisherAuthority
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
+from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     DriverRuntimeBinding,
@@ -43,6 +44,7 @@ from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
 
 logger = logging.getLogger(__name__)
 
+SAFETY_MANAGER_SOURCE_STATE_PUBLISHER = "safety_manager_source_state_v1"
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
@@ -68,6 +70,21 @@ class SafetyState(Enum):
     RUNNING = "running"
     FAULT_LATCHED = "fault_latched"
     MANUAL_RECOVERY = "manual_recovery"
+
+
+class BlindGuardAdvisoryResult(Enum):
+    """Settlement truth for one instrument-confirmed blind interlock guard.
+
+    The advisory never grants actuation authority and never commands OFF.  Its
+    boolean value is only the InterlockEngine episode-settlement decision:
+    retry while the durable operator record is pending, settle once recorded.
+    """
+
+    RETRY = "retry"
+    RECORDED = "recorded"
+
+    def __bool__(self) -> bool:
+        return self is BlindGuardAdvisoryResult.RECORDED
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,20 +195,40 @@ class SafetyManager:
         )
         self._reviewed_source_generation: _ReviewedSourceGeneration | None = None
         self._data_broker = data_broker
+        self._source_state_publication_authority: PublisherAuthority | None = None
+        if data_broker is not None:
+            reserve_publisher = getattr(data_broker, "reserve_publisher", None)
+            if not callable(reserve_publisher):
+                raise TypeError("data_broker must reserve SafetyManager source-state channels")
+            self._source_state_publication_authority = reserve_publisher(
+                SAFETY_MANAGER_SOURCE_STATE_PUBLISHER,
+                tuple(f"analytics/keithley_channel_state/{channel}" for channel in SMU_CHANNELS),
+            )
         self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
         self._fault_reason = ""
+        # A latch can receive a second, independent cause before its first
+        # settlement completes.  Keep every observed origin so an interlock
+        # latch is restartable only when it is still exclusively an interlock
+        # decision, never after persistence or safety-authority loss joined it.
+        self._fault_sources: set[str] = set()
         self._fault_time = 0.0
         self._fault_activated_at = 0.0
         # Presentation identity only; no recovery or output authority.
         self._fault_revision = 0
         self._recovery_reason = ""
         self._active_sources: set[SmuChannel] = set()
+        self._source_observation_revisions: dict[SmuChannel, int] = {channel: 0 for channel in SMU_CHANNELS}
+        self._source_observed_states: dict[SmuChannel, str | None] = {channel: None for channel in SMU_CHANNELS}
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
         self._latest: dict[tuple[str, str], tuple[float, float, str]] = {}
+        # Current per-input instrument-register faults remain explicit reading
+        # evidence but do not grant temperature authority or revoke RUN.  A
+        # later reading without exact register evidence clears the advisory.
+        self._instrument_status_faults: dict[tuple[str, str], tuple[str, ...]] = {}
         # HI-1: the gate is the elapsed data SPAN (min_span_s=30), not a raw
         # point count. The deployed LakeShore poll is 2.0 s
         # (config/instruments.yaml), so the 120 s window holds only ~61
@@ -231,24 +268,23 @@ class SafetyManager:
         # matured. SafetyManager owns this RUN blocker; only a later usable
         # sample accepted by InterlockEngine may clear the exact channel.
         self._mature_dead_interlock_channels: dict[str, str] = {}
+        # Mature instrument-status faults are guard-blind advisories, not RUN
+        # blockers.  The final flag records successful durable operator-log
+        # delivery for this exact interlock/channel/reason episode.
+        self._blind_interlock_guards: dict[str, tuple[str, tuple[str, ...], bool, float]] = {}
+        # One active experiment exists at a time, so retaining only the latest
+        # bound experiment per channel is enough to keep this evidence O(channels)
+        # while still recording every new experiment boundary in a long episode.
+        self._blind_guard_experiment_records: dict[str, str] = {}
         # Instruments whose synthetic failed-poll samples could not obtain
         # persistence-backed publication authority. Acknowledgment clears the
         # fault latch, not this RUN blocker; only Scheduler-observed committed
         # publication for the exact instrument clears it.
         self._failed_poll_persistence_blockers: dict[str, str] = {}
-        # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
-        # predictor model status, reported by a wired CooldownService via
-        # set_cooldown_predictor_status(). None = no subsystem has ever
-        # reported a status. Cooldown prediction is an optional, config-gated
-        # feature (engine cooldown.yaml `enabled: false` by default) and its
-        # absence must not block RUN for deployments that never construct or
-        # wire a CooldownService — that would be a new mandatory dependency
-        # this fix was not asked to introduce. False = a wired CooldownService
-        # reported its predictor model missing, malformed, or below the
-        # reviewed minimum curve count; this is consulted by
-        # _check_preconditions() and blocks request_run() and the
-        # SAFE_OFF -> READY auto-transition until a later True report clears
-        # it. Never consulted by any OFF/emergency-off path.
+        # Prediction is observational.  A wired CooldownService reports model
+        # health here so an unavailable predictor remains an operator-visible
+        # warning at RUN admission without becoming source authority or a RUN
+        # refusal.  None means no subsystem has reported a status.
         self._cooldown_predictor_available: bool | None = None
         self._cooldown_predictor_unavailable_reason: str = ""
         self._operator_safety_snapshot = OperatorSafetySnapshot(
@@ -289,12 +325,30 @@ class SafetyManager:
         # flags (Phase 2a H.1). Engine wires this to writer.clear_disk_full
         # so operator acknowledgment, not auto-recovery, resumes polling.
         self._persistence_failure_clear: Callable[[], None] | None = None
+        # Re-arm control interlocks on a deliberate start.  A tripped control
+        # interlock is excluded from evaluation until something puts it back to
+        # ARMED, and the only operator-reachable path to that (the
+        # interlock_acknowledge command) has no control in the GUI.  Without
+        # this, allowing a start after a trip - which the owner requires - would
+        # leave the source with no protection for the rest of the run.
+        self._interlock_rearm: Callable[[], list[str]] | None = None
+        # Names observed on the real control-trip path.  Keep them until one
+        # successful all-guard re-arm pass; if that pass raises, these are the
+        # exact guards the operator must be told may still be TRIPPED and blind.
+        self._tripped_control_interlocks: set[str] = set()
+        # Does persistence report that it can write again?  Registered by the
+        # engine against the writer.  DEFAULT IS REFUSE: with no hook, a
+        # persistence latch keeps blocking exactly as it does today.
+        self._persistence_recovered: Callable[[], bool] | None = None
 
         # Lock that serializes _active_sources mutations across await points.
         # Multiple REQ clients (GUI subprocess + web dashboard + future
         # operator CLI) can race on request_run / request_stop / emergency_off.
         # See DEEP_AUDIT_CC.md I.1.
         self._cmd_lock = asyncio.Lock()
+        # Serialize RUN admissions while warning persistence happens outside
+        # _cmd_lock. OFF, stop, and faults never contend for this lock.
+        self._run_request_lock = asyncio.Lock()
 
         # Monotonic abort intent. Each abort increments before contending for
         # _cmd_lock. An in-flight request_run captures its entry generation and
@@ -304,6 +358,7 @@ class SafetyManager:
         self._abort_generation = 0
         self._full_abort_generation = 0
         self._latched_fault_abort_generation: int | None = None
+        self._pending_interlock_start_warning: tuple[int, dict[str, str]] | None = None
 
         # A global OFF is one physical operation for one exact driver/source
         # generation and abort epoch. Concurrent callers share this retained
@@ -985,6 +1040,18 @@ class SafetyManager:
             else SourceOffTier.COMMAND_ONLY
         )
 
+    @property
+    def _reviewed_source_off_evidence(self) -> SourceOffEvidence:
+        return self.__reviewed_source_off_evidence
+
+    @_reviewed_source_off_evidence.setter
+    def _reviewed_source_off_evidence(self, evidence: SourceOffEvidence) -> None:
+        if type(evidence) is not SourceOffEvidence:
+            raise TypeError("reviewed source OFF evidence must be an exact SourceOffEvidence")
+        self.__reviewed_source_off_evidence = evidence
+        self._reviewed_source_off_evidence_observed_at = datetime.now(UTC)
+        self._reviewed_source_off_evidence_observed_monotonic_s = time.monotonic()
+
     def _unknown_global_off_evidence(self) -> SourceOffEvidence:
         return SourceOffEvidence.from_global_result(
             self._reviewed_source_off_tier(), SourceOffResult.PHYSICAL_STATE_UNKNOWN
@@ -1102,19 +1169,236 @@ class SafetyManager:
         i_comp: float,
         *,
         channel: str | None = None,
+        warning_choice_committer: Callable[
+            [list[dict[str, str]]],
+            Awaitable[dict[str, Any]],
+        ]
+        | None = None,
     ) -> dict[str, Any]:
+        """Admit RUN without letting warning persistence obstruct OFF.
+
+        The abort epochs are sampled at method admission, before this request
+        can wait behind another RUN at ``_run_request_lock``.  Consequently an
+        emergency OFF that occurs while this request is queued always changes
+        the epoch the queued request must present at both command-lock cuts.
+        """
+
         start_abort_generation = self._abort_generation
         start_full_abort_generation = self._full_abort_generation
+        async with self._run_request_lock:
+            preflight = await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                _preflight_only=True,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+            raw_warnings = preflight.pop("_operator_warnings", None)
+            if raw_warnings is None:
+                return preflight
+            operator_warnings = [dict(warning) for warning in raw_warnings]
+
+            warning_receipt: dict[str, Any] | None = None
+            if operator_warnings:
+                if warning_choice_committer is None:
+                    warning_receipt = self._unconfirmed_warning_choice_receipt(
+                        "persistence_unavailable",
+                    )
+                else:
+                    try:
+                        committed = await warning_choice_committer([dict(warning) for warning in operator_warnings])
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.error(
+                            "Operator warning-choice persistence failed on %s; "
+                            "RUN continues with an unconfirmed receipt",
+                            normalize_smu_channel(channel),
+                            exc_info=True,
+                        )
+                        warning_receipt = self._unconfirmed_warning_choice_receipt(
+                            "persistence_failed",
+                        )
+                    else:
+                        if type(committed) is dict and type(committed.get("committed")) is bool:
+                            warning_receipt = dict(committed)
+                        else:
+                            logger.error(
+                                "Operator warning-choice persistence returned an invalid receipt on %s; "
+                                "RUN continues with an unconfirmed receipt",
+                                normalize_smu_channel(channel),
+                            )
+                            warning_receipt = self._unconfirmed_warning_choice_receipt(
+                                "persistence_receipt_invalid",
+                            )
+
+            # OFF advances the generation synchronously before it waits for
+            # _cmd_lock, so a receipt write overlapped by OFF cannot reach ON.
+            if self._abort_generation != start_abort_generation:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channel": normalize_smu_channel(channel),
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
+                }
+
+            return await self._request_run_locked(
+                p_target,
+                v_comp,
+                i_comp,
+                channel=channel,
+                _expected_operator_warnings=operator_warnings,
+                _operator_warning_receipt=warning_receipt,
+                _expected_abort_generation=start_abort_generation,
+                _expected_full_abort_generation=start_full_abort_generation,
+            )
+
+    @staticmethod
+    def _unconfirmed_warning_choice_receipt(error_code: str) -> dict[str, Any]:
+        return {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": None,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": error_code,
+        }
+
+    async def _request_run_locked(
+        self,
+        p_target: float,
+        v_comp: float,
+        i_comp: float,
+        *,
+        channel: str | None = None,
+        _preflight_only: bool = False,
+        _expected_operator_warnings: list[dict[str, str]] | None = None,
+        _operator_warning_receipt: dict[str, Any] | None = None,
+        _expected_abort_generation: int,
+        _expected_full_abort_generation: int,
+    ) -> dict[str, Any]:
+        start_abort_generation = _expected_abort_generation
+        start_full_abort_generation = _expected_full_abort_generation
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 
-            if self._state == SafetyState.FAULT_LATCHED:
+            if self._abort_generation != start_abort_generation:
                 return {
                     "ok": False,
                     "state": self._state.value,
                     "channel": smu_channel,
-                    "error": f"FAULT: {self._fault_reason}",
+                    "active_channels": sorted(self._active_sources),
+                    "error": "Safety authority changed before source start",
                 }
+
+            interlock_warning: dict[str, str] | None = None
+            pending_interlock_warning = self._pending_interlock_start_warning
+            if pending_interlock_warning is not None:
+                pending_generation, pending_warning = pending_interlock_warning
+                if pending_generation == start_abort_generation:
+                    interlock_warning = dict(pending_warning)
+                else:
+                    self._pending_interlock_start_warning = None
+
+            # A REQ client can issue keithley_start without ever reading the
+            # operator snapshot, so the expiry runs HERE as well.  Revoking in
+            # one place only would leave exactly the path Codex named.
+            self._expire_stale_off_evidence()
+
+            if self._state == SafetyState.FAULT_LATCHED:
+                # A latch whose ONLY origin is persistence is consumable by a
+                # deliberate Start, for the same reason the interlock latch is:
+                # nothing is silently lost.  The writer's flag is cleared on the
+                # way through, and if the disk is still full the very next write
+                # calls on_persistence_failure again and the fault re-latches -
+                # visibly, and recorded.  He never gets a run that quietly fails
+                # to record; he gets one that stops again and says why.
+                #
+                # This exists because the documented recovery is not reachable:
+                # acknowledge_fault is exposed as the safety_acknowledge command
+                # and has ZERO call sites in src/cryodaq/gui/.  Without this, a
+                # disk that fills during a week-long run ends it until the
+                # application is restarted.
+                # A persistence-only latch is consumable ONLY when persistence
+                # reports it can write again.  While the disk is still full the
+                # refusal stands, because starting a run that cannot be recorded
+                # would satisfy the owner's ruling by destroying what it protects.
+                # Default is REFUSE: no hook, or a hook that says False, blocks.
+                _persistence_only = self._fault_sources == {"persistence"}
+                if _persistence_only:
+                    try:
+                        # The production hook probes the WRITER - one real committed
+                        # transaction - and that probe must not run on this event loop
+                        # while the command lock is held, so it answers with an
+                        # awaitable.  A plain predicate is still accepted, because
+                        # several callers legitimately wire one.  The await stays
+                        # INSIDE this try so a probe that raises still fails closed and
+                        # keeps the latch, exactly as it did when the hook was sync.
+                        _answer: Any = (
+                            self._persistence_recovered() if self._persistence_recovered is not None else False
+                        )
+                        if inspect.isawaitable(_answer):
+                            _answer = await _answer
+                        _recovered = bool(_answer)
+                    except Exception as exc:
+                        logger.error(
+                            "persistence_recovered query failed: %s; keeping the latch",
+                            type(exc).__name__,
+                        )
+                        _recovered = False
+                    _persistence_only = _recovered
+                if self._fault_sources != {"interlock"} and not _persistence_only:
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": f"FAULT: {self._fault_reason}",
+                    }
+                if _persistence_only:
+                    if self._persistence_failure_clear is not None:
+                        try:
+                            self._persistence_failure_clear()
+                        except Exception as exc:
+                            logger.error(
+                                "persistence_failure_clear failed during operator start: %s",
+                                type(exc).__name__,
+                            )
+                    self._persistence_fault_active = False
+
+                if _persistence_only:
+                    interlock_warning = {
+                        "code": "latched_persistence_start",
+                        "operator_text": f"ЗАПИСЬ ДАННЫХ ОТКАЗАЛА: {self._fault_reason}",
+                        "consequence": (
+                            "Оператор намеренно продолжает запуск. Если диск всё ещё полон, "
+                            "следующая запись снова остановит источник, и это будет записано."
+                        ),
+                        "reason": self._fault_reason,
+                    }
+                else:
+                    interlock_warning = {
+                        "code": "latched_interlock_start",
+                        "operator_text": f"ИНТЕРЛОК БЫЛ ЗАЩЁЛКНУТ: {self._fault_reason}",
+                        "consequence": ("Источник был аварийно отключён; оператор намеренно продолжает запуск"),
+                        "reason": self._fault_reason,
+                    }
+                self._pending_interlock_start_warning = (
+                    start_abort_generation,
+                    dict(interlock_warning),
+                )
+                self._recovery_reason = "Operator requested Start under a latched interlock"
+                self._latched_fault_abort_generation = None
+                self._fault_sources.clear()
+                self._transition(
+                    SafetyState.SAFE_OFF,
+                    "Operator requested Start under a latched interlock",
+                )
+
+            if not _preflight_only and interlock_warning is not None:
+                self._pending_interlock_start_warning = None
 
             if self._state not in (SafetyState.SAFE_OFF, SafetyState.READY, SafetyState.RUNNING):
                 return {
@@ -1175,6 +1459,71 @@ class SafetyManager:
                     "channel": smu_channel,
                     "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
                 }
+
+            operator_warnings = self._cooldown_operator_warnings()
+            if interlock_warning is not None:
+                operator_warnings.insert(0, interlock_warning)
+            if _preflight_only:
+                return {"_operator_warnings": operator_warnings}
+            if _expected_operator_warnings is not None and operator_warnings != _expected_operator_warnings:
+                # A changing observational warning never vetoes RUN.  It does
+                # invalidate what the attempted receipt covered, so tell the
+                # operator that persistence was not confirmed for this cut.
+                _operator_warning_receipt = self._unconfirmed_warning_choice_receipt(
+                    "warning_changed_during_persistence",
+                )
+
+            # The operator is deliberately starting the source.  Put every tripped
+            # CONTROL interlock back to ARMED so the guards protect this run too.
+            #
+            # Placed AFTER the preflight return and after the expected-warnings
+            # comparison on purpose: re-arming must happen once, for a real start,
+            # and must not perturb the two-phase warning receipt.
+            #
+            # This does NOT clear any violation.  If the cryostat is still above a
+            # threshold, the next matching reading trips the interlock again and
+            # cuts the source again.  That is the point: the owner ruled that an
+            # alarm may warn and may stop the source but may never block his
+            # launch - he did not rule that it may stop protecting him.
+            if self._interlock_rearm is not None:
+                try:
+                    _rearmed_interlocks = self._interlock_rearm()
+                except Exception as exc:
+                    _unconfirmed_interlocks = sorted(self._tripped_control_interlocks)
+                    _unconfirmed_label = (
+                        ", ".join(_unconfirmed_interlocks)
+                        if _unconfirmed_interlocks
+                        else "имена ранее сработавших управляющих интерлоков недоступны"
+                    )
+                    logger.error(
+                        "interlock re-arm hook failed: %s; guards may remain blind: %s",
+                        type(exc).__name__,
+                        _unconfirmed_label,
+                    )
+                    operator_warnings.append(
+                        {
+                            "code": "interlock_rearm_unconfirmed",
+                            "operator_text": (
+                                f"ПЕРЕВЗВОД ИНТЕРЛОКОВ НЕ ПОДТВЕРЖДЁН; МОГУТ БЫТЬ СЛЕПЫ: {_unconfirmed_label}"
+                            ),
+                            "consequence": (
+                                "Пуск продолжен по решению оператора; названные интерлоки "
+                                "могут не оценивать показания этого запуска"
+                            ),
+                            "reason": (f"hook={type(exc).__name__}; unconfirmed_interlocks={_unconfirmed_label}"),
+                        }
+                    )
+                else:
+                    # The callback scans every configured control interlock.
+                    # A remembered name absent from its return was already
+                    # acknowledged elsewhere, so the successful pass settles
+                    # the whole conservative set, not only the returned names.
+                    self._tripped_control_interlocks.clear()
+                    if _rearmed_interlocks:
+                        logger.warning(
+                            "Operator start re-armed tripped control interlocks: %s",
+                            ", ".join(sorted(_rearmed_interlocks)),
+                        )
 
             # A global OFF receipt cannot remain true while another channel is
             # intentionally sourcing. Before adding a second channel, obtain
@@ -1481,12 +1830,17 @@ class SafetyManager:
                     smu_channel=smu_channel,
                     revocation=revocation,
                 )
-            return {
+            result: dict[str, Any] = {
                 "ok": True,
                 "state": self._state.value,
                 "channel": smu_channel,
                 "active_channels": sorted(self._active_sources),
             }
+            if operator_warnings:
+                result["operator_warnings"] = operator_warnings
+            if _operator_warning_receipt is not None:
+                result["operator_warning_receipt"] = _operator_warning_receipt
+            return result
 
     def _current_unmanaged_output_hazard(self) -> tuple[SmuChannel | None, str] | None:
         """Consume only an exact current positive observation capability."""
@@ -2118,7 +2472,12 @@ class SafetyManager:
                 "active_channels": sorted(self._active_sources),
                 "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
             }
-        publish_task = asyncio.create_task(self._publish_keithley_channel_states("emergency_off"))
+        publish_task = asyncio.create_task(
+            self._publish_keithley_channel_states(
+                "emergency_off",
+                observed_channels=channels,
+            )
+        )
         _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
         if publish_error is not None:
             logger.warning("Emergency-OFF state publish failed: %s", publish_error)
@@ -2487,34 +2846,49 @@ class SafetyManager:
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
 
+    def set_interlock_rearm(self, callback: Callable[[], list[str]]) -> None:
+        """Register the hook that re-arms tripped control interlocks.
+
+        Called from ``request_run`` on a DELIBERATE start only, never on a
+        preflight.  The callback returns the names it re-armed, for the record.
+        """
+        self._interlock_rearm = callback
+
+    def set_persistence_recovered(self, callback: Callable[[], bool]) -> None:
+        """Register the query that answers "can persistence write again?".
+
+        Consulted only when a fault latch's ONLY origin is persistence, to decide
+        whether a deliberate operator Start may consume it.  Returning False, or
+        never registering this at all, keeps the latch blocking.
+        """
+        self._persistence_recovered = callback
+
     def set_persistence_failure_clear(self, callback: Callable[[], None]) -> None:
         """Register a sync callback that clears external persistence-failure
         flags (Phase 2a H.1). Called from acknowledge_fault."""
         self._persistence_failure_clear = callback
 
+    def _cooldown_operator_warnings(self) -> list[dict[str, str]]:
+        """Return observational cooldown cautions without granting control authority."""
+
+        if self._cooldown_predictor_available is not False:
+            return []
+        return [
+            {
+                "code": "cooldown_predictor_unavailable",
+                "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+                "consequence": "Расчёт ожидаемой траектории и времени до завершения не выполняется",
+                "reason": self._cooldown_predictor_unavailable_reason or "прогнозирование недоступно",
+            }
+        ]
+
     async def set_cooldown_predictor_status(self, available: bool, reason: str = "") -> None:
         """Record cooldown-predictor model health reported by a wired CooldownService.
 
-        P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): a cooldown model
-        with zero valid curves (all rejected, or none yet collected) must
-        never present as usable safety infrastructure. A wired caller
-        reports ``available=False`` with a diagnostic ``reason`` whenever its
-        predictor model is missing, malformed, or below the reviewed minimum
-        curve count. This is fed into the EXISTING ``_check_preconditions()``
-        gate — the same one ``request_run()`` already uses for reviewed-
-        source, critical-channel, and persistence facts — so it blocks
-        ``request_run()`` and the SAFE_OFF -> READY auto-transition without
-        creating a second source-authority path. It is also surfaced in
-        ``_refresh_operator_safety_snapshot()`` as a plant-health fact and
-        blocker so READY reporting and diagnostics stay truthful.
-
-        Never touches ``_active_sources``, ``_keithley``, or any OFF /
-        emergency-off path: this can only make RUN harder to reach, never
-        easier, and can never prevent commanding OFF.
-
-        No caller ever invoking this is a supported, unchanged configuration
-        (cooldown prediction is optional and config-gated) — the initial
-        ``None`` state is deliberately not a block.
+        The predictor is observational, so unavailability is a caution shown
+        at RUN admission and in the operator snapshot, never a source-control
+        prerequisite.  Missing data, stale safety authority, interlocks, and
+        all other genuine preconditions remain independently fail-closed.
         """
         if type(available) is not bool:
             raise TypeError("available must be an exact bool")
@@ -2564,7 +2938,7 @@ class SafetyManager:
                         "Restore a current valid critical-channel reading",
                     ),
                 )
-            for (_instrument_id, _channel), (observed, value, status) in matches:
+            for identity, (observed, value, status) in matches:
                 if now - observed > self._config.stale_timeout_s:
                     return (
                         PlantHealthFact(
@@ -2580,6 +2954,8 @@ class SafetyManager:
                             "Restore fresh critical-channel readings",
                         ),
                     )
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok" or not math.isfinite(value):
                     return (
                         PlantHealthFact(
@@ -2605,6 +2981,34 @@ class SafetyManager:
             None,
         )
 
+    def _expire_stale_off_evidence(self) -> bool:
+        """Revoke retained OFF proof once it is older than the staleness bound.
+
+        A device that reported OFF long ago is not evidence it is OFF now.  That
+        sentence was already written in the publish path, but only the PUBLISHED
+        READING acted on it: the Safety-owned evidence stayed positive, so the
+        operator snapshot and the command boundary went on authorising a Start
+        from proof that had expired.  The GUI hid the button after seeing UNKNOWN,
+        which made the interface the only thing standing between an expired proof
+        and an energised source.
+
+        Returns True when evidence was revoked by this call.
+        """
+
+        if not self._reviewed_source_off_evidence.verified_off:
+            return False
+        age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
+        if age_s <= self._config.stale_timeout_s:
+            return False
+        logger.warning(
+            "Retained OFF evidence expired after %.1fs (bound %.1fs); revoking it. "
+            "A device that reported OFF long ago is not evidence it is OFF now.",
+            age_s,
+            self._config.stale_timeout_s,
+        )
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        return True
+
     def _refresh_operator_safety_snapshot(self) -> None:
         """Replace the owner cut synchronously from already-owned facts only."""
         previous = self._operator_safety_snapshot
@@ -2616,6 +3020,9 @@ class SafetyManager:
         # output readback is unusable; neither condition can remain verified OFF.
         if self._keithley is not None and getattr(self._keithley, "output_state_unverified", None) is True:
             self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        # Staleness is the same kind of fact as the negative cache above, and was
+        # previously honoured only in the published reading.
+        self._expire_stale_off_evidence()
         verified_off = (
             children_authoritative
             and self._reviewed_source_connected
@@ -2708,7 +3115,8 @@ class SafetyManager:
         if critical_blocker is not None:
             blockers.append(critical_blocker)
 
-        if self._mature_dead_interlock_channels:
+        mature_dead_channels = bool(self._mature_dead_interlock_channels)
+        if mature_dead_channels:
             channels = ", ".join(sorted(self._mature_dead_interlock_channels))
             plant.append(
                 PlantHealthFact(
@@ -2726,7 +3134,22 @@ class SafetyManager:
                     "Restore a usable persisted sample on every named protected channel",
                 )
             )
-        else:
+        if self._blind_interlock_guards:
+            details = "; ".join(
+                f"{channel} ({interlock_name}: {', '.join(reasons)})"
+                for channel, (interlock_name, reasons, _recorded, _value) in sorted(
+                    self._blind_interlock_guards.items()
+                )
+            )
+            plant.append(
+                PlantHealthFact(
+                    "interlock_blind_guards" if mature_dead_channels else "interlock_channels",
+                    f"Слепые защиты: {details}",
+                    OperatorPresentationState.FAULT,
+                    "interlock_guard_blind",
+                )
+            )
+        elif not mature_dead_channels:
             plant.append(
                 PlantHealthFact(
                     "interlock_channels",
@@ -2782,26 +3205,15 @@ class SafetyManager:
                 )
             )
 
-        # P0 fail-open fix: surface cooldown-predictor unavailability as its
-        # own diagnostic fact/blocker (constraint 5: denying READY/RUN must
-        # not suppress diagnostics). `None` (never reported) and `True`
-        # (reported available) both present as OK/absent here — only an
-        # explicit `False` report blocks.
+        # Predictor health remains explicit operator truth, but the
+        # observational subsystem never contributes a RUN blocker.
         if self._cooldown_predictor_available is False:
             plant.append(
                 PlantHealthFact(
                     "cooldown_predictor",
-                    "Cooldown predictor",
-                    OperatorPresentationState.FAULT,
+                    "Прогноз траектории захолаживания НЕДОСТУПЕН — расчёт времени до завершения не выполняется",
+                    OperatorPresentationState.CAUTION,
                     "cooldown_predictor_unavailable",
-                )
-            )
-            blockers.append(
-                SafetyBlocker(
-                    "cooldown_predictor_unavailable",
-                    OperatorPresentationState.FAULT,
-                    f"Cooldown predictor model is unavailable: {self._cooldown_predictor_unavailable_reason}",
-                    "Restore a valid reviewed cooldown model meeting the minimum curve count",
                 )
             )
 
@@ -2911,12 +3323,27 @@ class SafetyManager:
     async def _publish_state(self, reason: str = "") -> None:
         if self._data_broker is None:
             return
+        is_transition = reason != "periodic"
+        if self._state is SafetyState.FAULT_LATCHED:
+            published_reason = self._fault_reason
+        elif self._state is SafetyState.MANUAL_RECOVERY and not is_transition:
+            recovery_ready, recovery_blocker = self._check_preconditions()
+            if recovery_ready and self._cooldown_predictor_available is False:
+                published_reason = f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
+            else:
+                published_reason = "" if recovery_ready else recovery_blocker
+        else:
+            published_reason = reason
         reading = Reading.now(
             channel="analytics/safety_state",
             value=0.0,
             unit="",
             instrument_id="safety_manager",
-            metadata={"state": self._state.value, "reason": reason},
+            metadata={
+                "state": self._state.value,
+                "reason": published_reason,
+                "is_transition": is_transition,
+            },
         )
         try:
             await self._data_broker.publish(reading)
@@ -2928,39 +3355,66 @@ class SafetyManager:
         reason: str = "",
         *,
         fault_channel: str | None = None,
+        observed_channels: set[SmuChannel] | frozenset[SmuChannel] = frozenset(),
     ) -> None:
         if self._data_broker is None:
             return
 
+        is_transition = reason != "periodic"
         off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
+        observed_at = self._reviewed_source_off_evidence_observed_at
+        evidence_age_s = time.monotonic() - self._reviewed_source_off_evidence_observed_monotonic_s
+        published_at = datetime.now(UTC)
         for smu_channel in ("smua", "smub"):
+            reading_timestamp = published_at
+            published_evidence = self._reviewed_source_off_evidence
             if fault_channel == smu_channel:
-                state = "fault"
+                state = KeithleySourceState.FAULT
                 value = -1.0
             elif smu_channel in self._active_sources:
-                state = "on"
+                state = KeithleySourceState.ON
                 value = 1.0
             elif off_results[smu_channel] is SourceOffResult.DEVICE_REPORTED_OFF:
-                state = "off"
-                value = 0.0
+                if evidence_age_s > self._config.stale_timeout_s:
+                    # Retained OFF evidence has expired.  Unknown stays unknown:
+                    # a device that reported OFF long ago is not evidence it is
+                    # OFF now.  Typed per the enum this file publishes.
+                    state = KeithleySourceState.UNKNOWN
+                    value = math.nan
+                    published_evidence = self._unknown_global_off_evidence()
+                else:
+                    state = KeithleySourceState.OFF
+                    value = 0.0
+                    reading_timestamp = observed_at
             else:
-                state = "unknown"
+                state = KeithleySourceState.UNKNOWN
                 value = math.nan
 
-            reading = Reading.now(
+            if is_transition and (
+                state != self._source_observed_states[smu_channel] or smu_channel in observed_channels
+            ):
+                self._source_observation_revisions[smu_channel] += 1
+                self._source_observed_states[smu_channel] = state
+            reading = Reading(
+                timestamp=reading_timestamp,
                 channel=f"analytics/keithley_channel_state/{smu_channel}",
                 value=value,
                 unit="",
                 instrument_id="safety_manager",
                 metadata={
-                    "state": state,
+                    "state": state.value,
                     "channel": smu_channel,
                     "reason": reason,
-                    "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                    "off_evidence": published_evidence.receipt_payload(),
+                    "is_transition": is_transition,
+                    "source_observation_revision": self._source_observation_revisions[smu_channel],
                 },
             )
             try:
-                await self._data_broker.publish(reading)
+                await self._data_broker.publish(
+                    reading,
+                    publisher_authority=self._source_state_publication_authority,
+                )
             except Exception as exc:
                 logger.warning("Failed to publish Keithley channel state for %s: %s", smu_channel, exc)
 
@@ -3020,9 +3474,10 @@ class SafetyManager:
         """Public entry point to latch FAULT_LATCHED.
 
         Triggers ``emergency_off``, latches the safety FSM in
-        ``FAULT_LATCHED``, blocks future ``request_run()`` until the
-        operator acknowledges. Use ТОЛЬКО for verified safety events
-        (sensor disconnect, threshold breach, alarm CRITICAL).
+        ``FAULT_LATCHED``. A latch whose only recorded origin is an interlock
+        may be consumed by a deliberate, warning-recorded Start; every other
+        origin still requires explicit fault recovery. Use ТОЛЬКО for verified
+        safety events (sensor disconnect, threshold breach, alarm CRITICAL).
 
         Args:
             reason: Human-readable description for audit log + Telegram
@@ -3051,7 +3506,6 @@ class SafetyManager:
         value: float = 0.0,
         source: str = "safety_manager",
     ) -> bool:
-        del source
         # Early-return guard: ignore concurrent re-entries while already latched.
         # Multiple call sites (SafetyBroker overflow, monitoring loop, channel
         # faults, start_source failure) can fire in the same tick. Without
@@ -3061,10 +3515,12 @@ class SafetyManager:
         # mutated synchronously below before any await, so a later call sees
         # FAULT_LATCHED and exits.
         if self._state == SafetyState.FAULT_LATCHED:
+            self._fault_sources.add(source)
             logger.info(
-                "_fault() re-entry ignored (already latched); new reason=%s channel=%s",
+                "_fault() re-entry ignored (already latched); new reason=%s channel=%s source=%s",
                 reason,
                 channel or "-",
+                source,
             )
             return False
 
@@ -3073,6 +3529,8 @@ class SafetyManager:
         # after monitor/rate/persistence faults that do not originate in an
         # operator command.
         self._latched_fault_abort_generation = self._register_abort_intent(full=True)
+        self._pending_interlock_start_warning = None
+        self._fault_sources = {source}
         self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
@@ -3410,14 +3868,6 @@ class SafetyManager:
                 "verified OFF and explicit fault acknowledgment required before RUN"
             )
 
-        # P0 fail-open fix: a wired CooldownService that reported its
-        # predictor model unavailable (missing, malformed, or below the
-        # reviewed minimum curve count) blocks RUN here. `None` (no
-        # subsystem has ever reported) is deliberately not a block — see
-        # set_cooldown_predictor_status().
-        if self._cooldown_predictor_available is False:
-            return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
-
         if self._failed_poll_persistence_blockers:
             instruments = ", ".join(sorted(self._failed_poll_persistence_blockers))
             return False, f"Failed-poll persistence authority unresolved for instrument(s): {instruments}"
@@ -3427,10 +3877,13 @@ class SafetyManager:
             return False, f"Persistently unusable interlock channel(s): {channels}"
 
         for declared, matches in self._critical_input_requirements():
-            for (_instrument_id, ch), (ts, value, status) in matches:
+            for identity, (ts, value, status) in matches:
+                ch = identity[1]
                 age = now - ts
                 if age > self._config.stale_timeout_s:
                     return False, f"Stale data: {ch} ({age:.1f}s)"
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok":
                     return False, f"Channel {ch} status={status}"
                 if math.isnan(value) or math.isinf(value):
@@ -3492,8 +3945,14 @@ class SafetyManager:
                     reading.value,
                     reading.status.value,
                 )
+                identity = (reading.instrument_id, reading.channel)
+                instrument_fault_reasons = reading.instrument_status_fault_reasons()
+                if instrument_fault_reasons:
+                    self._instrument_status_faults[identity] = instrument_fault_reasons
+                else:
+                    self._instrument_status_faults.pop(identity, None)
                 self._refresh_operator_safety_snapshot()
-                critical_identity = (reading.instrument_id, reading.channel)
+                critical_identity = identity
                 rate_identity_accepted = (
                     self._critical_input_bindings is None and self._mock
                 ) or critical_identity in (self._critical_input_bindings or {})
@@ -3520,7 +3979,19 @@ class SafetyManager:
         try:
             while True:
                 await asyncio.sleep(_CHECK_INTERVAL_S)
+                fault_revision_before_checks = self._fault_revision
                 await self._run_checks()
+                # ZMQ PUB/SUB does not retain the initial state snapshot for a
+                # subscriber whose handshake completes later. Re-publish the
+                # manager state (including its exact latched reason) and
+                # re-derive channel state from the sole safety authority so a
+                # late observer eventually receives truth, including UNKNOWN.
+                await self._publish_state("periodic")
+                # A fault transition publishes its channel-specific cue inside
+                # _fault(). Do not overwrite that cue in the same monitor
+                # iteration; the next cadence resumes physical-state snapshots.
+                if self._fault_revision == fault_revision_before_checks:
+                    await self._publish_keithley_channel_states("periodic")
         except asyncio.CancelledError:
             raise
 
@@ -3580,10 +4051,13 @@ class SafetyManager:
             if not matches and not self._mock:
                 await self._fault(f"No data for critical channel {declared}", channel=declared)
                 return
-            for (_instrument_id, ch), (ts, value, status) in matches:
+            for identity, (ts, value, status) in matches:
+                ch = identity[1]
                 if now - ts > self._config.stale_timeout_s:
                     await self._fault(f"Устаревшие данные канала {ch}", channel=ch)
                     return
+                if identity in self._instrument_status_faults:
+                    continue
                 if status != "ok":
                     await self._fault(f"Channel {ch} status={status}", channel=ch, value=value)
                     return
@@ -3678,6 +4152,8 @@ class SafetyManager:
         action: str = "emergency_off",
     ) -> None:
         """Own the complete interlock action through truthful publication."""
+        if action != "warning":
+            self._tripped_control_interlocks.add(interlock_name)
         if action == "stop_source":
             # This synchronous cut reaches an in-flight request_run before the
             # owned interlock task can acquire _cmd_lock.
@@ -3708,8 +4184,9 @@ class SafetyManager:
         """Handle an interlock trip from InterlockEngine.
 
         ``action="emergency_off"`` (default, backwards-compatible):
-            Full fault latch — outputs off, FAULT_LATCHED, operator must
-            acknowledge_fault to recover.
+            Full fault latch — outputs off and FAULT_LATCHED. A later
+            deliberate Start records that this interlock had fired before it
+            consumes this latch; non-interlock latches remain blocking.
 
         ``action="stop_source"``:
             Soft stop — outputs off, transition to SAFE_OFF, no fault latch.
@@ -3724,7 +4201,12 @@ class SafetyManager:
 
         if action == "emergency_off":
             logger.critical("INTERLOCK emergency_off: %s", reason)
-            await self._fault(reason, channel=channel, value=value)
+            await self._fault(
+                reason,
+                channel=channel,
+                value=value,
+                source="interlock",
+            )
             return
 
         if action == "stop_source":
@@ -3820,12 +4302,17 @@ class SafetyManager:
         channel: str,
         *,
         value: float = float("nan"),
-    ) -> bool:
+        reading: Reading | None = None,
+    ) -> bool | BlindGuardAdvisoryResult:
         """Escalation for a PERSISTENTLY non-usable interlock channel (P2-5).
 
         Called by InterlockEngine once a channel it protects has been
         non-usable (NaN / error-status) for ``nonusable_escalation`` long
         enough. SafetyManager is the sole authority for the active source lifecycle:
+
+        - exact instrument-register fault evidence is advisory: retain the
+          faulted Reading for persistence/operator display, report the blind
+          guard durably, but do not block RUN or command OFF;
 
         - state in {RUN_PERMITTED, RUNNING}: latch FAULT_LATCHED +
           emergency_off. RUN_PERMITTED includes the in-flight OUTPUT_ON
@@ -3838,19 +4325,45 @@ class SafetyManager:
 
         Returns
         -------
-        bool
-            ``True`` iff a fault is now latched (this call latched it, or the
-            state was already FAULT_LATCHED). ``False`` iff escalation was
-            declined because the state is outside RUN_PERMITTED/RUNNING. S1
-            fail-closed contract: InterlockEngine marks the debounce window
-            ``escalated`` ONLY on ``True``. A ``False`` leaves the window
-            un-escalated so the next non-usable sample retries — the first
-            sample after an active source lifecycle begins then faults, instead
-            of the dead channel leaking through forever.
+        bool | BlindGuardAdvisoryResult
+            Generic episodes return ``True`` only after a fault latched and
+            ``False`` when they must retry. Instrument-register advisories use
+            a distinct result: ``RETRY`` while durable delivery is pending and
+            ``RECORDED`` once this exact fault evidence is durable.
         """
+        instrument_fault_reasons = () if reading is None else reading.instrument_status_fault_reasons()
+        if instrument_fault_reasons:
+            removed = self._mature_dead_interlock_channels.pop(channel, None)
+            reasons = tuple(instrument_fault_reasons)
+            previous = self._blind_interlock_guards.get(channel)
+            episode = (interlock_name, reasons)
+            recorded = previous is not None and previous[:2] == episode and previous[2]
+            if previous is None or previous[:2] != episode:
+                self._blind_guard_experiment_records.pop(channel, None)
+            self._blind_interlock_guards[channel] = (*episode, recorded, value)
+            if removed is not None or previous is None or previous[:2] != episode:
+                self._refresh_operator_safety_snapshot()
+            logger.warning(
+                "Интерлок-канал %s: прибор сообщает неисправность датчика (%s); "
+                "температурное действие не выполнено, RUN не блокируется.",
+                channel,
+                ", ".join(reasons),
+            )
+            if not recorded and self._fault_log_callback is not None:
+                if await self._record_blind_guard(
+                    interlock_name=interlock_name,
+                    channel=channel,
+                    reasons=reasons,
+                    value=value,
+                ):
+                    recorded = True
+                    self._blind_interlock_guards[channel] = (*episode, True, value)
+            return BlindGuardAdvisoryResult.RECORDED if recorded else BlindGuardAdvisoryResult.RETRY
+        blind_guard = self._blind_interlock_guards.pop(channel, None)
+        self._blind_guard_experiment_records.pop(channel, None)
         previous_interlock = self._mature_dead_interlock_channels.get(channel)
         self._mature_dead_interlock_channels[channel] = interlock_name
-        if previous_interlock != interlock_name:
+        if blind_guard is not None or previous_interlock != interlock_name:
             self._refresh_operator_safety_snapshot()
 
         if self._state == SafetyState.FAULT_LATCHED:
@@ -3872,17 +4385,76 @@ class SafetyManager:
         )
         return True
 
+    async def _record_blind_guard(
+        self,
+        *,
+        interlock_name: str,
+        channel: str,
+        reasons: tuple[str, ...],
+        value: float,
+        experiment_id: str | None = None,
+    ) -> bool:
+        """Settle one durable blind-guard row for an episode scope."""
+        if self._fault_log_callback is None:
+            return False
+        message = (
+            f"Слепая защита: интерлок-канал {channel} ('{interlock_name}') "
+            f"непригоден по статусу прибора: {', '.join(reasons)}"
+        )
+        callback_kwargs: dict[str, Any] = {
+            "source": "interlock_guard_blind",
+            "message": message,
+            "channel": channel,
+            "value": value,
+        }
+        if experiment_id is not None:
+            callback_kwargs["experiment_id"] = experiment_id
+        log_task = asyncio.create_task(self._fault_log_callback(**callback_kwargs))
+        _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
+        if error is not None:
+            logger.error("Failed to record blind interlock guard: %s", error)
+        if cancelled is not None:
+            raise cancelled
+        return error is None
+
+    async def record_blind_guards_for_experiment(self, experiment_id: str) -> None:
+        """Bind every active blind episode into one newly active experiment."""
+        if type(experiment_id) is not str or not experiment_id:
+            raise ValueError("blind-guard experiment binding requires an exact non-empty experiment_id")
+        failures: list[str] = []
+        for channel, episode in sorted(self._blind_interlock_guards.items()):
+            if self._blind_guard_experiment_records.get(channel) == experiment_id:
+                continue
+            interlock_name, reasons, _recorded, value = episode
+            if await self._record_blind_guard(
+                interlock_name=interlock_name,
+                channel=channel,
+                reasons=reasons,
+                value=value,
+                experiment_id=experiment_id,
+            ):
+                if self._blind_interlock_guards.get(channel) == episode:
+                    self._blind_guard_experiment_records[channel] = experiment_id
+            else:
+                failures.append(channel)
+        if failures:
+            raise RuntimeError("blind-guard experiment binding was not durable for channel(s): " + ", ".join(failures))
+
     def on_interlock_channel_recovered(self, interlock_name: str, channel: str) -> None:
-        """Clear one mature canonical blocker after InterlockEngine sees recovery."""
+        """Clear one mature blocker or blind-guard advisory after recovery."""
         recorded_interlock = self._mature_dead_interlock_channels.get(channel)
-        if recorded_interlock is None:
+        blind_guard = self._blind_interlock_guards.pop(channel, None)
+        self._blind_guard_experiment_records.pop(channel, None)
+        if recorded_interlock is None and blind_guard is None:
             return
-        del self._mature_dead_interlock_channels[channel]
+        if recorded_interlock is not None:
+            del self._mature_dead_interlock_channels[channel]
+        registered_interlock = recorded_interlock if recorded_interlock is not None else blind_guard[0]
         logger.warning(
             "Интерлок-канал %s снова пригоден (блокировка %s, зарегистрирована %s).",
             channel,
             interlock_name,
-            recorded_interlock,
+            registered_interlock,
         )
         self._refresh_operator_safety_snapshot()
 
@@ -3920,4 +4492,5 @@ class SafetyManager:
             f"Persistence failure: {reason}",
             channel="",
             value=0.0,
+            source="persistence",
         )

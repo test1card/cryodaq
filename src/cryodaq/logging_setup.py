@@ -24,6 +24,7 @@ import logging.handlers
 import os
 import re
 import sys
+from typing import Final
 
 from cryodaq.paths import get_logs_dir
 
@@ -31,6 +32,74 @@ _QSETTINGS_ORG = "FIAN"
 _QSETTINGS_APP = "CryoDAQ"
 _QSETTINGS_DEBUG_KEY = "logging/debug_mode"
 _ENV_VAR = "CRYODAQ_LOG_LEVEL"
+
+# --- Authoritative rotating-log retention/naming contract ----------------
+#
+# ``setup_logging`` below is the only producer of rotating component logs.
+# Consumers that must recognise exactly what it can leave behind -- notably
+# the long-soak evidence publisher in ``scripts/soak_mock_stack_runner.py``,
+# which enumerates and reads the assistant log at teardown -- import THIS
+# block instead of restating its values. A private copy of these numbers once
+# drifted from the real handler: teardown then refused rotations the handler
+# validly retained and replaced the diagnosis with a false rotation-ceiling
+# marker (PR #102 cold review F1).
+#
+# ``tests/scripts/test_assistant_log_rotation_contract_binding.py``
+# constructs the real production handler through ``setup_logging``'s own
+# default path, forces a genuine rollover, and proves that binding holds;
+# change anything here without its consumer and that guard turns red.
+ASSISTANT_LOG_BASENAME: Final[str] = "assistant.log"
+ASSISTANT_LOG_ROTATION_WHEN: Final[str] = "midnight"
+ASSISTANT_LOG_SUFFIX_FORMAT: Final[str] = "%Y-%m-%d"
+ASSISTANT_LOG_BACKUP_COUNT: Final[int] = 14
+
+# The strftime directives a TimedRotatingFileHandler suffix carries for the
+# rotation triggers this module configures ("midnight" -> "%Y-%m-%d").
+_ROTATION_SUFFIX_DIRECTIVE_PATTERNS: Final[dict[str, str]] = {
+    "%Y": r"\d{4}",
+    "%m": r"\d{2}",
+    "%d": r"\d{2}",
+    "%H": r"\d{2}",
+    "%M": r"\d{2}",
+    "%S": r"\d{2}",
+}
+
+
+def _rotation_suffix_regex_source(format_string: str) -> str:
+    """Translate a rotation suffix strftime format into a regex source.
+
+    Unknown directives raise instead of degrading: a suffix carrying a token
+    this translation does not know must fail loudly here rather than let
+    downstream recognition silently disagree with what rotation writes.
+    """
+    pieces: list[str] = []
+    index = 0
+    while index < len(format_string):
+        char = format_string[index]
+        if char != "%":
+            pieces.append(re.escape(char))
+            index += 1
+            continue
+        directive = format_string[index : index + 2]
+        pattern = _ROTATION_SUFFIX_DIRECTIVE_PATTERNS.get(directive)
+        if pattern is None:
+            raise ValueError(f"unsupported rotation suffix directive: {directive!r}")
+        pieces.append(pattern)
+        index += 2
+    return "".join(pieces)
+
+
+def rotated_log_name_pattern(basename: str) -> re.Pattern[str]:
+    """Return the fullmatch pattern for names the production handler rotates to.
+
+    :class:`~logging.handlers.TimedRotatingFileHandler` writes each rotation as
+    ``<basename>.<suffix>``, where ``<suffix>`` is
+    :data:`ASSISTANT_LOG_SUFFIX_FORMAT` rendered by ``time.strftime`` at
+    rollover time. Recognition is derived from THE SAME format instead of
+    restating a literal, so it cannot drift from what the handler produces.
+    """
+    return re.compile(re.escape(basename) + r"\." + _rotation_suffix_regex_source(ASSISTANT_LOG_SUFFIX_FORMAT))
+
 
 # Telegram bot tokens follow ``botID:secret`` shape — 8+ digit bot ID +
 # colon + ~35-char base64-ish secret. The token can leak in TWO forms:
@@ -91,8 +160,8 @@ def setup_logging(
     level: int = logging.INFO,
     console: bool = True,
     file: bool = True,
-    when: str = "midnight",
-    backup_count: int = 14,
+    when: str = ASSISTANT_LOG_ROTATION_WHEN,
+    backup_count: int = ASSISTANT_LOG_BACKUP_COUNT,
 ) -> None:
     """Configure root logging for a CryoDAQ entry point.
 
@@ -109,8 +178,13 @@ def setup_logging(
         Also log to a rotating file in :func:`cryodaq.paths.get_logs_dir`.
         Default ``True``.
     when, backup_count:
-        Passed to :class:`logging.handlers.TimedRotatingFileHandler`. Default:
-        rotate at midnight, keep 14 old files.
+        Passed to :class:`logging.handlers.TimedRotatingFileHandler`. Defaults
+        come from the authoritative rotating-log contract at the top of this
+        module (:data:`ASSISTANT_LOG_ROTATION_WHEN`,
+        :data:`ASSISTANT_LOG_BACKUP_COUNT`) — rotate at midnight, keep 14 old
+        files. Do not hardcode alternatives here without moving them into that
+        contract; its consumers bind against it and against the real handler
+        this function builds.
 
     Idempotent — subsequent calls replace all handlers on the root logger.
     File logging failures are non-fatal; we fall back to console only and

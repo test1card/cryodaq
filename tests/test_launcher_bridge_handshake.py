@@ -72,11 +72,12 @@ def test_valid_posix_mock_tray_request_emits_bounded_identity_and_data_stream(
         assert authority.emit_data_observed(bridge_pid=os.getpid() + 1000, restart_count=1)
         data = os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
         assert (
-            runner._parse_bridge_data(
+            runner._parse_bridge_stream_record(
                 data,
                 expected_nonce=nonce,
                 expected_launcher_pid=os.getpid(),
                 expected_bridge_pid=os.getpid() + 1000,
+                expected_restart_count=1,
                 after_sequence=0,
             ).sequence
             == 1
@@ -457,6 +458,137 @@ def test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant(monkeypa
         os.close(_read_fd)
 
 
+@_POSIX_HANDSHAKE
+def test_a_bridge_replacement_is_announced_and_the_stream_survives_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An engine restart replaces the bridge on purpose, and the evidence must survive it.
+
+    Before this, the stream was pinned to the FIRST bridge, which was right while an owned
+    engine could never restart. It can now, and every restart replaces the bridge -- a new
+    child must not inherit an old transport -- so the first legitimate replacement
+    quarantined the stream and every later fact was lost. The runner then waited for a data
+    fact that could never arrive and reported that the engine had never recovered.
+
+    The pin is not loosened. The epoch advances, and only across an announced turnover.
+    """
+
+    read_fd, write_fd, nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    first, second = os.getpid() + 1000, os.getpid() + 2000
+    try:
+        authority.emit(bridge_pid=first, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+
+        authority.note_bridge_turnover(bridge_pid=second, restart_count=2)
+        record = runner._parse_bridge_stream_record(
+            os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1),
+            expected_nonce=nonce,
+            expected_launcher_pid=os.getpid(),
+            expected_bridge_pid=first,
+            expected_restart_count=1,
+            after_sequence=0,
+        )
+        assert type(record) is runner._BridgeTurnoverRecord
+        assert (record.retired_bridge_pid, record.bridge_pid, record.restart_count) == (first, second, 2)
+
+        # The new bridge speaks, and it is read against the new epoch.
+        assert authority.emit_data_observed(bridge_pid=second, restart_count=2)
+        data = runner._parse_bridge_stream_record(
+            os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1),
+            expected_nonce=nonce,
+            expected_launcher_pid=os.getpid(),
+            expected_bridge_pid=second,
+            expected_restart_count=2,
+            after_sequence=record.sequence,
+        )
+        assert data.sequence == record.sequence + 1
+    finally:
+        authority.close()
+        os.close(read_fd)
+
+
+@_POSIX_HANDSHAKE
+def test_the_retired_bridge_cannot_speak_after_its_turnover(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Evidence belongs to exactly one process, and the change of process is the point."""
+
+    read_fd, write_fd, _nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    first, second = os.getpid() + 1000, os.getpid() + 2000
+    try:
+        authority.emit(bridge_pid=first, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        authority.note_bridge_turnover(bridge_pid=second, restart_count=2)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+
+        with pytest.raises(RuntimeError, match="bridge identity changed"):
+            authority.emit_data_observed(bridge_pid=first, restart_count=1)
+        # The refusal quarantined the stream, which is the point: closing it again is a
+        # quiet no-op, and the descriptor is already gone.
+        assert authority._closed is True
+    finally:
+        os.close(read_fd)
+
+
+@_POSIX_HANDSHAKE
+@pytest.mark.parametrize(
+    ("what", "changes"),
+    [
+        ("a gap in the count", {"restart_count": 3}),
+        ("a repeated count", {"restart_count": 1}),
+        ("the launcher naming itself", {"bridge_pid": "self"}),
+    ],
+)
+def test_a_turnover_that_does_not_continue_the_epoch_quarantines_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    what: str,
+    changes: dict,
+) -> None:
+    """A gap, a repeat, or this process naming itself is still an unexplained change.
+
+    Parametrized rather than looped because the fixture builds a directory under tmp_path
+    and can therefore run once per test; the loop failed on its second turn for that
+    reason and said nothing about the contract.
+    """
+
+    read_fd, _write_fd, _nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    try:
+        authority.emit(bridge_pid=os.getpid() + 1000, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        call = {"bridge_pid": os.getpid() + 2000, "restart_count": 2}
+        for key, value in changes.items():
+            call[key] = os.getpid() if value == "self" else value
+        with pytest.raises(RuntimeError, match="does not continue the accepted epoch"):
+            authority.note_bridge_turnover(**call)
+        assert authority._closed is True, what
+    finally:
+        os.close(read_fd)
+
+
 def test_child_environments_always_strip_launcher_only_descriptor_authority() -> None:
     environment = {
         "SAFE": "1",
@@ -519,7 +651,7 @@ _ALLOWED_LAUNCHER_MODULE_CHAINS = {
         ("set_inheritable",),
         ("write",),
     },
-    "signal": {("SIGINT",), ("SIGTERM",), ("signal",)},
+    "signal": {("SIGBREAK",), ("SIGINT",), ("SIGTERM",), ("signal",)},
     "subprocess": {
         ("DEVNULL",),
         ("PIPE",),
@@ -545,17 +677,25 @@ _ALLOWED_SELF_GETATTRIBUTES = {
     "_child_ready_pipe_owner",
     "_child_ready_stream_owner",
     "_child_ready_write_fd_owner",
+    "_close_engine_stderr_stream",
     "_engine_external",
     "_engine_instance_id",
+    "_engine_owner_settlement_retry_owner",
+    "_engine_owner_settlement_retry_transaction",
     "_engine_proc",
+    "_engine_reader_settlement_state",
     "_engine_ready",
     "_engine_ready_lock",
     "_engine_ready_nonce",
     "_engine_ready_thread",
     "_engine_shutdown_capability",
+    "_engine_shutdown_hold_reason",
     "_engine_shutdown_receipt",
+    "_engine_shutdown_receipt_rejected",
     "_engine_shutdown_request_id",
     "_engine_shutdown_transport_identity",
+    "_engine_shutdown_transport_identity_awaited",
+    "_engine_shutdown_unreadable_evidence_worker",
     "_engine_shutdown_wait_deadline",
     "_engine_shutdown_worker",
     "_engine_stderr_acquisition_owner",
@@ -563,6 +703,7 @@ _ALLOWED_SELF_GETATTRIBUTES = {
     "_engine_stderr_logger",
     "_engine_stderr_persistence_failure",
     "_engine_stderr_stream_owner",
+    "_engine_stderr_tail",
     "_engine_stderr_thread",
     "_engine_unsettled_incarnation",
     "_external_engine_ready_receipt",
@@ -571,6 +712,7 @@ _ALLOWED_SELF_GETATTRIBUTES = {
     "_last_health_watchdog_restart",
     "_loop",
     "_main_window",
+    "_mock",
     "_mock_thermal_simulator",
     "_periodic_status_banner",
     "_replay_ready",
@@ -587,6 +729,7 @@ _ALLOWED_SELF_GETATTRIBUTES = {
     "_shutdown_phase",
     "_shutdown_requested",
     "_shutdown_settled",
+    "_shutdown_terminal_engine_readers_settled",
     "_snapshot_ingress",
     "_soak_artifact_capability",
     "_soak_bridge_handshake",
@@ -594,17 +737,42 @@ _ALLOWED_SELF_GETATTRIBUTES = {
     "_theme_active_id",
     "_theme_pending_action",
     "_tick_async_warned",
+    "_terminal_quit_reap_state",
     "_tray",
+    "_stop_engine",
 }
 
 _ALLOWED_DYNAMIC_SELF_GETATTRIBUTES = {
     ("_settle_raw_descriptor", "state_name"),
     ("_close_engine_stderr_stream", "attribute"),
+    ("_engine_reader_threads_are_alive", "attribute"),
     ("_invalidate_launcher_status_authority", "name"),
     ("_launcher_status_authority_is_current", "generation_attribute"),
     ("_ensure_shutdown_state", "name"),
     ("_quiesce_for_shutdown", "name"),
     ("_settle_safety_worker", "attribute"),
+}
+
+_ALLOWED_SELF_VARS_GET_KEYS = {
+    "_assistant_restart_generation",
+    "_bridge_restart_fault",
+    "_bridge_restart_hold",
+    "_bridge_watchdog_generation",
+    "_engine_unobservable_poll_supervision_process",
+    "_engine_unobservable_poll_supervision_registration",
+    "_engine_unobservable_reap_state",
+    "_engine_unobservable_supervision_bound",
+    "_main_window",
+    "_replay_session_verified",
+    "_restart_generation",
+    "_restart_giving_up",
+}
+
+_ALLOWED_SELF_VARS_SUBSCRIPT_KEYS = {
+    "_engine_unobservable_poll_supervision_process",
+    "_engine_unobservable_poll_supervision_registration",
+    "_engine_unobservable_reap_state",
+    "_engine_unobservable_supervision_bound",
 }
 
 
@@ -747,7 +915,7 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
     ):
         unsafe.append("the exact reviewed _spawn_child_process references changed")
 
-    if len(imports) != 80 or import_digest != "8069275ec1216221ff3e09ce5303af2a1fc2a0202fafb84311ede476cc94a936":
+    if len(imports) != 84 or import_digest != "6b79359ccf912d5517283bed88e5e615ce6ee521be7b99e279ad18c3eb88fd68":
         unsafe.append("the exact reviewed import vocabulary changed")
 
     imported_module_aliases = {
@@ -763,8 +931,8 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
     )
     module_occurrence_digest = hashlib.sha256("\n".join(imported_module_occurrences).encode("utf-8")).hexdigest()
     if (
-        len(imported_module_occurrences) != 302
-        or module_occurrence_digest != "8332dfa630ee5071ed7e5c84fced541c3eff41c3573aeb474d37c301fcfe24d8"
+        len(imported_module_occurrences) != 330
+        or module_occurrence_digest != "db6313fc78e27ddb2a562a045ba7a0d3c6b2ada200c081ef6c0fcec58941f598"
     ):
         unsafe.append("the exact reviewed imported-module semantic occurrences changed")
 
@@ -775,8 +943,8 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
     )
     getattr_occurrence_digest = hashlib.sha256("\n".join(getattr_occurrences).encode("utf-8")).hexdigest()
     if (
-        len(getattr_occurrences) != 188
-        or getattr_occurrence_digest != "88bd519a1e2880aa9056b4ea54d0a38844dbcdaf03d8ccf8066acee64febb332"
+        len(getattr_occurrences) != 336
+        or getattr_occurrence_digest != "72180fbfc27e8db395bd495b23797f07be614c3640eafd1e44441eefa4c53c7a"
     ):
         unsafe.append("the exact reviewed getattr semantic occurrences changed")
 
@@ -836,7 +1004,21 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
                 and isinstance(parent.func, ast.Name)
                 and parent.func.id in {"Signal", "Slot"}
             )
-            if not runtime_object_marker:
+            marker_call = parents.get(parent) if isinstance(parent, ast.Call) else None
+            runtime_unique_marker = (
+                node.id == "object"
+                and isinstance(parent, ast.Call)
+                and parent.func is node
+                and not parent.args
+                and not parent.keywords
+                and isinstance(marker_call, ast.Assign)
+                and len(marker_call.targets) == 1
+                and isinstance(marker_call.targets[0], ast.Name)
+                and marker_call.targets[0].id == "watch_registration"
+                and (enclosing_function(node) is not None)
+                and enclosing_function(node).name == "_schedule_unowned_process_supervision"
+            )
+            if not (runtime_object_marker or runtime_unique_marker):
                 unsafe.append(f"line {node.lineno}: {node.id} can recover executable authority")
         elif isinstance(node, ast.Attribute) and node.attr in forbidden_attributes:
             unsafe.append(f"line {node.lineno}: .{node.attr} reflection is forbidden")
@@ -867,6 +1049,16 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
                 and len(parent.args) == 2
                 and isinstance(parent.args[1], ast.Constant)
                 and parent.args[1].value == "register_at_fork"
+            ):
+                continue
+            if (
+                isinstance(parent, ast.Call)
+                and node in parent.args
+                and call_name(parent) == "hasattr"
+                and node.id == "signal"
+                and len(parent.args) == 2
+                and isinstance(parent.args[1], ast.Constant)
+                and parent.args[1].value == "SIGBREAK"
             ):
                 continue
             chain = attribute_chain(node)
@@ -932,6 +1124,9 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
                         ("snapshot_ingress", "'active'"),
                         ("stat_module", "'FILE_ATTRIBUTE_REPARSE_POINT'"),
                         ("sys", "'frozen'"),
+                        ("captured_worker", "'result'"),
+                        ("retained_worker", "'result'"),
+                        ("worker", "'result'"),
                         ("worker", "'quit'"),
                         ("worker", "'requestInterruption'"),
                         ("worker", "'wait'"),
@@ -946,30 +1141,31 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
             if not valid:
                 unsafe.append(f"line {node.lineno}: getattr is outside the reviewed reflection vocabulary")
         elif isinstance(node, ast.Call) and call_name(node) == "vars":
-            valid = (
+            valid = False
+            if (
                 len(node.args) == 1
                 and not node.keywords
                 and isinstance(node.args[0], ast.Name)
                 and node.args[0].id == "self"
-                and isinstance(parent, ast.Attribute)
-                and parent.value is node
-                and parent.attr == "get"
-                and isinstance(parents.get(parent), ast.Call)
-                and parents[parent].func is parent
-                and parents[parent].args
-                and isinstance(parents[parent].args[0], ast.Constant)
-                and parents[parent].args[0].value
-                in {
-                    "_assistant_restart_generation",
-                    "_bridge_restart_fault",
-                    "_bridge_restart_hold",
-                    "_bridge_watchdog_generation",
-                    "_main_window",
-                    "_replay_session_verified",
-                    "_restart_generation",
-                    "_restart_giving_up",
-                }
-            )
+            ):
+                if (
+                    isinstance(parent, ast.Attribute)
+                    and parent.value is node
+                    and parent.attr == "get"
+                    and isinstance(parents.get(parent), ast.Call)
+                    and parents[parent].func is parent
+                    and parents[parent].args
+                    and isinstance(parents[parent].args[0], ast.Constant)
+                    and parents[parent].args[0].value in _ALLOWED_SELF_VARS_GET_KEYS
+                ):
+                    valid = True
+                elif (
+                    isinstance(parent, ast.Subscript)
+                    and parent.value is node
+                    and isinstance(parent.slice, ast.Constant)
+                    and parent.slice.value in _ALLOWED_SELF_VARS_SUBSCRIPT_KEYS
+                ):
+                    valid = True
             if not valid:
                 unsafe.append(f"line {node.lineno}: vars is outside the reviewed state lookup vocabulary")
         elif isinstance(node, ast.Attribute) and node.attr == "Popen":

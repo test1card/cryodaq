@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import contextlib
 import io
+import logging
 import os
 import subprocess
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 from cryodaq import launcher, logging_setup
 
@@ -304,3 +307,46 @@ def test_an_over_long_line_is_reported_and_not_forwarded_whole(tmp_path, monkeyp
         "no single record may carry more than the bound plus its own prefix"
     )
     assert any("short line after" in m for m in messages), "and the pump must carry on to the next line"
+
+
+def test_real_construction_failure_logs_bounded_reason_stderr_and_keeps_cause(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive the production pump and construction wrapper through one failure."""
+
+    reason = "engine readiness failed: libvendor_cryogenic.so is missing"
+    failure = RuntimeError(reason + "!" * launcher._LAUNCHER_CONSTRUCTION_EXCEPTION_MAX_CHARS)
+    oldest = "oldest engine diagnostic must leave the bounded tail"
+    last_words = "engine import failed: libvendor_cryogenic.so: cannot open shared object file"
+    stderr = (oldest + "\n" + ("bounded filler\n" * 500) + last_words + "\n").encode()
+    tail = launcher._BoundedEngineStderrTail()
+    stderr_logger = MagicMock()
+    host = SimpleNamespace(
+        _engine_stderr_tail=tail,
+        setWindowTitle=MagicMock(),
+        show=MagicMock(),
+    )
+    monkeypatch.setattr(launcher.LauncherWindow, "_do_shutdown", lambda _host: False)
+
+    def fail_after_capturing_engine_stderr() -> None:
+        launcher._pump_engine_stderr(io.BytesIO(stderr), stderr_logger, tail)
+        raise failure
+
+    with caplog.at_level(logging.CRITICAL, logger="cryodaq.launcher"):
+        with pytest.raises(launcher._LauncherConstructionHold) as raised:
+            launcher.LauncherWindow._run_construction_step(
+                host,
+                "engine",
+                fail_after_capturing_engine_stderr,
+            )
+
+    record = next(item for item in caplog.records if item.getMessage().startswith("Launcher construction failed;"))
+    message = record.getMessage()
+    assert reason in message, "the exception message, not merely RuntimeError, must reach the operator log"
+    assert last_words in message, "the engine's captured stderr must reach the same failure record"
+    assert oldest not in message, "construction stderr is a latest-text tail, never unbounded history"
+    assert raised.value.__cause__ is failure, "the HOLD must retain the original construction failure"
+    assert isinstance(record.args, tuple)
+    assert len(record.args[2]) <= launcher._LAUNCHER_CONSTRUCTION_EXCEPTION_MAX_CHARS
+    assert len(record.args[3]) <= launcher._LAUNCHER_CONSTRUCTION_STDERR_TAIL_MAX_CHARS

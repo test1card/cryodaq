@@ -905,8 +905,8 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ),
         (f"The exact {inventory_size}-path", f"The exact {inventory_size - 1}-path"),
         (
+            "all 11 tracked workflow-referenced CI/governance runner modules",
             "all 10 tracked workflow-referenced CI/governance runner modules",
-            "all 9 tracked workflow-referenced CI/governance runner modules",
         ),
         (
             "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
@@ -920,8 +920,8 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
         ("at all seven sites", "at all six sites"),
         (
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:131`",
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:130`",
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:166`",
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:165`",
         ),
     ):
         mutated = text.replace(old, replacement, 1)
@@ -947,9 +947,9 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     with pytest.raises(AssertionError):
         assert_current(text, [path for path in tracked if path != "tools/check_python_compile.py"], contents)
     registry_claim = text.replace(
-        "all 10 tracked workflow-referenced CI/governance runner modules were swept",
+        "all 11 tracked workflow-referenced CI/governance runner modules were swept",
         (
-            "all 10 tracked workflow-referenced CI/governance runner modules were swept, "
+            "all 11 tracked workflow-referenced CI/governance runner modules were swept, "
             "and the registry/config references were swept"
         ),
         1,
@@ -1315,6 +1315,28 @@ def test_bottom_status_bar_spec_matches_live_setter_contract() -> None:
     assert "class StatusItem" not in spec
 
 
+def test_keithley_panel_spec_governs_source_state_replay_and_gap_resync() -> None:
+    source = _read(REPO_ROOT / "src/cryodaq/gui/shell/overlays/keithley_panel.py")
+    spec = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/keithley-panel.md")
+    impact = _read(REPO_ROOT / "docs/design-system/governance/change-impact.md")
+
+    assert "def replay_source_state(self, key: str, reading: Reading)" in source
+    assert "def replay_source_state(self, key: str, reading: Reading)" in spec
+    for contract_marker in (
+        "producer observation",
+        "retained presentation",
+        "measurement-flow gap",
+        "newer typed READY",
+        "verified-OFF",
+        "Safety observation",
+        "without advancing producer-observation",
+        "before generic measurement flow resumes",
+    ):
+        assert contract_marker in spec
+    assert "Keithley source-state gap resynchronization" in impact
+    assert "pre-gap ON/OFF" in impact
+
+
 def test_operator_manual_matches_current_runtime_authority_boundaries() -> None:
     manual = _read(REPO_ROOT / "docs/operator_manual.md")
     normalized = re.sub(r"\s+", " ", manual)
@@ -1349,6 +1371,37 @@ def test_operator_manual_matches_current_runtime_authority_boundaries() -> None:
     assert "alarm_count` в launcher/tray" in tray
     assert "незавершённом shutdown красный имеет отдельное значение" in tray
     assert "authoritative alarm/snapshot wiring" not in tray
+
+
+def test_keithley_channel_state_contract_separates_physical_badge_from_manager_latch() -> None:
+    component = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/keithley-panel.md")
+    manual = _read(REPO_ROOT / "docs/operator_manual.md")
+    version = _read(REPO_ROOT / "docs/design-system/VERSION").strip()
+    changelog = _read(REPO_ROOT / "docs/design-system/CHANGELOG.md")
+    current_release = changelog.split(f"## [{version}]", 1)[1].split("\n## [", 1)[0]
+
+    for marker in (
+        "Per-channel source state and manager safety state are separate truths.",
+        'A periodic snapshot replaces a transition-only `"fault"`',
+        "does not mean the manager fault was acknowledged",
+    ):
+        assert marker in component
+
+    keithley = manual.split("### 4.2. Keithley 2604B", 1)[1].split("### 4.3. Тревоги", 1)[0]
+    for marker in (
+        "описывает физическое состояние выхода",
+        "`analytics/safety_state=fault_latched`",
+        "не означает, что авария Safety квитирована",
+    ):
+        assert marker in keithley
+
+    for marker in (
+        "cryodaq-primitives/keithley-panel.md",
+        "docs/operator_manual.md",
+        "physical source state",
+        "manager fault latch",
+    ):
+        assert marker in current_release
 
 
 def test_public_docs_keep_provider_machine_and_secret_boundaries() -> None:

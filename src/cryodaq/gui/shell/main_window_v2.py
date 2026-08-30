@@ -36,8 +36,11 @@ from cryodaq.channels.descriptors import (
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.core.safety_manager import SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
+from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.shell.annunciation_controller import AnnunciationController
@@ -50,7 +53,7 @@ from cryodaq.gui.shell.overlays.archive_panel import ArchivePanel
 from cryodaq.gui.shell.overlays.calibration_panel import CalibrationPanel
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
-from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
+from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel, SafetyGateCause
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
@@ -89,6 +92,10 @@ _DISK_FUTURE_TOLERANCE_S = 5.0
 _DISK_MAX_SOURCE_AGE_S = 600.0
 _SAFETY_FUTURE_TOLERANCE_S = 5.0
 _SAFETY_MAX_SOURCE_AGE_S = 10.0
+_MEASUREMENT_CONNECTION_TIMEOUT_S = 3.0
+_CONCRETE_KEITHLEY_SOURCE_STATES = frozenset(
+    state.value for state in KeithleySourceState if state is not KeithleySourceState.UNKNOWN
+)
 _WORKER_SETTLE_MS = 1_500
 # settle_owned_workers() used to give every descendant QThread the full
 # _WORKER_SETTLE_MS on the Qt main thread, across up to 4 stabilization
@@ -209,8 +216,10 @@ class MainWindowV2(QMainWindow):
         self._rate_count = 0
         self._last_rate_time = time.monotonic()
         self._last_reading_time = 0.0
+        self._last_measurement_received_at: datetime | None = None
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
         self._last_safety_observed_at: datetime | None = None
         self._accepted_safety_bridge_instance_id: str | None = None
         self._accepted_safety_experiment_id: str | None = None
@@ -218,6 +227,7 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_producer_id: str | None = None
         self._typed_safety_revision: int | None = None
         self._typed_safety_ready = False
+        self._typed_safety_snapshot: OperatorSnapshot | None = None
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
 
@@ -285,6 +295,13 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        # Source-state publications belong to the engine/SafetyManager
+        # producer, not to an experiment or replaceable transport incarnation.
+        self._keithley_channel_state_snapshot: dict[str, Reading] = {}
+        self._keithley_channel_state_received_monotonic: dict[str, float] = {}
+        self._keithley_source_state_gap_active = False
+        self._keithley_source_state_pending: set[str] = set()
+        self._keithley_source_state_resync_not_before: datetime | None = None
         # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
         # opened after readings start arriving still gets a populated
@@ -392,6 +409,9 @@ class MainWindowV2(QMainWindow):
         cut = snapshot.cut
         readiness = snapshot.readiness
         bridge_instance_id = self._current_bridge_instance_id()
+        experiment_matches = (
+            self._latest_experiment_status is None or snapshot.experiment.experiment_id == self._active_experiment_id()
+        )
         producer_changed = self._typed_safety_producer_id not in (None, cut.producer_id)
         if producer_changed:
             self._typed_safety_revision = None
@@ -407,6 +427,7 @@ class MainWindowV2(QMainWindow):
             bridge_instance_id is not None
             and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
+            and experiment_matches
             and readiness.readiness is ReadinessTruth.READY
             and readiness.lifecycle is SafetyLifecycle.READY
             and readiness.status.state is OperatorPresentationState.OK
@@ -425,18 +446,73 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_producer_id = cut.producer_id
         self._typed_safety_revision = cut.revision
         self._typed_safety_ready = ready
+        self._typed_safety_snapshot = snapshot
         self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
         self._accepted_safety_bridge_instance_id = bridge_instance_id
         self._last_safety_state = readiness.lifecycle.value
-        self._last_safety_reason = readiness.status.operator_text
-        transport_stale = readiness.status.state in {
+        transport_unavailable = readiness.status.state in {
             OperatorPresentationState.STALE,
             OperatorPresentationState.DISCONNECTED,
-        }
-        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
+        } or bool(readiness.status.transport_reason_codes)
+        transport_unavailable = transport_unavailable or any(
+            blocker.state
+            in {
+                OperatorPresentationState.STALE,
+                OperatorPresentationState.DISCONNECTED,
+            }
+            or bool(blocker.transport_reason_codes)
+            for blocker in readiness.blockers
+        )
+        binding_current = bridge_instance_id is not None and (
+            self._latest_experiment_status is None or snapshot.experiment.experiment_id == self._active_experiment_id()
+        )
+        authoritative_blocked = (
+            not ready
+            and binding_current
+            and not self._replay_mode
+            and cut.mode is SnapshotMode.LIVE
+            and readiness.readiness is ReadinessTruth.BLOCKED
+            and readiness.lifecycle is not SafetyLifecycle.UNKNOWN
+            and bool(readiness.blockers)
+            and not transport_unavailable
+        )
+        if ready:
+            reason = ""
+        elif transport_unavailable:
+            reason = "Состояние Safety устарело"
+        elif authoritative_blocked:
+            # The composer summary text names the authority, while the
+            # blocker rows name the conditions that can stop the source.
+            # Preserve every distinct bounded protocol string in the visible
+            # warning and in the operator-choice receipt.
+            reason = "; ".join(dict.fromkeys(blocker.operator_text for blocker in readiness.blockers))
+        else:
+            reason = readiness.status.operator_text
+        cause = (
+            SafetyGateCause.AUTHORITATIVE_NOT_READY if authoritative_blocked else SafetyGateCause.AUTHORITY_UNAVAILABLE
+        )
+        self._last_safety_reason = reason
+        self._last_safety_gate_cause = cause
+        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_unavailable)
         if self._keithley_panel is not None:
-            reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
-            self._keithley_panel.set_safety_ready(ready, reason)
+            self._keithley_panel.set_safety_ready(ready, reason, cause=cause)
+        if (
+            bridge_instance_id is not None
+            and not self._replay_mode
+            and cut.mode is SnapshotMode.LIVE
+            and experiment_matches
+            and (ready or cause is SafetyGateCause.AUTHORITY_UNAVAILABLE)
+        ):
+            # Periodic typed cuts cover isolated loss of the best-effort
+            # source-state topic. READY provides verified-OFF evidence; a cut
+            # with unavailable authority revokes older per-channel
+            # presentation without guessing which source is active. A current
+            # authoritative blocker is warning-permissive and must not erase a
+            # retained OFF state merely to disable Start indirectly.
+            self._synchronize_keithley_source_state_from_typed_snapshot(
+                snapshot,
+                ready=ready,
+            )
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -499,10 +575,11 @@ class MainWindowV2(QMainWindow):
         if name == "source":
             derived_connected = False
             if self._last_reading_time > 0.0:
-                derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
+                derived_connected = (time.monotonic() - self._last_reading_time) < _MEASUREMENT_CONNECTION_TIMEOUT_S
             widget.set_connected(derived_connected)
-            ready, reason_text = self._current_keithley_safety_gate()
-            widget.set_safety_ready(ready, reason_text)
+            ready, reason_text, cause = self._current_keithley_safety_gate()
+            widget.set_safety_ready(ready, reason_text, cause=cause)
+            self._replay_keithley_channel_state_snapshot()
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -629,6 +706,135 @@ class MainWindowV2(QMainWindow):
             if callable(fn):
                 fn(*args)
 
+    def _replay_keithley_channel_state_snapshot(self) -> None:
+        """Present retained producer truth without claiming a new observation."""
+        if self._keithley_panel is None or not self._keithley_panel._connected:
+            return
+        for key, reading in self._keithley_channel_state_snapshot.items():
+            if key in self._keithley_source_state_pending:
+                continue
+            self._keithley_panel.replay_source_state(key, reading)
+
+    def _begin_keithley_source_state_gap(self) -> None:
+        """Revoke retained source state once per measurement-flow outage."""
+        if self._keithley_source_state_gap_active:
+            return
+        self._keithley_source_state_gap_active = True
+        retained_keys = {
+            key
+            for key, received_at in self._keithley_channel_state_received_monotonic.items()
+            if (
+                self._last_reading_time > 0.0
+                and received_at >= self._last_reading_time
+                and key in self._keithley_channel_state_snapshot
+                and self._keithley_source_state_is_concrete(self._keithley_channel_state_snapshot[key])
+            )
+        }
+        self._keithley_channel_state_snapshot = {
+            key: reading for key, reading in self._keithley_channel_state_snapshot.items() if key in retained_keys
+        }
+        self._keithley_channel_state_received_monotonic = {
+            key: received_at
+            for key, received_at in self._keithley_channel_state_received_monotonic.items()
+            if key in retained_keys
+        }
+        self._keithley_source_state_pending = set(SMU_CHANNELS) - retained_keys
+        # The periodic snapshot transport is independent of generic
+        # measurement delivery. Compare its Safety observation with the
+        # actual local receipt boundary; reconstructing that wall time later
+        # from a monotonic age would make a wall-clock adjustment capable of
+        # admitting pre-gap evidence.
+        self._keithley_source_state_resync_not_before = self._last_measurement_received_at
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_connected(False)
+
+    def _resynchronize_keithley_source_state_from_ready_snapshot(
+        self,
+        snapshot: OperatorSnapshot,
+    ) -> None:
+        """Project a current verified-OFF Safety cut into eligible source badges."""
+        self._synchronize_keithley_source_state_from_typed_snapshot(
+            snapshot,
+            ready=True,
+        )
+
+    def _synchronize_keithley_source_state_from_typed_snapshot(
+        self,
+        snapshot: OperatorSnapshot,
+        *,
+        ready: bool,
+    ) -> None:
+        """Bound retained channel presentation to the periodic typed Safety cut."""
+        if self._replay_mode:
+            return
+        if ready and (
+            self._last_reading_time <= 0.0
+            or (time.monotonic() - self._last_reading_time) >= _MEASUREMENT_CONNECTION_TIMEOUT_S
+        ):
+            return
+        not_before = self._keithley_source_state_resync_not_before
+        if not_before is not None and snapshot.cut.observed_at < not_before:
+            return
+
+        changed_keys: set[str] = set()
+        for key in SMU_CHANNELS:
+            retained = self._keithley_channel_state_snapshot.get(key)
+            retained_observed_at = self._keithley_source_state_observed_at(retained)
+            if retained_observed_at is not None and snapshot.cut.observed_at <= retained_observed_at:
+                continue
+            changed_keys.add(key)
+            self._keithley_channel_state_received_monotonic.pop(key, None)
+            if ready:
+                self._keithley_channel_state_snapshot[key] = Reading(
+                    timestamp=snapshot.cut.observed_at,
+                    instrument_id="safety_manager",
+                    channel=f"analytics/keithley_channel_state/{key}",
+                    value=0.0,
+                    unit="",
+                    metadata={
+                        "state": KeithleySourceState.OFF.value,
+                        "reason": "verified_off_operator_snapshot_resync",
+                    },
+                )
+                self._keithley_source_state_pending.discard(key)
+            else:
+                self._keithley_channel_state_snapshot.pop(key, None)
+                self._keithley_source_state_pending.add(key)
+
+        if not self._keithley_source_state_pending:
+            self._keithley_source_state_resync_not_before = None
+        if ready:
+            self._replay_keithley_channel_state_snapshot()
+        elif self._keithley_panel is not None and self._keithley_panel._connected:
+            for key in changed_keys:
+                self._keithley_panel.replay_source_state(
+                    key,
+                    Reading(
+                        timestamp=snapshot.cut.observed_at,
+                        instrument_id="safety_manager",
+                        channel=f"analytics/keithley_channel_state/{key}",
+                        value=0.0,
+                        unit="",
+                        metadata={
+                            "state": KeithleySourceState.UNKNOWN.value,
+                            "reason": "nonready_operator_snapshot_revocation",
+                        },
+                    ),
+                )
+
+    @staticmethod
+    def _keithley_source_state_observed_at(reading: Reading | None) -> datetime | None:
+        if reading is None or type(reading.timestamp) is not datetime:
+            return None
+        if reading.timestamp.tzinfo is None or reading.timestamp.utcoffset() is None:
+            return None
+        return reading.timestamp.astimezone(UTC)
+
+    @staticmethod
+    def _keithley_source_state_is_concrete(reading: Reading) -> bool:
+        metadata = reading.metadata
+        return type(metadata) is dict and metadata.get("state") in _CONCRETE_KEITHLEY_SOURCE_STATES
+
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
@@ -700,6 +906,10 @@ class MainWindowV2(QMainWindow):
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
 
+        self._keithley_channel_state_snapshot.clear()
+        self._keithley_channel_state_received_monotonic.clear()
+        self._keithley_source_state_gap_active = False
+        self._begin_keithley_source_state_gap()
         self.invalidate_descriptor_transport()
         self._overview_panel.invalidate_operator_snapshot_producer()
 
@@ -743,9 +953,29 @@ class MainWindowV2(QMainWindow):
         # establish measurement flow, engine presence, or mutation authority.
         is_measurement = not channel.startswith(("system/", "analytics/", "support/"))
         if is_measurement:
+            observed_monotonic = time.monotonic()
+            crossed_measurement_gap = (
+                self._last_reading_time > 0.0
+                and observed_monotonic - self._last_reading_time >= _MEASUREMENT_CONNECTION_TIMEOUT_S
+            )
+            if crossed_measurement_gap:
+                # Detect recovery at ingress as well as on the 1 Hz status
+                # tick. Otherwise the first generic measurement overwrites
+                # the silence duration before the tick can see the outage.
+                self._begin_keithley_source_state_gap()
             self._reading_count += 1
             self._rate_count += 1
-            self._last_reading_time = time.monotonic()
+            self._last_reading_time = observed_monotonic
+            self._last_measurement_received_at = datetime.now(UTC)
+            if (
+                crossed_measurement_gap
+                and self._typed_safety_snapshot is not None
+                and self._current_keithley_safety_gate()[0]
+            ):
+                # A READY cut received during the outage is already fresh
+                # evidence when its transport timestamp crosses the last-
+                # measurement boundary; do not wait for another transition.
+                self._resynchronize_keithley_source_state_from_ready_snapshot(self._typed_safety_snapshot)
 
         # Eager sinks
         self._overview_panel.on_reading(reading, dashboard_identity)
@@ -764,15 +994,29 @@ class MainWindowV2(QMainWindow):
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        if (
-            channel
-            in {
-                "analytics/keithley_channel_state/smua",
-                "analytics/keithley_channel_state/smub",
-            }
-            and self._keithley_panel is not None
-        ):
-            self._keithley_panel.on_reading(reading)
+        if channel in {
+            "analytics/keithley_channel_state/smua",
+            "analytics/keithley_channel_state/smub",
+        }:
+            metadata = reading.metadata
+            source_state_authoritative = (
+                type(metadata) is dict
+                and metadata.get(PUBLISHER_AUTHORITY_METADATA_KEY) == SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
+            )
+            # DataBroker stamps this marker only after the exact SafetyManager
+            # capability publishes on its reserved source-state channels.
+            if self._current_bridge_instance_id() is not None and source_state_authoritative:
+                source_state_key = channel.rsplit("/", maxsplit=1)[-1]
+                self._keithley_channel_state_snapshot[source_state_key] = reading
+                self._keithley_channel_state_received_monotonic[source_state_key] = time.monotonic()
+                if self._keithley_source_state_is_concrete(reading):
+                    self._keithley_source_state_pending.discard(source_state_key)
+                else:
+                    self._keithley_source_state_pending.add(source_state_key)
+                if not self._keithley_source_state_pending:
+                    self._keithley_source_state_resync_not_before = None
+            if self._keithley_panel is not None and source_state_authoritative:
+                self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (B.5.5 F3)
@@ -836,20 +1080,47 @@ class MainWindowV2(QMainWindow):
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
         reason = metadata.get("reason", "") or ""
+        legacy_reason = str(reason) if reason else ""
         if self._typed_safety_authority_seen:
             # READY-looking analytics cannot overwrite the coherent typed cut.
             # A negative observation is allowed to revoke it, and remains
             # visible until a newer typed cut supplies recovery authority.
             if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._last_safety_state = state_name
-                self._last_safety_reason = str(reason) if reason else ""
                 self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
-                self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+                current_safe_off = (
+                    state_name == SafetyLifecycle.SAFE_OFF.value
+                    and self._accepted_safety_bridge_instance_id == self._current_bridge_instance_id()
+                    and self._accepted_safety_bridge_instance_id is not None
+                    and (
+                        self._latest_experiment_status is None
+                        or self._accepted_safety_experiment_id == self._active_experiment_id()
+                    )
+                )
+                typed_gate_can_remain_authoritative = self._typed_safety_ready or (
+                    self._last_safety_gate_cause is SafetyGateCause.AUTHORITATIVE_NOT_READY
+                )
+                if current_safe_off and typed_gate_can_remain_authoritative:
+                    # The negative observation revokes readiness, not the
+                    # still-current bridge/experiment identity binding. It can
+                    # preserve an authoritative blocker, but cannot promote an
+                    # unavailable typed cut into authoritative gate evidence.
+                    self._typed_safety_ready = False
+                    self._last_safety_reason = legacy_reason
+                    self._last_safety_gate_cause = SafetyGateCause.AUTHORITATIVE_NOT_READY
+                    if self._keithley_panel is not None:
+                        self._keithley_panel.set_safety_ready(
+                            False,
+                            self._last_safety_reason or "Safety state is not ready",
+                            cause=SafetyGateCause.AUTHORITATIVE_NOT_READY,
+                        )
+                elif not current_safe_off:
+                    self._invalidate_safety_authority(legacy_reason or "Safety state is not ready")
             return
 
         self._last_safety_state = state_name
-        self._last_safety_reason = str(reason) if reason else ""
+        self._last_safety_reason = legacy_reason
         self._last_safety_observed_at = observed_at
         self._bottom_bar.set_safety_state(self._last_safety_state)
 
@@ -868,7 +1139,7 @@ class MainWindowV2(QMainWindow):
                     "No authoritative Safety state",
                 )
 
-    def _current_keithley_safety_gate(self) -> tuple[bool, str]:
+    def _current_keithley_safety_gate(self) -> tuple[bool, str, SafetyGateCause]:
         bridge_instance_id = self._current_bridge_instance_id()
         binding_current = (
             bridge_instance_id is not None
@@ -879,15 +1150,23 @@ class MainWindowV2(QMainWindow):
             )
         )
         if self._typed_safety_authority_seen and self._typed_safety_ready and binding_current:
-            return True, ""
+            return True, "", SafetyGateCause.AUTHORITY_UNAVAILABLE
         if self._typed_safety_authority_seen:
-            return False, self._last_safety_reason or "Нет текущего состояния Safety"
-        return False, self._last_safety_reason or "Нет авторитетного состояния Safety"
+            cause = self._last_safety_gate_cause if binding_current else SafetyGateCause.AUTHORITY_UNAVAILABLE
+            return False, self._last_safety_reason or "Нет текущего состояния Safety", cause
+        return (
+            False,
+            self._last_safety_reason or "Нет авторитетного состояния Safety",
+            SafetyGateCause.AUTHORITY_UNAVAILABLE,
+        )
 
     def _invalidate_safety_authority(self, reason: str, *, disconnected: bool = False) -> None:
         self._accepted_safety_bridge_instance_id = None
         self._accepted_safety_experiment_id = None
         self._typed_safety_ready = False
+        self._last_safety_reason = reason
+        self._last_safety_gate_cause = SafetyGateCause.AUTHORITY_UNAVAILABLE
+        self._typed_safety_snapshot = None
         if self._last_safety_state is not None:
             self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
         elif disconnected:
@@ -960,7 +1239,7 @@ class MainWindowV2(QMainWindow):
 
         if quantity is ChannelQuantity.TEMPERATURE:
             if self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             self._analytics_temperature_snapshot[descriptor.channel_id] = reading
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
@@ -975,7 +1254,7 @@ class MainWindowV2(QMainWindow):
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
             if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
+                self._conductivity_panel.on_descriptor_reading(reading, descriptor)
             if quantity in {
                 ChannelQuantity.VOLTAGE,
                 ChannelQuantity.CURRENT,
@@ -1135,7 +1414,7 @@ class MainWindowV2(QMainWindow):
             return
         now = time.monotonic()
         silence = now - self._last_reading_time if self._last_reading_time > 0 else 999.0
-        connected = silence < 3.0
+        connected = silence < _MEASUREMENT_CONNECTION_TIMEOUT_S
         wall_now = datetime.now(UTC)
         current_bridge_instance_id = self._current_bridge_instance_id()
         disk_marked_stale = False
@@ -1179,6 +1458,7 @@ class MainWindowV2(QMainWindow):
         self._top_bar.set_engine_state(connected)
         self._overview_panel.set_connected(connected)
         if connected:
+            self._keithley_source_state_gap_active = False
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
             self._rate_count = 0
@@ -1186,6 +1466,8 @@ class MainWindowV2(QMainWindow):
             self._bottom_bar.set_data_rate(rate)
             self._bottom_bar.set_connected(True, "Подключено")
         else:
+            if self._last_reading_time > 0.0:
+                self._begin_keithley_source_state_gap()
             if self._reading_count == 0:
                 self._bottom_bar.set_connected(False, "Отключено")
             elif silence < 90:
@@ -1206,7 +1488,10 @@ class MainWindowV2(QMainWindow):
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
+            was_connected = self._keithley_panel._connected
             self._keithley_panel.set_connected(connected)
+            if connected and not was_connected:
+                self._replay_keithley_channel_state_snapshot()
         # Phase II.3: mirror to OperatorLog overlay (same contract).
         if self._operator_log_panel is not None:
             self._operator_log_panel.set_connected(connected)
@@ -1389,6 +1674,13 @@ class MainWindowV2(QMainWindow):
         controller = getattr(self, "_annunciation_controller", None)
         if controller is not None:
             controller.complete_root_shutdown()
+
+    def refresh_display_precision(self) -> None:
+        """Re-render loaded operator measurement surfaces."""
+
+        self._overview_panel.refresh_display_precision()
+        if self._conductivity_panel is not None:
+            self._conductivity_panel.refresh_display_precision()
 
     def closeEvent(self, event):  # noqa: ANN001
         """Transfer a close request to the one composition-root owner.
