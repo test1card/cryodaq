@@ -8283,6 +8283,14 @@ class LauncherWindow(QMainWindow):
             self._last_safety_state = None
             self._last_alarm_count = None
         if alive and bridge_alive and self._replay_source is None:
+            # These repeating workers are intentionally parentless: the
+            # process-wide registry retains each one through queued-result
+            # disposition and thread termination, while the attributes below
+            # retain only the current worker. A LauncherWindow parent would
+            # retain every replaced worker for the window's full lifetime.
+            # Do not delete workers centrally at registry release: registry
+            # callers may still hold terminal wrappers, and deleteLater()
+            # would invalidate those wrappers before their owners clear them.
             if self._safety_worker is None or self._safety_worker.isFinished():
                 self._safety_status_generation += 1
                 authority = self._capture_launcher_status_authority(
@@ -8291,7 +8299,7 @@ class LauncherWindow(QMainWindow):
                 if authority is None:
                     self._last_safety_state = None
                 else:
-                    worker = ZmqCommandWorker({"cmd": "safety_status"}, parent=self)
+                    worker = ZmqCommandWorker({"cmd": "safety_status"})
                     worker.finished.connect(lambda result, expected=authority: self._on_safety_result(result, expected))
                     self._safety_worker = worker
                     worker.start()
@@ -8303,7 +8311,7 @@ class LauncherWindow(QMainWindow):
                 if authority is None:
                     self._last_alarm_count = None
                 else:
-                    worker = ZmqCommandWorker({"cmd": "annunciation_status"}, parent=self)
+                    worker = ZmqCommandWorker({"cmd": "annunciation_status"})
                     worker.finished.connect(
                         lambda result, expected=authority: self._on_annunciation_result(result, expected)
                     )

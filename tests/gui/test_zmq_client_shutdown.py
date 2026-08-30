@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import os
 import queue
 import subprocess
 import sys
 import threading
 import time
+import weakref
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1702,3 +1704,253 @@ def test_application_close_settles_all_real_qthreads(
             window.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
             app.processEvents()
+
+
+class _LiveLauncherStatusBridge:
+    def is_alive(self) -> bool:
+        return True
+
+    def process_pid(self) -> int:
+        return 41
+
+    def restart_count(self) -> int:
+        return 3
+
+
+def _healthy_launcher_status_reply(command: dict[str, object]) -> dict[str, object]:
+    if command == {"cmd": "safety_status"}:
+        return {
+            "ok": True,
+            "state": "ready",
+            "fault_reason": "",
+            "fault_revision": 0,
+            "fault_activated_at": 0.0,
+            "recovery_reason": "",
+            "channels_tracked": 0,
+            "keithley_connected": False,
+            "active_channels": [],
+            "mock": True,
+            "engine_instance_id": "a" * 32,
+            "proto": zmq_client.CLIENT_PROTOCOL_VERSION,
+        }
+    assert command == {"cmd": "annunciation_status"}
+    return {
+        "ok": True,
+        "engine_instance_id": "a" * 32,
+        "snapshot_revision": 1,
+        "activations": [],
+        "proto": zmq_client.CLIENT_PROTOCOL_VERSION,
+    }
+
+
+def _launcher_status_window():
+    """Build only the QObject-owned state needed by the real health tick."""
+
+    from PySide6.QtWidgets import QMainWindow
+
+    from cryodaq.launcher import LauncherWindow
+
+    window = LauncherWindow.__new__(LauncherWindow)
+    QMainWindow.__init__(window)
+    window._runtime_callbacks_open = True
+    window._runtime_callback_epoch = 7
+    window._shutdown_requested = False
+    window._assistant_enabled = False
+    window._engine_instance_id = "a" * 32
+    window._engine_unsettled_incarnation = None
+    window._bridge_restart_fault = False
+    window._bridge_restart_hold = False
+    window._restart_giving_up = False
+    window._restart_attempts = 0
+    window._last_restart_time = 0.0
+    window._tray_only = True
+    window._alarm_timer = None
+    window._engine_down_banner = None
+    window._bridge = _LiveLauncherStatusBridge()
+    window._replay_source = None
+    window._safety_status_generation = 0
+    window._annunciation_status_generation = 0
+    window._safety_worker = None
+    window._annunciation_worker = None
+    window._last_safety_state = None
+    window._last_alarm_count = None
+    window._last_reading_time = 0.0
+    window._periodic_reporting_fault = False
+    window._tray_icon_green = "green"
+    window._tray_icon_yellow = "yellow"
+    window._tray_icon_red = "red"
+    window._tray = SimpleNamespace(
+        isVisible=lambda: False,
+        setIcon=lambda _icon: None,
+        setToolTip=lambda _text: None,
+    )
+    window._is_engine_alive = lambda: True
+    return window
+
+
+def _launcher_status_probe_plugin_args(env: dict[str, str]) -> tuple[str, ...]:
+    if env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD"):
+        return ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")
+    return ()
+
+
+@pytest.mark.parametrize(
+    ("autoload_disabled", "expected_plugin_count"),
+    [(None, 0), ("", 0), ("1", 1), ("true", 1), ("0", 1)],
+)
+def test_launcher_status_probe_plugins_follow_pytest_autoload_truthiness(
+    autoload_disabled: str | None,
+    expected_plugin_count: int,
+) -> None:
+    env: dict[str, str] = {}
+    if autoload_disabled is not None:
+        env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = autoload_disabled
+
+    plugin_args = _launcher_status_probe_plugin_args(env)
+
+    assert plugin_args.count("pytest_asyncio.plugin") == expected_plugin_count
+    assert plugin_args.count("pytest_timeout") == expected_plugin_count
+    assert plugin_args.count("-p") == 2 * expected_plugin_count
+
+
+@pytest.mark.parametrize(
+    ("autoload_disabled", "expected_plugin_args"),
+    [
+        (None, ()),
+        ("", ()),
+        ("1", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+        ("true", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+        ("0", ("-p", "pytest_asyncio.plugin", "-p", "pytest_timeout")),
+    ],
+)
+def test_launcher_status_poll_wrapper_passes_required_plugins_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    autoload_disabled: str | None,
+    expected_plugin_args: tuple[str, ...],
+) -> None:
+    child_marker = "CRYODAQ_LAUNCHER_STATUS_RETENTION_PROBE"
+    monkeypatch.delenv(child_marker, raising=False)
+    if autoload_disabled is None:
+        monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", autoload_disabled)
+
+    observed_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def _record_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+        observed_calls.append((tuple(args), kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _record_run)
+
+    test_launcher_status_poll_keeps_finished_worker_children_bounded(monkeypatch, tmp_path)
+
+    assert len(observed_calls) == 1
+    command, child_options = observed_calls[0]
+    cache_plugin_index = command.index("no:cacheprovider")
+    warnings_index = command.index("-W")
+    assert command[cache_plugin_index + 1 : warnings_index] == expected_plugin_args
+    assert command.count("pytest_asyncio.plugin") == expected_plugin_args.count("pytest_asyncio.plugin")
+    assert command.count("pytest_timeout") == expected_plugin_args.count("pytest_timeout")
+    child_env = child_options["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[child_marker] == "1"
+
+
+def test_launcher_status_poll_keeps_finished_worker_children_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Repeated real launcher health ticks must not retain historical QThreads."""
+
+    # The global QApplication can contain deferred widget deletions from earlier
+    # GUI guards. Flushing DeferredDelete below must still prove this window and
+    # its workers settle, but doing so in that shared application can destroy an
+    # unrelated stale QGraphicsScene and segfault before pytest emits a receipt.
+    # Keep the real Qt lifecycle boundary and -W error, isolated in a child where
+    # any QThread/Qt crash remains a hard non-zero failure.
+    child_marker = "CRYODAQ_LAUNCHER_STATUS_RETENTION_PROBE"
+    if os.environ.get(child_marker) != "1":
+        env = os.environ.copy()
+        env[child_marker] = "1"
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        repo_root = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(repo_root / "src")
+        # Ordinary pytest runs load these entry points automatically. Protected
+        # CI disables autoload and names the same plugins explicitly; mirror the
+        # active contract so neither path registers a plugin twice or omits it.
+        plugin_args = _launcher_status_probe_plugin_args(env)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                *plugin_args,
+                "-W",
+                "error",
+                "--basetemp",
+                str(tmp_path / "isolated-launcher-status-retention"),
+                f"{Path(__file__).resolve()}::test_launcher_status_poll_keeps_finished_worker_children_bounded",
+                "-q",
+                "--timeout=120",
+                "--timeout-method=thread",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"isolated launcher status retention probe failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        return
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    from cryodaq.launcher import LauncherWindow
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        zmq_client,
+        "send_command",
+        lambda command, *, cancellation_requested=None: _healthy_launcher_status_reply(command),
+    )
+    window = _launcher_status_window()
+    observed_workers: list[weakref.ReferenceType[zmq_client.ZmqCommandWorker]] = []
+
+    try:
+        for tick in range(8):
+            LauncherWindow._check_engine_health(window)
+            current_workers = (window._safety_worker, window._annunciation_worker)
+            assert all(worker is not None for worker in current_workers)
+            assert all(worker.wait(2_000) for worker in current_workers if worker is not None)
+
+            deadline = time.monotonic() + 1.0
+            while zmq_client.registered_gui_command_workers() and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.001)
+            assert zmq_client.registered_gui_command_workers() == ()
+
+            observed_workers.extend(weakref.ref(worker) for worker in current_workers if worker is not None)
+            del current_workers
+            app.processEvents()
+            gc.collect()
+
+            children = window.findChildren(zmq_client.ZmqCommandWorker)
+            assert len(children) <= 2, f"launcher retained {len(children)} status workers after tick {tick + 1}"
+            assert sum(reference() is not None for reference in observed_workers) <= 2
+    finally:
+        window._safety_worker = None
+        window._annunciation_worker = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
