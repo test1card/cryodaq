@@ -82,13 +82,68 @@ def test_launcher_imports_signal_module() -> None:
     assert module.signal is stdlib_signal
 
 
-def test_main_registers_sigint_and_sigterm_handlers() -> None:
+def test_main_registers_sigint_sigterm_and_sigbreak_handlers() -> None:
     import cryodaq.launcher as module
 
     source = inspect.getsource(module.main)
     assert "signal.signal" in source
     assert "SIGINT" in source
     assert "SIGTERM" in source
+    assert "SIGBREAK" in source
+
+
+def test_main_registers_sigbreak_to_the_shutdown_handler_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import cryodaq.launcher as module
+
+    app = MagicMock()
+    app.exec.return_value = 0
+    window = SimpleNamespace(_do_shutdown=MagicMock())
+    registrations: dict[int, object] = {}
+
+    def register(signum: int, handler: object) -> None:
+        registrations[signum] = handler
+
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.signal, "SIGBREAK", 21, raising=False)
+    with (
+        patch("sys.argv", ["cryodaq", "--tray", "--mock"]),
+        patch("cryodaq.logging_setup.setup_logging"),
+        patch("cryodaq.logging_setup.resolve_log_level", return_value="INFO"),
+        patch("cryodaq.launcher._consume_soak_bridge_handshake", return_value=None),
+        patch("cryodaq.launcher._consume_soak_artifact_capability", return_value=None),
+        patch("cryodaq.launcher.QApplication", return_value=app),
+        patch("cryodaq.gui.app._load_bundled_fonts"),
+        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
+        patch("cryodaq.launcher.try_acquire_lock", return_value=73),
+        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
+        patch("cryodaq.launcher.LauncherWindow", return_value=window),
+        patch("cryodaq.launcher.signal.signal", side_effect=register),
+        patch("cryodaq.launcher.release_lock_exact"),
+    ):
+        with pytest.raises(SystemExit) as exited:
+            module.main()
+
+        assert exited.value.code == 0
+        assert module.signal.SIGINT in registrations
+        assert module.signal.SIGBREAK in registrations
+        assert module.signal.SIGTERM not in registrations
+        assert registrations[module.signal.SIGBREAK] is registrations[module.signal.SIGINT]
+
+        callbacks: list[object] = []
+        with (
+            caplog.at_level("INFO", logger=module.logger.name),
+            patch(
+                "cryodaq.launcher.QTimer.singleShot",
+                side_effect=lambda _delay, callback: callbacks.append(callback),
+            ),
+        ):
+            registrations[module.signal.SIGBREAK](module.signal.SIGBREAK, None)  # type: ignore[operator]
+
+    assert callbacks == [window._do_shutdown]
+    assert "Получен SIGBREAK" in caplog.text
 
 
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:

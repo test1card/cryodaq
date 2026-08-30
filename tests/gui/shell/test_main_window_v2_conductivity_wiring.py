@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
+
+from PySide6.QtCore import QSettings
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -122,9 +125,36 @@ def test_tick_sets_overlay_connected_false_when_stale():
 # ----------------------------------------------------------------------
 
 
+@contextmanager
+def _concise_display():
+    """Force concise display for the duration, then restore what was there.
+
+    These guards assert the two-decimal rendering.  Without this they depend on
+    whatever `display/precision_mode` happens to hold in the developer's own
+    QSettings: with precision mode enabled the panel renders full values and the
+    guard fails though the wiring is correct.  Codex raised exactly this.
+    """
+
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    try:
+        settings.setValue(key, False)
+        settings.sync()
+        yield
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
 def test_temperature_reading_reaches_overlay():
     _app()
     w = MainWindowV2()
+    stack = _concise_display()
+    stack.__enter__()
     try:
         w._ensure_overlay("conductivity")
         from PySide6.QtCore import QCoreApplication
@@ -144,13 +174,17 @@ def test_temperature_reading_reaches_overlay():
         QCoreApplication.processEvents()
 
         # Dispatch both readings through the shell.
-        _dispatch_described(w, _temp_reading("Т1", 77.3), ChannelQuantity.TEMPERATURE)
-        _dispatch_described(w, _temp_reading("Т2", 4.2), ChannelQuantity.TEMPERATURE)
+        # PRECISION-SENSITIVE ON PURPOSE.  77.3 and 4.2 have fewer than two decimals,
+        # so an implementation that stored round(value, 2) would satisfy every
+        # assertion below and this guard would prove nothing about the contract it
+        # names.  These values differ from their own two-decimal rendering.
+        _dispatch_described(w, _temp_reading("Т1", 77.3456), ChannelQuantity.TEMPERATURE)
+        _dispatch_described(w, _temp_reading("Т2", 4.2071), ChannelQuantity.TEMPERATURE)
         QCoreApplication.processEvents()
 
         # Assert stored values (feeds table on next _refresh tick).
-        assert panel._temps.get("Т1") == 77.3
-        assert panel._temps.get("Т2") == 4.2
+        assert panel._temps.get("Т1") == 77.3456
+        assert panel._temps.get("Т2") == 4.2071
 
         # Call _refresh() to drive _update_table and verify rendered cells.
         panel._refresh()
@@ -163,15 +197,28 @@ def test_temperature_reading_reaches_overlay():
         t_cold_item = table.item(0, 2)
         assert t_hot_item is not None, "t_hot cell (col 1) is None after _refresh()"
         assert t_cold_item is not None, "t_cold cell (col 2) is None after _refresh()"
-        assert t_hot_item.text() == f"{77.3:.4f}", f"t_hot cell text wrong: {t_hot_item.text()!r}"
-        assert t_cold_item.text() == f"{4.2:.4f}", f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        # DISPLAY ROUNDS, STORAGE DOES NOT.  The owner ruled 2026-08-29 that the
+        # screen carries two decimals with a precision mode for full values, so the
+        # cells no longer render `.4f`.  The stored values asserted above are still
+        # the exact readings - that is the half that must never round, and it is
+        # checked before this block rather than instead of it.
+        assert t_hot_item.text() == "77.35", f"t_hot cell text wrong: {t_hot_item.text()!r}"
+        assert t_cold_item.text() == "4.21", f"t_cold cell text wrong: {t_cold_item.text()!r}"
+        # and the underlying values did not move when the rendering did.  These
+        # differ from the rendered text, so rounding before storage fails here.
+        assert panel._temps.get("Т1") == 77.3456
+        assert panel._temps.get("Т2") == 4.2071
     finally:
+        stack.__exit__(None, None, None)
+
         _stop_timers(w)
 
 
 def test_power_reading_reaches_overlay():
     _app()
     w = MainWindowV2()
+    stack = _concise_display()
+    stack.__enter__()
     try:
         w._ensure_overlay("conductivity")
         _dispatch_described(w, _power_reading(0.037), ChannelQuantity.POWER, source=True)
@@ -179,10 +226,20 @@ def test_power_reading_reaches_overlay():
 
         QCoreApplication.processEvents()
         # Assert stored value AND that it renders into the power label.
+        #
+        # DISPLAY ROUNDS, STORAGE DOES NOT.  The owner ruled 2026-08-29 that the
+        # screen carries two decimals, so the label shows "0.04" where it used to
+        # show "0.037".  The stored value is asserted to be the EXACT reading on the
+        # line above - rounding on the way to memory or disk would be his own "data
+        # lost" criterion, and that is what this guard now pins on both sides.
         assert w._conductivity_panel._power == 0.037
         w._conductivity_panel._update_power_label()
-        assert "0.037" in w._conductivity_panel._power_label.text()
+        rendered = w._conductivity_panel._power_label.text()
+        assert "0.04" in rendered, f"power label did not render the rounded value: {rendered!r}"
+        assert w._conductivity_panel._power == 0.037, "rendering must not mutate the stored value"
     finally:
+        stack.__exit__(None, None, None)
+
         _stop_timers(w)
 
 

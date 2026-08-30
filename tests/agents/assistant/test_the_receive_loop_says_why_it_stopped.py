@@ -1,0 +1,1120 @@
+"""The loop that actually loses authority must say which class of failure took it.
+
+WHY THIS MODULE EXISTS, SEPARATELY FROM ITS SIBLING. Naming every construction site was
+not enough. In a real run the source loses authority inside the receive loop, which
+catches whatever the frame handler raised and DISCARDS it, so the reason recorded was
+always the generic one and `wait()` reported only that the source was already invalid.
+The whole fault class -- a sequence gap, a malformed frame, a counter change, a callback
+error -- stayed indistinguishable.
+
+The reason is a CLOSED CATEGORY, never the exception text. Frame content carries values,
+identifiers and addresses, and this reason reaches both a log line and a durable health
+record.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+
+import msgpack
+import pytest
+import zmq
+
+from cryodaq.agents.assistant import periodic_runtime
+
+_SOURCE = periodic_runtime.SequencedPeriodicLiveSources
+
+
+def _fresh() -> object:
+    """A real source object with no transport, built only far enough to lose authority.
+
+    Constructed without `__init__` on purpose: the constructor allocates a ZeroMQ
+    context, and this test is about what the loop RECORDS, not about a socket.
+    """
+
+    source = object.__new__(_SOURCE)
+    source._running = True
+    source._stopping = False
+    source._invalid = False
+    source._invalidation_reason = "the live generation was invalidated"
+    source._provisional = []
+    source._provisional_bytes = 0
+    source._receive_task = None
+    source._monitor_task = None
+    source._ready_marker = None
+    source._failure = None
+    source._connected = None
+    source._socket = None
+    return source
+
+
+def test_the_category_names_the_class_not_the_text() -> None:
+    """A malformed frame's own message must not become the reason."""
+
+    # The channel identifiers in this laboratory are Cyrillic. A redactor exercised only
+    # with ASCII passes while leaking the names actually in use.
+    for identifier in ("T12", "Т12"):
+        reason = periodic_runtime._invalidation_category(ValueError(f"channel {identifier} at 10.0.0.7 said 4.21"))
+
+        assert "out of sequence" in reason or "malformed" in reason
+        assert "10.0.0.7" not in reason and identifier not in reason and "4.21" not in reason
+
+
+def test_every_mapped_class_has_its_own_sentence() -> None:
+    """Four classes, four sentences -- a shared sentence is the defect returning."""
+
+    said = {
+        periodic_runtime._invalidation_category(error)
+        for error in (ValueError("x"), TypeError("x"), KeyError("x"), OSError("x"))
+    }
+    assert len(said) == 4, said
+
+
+def test_an_unmapped_class_still_names_itself() -> None:
+    class _Odd(RuntimeError):
+        pass
+
+    assert "_Odd" in periodic_runtime._invalidation_category(_Odd("x"))
+
+
+def test_no_error_is_not_reported_as_an_error() -> None:
+    assert periodic_runtime._invalidation_category(None) == "the live generation was invalidated"
+
+
+def test_the_receive_loop_records_the_class_it_caught(caplog: pytest.LogCaptureFixture) -> None:
+    """Driven through `_receive_loop`, which is where a real run loses authority."""
+
+    source = _fresh()
+
+    periodic_runtime._last_discontinuity_log.clear()
+    with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+        # No socket, so the loop raises RuntimeError("subscriber unavailable") -- an
+        # unmapped class, which must still name itself rather than fall back.
+        asyncio.run(_SOURCE._receive_loop(source))
+
+    assert source._invalid is True
+    assert "the receive loop stopped" in source._invalidation_reason
+    assert "RuntimeError" in source._invalidation_reason
+    assert any("the receive loop stopped" in record.getMessage() for record in caplog.records)
+
+
+def test_wait_reports_the_reason_rather_than_the_state() -> None:
+    """`wait()` said only that the source was invalid, which the caller already knew."""
+
+    source = _fresh()
+    source._invalid = True
+    source._invalidation_reason = "the receive loop stopped: the subscriber transport failed"
+    failure: asyncio.Future[None]
+
+    async def _drive() -> None:
+        nonlocal failure
+        failure = asyncio.get_running_loop().create_future()
+        failure.set_result(None)
+        source._failure = failure
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await _SOURCE.wait(source)
+        assert "the subscriber transport failed" in str(raised.value)
+
+    asyncio.run(_drive())
+
+
+def test_the_rejection_site_chooses_the_category_not_the_class() -> None:
+    """`ValueError` covered six conditions with one sentence.
+
+    A malformed payload, a sequence gap, a changed publisher counter, a provisional
+    overflow, an orphan barrier and a synchronous-callback violation implicate different
+    components and need different remedies. The rejection site is the only place that
+    knows which one it was.
+    """
+
+    rejected = periodic_runtime._FrameRejected("the reading sequence has a gap", "stream discontinuity")
+
+    assert isinstance(rejected, ValueError), "existing handlers select on ValueError"
+    assert periodic_runtime._invalidation_category(rejected) == "the reading sequence has a gap"
+    # The detail stays available to a local handler and never becomes the category.
+    assert str(rejected) == "stream discontinuity"
+
+
+def test_the_receive_path_conditions_are_distinguishable() -> None:
+    """Three conditions the week-long run keeps hitting must read differently."""
+
+    said = {
+        periodic_runtime._invalidation_category(periodic_runtime._FrameRejected(category, "detail"))
+        for category in (
+            "a reading frame did not parse",
+            "the reading sequence has a gap",
+            "the publisher's drop or failure counters changed",
+        )
+    }
+    assert len(said) == 3, said
+
+
+def test_no_two_rejection_sites_share_a_category_by_accident() -> None:
+    """MEASURED, not assumed: one bucket covered eleven different checks.
+
+    On Ubuntu 22.04 the first run at this branch's head reported
+    `the receive loop stopped: a frame was malformed` over and over -- a sentence shared
+    by the transport envelope, the reading frame, the reading shape, the reading value,
+    the raw value, the metadata, the event shape, the event payload, the barrier marker
+    and the multipart frame. Ten checks, one diagnosis, and no way to tell which fired.
+
+    So this reads the categories out of the module and requires that a category is either
+    used once, or used by sites that genuinely mean the same thing -- which is a decision
+    a person makes and records HERE, not a coincidence of drafting.
+    """
+
+    import collections
+    import re
+    from pathlib import Path
+
+    source = Path(periodic_runtime.__file__).read_text(encoding="utf-8")
+    categories = re.findall(r"_FrameRejected\(\s*['\"](.+?)['\"]\s*,", source)
+    assert len(categories) >= 20, f"only {len(categories)} rejection sites found"
+
+    # Categories deliberately shared, each with the reason it is shared.
+    SHARED = {
+        "the frame carried an invalid transport envelope": 3,  # three fields of one envelope
+        "the provisional buffer overflowed": 2,  # by frame count and by byte count
+    }
+    counted = collections.Counter(categories)
+    unexpected = {category: count for category, count in counted.items() if count > 1 and SHARED.get(category) != count}
+    assert not unexpected, (
+        "these categories are used by more sites than were deliberately shared, so a "
+        f"diagnosis cannot say which check fired: {unexpected}"
+    )
+
+
+def test_a_rejected_frame_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
+    """Driven through `_receive_loop`, with the frame handler refusing a real frame."""
+
+    source = _fresh()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [b"topic", b"payload"]
+
+    async def _refuse(_parts):
+        raise periodic_runtime._FrameRejected(
+            "the publisher's drop or failure counters changed", "publisher counters changed"
+        )
+
+    source._socket = _Socket()
+    source._handle_frame = _refuse
+
+    periodic_runtime._last_discontinuity_log.clear()
+    with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+        asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "counters changed" in source._invalidation_reason
+    assert "publisher counters changed" != source._invalidation_reason, (
+        "the frame's own detail must not become the reason"
+    )
+
+
+def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
+    """Driven through the REAL `ready()` -> `_invalidate` -> `wait()` path.
+
+    `ready()` works out a reason and raises it. The outer handler recorded the CLASS name
+    instead, so the immediate caller saw the detail while the watcher released by
+    `_invalidate` reported the generic replacement to whoever was waiting.
+
+    An earlier version of this test called `_invalidate` with the reason itself, which
+    proved only that a string survives a setter -- reverting the fix left it green.
+    """
+
+    source = _fresh()
+    source._ready_active = False
+    source._ready_task = None
+    source._retired_ready_nonces = set()
+    source._connected = None  # `ready()` refuses here, with a reason it chose
+
+    async def _drive() -> None:
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity):
+            await _SOURCE.ready(source)
+
+        assert source._invalid is True
+        assert "connection event" in source._invalidation_reason, (
+            f"the barrier's own reason was replaced: {source._invalidation_reason!r}"
+        )
+
+        # And the watcher, which is the LATER observer, gets that same reason.
+        failure = asyncio.get_running_loop().create_future()
+        failure.set_result(None)
+        source._failure = failure
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await _SOURCE.wait(source)
+        assert "connection event" in str(raised.value)
+
+    asyncio.run(_drive())
+
+
+def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The real query parser must close an arbitrary wire value before recording it."""
+
+    untrusted = "operator-token-and-address-" + "x" * 4096
+    raw = json.dumps(
+        {
+            "ok": False,
+            "proto": periodic_runtime.PROTOCOL_VERSION,
+            "schema": periodic_runtime.PERIODIC_BARRIER_SCHEMA,
+            "error_code": untrusted,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    assert len(raw) < periodic_runtime.PERIODIC_QUERY_MAX_BYTES
+
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.request: bytes | None = None
+            self.closed = False
+
+        def setsockopt(self, _option: int, _value: object) -> None:
+            pass
+
+        def connect(self, address: str) -> None:
+            assert address == periodic_runtime.DEFAULT_CMD_ADDR
+
+        async def send(self, request: bytes) -> None:
+            self.request = request
+
+        async def recv(self) -> bytes:
+            return raw
+
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+            self.closed = True
+
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.socket_instance = _FakeSocket()
+            self.terminated = False
+
+        def socket(self, socket_type: int) -> _FakeSocket:
+            assert socket_type == zmq.REQ
+            return self.socket_instance
+
+        def term(self) -> None:
+            self.terminated = True
+
+    contexts: list[_FakeContext] = []
+
+    def factory() -> _FakeContext:
+        context = _FakeContext()
+        contexts.append(context)
+        return context
+
+    async def _drive() -> None:
+        query = periodic_runtime.PeriodicEngineQuery(_context_factory=factory)  # type: ignore[arg-type]
+        normalized = await query.barrier("a" * 32)
+        assert normalized == periodic_runtime.BarrierQueryResult(False, None, None, "response_invalid")
+        first = contexts[0]
+        assert json.loads(first.socket_instance.request or b"") == {
+            "cmd": "periodic_subscription_barrier",
+            "nonce": "a" * 32,
+            "schema": periodic_runtime.PERIODIC_QUERY_SCHEMA,
+        }
+        assert first.socket_instance.closed
+        assert first.terminated
+
+        source = _SOURCE(query)
+        source._running = True
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        try:
+            periodic_runtime._last_discontinuity_log.clear()
+            with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+                with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+                    await source.ready()
+
+            expected = "the engine barrier response was invalid"
+            assert raised.value.reason == expected
+            assert source._invalidation_reason == expected
+            assert set(periodic_runtime._last_discontinuity_log) == {expected}
+            logged = "\n".join(record.getMessage() for record in caplog.records)
+            assert untrusted not in logged
+            second = contexts[1]
+            request = json.loads(second.socket_instance.request or b"")
+            assert request["cmd"] == "periodic_subscription_barrier"
+            assert request["schema"] == periodic_runtime.PERIODIC_QUERY_SCHEMA
+            assert isinstance(request["nonce"], str) and len(request["nonce"]) == 32
+            assert second.socket_instance.closed
+            assert second.terminated
+        finally:
+            await source.stop()
+            await query.close()
+
+    asyncio.run(_drive())
+
+
+def test_a_held_frame_callback_failure_keeps_its_category_through_ready(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The real startup state machine must preserve a held-frame rejection category."""
+
+    raw_detail = "operator-token-and-address-from-callback"
+    source: periodic_runtime.SequencedPeriodicLiveSources
+
+    class Query:
+        async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+            cut = periodic_runtime.LiveSourceCut(
+                "0" * 32,
+                source._generation,
+                1,
+                10.5,
+                0,
+                0,
+                0,
+                "sha256:" + "0" * 64,
+            )
+            source._provisional_cut = cut
+            source._provisional_last = 2
+            source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+            assert source._ready_marker is not None
+            source._ready_marker.set_result(cut)
+            return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+    source = _SOURCE(Query())
+    source._running = True
+
+    def fail(_reading: object) -> None:
+        raise OSError(raw_detail)
+
+    source._on_reading = fail
+    source._on_event = lambda _event: None
+
+    async def _drive() -> None:
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+        periodic_runtime._last_discontinuity_log.clear()
+        with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+            with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+                await source.ready()
+
+        expected = "a periodic live callback failed"
+        assert raised.value.reason == expected
+        assert source._invalidation_reason == expected
+        assert set(periodic_runtime._last_discontinuity_log) == {expected}
+        exposed = "\n".join(
+            [str(raised.value), source._invalidation_reason]
+            + list(periodic_runtime._last_discontinuity_log)
+            + [record.getMessage() for record in caplog.records]
+        )
+        assert raw_detail not in exposed
+        assert "_FrameRejected" not in exposed
+        assert "barrier failed" not in exposed
+        await source.stop()
+
+    asyncio.run(_drive())
+
+
+def test_a_held_frame_callback_self_cancellation_is_settled_before_ready_returns() -> None:
+    """A held callback cannot cancel ready after its failure is recorded."""
+
+    source: periodic_runtime.SequencedPeriodicLiveSources
+
+    class Query:
+        async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+            cut = periodic_runtime.LiveSourceCut(
+                "0" * 32,
+                source._generation,
+                1,
+                10.5,
+                0,
+                0,
+                0,
+                "sha256:" + "0" * 64,
+            )
+            source._provisional_cut = cut
+            source._provisional_last = 2
+            source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+            assert source._ready_marker is not None
+            source._ready_marker.set_result(cut)
+            return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+    source = _SOURCE(Query())
+    source._running = True
+
+    def cancel_ready(_reading: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("HELD CALLBACK CANCELLATION SECRET")
+
+    source._on_reading = cancel_ready
+    source._on_event = lambda _event: None
+
+    async def _drive() -> None:
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await source.ready()
+
+        assert raised.value.reason == "a periodic live callback failed"
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 0
+        await source.stop()
+
+    asyncio.run(_drive())
+
+
+@pytest.mark.parametrize("route", ["active", "held"])
+def test_scheduled_callback_cancellation_delivery_is_consumed_in_default_ci(
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """Force Python 3.12 cancellation delivery through both production routes."""
+
+    settlement_attempts = 0
+    original_sleep = asyncio.sleep
+
+    def cancel_callback(_value: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("CALLBACK CANCELLATION SECRET")
+
+    async def deliver_scheduled_cancellation(delay: float) -> None:
+        nonlocal settlement_attempts
+        assert delay == 0
+        settlement_attempts += 1
+        await original_sleep(delay)
+        raise asyncio.CancelledError("SIMULATED PYTHON 3.12 CANCELLATION DELIVERY")
+
+    async def _drive_active() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = cancel_callback
+        source._socket = _Socket()
+        await _SOURCE._receive_loop(source)
+
+        assert source._invalid
+        assert source._invalidation_reason == "the receive loop stopped: a periodic live callback failed"
+
+    async def _drive_held() -> None:
+        source: periodic_runtime.SequencedPeriodicLiveSources
+
+        class Query:
+            async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+                cut = periodic_runtime.LiveSourceCut(
+                    "0" * 32,
+                    source._generation,
+                    1,
+                    10.5,
+                    0,
+                    0,
+                    0,
+                    "sha256:" + "0" * 64,
+                )
+                source._provisional_cut = cut
+                source._provisional_last = 2
+                source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+                assert source._ready_marker is not None
+                source._ready_marker.set_result(cut)
+                return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+        source = _SOURCE(Query())
+        source._running = True
+        source._on_reading = cancel_callback
+        source._on_event = lambda _event: None
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await source.ready()
+
+        assert raised.value.reason == "a periodic live callback failed"
+        await source.stop()
+
+    async def _drive() -> None:
+        with monkeypatch.context() as patch:
+            patch.setattr(periodic_runtime.asyncio, "sleep", deliver_scheduled_cancellation)
+            if route == "active":
+                await _drive_active()
+            else:
+                await _drive_held()
+
+        assert settlement_attempts == 1
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 0
+
+    asyncio.run(_drive())
+
+
+def test_owner_cancellation_during_callback_settlement_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner cancellation that arrives during settlement remains authoritative."""
+
+    original_sleep = asyncio.sleep
+    owner_scheduled = False
+
+    def cancel_callback(_event: object) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("CALLBACK CANCELLATION SECRET")
+
+    async def owner_cancels_during_settlement(delay: float) -> None:
+        nonlocal owner_scheduled
+        assert delay == 0
+        task = asyncio.current_task()
+        assert task is not None
+        asyncio.get_running_loop().call_soon(task.cancel, "OWNER CANCELLATION")
+        owner_scheduled = True
+        await original_sleep(delay)
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        class _Socket:
+            async def recv_multipart(self):
+                return _valid_callback_event_parts()
+
+        source._on_event = cancel_callback
+        source._socket = _Socket()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(periodic_runtime.asyncio, "sleep", owner_cancels_during_settlement)
+            with pytest.raises(asyncio.CancelledError, match="OWNER CANCELLATION"):
+                await _SOURCE._receive_loop(source)
+
+        assert owner_scheduled
+        task = asyncio.current_task()
+        assert task is not None
+        assert task.cancelling() == 1
+        assert not source._invalid
+        task.uncancel()
+
+    asyncio.run(_drive())
+
+
+def test_an_invalid_transport_sequence_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
+    """A real reading frame must recategorize its helper validator failure."""
+
+    source = _fresh()
+    source._state_lock = asyncio.Lock()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.DEFAULT_TOPIC,
+                msgpack.packb(
+                    {
+                        "ts": 1.0,
+                        "iid": "instrument",
+                        "ch": "channel",
+                        "v": 1.0,
+                        "u": "K",
+                        "st": "ok",
+                        "raw": None,
+                        "meta": {},
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": "not-an-integer",
+                            "persistence_authoritative": False,
+                        },
+                    },
+                    use_bin_type=True,
+                ),
+            ]
+
+    source._socket = _Socket()
+
+    periodic_runtime._last_discontinuity_log.clear()
+    with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+        asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "transport sequence was invalid" in source._invalidation_reason
+
+
+@pytest.mark.parametrize(
+    ("topic", "payload", "expected"),
+    [
+        (
+            periodic_runtime.DEFAULT_TOPIC,
+            msgpack.packb(
+                {
+                    "ts": "not-a-timestamp",
+                    "iid": "instrument",
+                    "ch": "channel",
+                    "v": 1.0,
+                    "u": "K",
+                    "st": "ok",
+                    "raw": None,
+                    "meta": {},
+                    "transport": {
+                        "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                        "session_id": "0" * 32,
+                        "sequence": 1,
+                        "persistence_authoritative": False,
+                    },
+                },
+                use_bin_type=True,
+            ),
+            "a reading frame did not validate",
+        ),
+        (periodic_runtime.EVENTS_TOPIC, b"not-json", "an event frame did not validate"),
+    ],
+)
+def test_parser_failures_reach_the_receive_loop_with_their_own_categories(
+    topic: bytes, payload: bytes, expected: str
+) -> None:
+    """Drive helpers and parsers through the loop instead of classifying their exceptions directly."""
+
+    source = _fresh()
+    source._state_lock = asyncio.Lock()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [topic, payload]
+
+    source._socket = _Socket()
+
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert expected in source._invalidation_reason
+
+
+def test_an_event_sequence_gap_names_the_global_stream_in_the_receive_loop() -> None:
+    """Events and readings share the same transport sequence, so the diagnosis must not blame readings."""
+
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+    source._on_event = lambda _event: None
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.EVENTS_TOPIC,
+                json.dumps(
+                    {
+                        "event_type": "notice",
+                        "ts": 1.0,
+                        "payload": {},
+                        "experiment_id": None,
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": 3,
+                            "persistence_authoritative": False,
+                        },
+                    }
+                ).encode(),
+            ]
+
+    source._socket = _Socket()
+
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "global stream sequence has a gap" in source._invalidation_reason
+    assert "reading sequence" not in source._invalidation_reason
+
+
+@pytest.mark.parametrize("callback_error", [OSError("callback socket error"), ValueError("callback value error")])
+def test_a_callback_failure_is_not_mislabeled_as_a_frame_or_transport_failure(
+    callback_error: Exception,
+) -> None:
+    """A valid event through the receive loop must identify the subscriber callback."""
+
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+
+    def callback(_event: object) -> None:
+        raise callback_error
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.EVENTS_TOPIC,
+                json.dumps(
+                    {
+                        "event_type": "notice",
+                        "ts": 1.0,
+                        "payload": {},
+                        "experiment_id": None,
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": 2,
+                            "persistence_authoritative": False,
+                        },
+                    }
+                ).encode(),
+            ]
+
+    source._on_event = callback
+    source._socket = _Socket()
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "a periodic live callback failed" in source._invalidation_reason
+    assert "subscriber transport failed" not in source._invalidation_reason
+
+
+def test_callback_cancelled_error_invalidates_source_and_releases_wait() -> None:
+    """Callback-originated cancellation is a callback failure, not task ownership."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        def callback(_event: object) -> None:
+            raise asyncio.CancelledError("CALLBACK SECRET MUST NOT ESCAPE")
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        waiter = asyncio.create_task(_SOURCE.wait(source))
+
+        await receive
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await asyncio.wait_for(waiter, timeout=1)
+
+        assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+        assert source._invalid
+        assert "CALLBACK SECRET" not in str(raised.value)
+
+    asyncio.run(_drive())
+
+
+def test_callback_self_cancellation_invalidates_source_and_releases_wait() -> None:
+    """A callback cannot cancel its owner task and strand the source waiter."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        def callback(_event: object) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel("CALLBACK CANCELLATION SECRET")
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        waiter = asyncio.create_task(_SOURCE.wait(source))
+
+        await receive
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await asyncio.wait_for(waiter, timeout=1)
+
+        assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+        assert "CALLBACK CANCELLATION SECRET" not in str(raised.value)
+        assert source._invalid
+        assert receive.cancelling() == 0
+        assert not receive.cancelled()
+
+    asyncio.run(_drive())
+
+
+def test_cancellation_pending_before_callback_entry_is_not_consumed() -> None:
+    """A callback failure must not erase cancellation already owned by its task."""
+
+    async def _drive() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("OWNER CANCELLATION")
+        before = task.cancelling()
+        callback_called = False
+
+        def callback(_value: object) -> None:
+            nonlocal callback_called
+            callback_called = True
+            raise asyncio.CancelledError("callback")
+
+        with pytest.raises(asyncio.CancelledError):
+            _SOURCE._call(callback, object())
+
+        assert not callback_called
+        assert task.cancelling() == before
+
+    with pytest.raises(asyncio.CancelledError, match="OWNER CANCELLATION"):
+        asyncio.run(_drive())
+
+
+def _valid_callback_event_parts() -> list[bytes]:
+    return [
+        periodic_runtime.EVENTS_TOPIC,
+        json.dumps(
+            {
+                "event_type": "notice",
+                "ts": 1.0,
+                "payload": {},
+                "experiment_id": None,
+                "transport": {
+                    "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                    "session_id": "0" * 32,
+                    "sequence": 2,
+                    "persistence_authoritative": False,
+                },
+            }
+        ).encode(),
+    ]
+
+
+async def _drive_returned_awaitable_callback(callback: object) -> tuple[object, asyncio.Task[None]]:
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+    source._failure = asyncio.get_running_loop().create_future()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return _valid_callback_event_parts()
+
+    source._on_event = callback
+    source._socket = _Socket()
+    receive = asyncio.create_task(_SOURCE._receive_loop(source))
+    source._receive_task = receive
+    waiter = asyncio.create_task(_SOURCE.wait(source))
+
+    await receive
+    with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+        await asyncio.wait_for(waiter, timeout=1)
+
+    assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+    assert source._invalid
+    assert not receive.cancelled()
+    assert receive.cancelling() == 0
+    return source, receive
+
+
+def test_returned_awaitable_close_cancelled_error_invalidates_and_releases_wait() -> None:
+    """CancelledError from awaitable cleanup is callback failure, not owner cancellation."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+                raise asyncio.CancelledError("CLOSE SECRET MUST NOT ESCAPE")
+
+        await _drive_returned_awaitable_callback(lambda _value: _ReturnedAwaitable())
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_returned_awaitable_close_self_cancellation_invalidates_and_releases_wait() -> None:
+    """A close method cannot cancel the receive owner and strand its failure waiter."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel("CLOSE CANCELLATION SECRET")
+
+        await _drive_returned_awaitable_callback(lambda _value: _ReturnedAwaitable())
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_callback_self_cancellation_still_closes_its_returned_awaitable() -> None:
+    """Awaitable cleanup precedes rejection even when the callback also self-cancels."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        def callback(_value: object) -> _ReturnedAwaitable:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel("CALLBACK CANCELLATION SECRET")
+            return _ReturnedAwaitable()
+
+        await _drive_returned_awaitable_callback(callback)
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_receive_loop_preserves_cancellation_pending_before_callback_entry() -> None:
+    """The real frame path must leave pre-entry owner cancellation untouched."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._failure = asyncio.get_running_loop().create_future()
+        callback_called = False
+
+        class _CancelOnEntryLock:
+            async def __aenter__(self):
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel("OWNER CANCELLATION")
+                return self
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+        class _Socket:
+            async def recv_multipart(self):
+                return _valid_callback_event_parts()
+
+        def callback(_value: object) -> None:
+            nonlocal callback_called
+            callback_called = True
+
+        source._state_lock = _CancelOnEntryLock()
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+
+        with pytest.raises(asyncio.CancelledError):
+            await receive
+
+        assert not callback_called
+        assert receive.cancelled()
+        assert receive.cancelling() == 1
+        assert not source._invalid
+        assert not source._failure.done()
+
+    asyncio.run(_drive())
+
+
+def test_owner_receive_task_cancellation_still_propagates_without_invalidation() -> None:
+    """Task-owner cancellation must not be recategorized as a callback failure."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._failure = asyncio.get_running_loop().create_future()
+        entered = asyncio.Event()
+
+        class _Socket:
+            async def recv_multipart(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        await entered.wait()
+        receive.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await receive
+
+        assert not source._invalid
+        assert not source._failure.done()
+
+    asyncio.run(_drive())

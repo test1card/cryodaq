@@ -8,7 +8,10 @@ import binascii
 import json
 import logging
 import multiprocessing
+import os
 import re
+import signal
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -428,8 +431,85 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
     return _HandleCloseOutcome(resource_error=resource_error, manager_error=manager_error)
 
 
-def _visa_process_main(connection: Any) -> None:
+# THE CHILD THAT HOLDS THE SOURCE MUST DIE WITH ITS ENGINE.
+#
+# This process owns the native VISA session for the Keithley -- the instrument that drives
+# the heater. `daemon=True` is not enough: multiprocessing terminates a daemonic child from
+# an atexit handler. Ordinary interpreter shutdown, including an unhandled Python exception,
+# runs that handler; abrupt termination such as SIGKILL, os._exit, or a native fatal exit
+# bypasses it and can leave the child alive past its parent.
+#
+# That survivor is not merely untidy. It can still be inside, or about to finish, a write to
+# the source. The launcher restarts a dead engine, the replacement connects and commands OFF
+# on every channel -- and the orphan's write can land AFTER that, leaving the instrument
+# sourcing while the software believes it is off. Two owners of one source is the exact
+# hazard the whole ownership design exists to prevent.
+#
+# On Linux the kernel will do this for us: PR_SET_PDEATHSIG asks for a signal when the
+# parent dies, whatever the cause. It carries one classic race -- the parent can die between
+# the fork and this call, so the signal is requested against a parent that is already gone
+# -- which is why the parent identity is re-read afterwards and a mismatch exits at once.
+#
+# On every other platform there is no equivalent installed yet. The source-owning worker
+# therefore refuses to start while the platform remains an explicitly OPEN gate until a real
+# binding (a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) plus a real
+# parent-death test exist. A failed open is safe; an unbound worker is not.
+_PR_SET_PDEATHSIG = 1
+
+
+def _bind_lifetime_to_parent(expected_parent: int) -> None:
+    """Bind the VISA worker lifetime to its engine or exit before opening VISA.
+
+    The expected parent is CAPTURED BY THE ENGINE before the spawn, never read here. Reading
+    it here looked equivalent and is not: if the engine dies before this child runs its first
+    instruction, and any ancestor is a Linux child subreaper, getppid() returns that
+    surviving ancestor. The child would then bind to the wrong process, the identity check
+    below would agree with itself, and the VISA owner would outlive the engine exactly as
+    before. The soak runner IS such a subreaper, so this is not hypothetical.
+    """
+
+    if type(expected_parent) is not int or expected_parent <= 1:
+        os._exit(0)
+    if os.getppid() != expected_parent:
+        # Reparented before the first instruction: the engine is already gone.
+        os._exit(0)
+    if not sys.platform.startswith("linux"):
+        # Explicitly OPEN gate, not support: without lifetime binding an abruptly dead
+        # engine can orphan this source-owning child. Refuse before VISA can open until a
+        # Windows Job Object or equivalent plus a real parent-death test closes the gate.
+        log.warning(
+            "USBTMC: платформа %s без привязки VISA-процесса к родителю — воркер не стартует (открытый шлюз)",
+            sys.platform,
+        )
+        os._exit(0)
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+    except Exception:
+        # A source-owning child that cannot be bound to its parent must not run at all.
+        # Refusing here costs one failed open, which the transport reports; continuing
+        # would risk the orphan this exists to prevent.
+        os._exit(0)
+    if os.getppid() != expected_parent:
+        # The race: the parent died between the check above and the prctl, so the signal we
+        # just asked for will never arrive. Leave now, by ourselves.
+        os._exit(0)
+
+
+def _visa_process_main(connection: Any, expected_parent: int) -> None:
     """Own native VISA handles behind a bounded, non-pickle protocol."""
+
+    # Before anything else, and before any VISA handle exists.
+    _bind_lifetime_to_parent(expected_parent)
+
+    _visa_worker_loop(connection)
+
+
+def _visa_worker_loop(connection: Any) -> None:
+    """Run the VISA request loop after the child lifetime is bound."""
 
     resource = None
     manager = None
@@ -762,7 +842,9 @@ class USBTMCTransport:
         parent_connection, child_connection = context.Pipe(duplex=True)
         process = context.Process(
             target=_visa_process_main,
-            args=(child_connection,),
+            # Captured HERE, in the engine, before the child exists. See
+            # _bind_lifetime_to_parent for why the child must not read it itself.
+            args=(child_connection, os.getpid()),
             daemon=True,
             name=f"cryodaq-usbtmc-{generation}",
         )

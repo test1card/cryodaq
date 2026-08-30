@@ -6,11 +6,8 @@ lets it run for a bounded window, sends SIGTERM, and asserts:
 
   - the process was still alive right before shutdown was requested
   - it exited within a grace period after SIGTERM (clean shutdown)
-  - its captured log has zero ERROR/CRITICAL lines except a small documented
-    allowlist of known by-design mock-startup events (e.g. the
-    ``detector_warmup`` interlock trip — the mock LS218 driver starts Т12
-    warm, above the 10 K interlock threshold, which trips ``stop_source`` on
-    essentially every run; that is expected mock behavior, not a defect)
+  - its captured log has zero ERROR/CRITICAL lines except exact documented
+    legacy mock-startup records retained for old captured-log compatibility
 
 GitHub-hosted runners cap a job at 6h, so CI runs a short bounded window
 (see .github/workflows/nightly.yml, default ~25 min). The lab-side literal
@@ -38,9 +35,13 @@ from pathlib import Path
 #: regex patterns so a lab operator can extend this via --allow without
 #: touching code (e.g. a site-specific known-benign shutdown warning).
 DEFAULT_ALLOWLIST: tuple[str, ...] = (
-    # Mock LS218 starts Т12 at a warm simulated value; detector_warmup
-    # (Т12 > 10 K) trips stop_source on ~every mock run. By design, not a bug.
-    r"detector_warmup",
+    # Exact legacy records from before detector_warmup became a WARNING-only
+    # observation. Do not broaden these patterns: a current ERROR/CRITICAL
+    # mentioning detector_warmup must fail the soak.
+    r"^.* │ CRITICAL +│ cryodaq\.core\.interlock │ !!! БЛОКИРОВКА СРАБОТАЛА !!! "
+    r"Имя: 'detector_warmup' \| .* Действие: 'stop_source' \| Время: .* \| Всего срабатываний: \d+$",
+    r"^.* │ CRITICAL +│ cryodaq\.core\.interlock │ Действие 'stop_source' для блокировки "
+    r"'detector_warmup' выполнено успешно\.$",
 )
 
 #: Logging levels the structured formatter can emit (``%(levelname)-8s`` uses

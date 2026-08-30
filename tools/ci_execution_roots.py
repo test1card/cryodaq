@@ -65,6 +65,14 @@ EXECUTION_ROOTS = (
             ),
             (
                 "tests/governance/test_red_reproduction.py"
+                "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-mismatch]"
+            ),
+            (
+                "tests/governance/test_red_reproduction.py"
+                "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-node-mismatch]"
+            ),
+            (
+                "tests/governance/test_red_reproduction.py"
                 "::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]"
             ),
             (

@@ -13,9 +13,11 @@ import inspect
 import ipaddress
 import itertools
 import json
+import logging
 import math
 import re
 import secrets
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -88,11 +90,129 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 )
 
 
-class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
-    """Fixed failure raised after the private live generation loses authority."""
+_log = logging.getLogger(__name__)
 
-    def __init__(self) -> None:
-        super().__init__("periodic live stream discontinuity")
+# The topics this source participates in.
+#
+# ZMQ SUBSCRIBE MATCHES BY PREFIX, NOT BY EQUALITY, and that is why admission cannot be
+# a refusal. Subscribing to b"readings" also delivers a future b"readings.detail", and
+# no list this consumer keeps can prevent that -- the publisher owns its own topics.
+# So `_handle_frame` IGNORES AND COUNTS a frame on a topic outside this tuple, and
+# refuses only what is genuinely malformed. A refusal invalidates the whole generation,
+# and a topic somebody else added must never be able to kill this source. Measured on
+# 2026-08-20: an ordinary `operator.snapshot` did exactly that.
+#
+# Equality between this tuple and the SUBSCRIBE list is still required, because a topic
+# subscribed but not admitted is a silent drop, and one admitted but not subscribed is a
+# frame that never arrives.
+_PARTICIPATING_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
+
+# THE READING CONTRACT, SPLIT INTO WHAT MUST BE THERE AND WHAT MAY BE.
+#
+# This used to be one set compared with `!=`, which refuses a reading that carries an
+# extra field just as hard as one that is missing a required field. `zmq_bridge._pack_reading`
+# attaches `desc`, the channel-descriptor envelope, whenever it has one -- so an ordinary
+# reading with a descriptor was refused, and the refusal INVALIDATES THE WHOLE GENERATION.
+# Measured on Ubuntu 22.04 on 2026-08-20, after the topic fix removed the previous
+# dominant cause, `a reading had an unexpected shape` became the most frequent reason the
+# periodic source lost authority.
+#
+# The check stays fail-closed on an unknown key. What changed is that a field the
+# publisher documents as optional is no longer treated as an unknown one.
+_READING_REQUIRED_KEYS: frozenset[str] = frozenset({"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"})
+_READING_OPTIONAL_KEYS: frozenset[str] = frozenset({"desc"})
+
+
+# One line per distinct reason per minute. A run that flaps once a second for a week
+# must leave a diagnosis, not a log nobody can open; and the FIRST occurrence of each
+# reason is always written, because that is the one that says what happened.
+_DISCONTINUITY_LOG_INTERVAL_S = 60.0
+_last_discontinuity_log: dict[str, float] = {}
+
+
+# A CLOSED VOCABULARY, not the exception text. The receive loop catches whatever the
+# frame handler raised, and putting that message into the reason would put frame content
+# -- values, identifiers, addresses -- into a log line and into a durable health record.
+# The category says which CLASS of thing went wrong, which is what a diagnosis needs.
+_INVALIDATION_CATEGORIES: dict[type[BaseException], str] = {
+    ValueError: "a frame was rejected as malformed, out of sequence, or counter-inconsistent",
+    TypeError: "a frame carried a value of the wrong type",
+    KeyError: "a frame was missing a required field",
+    OSError: "the subscriber transport failed",
+}
+
+
+class _FrameRejected(ValueError):
+    """A frame this source refused, carrying the CATEGORY of the refusal.
+
+    WHY THE CATEGORY IS CHOSEN HERE. The receive loop catches whatever the frame handler
+    raised, and a class-only mapping gave one sentence to six different conditions -- a
+    malformed wire payload, a sequence gap, a changed publisher counter, a provisional
+    overflow, an orphan barrier, and a callback that returned an awaitable. Those
+    implicate different components and need different remedies. The rejection site is the
+    only place that knows which one it was, so it says so.
+
+    It stays a `ValueError` so every existing handler keeps working, and the detail
+    message is unchanged -- the category is the addition, and it is the part that reaches
+    the log and the durable record. The detail never does, because a frame's own text
+    carries values, channel names and addresses.
+    """
+
+    def __init__(
+        self,
+        category: str,
+        detail: str,
+        *,
+        pending_callback_cancellation: bool = False,
+    ) -> None:
+        super().__init__(detail)
+        self.category = category
+        self.pending_callback_cancellation = pending_callback_cancellation
+
+
+def _invalidation_category(error: BaseException | None) -> str:
+    """Name the class of failure that took authority, never its text."""
+
+    if error is None:
+        return "the live generation was invalidated"
+    if isinstance(error, _FrameRejected):
+        # Chosen at the rejection site, which is the only place that knew.
+        return error.category
+    for kind, category in _INVALIDATION_CATEGORIES.items():
+        if isinstance(error, kind):
+            return category
+    return f"the receive path failed with {type(error).__name__}"
+
+
+def _say_discontinuity(reason: str) -> None:
+    """Write the reason at most once a minute, per reason."""
+
+    now = time.monotonic()
+    previous = _last_discontinuity_log.get(reason)
+    if previous is not None and now - previous < _DISCONTINUITY_LOG_INTERVAL_S:
+        return
+    _last_discontinuity_log[reason] = now
+    _log.warning("Periodic live source lost authority: because=%s", reason)
+
+
+class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
+    """Fixed failure raised after the private live generation loses authority.
+
+    WHY IT CARRIES A REASON. Sixteen places construct this, and every one of them
+    produced the same sentence. The supervisor turns it into the health code
+    `periodic_engine_unavailable` and stops there, so a run that never allocates a
+    periodic slot -- and therefore never seals a receipt, and therefore refuses the
+    assistant fault -- leaves no evidence of WHICH condition fired. That is the
+    difference between a week-long run that can be diagnosed and one that cannot.
+
+    The reason is recorded on construction rather than at each raise site, so a new
+    site cannot be added silently: the default reads `unstated`, and a test refuses it.
+    """
+
+    def __init__(self, reason: str = "unstated") -> None:
+        super().__init__(f"periodic live stream discontinuity (because={reason})")
+        self.reason = reason
+        _say_discontinuity(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +691,9 @@ class SequencedPeriodicLiveSources:
         self._failure: asyncio.Future[None] | None = None
         self._connected: asyncio.Event | None = None
         self._state_lock = asyncio.Lock()
+        # Frames delivered by prefix matching on a topic this source does not
+        # participate in. Counted rather than refused; see _handle_frame.
+        self._foreign_topic_frames = 0
         self._ready_active = False
         self._ready_nonce: str | None = None
         self._retired_ready_nonces: set[str] = set()
@@ -578,6 +701,9 @@ class SequencedPeriodicLiveSources:
         self._running = False
         self._stopping = False
         self._invalid = False
+        # Set the moment authority is lost, and read by `wait()`. A default that says
+        # nothing would let a reader mistake "no reason recorded" for "no reason".
+        self._invalidation_reason = "the live generation was invalidated"
         self._closed = False
         self._generation = next(_GENERATION_COUNTER)
         self._session_id: str | None = None
@@ -589,10 +715,13 @@ class SequencedPeriodicLiveSources:
         self._provisional: list[_ProvisionalFrame] = []
         self._provisional_bytes = 0
 
-    def _invalidate(self) -> None:
+    def _invalidate(self, reason: str = "the live generation was invalidated") -> None:
+        """Take the generation down and REMEMBER WHY, so a later reader is not guessing."""
+
         if self._invalid or self._stopping:
             return
         self._invalid = True
+        self._invalidation_reason = reason
         self._running = False
         self._provisional.clear()
         self._provisional_bytes = 0
@@ -600,7 +729,7 @@ class SequencedPeriodicLiveSources:
         for task in (self._receive_task, self._monitor_task):
             if task is not None and task is not current and not task.done():
                 task.cancel()
-        discontinuity = PeriodicLiveDiscontinuity()
+        discontinuity = PeriodicLiveDiscontinuity(reason)
         marker = self._ready_marker
         if marker is not None and not marker.done():
             marker.set_exception(discontinuity)
@@ -619,19 +748,23 @@ class SequencedPeriodicLiveSources:
             "sequence",
             "persistence_authoritative",
         }:
-            raise ValueError("invalid transport")
+            raise _FrameRejected("the frame carried an invalid transport envelope", "invalid transport")
         session = _text(value["session_id"], maximum=32, allow_empty=False)
         if value["schema"] != PERIODIC_STREAM_SCHEMA or _TOKEN.fullmatch(session) is None:
-            raise ValueError("invalid transport")
+            raise _FrameRejected("the frame carried an invalid transport envelope", "invalid transport")
         authoritative = value["persistence_authoritative"]
         if type(authoritative) is not bool:
-            raise ValueError("invalid transport")
-        return _Transport(session, _exact_int(value["sequence"], minimum=1), authoritative)
+            raise _FrameRejected("the frame carried an invalid transport envelope", "invalid transport")
+        try:
+            sequence = _exact_int(value["sequence"], minimum=1)
+        except ValueError as exc:
+            raise _FrameRejected("the transport sequence was invalid", "invalid transport sequence") from exc
+        return _Transport(session, sequence, authoritative)
 
     @classmethod
     def _reading(cls, raw: bytes) -> tuple[_Transport, Reading]:
         if not raw or len(raw) > MAX_DATA_MSG_SIZE:
-            raise ValueError("invalid reading frame")
+            raise _FrameRejected("a reading frame did not parse", "invalid reading frame")
         data = msgpack.unpackb(
             raw,
             raw=False,
@@ -642,9 +775,22 @@ class SequencedPeriodicLiveSources:
             max_array_len=1024,
             max_map_len=1024,
         )
-        expected = {"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"}
-        if not isinstance(data, dict) or set(data) != expected:
-            raise ValueError("invalid reading shape")
+        if not isinstance(data, dict):
+            raise _FrameRejected(
+                "a reading payload was not a mapping",
+                "invalid reading shape: the reading is not a mapping",
+            )
+        keys = set(data)
+        missing = sorted(_READING_REQUIRED_KEYS - keys)
+        unexpected = sorted(keys - _READING_REQUIRED_KEYS - _READING_OPTIONAL_KEYS)
+        if missing or unexpected:
+            # The KEY NAMES, never a value. The required set is a fixed vocabulary, and an
+            # unexpected key is reported by COUNT rather than by name, because an unknown
+            # name is not a fixed vocabulary and could carry content from the wire.
+            raise _FrameRejected(
+                "a reading was missing required fields or carried unknown fields",
+                f"invalid reading shape: missing={missing} unexpected_key_count={len(unexpected)}",
+            )
         transport = cls._transport(data["transport"])
         timestamp = _finite_number(data["ts"])
         instrument = _text(data["iid"], maximum=256)
@@ -653,13 +799,13 @@ class SequencedPeriodicLiveSources:
         status = ChannelStatus(_text(data["st"], maximum=32, allow_empty=False))
         value = data["v"]
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ValueError("invalid reading value")
+            raise _FrameRejected("a reading value was not usable", "invalid reading value")
         raw_value = data["raw"]
         if raw_value is not None and (isinstance(raw_value, bool) or not isinstance(raw_value, (int, float))):
-            raise ValueError("invalid raw reading value")
+            raise _FrameRejected("a raw reading value was not usable", "invalid raw reading value")
         metadata = data["meta"]
         if not isinstance(metadata, dict) or len(metadata) > 256:
-            raise ValueError("invalid reading metadata")
+            raise _FrameRejected("a reading's metadata was not usable", "invalid reading metadata")
         reading = Reading(
             timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
             instrument_id=instrument,
@@ -676,14 +822,16 @@ class SequencedPeriodicLiveSources:
     def _event(cls, raw: bytes) -> tuple[_Transport, Mapping[str, object]]:
         event = _bounded_json(raw)
         if set(event) != {"event_type", "ts", "payload", "experiment_id", "transport"}:
-            raise ValueError("invalid event shape")
+            raise _FrameRejected("an event had an unexpected shape", "invalid event shape")
         transport = cls._transport(event["transport"])
         if transport.persistence_authoritative:
-            raise ValueError("event cannot claim persistence authority")
+            raise _FrameRejected(
+                "an event claimed persistence authority it does not have", "event cannot claim persistence authority"
+            )
         _text(event["event_type"], maximum=128, allow_empty=False)
         _finite_number(event["ts"])
         if not isinstance(event["payload"], Mapping) or len(event["payload"]) > 256:
-            raise ValueError("invalid event payload")
+            raise _FrameRejected("an event payload did not parse", "invalid event payload")
         if event["experiment_id"] is not None:
             _text(event["experiment_id"], maximum=256, allow_empty=False)
         public = dict(event)
@@ -692,12 +840,60 @@ class SequencedPeriodicLiveSources:
 
     @staticmethod
     def _call(callback: Callable[[Any], object], value: object) -> None:
-        result = callback(value)
-        if inspect.isawaitable(result):
-            close = getattr(result, "close", None)
-            if callable(close):
-                close()
-            raise ValueError("periodic live callbacks must be synchronous")
+        task = asyncio.current_task()
+        cancellation_depth = task.cancelling() if task is not None else 0
+        if cancellation_depth:
+            # Cancellation already owned the receive task before callback entry. Do not
+            # run subscriber code or recategorize that owner-directed cancellation.
+            raise asyncio.CancelledError
+
+        def consume_callback_cancellation() -> bool:
+            if task is None or task.cancelling() <= cancellation_depth:
+                return False
+            # `Task.cancel()` called synchronously by the callback schedules delivery at
+            # the NEXT await, outside this try/except. Consume only requests added during
+            # this callback so the owner loop can finish its invalidation path.
+            while task.cancelling() > cancellation_depth:
+                task.uncancel()
+            return True
+
+        def reject_callback(
+            error: BaseException | None = None,
+            *,
+            pending_cancellation: bool = False,
+        ) -> None:
+            rejection = _FrameRejected(
+                "a periodic live callback failed",
+                "periodic callback failed",
+                pending_callback_cancellation=pending_cancellation,
+            )
+            if error is None:
+                raise rejection
+            raise rejection from error
+
+        try:
+            result = callback(value)
+            returned_awaitable = inspect.isawaitable(result)
+            if returned_awaitable:
+                # Rejected awaitables must be settled before the receive loop records
+                # the callback failure. Keep lookup and close inside this boundary:
+                # either can raise CancelledError or add a synchronous cancellation
+                # request to the owner task, and neither is owner cancellation merely
+                # because coroutine cleanup happened to use that exception type.
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+        except asyncio.CancelledError as exc:
+            reject_callback(exc, pending_cancellation=consume_callback_cancellation())
+        except Exception as exc:
+            reject_callback(exc, pending_cancellation=consume_callback_cancellation())
+        if consume_callback_cancellation():
+            reject_callback(pending_cancellation=True)
+        if returned_awaitable:
+            raise _FrameRejected(
+                "a periodic callback returned an awaitable instead of running synchronously",
+                "periodic live callbacks must be synchronous",
+            )
 
     def _validate_next(self, session: str, sequence: int, *, provisional: bool) -> None:
         expected_session = (
@@ -705,18 +901,30 @@ class SequencedPeriodicLiveSources:
         )
         previous = self._provisional_last if provisional else self._last_sequence
         if expected_session != session or previous is None or sequence != previous + 1:
-            raise ValueError("stream discontinuity")
+            raise _FrameRejected("the global stream sequence has a gap", "stream discontinuity")
 
     async def _semantic_frame(self, topic: bytes, raw: bytes) -> tuple[_Transport, _ProvisionalFrame]:
         if topic == DEFAULT_TOPIC:
-            transport, reading = self._reading(raw)
+            try:
+                transport, reading = self._reading(raw)
+            except _FrameRejected:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise _FrameRejected("a reading frame did not validate", "invalid reading fields") from exc
             if transport.persistence_authoritative:
                 return transport, _ProvisionalFrame(transport.sequence, "reading", reading, len(raw))
             return transport, _ProvisionalFrame(transport.sequence, "filtered", None, len(raw))
         if topic == EVENTS_TOPIC:
-            transport, event = self._event(raw)
+            try:
+                transport, event = self._event(raw)
+            except _FrameRejected:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise _FrameRejected("an event frame did not validate", "invalid event fields") from exc
             return transport, _ProvisionalFrame(transport.sequence, "event", event, len(raw))
-        raise ValueError("unknown participating topic")
+        raise _FrameRejected(
+            "a frame arrived on a topic this source does not participate in", "unknown participating topic"
+        )
 
     def _dispatch(self, frame: _ProvisionalFrame) -> None:
         if frame.kind == "reading":
@@ -725,6 +933,26 @@ class SequencedPeriodicLiveSources:
         elif frame.kind == "event":
             assert self._on_event is not None
             self._call(self._on_event, frame.value)
+
+    @staticmethod
+    async def _settle_callback_cancellation(error: _FrameRejected) -> None:
+        """Consume only a callback's already-scheduled cancellation delivery.
+
+        Python 3.12 leaves the next ``CancelledError`` scheduled after
+        ``Task.uncancel()`` reduces the cancellation count to zero. Yield once
+        inside the callback-failure boundary so that delivery cannot bypass
+        ``_invalidate``. A new owner cancellation has a non-zero count and
+        remains authoritative.
+        """
+
+        if not error.pending_callback_cancellation:
+            return
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            if task is not None and task.cancelling():
+                raise
 
     async def _handle_barrier(self, raw: bytes) -> None:
         payload = _bounded_json(raw)
@@ -741,7 +969,7 @@ class SequencedPeriodicLiveSources:
             "alarm_state_token",
         }
         if set(payload) != marker_keys:
-            raise ValueError("invalid barrier marker shape")
+            raise _FrameRejected("a barrier marker had an unexpected shape", "invalid barrier marker shape")
         nonce, cut = _parse_cut({"ok": True, **payload}, generation=self._generation)
         marker = self._ready_marker
         if self._ready_active and self._session_id is None and nonce in self._retired_ready_nonces:
@@ -751,39 +979,58 @@ class SequencedPeriodicLiveSources:
             # matching marker remains outside the accepted stream prefix.
             return
         if not self._ready_active or nonce != self._ready_nonce or marker is None or marker.done():
-            raise ValueError("orphan barrier")
+            raise _FrameRejected("a barrier answer arrived that no request expected", "orphan barrier")
         if self._session_id is None:
             if self._provisional_cut is not None:
-                raise ValueError("duplicate startup barrier")
+                raise _FrameRejected("a second startup barrier arrived for one request", "duplicate startup barrier")
             self._provisional_cut = cut
             self._provisional_last = cut.sequence
         else:
             self._validate_next(cut.session_id, cut.sequence, provisional=False)
             if cut.reading_drop_count != self._drop_baseline or cut.publish_failure_count != self._failure_baseline:
-                raise ValueError("publisher counters changed")
+                raise _FrameRejected("the publisher's drop or failure counters changed", "publisher counters changed")
             self._last_sequence = cut.sequence
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
-        if len(parts) != 2 or parts[0] not in {DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC}:
-            raise ValueError("invalid multipart frame")
+        if not parts:
+            raise _FrameRejected("the multipart frame was empty", "invalid multipart frame")
+        if parts[0] not in _PARTICIPATING_TOPICS:
+            # NOT OURS, AND NOT A VIOLATION. A SUBSCRIBE is a byte PREFIX, so subscribing
+            # to b"readings" also delivers anything the publisher later names
+            # b"readings.<something>". Refusing that would let one new publisher topic
+            # invalidate this source's whole generation -- the exact failure this class was
+            # just corrected for. Count it and move on.
+            self._foreign_topic_frames += 1
+            return
+        # THE FRAME COUNT IS A RULE ABOUT OUR OWN TOPICS, so it is applied after the topic
+        # is classified and never before. Checking it first would make a foreign topic
+        # fatal whenever it used one or three parts instead of two -- the non-fatal
+        # handling above would then have protected only foreign topics that happened to
+        # share our envelope shape, which is no protection at all.
+        if len(parts) != 2:
+            raise _FrameRejected("a known topic's multipart frame was not exactly two parts", "invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("a frame arrived after the source stopped")
             if parts[0] == PERIODIC_BARRIER_TOPIC:
                 await self._handle_barrier(parts[1])
                 return
             transport, frame = await self._semantic_frame(parts[0], parts[1])
             if self._session_id is not None:
                 self._validate_next(transport.session_id, transport.sequence, provisional=False)
-                self._dispatch(frame)
+                try:
+                    self._dispatch(frame)
+                except _FrameRejected as error:
+                    await self._settle_callback_cancellation(error)
+                    raise
                 self._last_sequence = transport.sequence
             elif self._provisional_cut is not None:
                 self._validate_next(transport.session_id, transport.sequence, provisional=True)
                 if len(self._provisional) >= self._max_provisional_frames:
-                    raise ValueError("provisional frame overflow")
+                    raise _FrameRejected("the provisional buffer overflowed", "provisional frame overflow")
                 if self._provisional_bytes + frame.encoded_bytes > self._max_provisional_bytes:
-                    raise ValueError("provisional byte overflow")
+                    raise _FrameRejected("the provisional buffer overflowed", "provisional byte overflow")
                 self._provisional.append(frame)
                 self._provisional_bytes += frame.encoded_bytes
                 self._provisional_last = transport.sequence
@@ -799,11 +1046,11 @@ class SequencedPeriodicLiveSources:
                 await self._handle_frame(parts)
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the receive loop stopped: {_invalidation_category(error)}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the receive loop ended while the source was still running")
 
     async def _monitor_loop(self) -> None:
         try:
@@ -825,18 +1072,18 @@ class SequencedPeriodicLiveSources:
                         # expected until the first connection; after that,
                         # DISCONNECTED remains terminal authority loss.
                         continue
-                    self._invalidate()
+                    self._invalidate("the subscriber retried its connection after it had connected once")
                     return
                 if event in _MONITOR_FAILURE_EVENTS:
-                    self._invalidate()
+                    self._invalidate(f"the subscriber socket reported event {event!r}")
                     return
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the socket monitor stopped: the monitor path failed with {type(error).__name__}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the socket monitor ended while the source was still running")
 
     async def start(
         self,
@@ -872,11 +1119,27 @@ class SequencedPeriodicLiveSources:
             )
             self._monitor.setsockopt(zmq.LINGER, 0)
             self._socket.connect(self._address)
-            # One all-topic subscription is one propagation unit: receiving
-            # the exact nonce barrier therefore also proves that readings and
-            # events use the same active SUB pipe.  Connect-before-subscribe is
-            # required by the supported macOS/Python/pyzmq combination.
-            self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+            # SUBSCRIBE TO WHAT THIS SOURCE PARTICIPATES IN, AND TO NOTHING ELSE.
+            #
+            # This used to subscribe to every topic with `b""`, and the reasoning was
+            # sound when it was written: one subscription is one propagation unit, so
+            # receiving the exact nonce barrier also proved that readings and events use
+            # the same active SUB pipe. That argument still holds with three
+            # subscriptions -- one socket, one connection, one pipe -- and the all-topic
+            # form acquired a defect the day a FOURTH topic appeared on the publisher.
+            #
+            # `zmq_bridge.publish_operator_snapshot` sends `operator.snapshot` on the
+            # sole PUB socket. An all-topic subscriber receives it, `_handle_frame`
+            # refuses it as a frame that is not two parts on a participating topic, and
+            # that refusal INVALIDATES THE WHOLE GENERATION. Measured on Ubuntu 22.04 on
+            # 2026-08-20, it was the most frequent reason the periodic source lost
+            # authority during a run -- which is why no periodic slot was ever allocated
+            # and no receipt could be sealed.
+            #
+            # Connect-before-subscribe is required by the supported macOS/Python/pyzmq
+            # combination, so the order below is deliberate.
+            for topic in _PARTICIPATING_TOPICS:
+                self._socket.setsockopt(zmq.SUBSCRIBE, topic)
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop(), name="periodic_live_receive")
             self._monitor_task = asyncio.create_task(self._monitor_loop(), name="periodic_live_monitor")
@@ -927,7 +1190,7 @@ class SequencedPeriodicLiveSources:
 
     async def ready(self) -> LiveSourceCut:
         if not self._running or self._invalid or self._stopping:
-            raise PeriodicLiveDiscontinuity()
+            raise PeriodicLiveDiscontinuity("ready was asked of a source that is not running")
         if self._ready_active:
             raise RuntimeError("periodic barrier is already in flight")
         self._ready_active = True
@@ -936,11 +1199,11 @@ class SequencedPeriodicLiveSources:
             marker_cut: LiveSourceCut | None = None
             connected = self._connected
             if connected is None:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("there is no connection event to wait on")
             for attempt in range(_READY_MAX_ATTEMPTS):
                 nonce = secrets.token_hex(16)
                 if nonce in self._retired_ready_nonces:
-                    raise PeriodicLiveDiscontinuity()
+                    raise PeriodicLiveDiscontinuity("the generated barrier nonce was already retired")
                 marker = asyncio.get_running_loop().create_future()
                 marker.add_done_callback(_consume_future_exception)
                 self._ready_nonce = nonce
@@ -951,18 +1214,30 @@ class SequencedPeriodicLiveSources:
                         if attempt == 0:
                             await connected.wait()
                         if self._invalid or not self._running:
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity("the source stopped while waiting to connect")
                         query_result = await self._query.barrier(nonce)
                         if not query_result.ok:
+                            error_code = query_result.error_code
                             if (
                                 attempt + 1 < _READY_MAX_ATTEMPTS
-                                and query_result.error_code == "transport_unavailable"
+                                and type(error_code) is str
+                                and error_code == "transport_unavailable"
                                 and await self._retire_startup_attempt(nonce, marker, require_no_evidence=True)
                             ):
                                 continue
-                            raise PeriodicLiveDiscontinuity()
+                            if type(error_code) is not str:
+                                failure_reason = "the engine barrier query returned an unsupported failure code"
+                            elif error_code == "transport_unavailable":
+                                failure_reason = "the engine barrier transport was unavailable"
+                            elif error_code == "response_invalid":
+                                failure_reason = "the engine barrier response was invalid"
+                            else:
+                                failure_reason = "the engine barrier query returned an unsupported failure code"
+                            raise PeriodicLiveDiscontinuity(failure_reason)
                         if query_result.nonce != nonce or query_result.cut is None:
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity(
+                                "the barrier answer named a different nonce or carried no cut"
+                            )
                         marker_cut = await marker
                 except TimeoutError:
                     can_retry = (
@@ -978,25 +1253,35 @@ class SequencedPeriodicLiveSources:
                     if not can_retry or not await self._retire_startup_attempt(
                         nonce, marker, require_no_evidence=False
                     ):
-                        raise PeriodicLiveDiscontinuity() from None
+                        raise PeriodicLiveDiscontinuity(
+                            "the engine barrier timed out and could not be retried"
+                        ) from None
                     continue
                 if not self._same_evidence(query_result.cut, marker_cut):
-                    raise PeriodicLiveDiscontinuity()
+                    raise PeriodicLiveDiscontinuity(
+                        "the barrier answer and the published marker describe different evidence"
+                    )
                 break
             if marker_cut is None:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("the barrier produced no cut")
             async with self._state_lock:
                 if self._session_id is None:
                     if self._provisional_cut != marker_cut:
-                        raise PeriodicLiveDiscontinuity()
+                        raise PeriodicLiveDiscontinuity(
+                            "the provisional cut does not match the cut the barrier established"
+                        )
                     self._session_id = marker_cut.session_id
                     self._drop_baseline = marker_cut.reading_drop_count
                     self._failure_baseline = marker_cut.publish_failure_count
                     self._last_sequence = marker_cut.sequence
                     for frame in self._provisional:
                         if frame.sequence != self._last_sequence + 1:
-                            raise PeriodicLiveDiscontinuity()
-                        self._dispatch(frame)
+                            raise PeriodicLiveDiscontinuity("a held frame is out of sequence")
+                        try:
+                            self._dispatch(frame)
+                        except _FrameRejected as error:
+                            await self._settle_callback_cancellation(error)
+                            raise
                         self._last_sequence = frame.sequence
                     self._provisional.clear()
                     self._provisional_bytes = 0
@@ -1004,13 +1289,24 @@ class SequencedPeriodicLiveSources:
                     self._provisional_last = None
             return marker_cut
         except asyncio.CancelledError:
-            self._invalidate()
+            self._invalidate("the barrier was cancelled")
             raise
         except BaseException as exc:
-            self._invalidate()
+            # KEEP THE NAME THE BARRIER ALREADY CHOSE. Replacing it with the class name
+            # threw away a reason that had been worked out -- and the live watcher, which
+            # `_invalidate` releases, then reported the generic replacement to whoever was
+            # waiting. The immediate caller saw the detail; the later observer did not.
+            reason = (
+                exc.reason
+                if isinstance(exc, PeriodicLiveDiscontinuity)
+                else exc.category
+                if isinstance(exc, _FrameRejected)
+                else f"the barrier failed with {type(exc).__name__}"
+            )
+            self._invalidate(reason)
             if isinstance(exc, PeriodicLiveDiscontinuity):
                 raise
-            raise PeriodicLiveDiscontinuity() from None
+            raise PeriodicLiveDiscontinuity(reason) from None
         finally:
             self._ready_active = False
             self._ready_task = None
@@ -1037,7 +1333,9 @@ class SequencedPeriodicLiveSources:
             raise RuntimeError("periodic live source is not started")
         await asyncio.shield(failure)
         if self._invalid:
-            raise PeriodicLiveDiscontinuity()
+            # The reason the generation went down, not the fact that it is down. The
+            # second is what a caller already knows.
+            raise PeriodicLiveDiscontinuity(self._invalidation_reason)
 
     async def _stop_impl(self) -> None:
         self._stopping = True
@@ -1082,7 +1380,7 @@ class SequencedPeriodicLiveSources:
             self._context = None
         marker = self._ready_marker
         if marker is not None and not marker.done():
-            marker.set_exception(PeriodicLiveDiscontinuity())
+            marker.set_exception(PeriodicLiveDiscontinuity("the source stopped while a barrier was in flight"))
         failure = self._failure
         if failure is not None and not failure.done():
             failure.set_result(None)

@@ -211,8 +211,24 @@ def _release_engine_lock(fd: int) -> None:
     release_lock_exact(fd, ".engine.lock")
 
 
+def _requires_launcher_fd2_isolation(
+    launcher_ready_nonce: str | None,
+    launcher_session_id: str | None,
+    launcher_ready_channel_fd: int | None,
+) -> bool:
+    """True only for a launcher-owned POSIX replay child, before any descendant spawn."""
+
+    return sys.platform != "win32" and (
+        launcher_ready_nonce is not None and launcher_session_id is not None and type(launcher_ready_channel_fd) is int
+    )
+
+
 def main() -> None:
     launcher_ready_nonce, launcher_session_id, launcher_ready_channel_fd = _consume_launcher_replay_authority()
+    if _requires_launcher_fd2_isolation(launcher_ready_nonce, launcher_session_id, launcher_ready_channel_fd):
+        from cryodaq._fd2_bootstrap import isolate_launcher_stderr_fd2
+
+        isolate_launcher_stderr_fd2()
     setup_logging("replay_engine")
     parser = argparse.ArgumentParser(
         prog="cryodaq-replay-engine",

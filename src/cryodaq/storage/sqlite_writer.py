@@ -306,6 +306,14 @@ INDEX_READINGS_TS = """
 CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (timestamp);
 """
 
+# The persistence-recovery probe writes and deletes rows under this exact channel
+# name inside ONE transaction, so the commit is net-zero.  The row count is chosen to
+# force page allocation on any page size: a probe that fits in existing free slack
+# would never reach SQLITE_FULL from ``max_page_count``, which is one of the three
+# conditions the probe exists to detect.
+_PERSISTENCE_PROBE_CHANNEL = "__cryodaq_persistence_probe__"
+_PERSISTENCE_PROBE_ROWS = 256
+
 INDEX_SOURCE_DATA_TS = """
 CREATE INDEX IF NOT EXISTS idx_source_data_ts ON source_data (timestamp);
 """
@@ -6737,10 +6745,15 @@ class SQLiteWriter:
     def clear_disk_full(self) -> None:
         """Clear the disk-full flag.
 
-        Called by DiskMonitor when free space recovers above the threshold.
-        Note: this does NOT auto-resume polling — the SafetyManager has
-        already latched a fault, and the operator must acknowledge_fault
-        explicitly. This is a deliberate guard against disk-space flapping.
+        NOT called by DiskMonitor.  DiskMonitor deliberately only LOGS recovery;
+        the sole caller is the SafetyManager hook wired in engine.py, reached
+        either by acknowledge_fault or by a deliberate operator Start that
+        consumes a persistence-only fault latch.
+
+        Clearing does not promise the disk is writable.  If it is not, the next
+        write calls the persistence-failure callback again and the fault
+        re-latches immediately, which is what keeps a flapping disk from
+        producing a run that silently fails to record.
         """
         if self._disk_full:
             logger.warning(
@@ -6748,6 +6761,89 @@ class SQLiteWriter:
                 "SafetyManager fault remains latched until operator acknowledge."
             )
             self._disk_full = False
+
+    async def probe_can_commit(self) -> bool:
+        """True only when a real transaction just COMMITTED against the live DB.
+
+        This exists because free space is not the question.  ``_write_day_batch``
+        latches persistence on ``database is full`` (SQLITE_FULL from
+        ``max_page_count``), on ``disk quota exceeded`` (a per-user quota), and on a
+        sustained ``database is locked``.  None of those three is a filesystem
+        free-space condition, so a volume with 500 GB free can answer "yes, plenty of
+        room" while every write still fails.  Clearing the persistence latch on that
+        answer would let the source energise and produce measurements that are never
+        recorded - the exact data loss the latch exists to prevent.
+
+        So the probe does not ask about bytes.  It performs the operation whose
+        success is the actual question: BEGIN IMMEDIATE (which answers the locked-DB
+        case), an insert large enough to force page allocation (which answers
+        ``max_page_count``), and a COMMIT (which answers quota and ENOSPC).  The rows
+        are deleted inside the same transaction, so the commit is net-zero: nothing is
+        added to the data, and ``source_data`` is observably empty afterwards - which
+        matters, because ``cold_rotation`` refuses to rotate any day whose
+        ``source_data`` carries rows.
+
+        One successful commit is evidence, not a guarantee.  The disk can fill again a
+        millisecond later.  That is deliberate and unchanged: the writer re-latches on
+        the next failed write, which is what keeps a flapping disk from producing a
+        run that silently fails to record.  Any error, and any inability to reach the
+        database at all, answers False - "cannot tell" is not "recovered".
+
+        Runs on the writer's own write executor, never on the event loop, so a stalled
+        or disconnected mount cannot freeze acquisition; and because that executor is
+        the single worker every real write already uses, the probe can never race a
+        concurrent write on the shared connection.
+        """
+
+        if self._stopping:
+            return False
+        try:
+            owner = self._owned_executor_task(
+                self._executor,
+                self._probe_can_commit_sync,
+                read=False,
+                name="sqlite_persistence_recovery_probe",
+            )
+        except RuntimeError:
+            return False
+        try:
+            return bool(await self._await_owned_task(owner))
+        except Exception as exc:
+            logger.warning("persistence recovery probe failed: %s", type(exc).__name__)
+            return False
+
+    def _probe_can_commit_sync(self) -> bool:
+        """The probe body, on the write executor.  See :meth:`probe_can_commit`.
+
+        Probes the connection the writer currently holds.  When it holds none, it
+        opens today's database - the same file the next real write would reach - so
+        the probe never answers for a file the writer is not about to use.
+        """
+
+        try:
+            conn = self._ensure_connection(self._current_date or datetime.now(UTC).date())
+        except Exception as exc:
+            logger.warning(
+                "persistence recovery probe could not reach the database: %s",
+                type(exc).__name__,
+            )
+            return False
+        stamp = datetime.now(UTC).isoformat()
+        rows = [(stamp, _PERSISTENCE_PROBE_CHANNEL, None) for _ in range(_PERSISTENCE_PROBE_ROWS)]
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT INTO source_data (timestamp, channel, voltage) VALUES (?, ?, ?);",
+                rows,
+            )
+            conn.execute("DELETE FROM source_data WHERE channel = ?;", (_PERSISTENCE_PROBE_CHANNEL,))
+            conn.commit()
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            logger.warning("persistence recovery probe did not commit: %s", exc)
+            return False
+        return True
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind the writer to an event loop so the executor thread can
@@ -7548,8 +7644,8 @@ class SQLiteWriter:
         (_write_batch) folds this per-day result into the per-call return
         of write_immediate().
 
-        NaN-доктрина (P2-2): a non-finite value paired with a non-OK status is
-        persisted as the finite ``sentinel.SENTINEL`` value carrying that status,
+        NaN-доктрина (P2-2): a non-finite value or any value paired with a
+        non-OK status is persisted as the finite ``sentinel.SENTINEL`` carrying that status,
         so the invariant «if the DataBroker has a reading, SQLite has it» holds
         even for error states (SQLite cannot store NaN — it maps NaN to NULL,
         violating NOT NULL). The status column, not the float value, is the

@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QSettings, Qt
 from PySide6.QtGui import QKeyEvent
 
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -52,6 +52,194 @@ def test_sensor_cell_update_value_with_reading(app, mock_channel_mgr, buffer_sto
     assert "4.21" in cell._value_widget.text()
     assert cell._unit_widget.text() == "K"
     assert cell._last_status == ChannelStatus.OK
+
+
+def test_sensor_cell_display_precision_round_trips_without_changing_reading(
+    app,
+    mock_channel_mgr,
+    buffer_store,
+):
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    reading = Reading(
+        channel="Т1 Криостат верх",
+        value=0.199999964322,
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+    try:
+        settings.remove(key)
+        settings.sync()
+        cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+        cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+        assert cell._value_widget.text() == "0.20"
+
+        settings.setValue(key, True)
+        settings.sync()
+        cell.refresh_display_precision()
+        assert cell._value_widget.text() == "0.199999964322"
+
+        settings.setValue(key, False)
+        settings.sync()
+        cell.refresh_display_precision()
+        assert cell._value_widget.text() == "0.20"
+        assert reading.value == 0.199999964322
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
+def test_sensor_cell_absent_and_faulted_readings_stay_dash_in_both_precision_modes(
+    app,
+    mock_channel_mgr,
+    buffer_store,
+):
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "display/precision_mode"
+    saved = (settings.contains(key), settings.value(key))
+    try:
+        cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+        assert cell._value_widget.text() == "—"
+        faulted = Reading(
+            channel="Т1 Криостат верх",
+            value=float("nan"),
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.SENSOR_ERROR,
+            instrument_id="lakeshore_218s",
+        )
+        cell.update_value(faulted, IdentityStatus.AUTHORITATIVE)
+
+        for precision_mode in (False, True):
+            settings.setValue(key, precision_mode)
+            settings.sync()
+            cell.refresh_display_precision()
+            assert cell._value_widget.text() == "—"
+            assert cell._value_widget.text() != "0.00"
+    finally:
+        if saved[0]:
+            settings.setValue(key, saved[1])
+        else:
+            settings.remove(key)
+        settings.sync()
+
+
+def test_display_precision_setting_survives_settings_recreation(tmp_path):
+    from cryodaq.gui.display_precision import precision_mode_enabled, set_precision_mode
+
+    settings_path = tmp_path / "CryoDAQ.ini"
+    settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    assert precision_mode_enabled(settings) is False
+
+    assert set_precision_mode(True, settings) is True
+    restarted = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    restarted.sync()
+    assert precision_mode_enabled(restarted) is True
+
+    assert set_precision_mode(False, restarted) is True
+    restarted_again = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    restarted_again.sync()
+    assert precision_mode_enabled(restarted_again) is False
+
+
+def test_sensor_cell_names_faulted_channel_and_instrument_reason(app, mock_channel_mgr, buffer_store):
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+    reading = Reading(
+        channel="Т2 Криостат",
+        value=float("nan"),
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+
+    operator_text = cell._status_hint_widget.text()
+    assert cell._value_widget.text() == "—"
+    assert "Т2" in operator_text
+    assert "обрыв" in operator_text.lower()
+    assert operator_text in cell.accessibleDescription()
+
+
+def test_a_changed_instrument_diagnosis_reaches_the_visible_card(app, mock_channel_mgr, buffer_store):
+    """Codex P2: the card kept the OLD physical diagnosis.
+
+    The instrument-register diagnosis and the ChannelStatus are different axes. A
+    LakeShore channel can go from sensor-units-over-range (an open circuit) to
+    sensor-units-zero (a short) while ChannelStatus stays SENSOR_ERROR throughout.
+    The hint was rendered only inside the status-TRANSITION branch, so on the second
+    reading the accessible description silently moved to the new diagnosis while the
+    text the operator actually looks at still named the old one.
+
+    Two faults that need opposite physical responses, and the card showed the wrong
+    one with nothing on screen to say so.
+    """
+
+    def _reading(reason: str) -> Reading:
+        return Reading(
+            channel="Т2 Криостат",
+            value=float("nan"),
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.SENSOR_ERROR,
+            instrument_id="LS218_1",
+            metadata={
+                "instrument_status_register": "LakeShore 218 RDGST",
+                "instrument_status_fault_reasons": [reason],
+            },
+        )
+
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+
+    cell.update_value(_reading("sensor_units_over_range"), IdentityStatus.AUTHORITATIVE)
+    first_visible = cell._status_hint_widget.text()
+    assert first_visible in cell.accessibleDescription()
+
+    # Same ChannelStatus, different register diagnosis.
+    cell.update_value(_reading("sensor_units_zero"), IdentityStatus.AUTHORITATIVE)
+    second_visible = cell._status_hint_widget.text()
+    second_described = cell.accessibleDescription()
+
+    assert second_visible != first_visible, (
+        "the visible card still names the previous instrument diagnosis after the fault changed"
+    )
+    assert second_visible in second_described, (
+        "the visible card and the accessible description disagree about the instrument fault"
+    )
+
+
+def test_non_ok_status_survives_buffer_refresh(app, mock_channel_mgr, buffer_store):
+    observed_at = datetime.now(UTC)
+    reading = Reading(
+        channel="Т2 Криостат",
+        value=380.0,
+        unit="K",
+        timestamp=observed_at,
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+    )
+    buffer_store.append("Т2", observed_at.timestamp(), reading.value, reading.status)
+    cell = SensorCell("Т2", mock_channel_mgr, buffer_store)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
+    assert cell._value_widget.text() == "—"
+
+    cell.refresh_from_buffer()
+
+    assert cell._value_widget.text() == "—"
+    assert cell._source_status is ChannelStatus.SENSOR_ERROR
+    assert "Ошибка датчика" in cell._status_hint_widget.text()
+    assert theme.STATUS_FAULT in cell.styleSheet()
 
 
 # HIGH: assert dash value, empty unit, stale text + stale style token
@@ -356,3 +544,60 @@ def test_refresh_adds_stale_without_erasing_non_authoritative_identity(app, mock
         assert expected_text in cell._status_hint_widget.text()
         assert "Устарело" in cell._status_hint_widget.text()
         assert expected_color in cell.styleSheet()
+
+
+def test_refresh_does_not_resurrect_an_unavailable_reading(app, mock_channel_mgr, buffer_store):
+    """A dash for an unavailable sensor must survive the presentation tick.
+
+    Codex P2 at c9d1326ea held that `refresh_from_buffer()` accepted everything
+    except NaN and would replace the dash with a finite or infinite value.  Read
+    against this tree it does not: the refresh requires `status is ChannelStatus.OK`
+    AND `math.isfinite(value)`, and the only two production callers of the store's
+    append pass `reading.status` explicitly.
+
+    This pins that, so the finding cannot quietly become true later.  A sensor that
+    is unavailable must not revert to a confident-looking number on a timer.
+    """
+
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    unusable = Reading(
+        channel="Т1 Криостат верх",
+        value=380.0,  # finite, plausible, and NOT trustworthy
+        unit="K",
+        timestamp=now,
+        instrument_id="LS218_1",
+        status=ChannelStatus.OVERRANGE,
+    )
+
+    buffer_store.append("Т1", now.timestamp(), 380.0, unusable.status)
+    cell.update_value(unusable, IdentityStatus.AUTHORITATIVE)
+    assert cell._value_widget.text() == "—", "the push path showed an unusable value"
+
+    cell.refresh_from_buffer()
+    assert cell._value_widget.text() == "—", "a presentation tick resurrected an unavailable sensor's value"
+
+
+def test_an_infinite_reading_is_not_resurrected_either(app, mock_channel_mgr, buffer_store):
+    """±inf is not a temperature, and NaN is not the only unusable value."""
+
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    buffer_store.append("Т1", now.timestamp(), float("inf"), ChannelStatus.OK)
+    cell.refresh_from_buffer()
+    assert cell._value_widget.text() == "—", "an infinite value reached the operator"
+
+
+def test_the_buffer_append_status_default_is_the_residual_hazard(buffer_store):
+    """The default is OK, so a caller that omits status stores an unusable sample as usable.
+
+    Both production callers pass it today (`dashboard_view.py:266,270`).  This pins
+    WHY that matters: omitting the argument is silently equivalent to asserting the
+    reading is good, which is how Codex's finding would become true.
+    """
+
+    now = datetime.now(UTC).timestamp()
+    buffer_store.append("Т9", now, 380.0)  # status omitted
+    assert buffer_store.get_last_with_status("Т9")[2] is ChannelStatus.OK, (
+        "the default changed; re-check every caller before relying on it"
+    )

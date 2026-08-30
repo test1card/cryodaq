@@ -2,12 +2,69 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import zmq
+
+from cryodaq.core import safety_manager as safety_manager_module
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.housekeeping import AdaptiveThrottle
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.core.smu_channel import SMU_CHANNELS
+from cryodaq.core.zmq_bridge import ZMQPublisher, ZMQSubscriber, _unpack_reading
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import SourceOffEvidence, SourceOffResult, SourceOffTier
+
+
+class _LateAttachingSocket:
+    """Non-retaining PUB transport whose observer attaches on demand."""
+
+    def __init__(self) -> None:
+        self.attached = False
+        self.messages: list[list[bytes]] = []
+
+    async def send_multipart(self, frames: Sequence[bytes]) -> None:
+        if self.attached:
+            self.messages.append(list(frames))
+
+    def close(self, *, linger: int) -> None:
+        del linger
+
+
+def _start_non_socket_publisher(
+    queue: asyncio.Queue[Any],
+) -> tuple[ZMQPublisher, _LateAttachingSocket]:
+    """Run the production drain/encoding loop without opening a socket."""
+
+    publisher = ZMQPublisher()
+    socket = _LateAttachingSocket()
+    publisher._queue = queue
+    publisher._session_id = "0" * 32
+    publisher._socket = socket  # type: ignore[assignment]
+    publisher._running = True
+    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
+    return publisher, socket
+
+
+async def _wait_for_channel_states(socket: _LateAttachingSocket) -> dict[str, Reading]:
+    async def collect() -> dict[str, Reading]:
+        while True:
+            readings = [_unpack_reading(frames[1]) for frames in socket.messages]
+            by_channel = {
+                reading.metadata["channel"]: reading
+                for reading in readings
+                if reading.instrument_id == "safety_manager" and reading.metadata.get("channel") in SMU_CHANNELS
+            }
+            if set(by_channel) == set(SMU_CHANNELS):
+                return by_channel
+            await asyncio.sleep(0)
+
+    return await asyncio.wait_for(collect(), timeout=2.5)
 
 
 async def _make_manager(*, data_broker: DataBroker):
@@ -67,6 +124,370 @@ async def test_initial_channel_state_with_device_reported_off_publishes_off_for_
             reading.metadata["off_evidence"]["channel_off_results"][channel] == "device_reported_off"
             for channel, reading in by_channel.items()
         )
+    finally:
+        await manager.stop()
+
+
+async def test_late_transport_observer_receives_authoritative_states_without_interlock_trip() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    warning_calls: list[None] = []
+
+    async def warn_only() -> None:
+        warning_calls.append(None)
+
+    detector_guard = InterlockEngine(data_broker, actions={"warning": warn_only})
+    detector_guard.add_condition(
+        InterlockCondition(
+            name="detector_warmup",
+            description="test warning-only masking control",
+            channel_ids=frozenset({"test/detector_temperature"}),
+            threshold=10.0,
+            comparison=">",
+            action="warning",
+        )
+    )
+    await detector_guard.start()
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager.start()
+    try:
+        result = await manager.request_run(0.5, 40.0, 1.0, channel=SMU_CHANNELS[0])
+        assert result["ok"] is True
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        socket.attached = True
+        try:
+            by_channel = await _wait_for_channel_states(socket)
+        except TimeoutError as exc:
+            assert detector_guard.get_state()["detector_warmup"] is InterlockState.ARMED
+            assert warning_calls == []
+            raise AssertionError(
+                "late source-state publication timed out while the warning-only detector guard stayed uninvolved"
+            ) from exc
+
+        assert {channel: reading.metadata["state"] for channel, reading in by_channel.items()} == {
+            SMU_CHANNELS[0]: "on",
+            SMU_CHANNELS[1]: "unknown",
+        }
+        assert (
+            by_channel[SMU_CHANNELS[1]].metadata["off_evidence"]["channel_off_results"][SMU_CHANNELS[1]]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+        )
+        assert detector_guard.get_state()["detector_warmup"] is InterlockState.ARMED
+        assert warning_calls == []
+    finally:
+        await manager.stop()
+        await detector_guard.stop()
+        await publisher.stop()
+
+
+async def test_late_transport_observer_preserves_genuinely_unknown_source_state() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=False, data_broker=data_broker)
+    await manager.start()
+    try:
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        socket.attached = True
+        by_channel = await _wait_for_channel_states(socket)
+
+        assert set(by_channel) == set(SMU_CHANNELS)
+        assert all(reading.metadata["state"] == "unknown" for reading in by_channel.values())
+        assert all(math.isnan(reading.value) for reading in by_channel.values())
+        assert all(
+            reading.metadata["off_evidence"]["channel_off_results"][channel]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+            for channel, reading in by_channel.items()
+        )
+    finally:
+        await manager.stop()
+        await publisher.stop()
+
+
+async def test_real_loopback_subscribers_repeatedly_attach_after_startup_and_receive_source_state() -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "zmq_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher = ZMQPublisher("tcp://127.0.0.1:*")
+    await publisher.start(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager.start()
+    try:
+        result = await manager.request_run(0.5, 40.0, 1.0, channel=SMU_CHANNELS[0])
+        assert result["ok"] is True
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        assert publisher._socket is not None
+        endpoint = publisher._socket.getsockopt_string(zmq.LAST_ENDPOINT)
+        for _attachment in range(3):
+            received: dict[str, Reading] = {}
+            complete = asyncio.Event()
+
+            def on_reading(reading: Reading) -> None:
+                if reading.instrument_id != "safety_manager":
+                    return
+                channel = reading.metadata.get("channel")
+                if channel in SMU_CHANNELS:
+                    received[str(channel)] = reading
+                if set(received) == set(SMU_CHANNELS):
+                    complete.set()
+
+            subscriber = ZMQSubscriber(endpoint, callback=on_reading)
+            await subscriber.start()
+            try:
+                await asyncio.wait_for(complete.wait(), timeout=3.5)
+            finally:
+                await subscriber.stop()
+
+            assert {channel: reading.metadata["state"] for channel, reading in received.items()} == {
+                SMU_CHANNELS[0]: "on",
+                SMU_CHANNELS[1]: "unknown",
+            }
+            assert all(reading.metadata["reason"] == "periodic" for reading in received.values())
+            assert all(reading.metadata["is_transition"] is False for reading in received.values())
+    finally:
+        await manager.stop()
+        await publisher.stop()
+
+
+async def test_periodic_off_snapshot_preserves_evidence_age_then_expires_to_unknown() -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_keithley_periodic_off_age",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager, _safety_broker = await _make_manager(data_broker=data_broker)
+    try:
+        initial = await _drain(queue)
+        observed_at = initial[0].timestamp
+        assert {reading.timestamp for reading in initial} == {observed_at}
+
+        await manager._publish_keithley_channel_states("periodic")
+        retained = await _drain(queue)
+        assert {reading.timestamp for reading in retained} == {observed_at}
+        assert all(reading.metadata["state"] == "off" for reading in retained)
+
+        manager._config.stale_timeout_s = 0.0
+        await manager._publish_keithley_channel_states("periodic")
+        expired = await _drain(queue)
+        assert all(reading.metadata["state"] == "unknown" for reading in expired)
+        assert all(math.isnan(reading.value) for reading in expired)
+        assert all(
+            reading.metadata["off_evidence"]["channel_off_results"][channel]
+            == SourceOffResult.PHYSICAL_STATE_UNKNOWN.value
+            for channel, reading in ((reading.metadata["channel"], reading) for reading in expired)
+        )
+    finally:
+        await manager.stop()
+
+
+async def test_periodic_snapshot_reports_physical_off_while_manager_fault_remains_latched() -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_keithley_periodic_latched_fault",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager, _safety_broker = await _make_manager(data_broker=data_broker)
+    manager._config.cooldown_before_rearm_s = 0.0
+    try:
+        await _drain(queue)
+        await manager._fault("latched channel fault", channel=SMU_CHANNELS[0])
+        await _drain(queue)
+        assert manager.state.value == "fault_latched"
+        assert manager.fault_reason == "latched channel fault"
+
+        async def collect_periodic() -> dict[str, Reading]:
+            by_channel: dict[str, Reading] = {}
+            while set(by_channel) != set(SMU_CHANNELS):
+                reading = await queue.get()
+                if reading.metadata.get("reason") == "periodic":
+                    by_channel[reading.metadata["channel"]] = reading
+            return by_channel
+
+        periodic = await asyncio.wait_for(collect_periodic(), timeout=2.5)
+        assert all(reading.metadata["state"] == "off" for reading in periodic.values())
+        assert all(reading.metadata["is_transition"] is False for reading in periodic.values())
+
+        acknowledged = await manager.acknowledge_fault("fault inspected")
+        assert acknowledged["ok"] is True
+        await manager._publish_keithley_channel_states("periodic")
+        after_ack = await _drain(queue)
+        assert all(reading.metadata["state"] != "fault" for reading in after_ack)
+    finally:
+        await manager.stop()
+
+
+async def test_monitor_fault_cue_survives_the_iteration_that_detected_it(
+    monkeypatch,
+) -> None:
+    data_broker = DataBroker()
+    queue = await data_broker.subscribe(
+        "test_monitor_fault_cue_survives_detection_iteration",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    monitor_calls = 0
+
+    class MonitorIterationComplete(Exception):
+        pass
+
+    async def run_checks() -> None:
+        nonlocal monitor_calls
+        monitor_calls += 1
+        if monitor_calls == 1:
+            await manager._fault("unmanaged source observed on", channel=SMU_CHANNELS[0])
+            return
+        raise MonitorIterationComplete
+
+    monkeypatch.setattr(safety_manager_module, "_CHECK_INTERVAL_S", 0.0)
+    monkeypatch.setattr(manager, "_run_checks", run_checks)
+
+    try:
+        await manager._monitor_loop()
+    except MonitorIterationComplete:
+        pass
+
+    readings = await _drain(queue)
+    affected = [reading for reading in readings if reading.metadata.get("channel") == SMU_CHANNELS[0]]
+    assert affected
+    assert affected[-1].metadata["state"] == "fault"
+    assert affected[-1].metadata["reason"] == "unmanaged source observed on"
+
+
+async def test_late_transport_observer_receives_latched_safety_reason(
+    monkeypatch,
+) -> None:
+    data_broker = DataBroker()
+    publisher_queue = await data_broker.subscribe(
+        "late_fault_reason_publisher",
+        maxsize=100,
+        wants_descriptor_envelope=True,
+    )
+    publisher, socket = _start_non_socket_publisher(publisher_queue)
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    fault_reason = "reviewed source exact active cut contains unmanaged smub"
+
+    class MonitorIterationComplete(Exception):
+        pass
+
+    monitor_calls = 0
+
+    async def run_checks() -> None:
+        nonlocal monitor_calls
+        monitor_calls += 1
+        if monitor_calls > 1:
+            raise MonitorIterationComplete
+
+    try:
+        await manager._fault(fault_reason, channel=SMU_CHANNELS[1])
+        if manager._pending_publishes:
+            await asyncio.gather(*manager._pending_publishes)
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+        assert socket.messages == []
+
+        socket.attached = True
+        monkeypatch.setattr(safety_manager_module, "_CHECK_INTERVAL_S", 0.0)
+        monkeypatch.setattr(manager, "_run_checks", run_checks)
+        try:
+            await manager._monitor_loop()
+        except MonitorIterationComplete:
+            pass
+        await asyncio.wait_for(publisher_queue.join(), timeout=0.5)
+
+        received = [_unpack_reading(frames[1]) for frames in socket.messages]
+        safety_states = [reading for reading in received if reading.channel == "analytics/safety_state"]
+        assert safety_states
+        assert safety_states[-1].metadata == {
+            "state": "fault_latched",
+            "reason": fault_reason,
+            "is_transition": False,
+        }
+    finally:
+        await publisher.stop()
+
+
+async def test_periodic_safety_retransmission_allows_stable_archive_throttle_to_engage() -> None:
+    data_broker = DataBroker()
+    safety_states = await data_broker.subscribe(
+        "test_periodic_safety_retransmission_throttle",
+        maxsize=10,
+        filter_fn=lambda reading: reading.channel == "analytics/safety_state",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    await manager._publish_state("periodic")
+    retransmission = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+
+    throttle = AdaptiveThrottle(
+        {
+            "enabled": True,
+            "include_patterns": ["TEMP_A"],
+            "stable_duration_s": 0.0,
+            "max_interval_s": 30.0,
+            "absolute_delta": {"default": 0.5},
+            "transition_holdoff_s": 30.0,
+        }
+    )
+    base = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
+    archived: list[Reading] = []
+    for second in range(1, 121):
+        timestamp = base + timedelta(seconds=second)
+        throttle.observe_runtime_signal(replace(retransmission, timestamp=timestamp))
+        archived.extend(throttle.filter_for_archive([Reading(timestamp, "mock", "TEMP_A", 4.0, "K")]))
+
+    assert len(archived) == 4
+    assert throttle.suppressed_count == 116
+    assert retransmission.metadata["is_transition"] is False
+
+
+async def test_periodic_manual_recovery_state_publishes_current_blocker_reason() -> None:
+    data_broker = DataBroker()
+    safety_states = await data_broker.subscribe(
+        "test_manual_recovery_blocker_reason",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel == "analytics/safety_state",
+    )
+    manager = SafetyManager(SafetyBroker(), mock=True, data_broker=data_broker)
+    manager._config.cooldown_before_rearm_s = 0.0
+    await manager.start()
+    try:
+        await _drain(safety_states)
+        await manager._fault("operator recovery test")
+        manager._cooldown_predictor_available = False
+        manager._cooldown_predictor_unavailable_reason = "calibration model missing"
+        acknowledged = await manager.acknowledge_fault("fault inspected")
+        assert acknowledged["ok"] is True
+        assert manager.state is SafetyState.MANUAL_RECOVERY
+        if manager._pending_publishes:
+            await asyncio.gather(*manager._pending_publishes)
+        await _drain(safety_states)
+
+        await manager._publish_state("periodic")
+        periodic = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+
+        assert periodic.metadata["reason"] == "Cooldown predictor UNAVAILABLE: calibration model missing"
+        assert periodic.metadata["reason"] != "periodic"
+
+        manager._cooldown_predictor_available = True
+        await manager._publish_state("periodic")
+        unblocked = await asyncio.wait_for(safety_states.get(), timeout=0.5)
+        assert unblocked.metadata["reason"] == ""
     finally:
         await manager.stop()
 
