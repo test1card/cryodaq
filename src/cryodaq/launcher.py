@@ -76,6 +76,7 @@ from cryodaq.process_lifetime import (
     WindowsKillOnCloseJob,
     create_windows_kill_on_close_job,
     parent_pid_environment,
+    resume_windows_process,
     windows_job_objects_available,
 )
 
@@ -626,9 +627,10 @@ _THEME_DISPLAY_ORDER: tuple[str, ...] = (
 )
 _LIGHT_THEME_IDS: frozenset[str] = frozenset({"gost", "xcode", "braun"})
 
-# Флаги создания процесса без окна (Windows)
+# Windows process-creation flags used by launcher-owned children.
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
 _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
@@ -6091,8 +6093,9 @@ class LauncherWindow(QMainWindow):
         # CREATE_NO_WINDOW children do not have a console on which
         # GenerateConsoleCtrlEvent can be relied upon.  Use a private file
         # sentinel for the production graceful path; SIGBREAK remains useful
-        # for the console-enabled frozen smoke harness.
-        creationflags = _WINDOWS_CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        # for the console-enabled frozen smoke harness. CREATE_SUSPENDED keeps
+        # application code from running until the kill-on-close Job owns it.
+        creationflags = _WINDOWS_CREATE_NO_WINDOW | _WINDOWS_CREATE_SUSPENDED if sys.platform == "win32" else 0
         shutdown_authority: _AssistantShutdownAuthority | None = None
         soak_duplicate: _OwnedFileDescriptor | None = None
         soak_generation: int | None = None
@@ -6139,12 +6142,14 @@ class LauncherWindow(QMainWindow):
             # Job assignment, so an assignment exception cannot discard it.
             self._assistant_proc = process
             if windows_job_objects_available():
-                # The process handle exists only after CreateProcess. As with
-                # bounded report children, assignment failure is fail-closed
-                # below and the retained job handle remains launcher-owned for
-                # exactly as long as the assistant incarnation.
+                # CreateProcess returns the child suspended. Publish the Job
+                # owner before resume too, so either assignment or resume
+                # failure retains every authority needed for exact cleanup.
                 parent_job = create_windows_kill_on_close_job(process)
-            self._assistant_parent_job = parent_job
+                self._assistant_parent_job = parent_job
+                resume_windows_process(process)
+            else:
+                self._assistant_parent_job = None
             self._assistant_shutdown_path = None if shutdown_authority is None else shutdown_authority.path
             self._assistant_shutdown_authority = shutdown_authority
             if soak_capability is not None and soak_generation is not None:

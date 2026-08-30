@@ -152,9 +152,19 @@ class WindowsKillOnCloseJob:
 
 
 def create_windows_kill_on_close_job(process: subprocess.Popen[Any]) -> WindowsKillOnCloseJob:
-    """Assign a started child to a kill-on-close Windows Job Object."""
+    """Assign a child to a kill-on-close Windows Job Object."""
 
     return WindowsKillOnCloseJob(process)
+
+
+def resume_windows_process(process: subprocess.Popen[Any]) -> None:
+    """Resume a suspended Windows child after its Job owns the process."""
+
+    if not windows_job_objects_available():
+        raise RuntimeError("Windows process resume requires native Windows")
+    import psutil
+
+    psutil.Process(process.pid).resume()
 
 
 def windows_job_objects_available() -> bool:

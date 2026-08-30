@@ -14,6 +14,31 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 
+def test_resume_windows_process_targets_exact_suspended_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    import cryodaq.process_lifetime as module
+
+    events: list[tuple[str, int]] = []
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            events.append(("open", pid))
+
+        def resume(self) -> None:
+            events.append(("resume", self.pid))
+
+    monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
+    monkeypatch.setattr(psutil, "Process", Process)
+
+    module.resume_windows_process(SimpleNamespace(pid=7315))  # type: ignore[arg-type]
+
+    assert events == [("open", 7315), ("resume", 7315)]
+
+
 def test_windows_assistant_retains_kill_on_close_job_until_child_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -23,6 +48,8 @@ def test_windows_assistant_retains_kill_on_close_job_until_child_exit(
     events: list[str] = []
     process = MagicMock(pid=7318)
     process.poll.return_value = 0
+    assistant_executed = False
+    job_assigned = False
 
     class Job:
         def close(self) -> None:
@@ -47,27 +74,47 @@ def test_windows_assistant_retains_kill_on_close_job_until_child_exit(
     monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
     monkeypatch.setenv(module.PARENT_PID_ENV, "stale-linux-parent")
     monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
-    monkeypatch.setattr(
-        module.subprocess,
-        "Popen",
-        lambda *_args, **kwargs: popen_calls.append(kwargs) or process,
-    )
-    monkeypatch.setattr(
-        module,
-        "create_windows_kill_on_close_job",
-        lambda candidate: events.append(f"assign:{candidate.pid}") or job,
-    )
+
+    def popen(*_args: object, **kwargs: object) -> MagicMock:
+        nonlocal assistant_executed
+        events.append("popen")
+        popen_calls.append(kwargs)
+        if not int(kwargs["creationflags"]) & 0x00000004:
+            assistant_executed = True
+        return process
+
+    def create_job(candidate: object) -> Job:
+        nonlocal job_assigned
+        assert candidate is process
+        assert assistant_executed is False, "assistant executed before Job assignment"
+        events.append(f"assign:{process.pid}")
+        job_assigned = True
+        return job
+
+    def resume(candidate: object) -> None:
+        nonlocal assistant_executed
+        assert candidate is process
+        assert job_assigned is True
+        assert host._assistant_parent_job is job
+        events.append(f"resume:{process.pid}")
+        assistant_executed = True
+
+    monkeypatch.setattr(module.subprocess, "Popen", popen)
+    monkeypatch.setattr(module, "create_windows_kill_on_close_job", create_job)
+    monkeypatch.setattr(module, "resume_windows_process", resume, raising=False)
 
     module.LauncherWindow._start_assistant(host)
 
     assert host._assistant_proc is process
     assert host._assistant_parent_job is job
-    assert events == ["assign:7318"]
+    assert assistant_executed is True
+    assert popen_calls[0]["creationflags"] == (module._WINDOWS_CREATE_NO_WINDOW | module._WINDOWS_CREATE_SUSPENDED)
+    assert events == ["popen", "assign:7318", "resume:7318"]
     assert module.PARENT_PID_ENV not in popen_calls[0]["env"]
 
     module.LauncherWindow._stop_assistant(host)
 
-    assert events == ["assign:7318", "close-job"]
+    assert events == ["popen", "assign:7318", "resume:7318", "close-job"]
     assert host._assistant_proc is None
     assert host._assistant_parent_job is None
 
@@ -96,12 +143,19 @@ def test_windows_job_assignment_failure_retains_exact_assistant_owner(
     monkeypatch.setattr(module.sys, "platform", "win32")
     monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
     monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
-    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    popen_calls: list[dict[str, object]] = []
+    resume = MagicMock()
+    monkeypatch.setattr(
+        module.subprocess,
+        "Popen",
+        lambda *_args, **kwargs: popen_calls.append(kwargs) or process,
+    )
     monkeypatch.setattr(
         module,
         "create_windows_kill_on_close_job",
         lambda _process: (_ for _ in ()).throw(OSError("job assignment failed")),
     )
+    monkeypatch.setattr(module, "resume_windows_process", resume, raising=False)
 
     with pytest.raises(RuntimeError, match="post-spawn construction failed"):
         module.LauncherWindow._start_assistant(host)
@@ -109,11 +163,72 @@ def test_windows_job_assignment_failure_retains_exact_assistant_owner(
     assert host._assistant_proc is process
     assert host._assistant_parent_job is None
     assert isinstance(host._assistant_unsettled_start_failure, OSError)
+    assert int(popen_calls[0]["creationflags"]) & module._WINDOWS_CREATE_SUSPENDED
+    resume.assert_not_called()
 
     process.poll.return_value = 0
     module.LauncherWindow._stop_assistant(host)
     assert host._assistant_proc is None
     assert host._assistant_unsettled_start_failure is None
+
+
+def test_windows_resume_failure_retains_process_and_assigned_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    events: list[str] = []
+    process = MagicMock(pid=7316)
+    process.poll.return_value = None
+
+    class Job:
+        def close(self) -> None:
+            events.append("close-job")
+
+    job = Job()
+    host = SimpleNamespace(
+        _assistant_experiment_mode=False,
+        _assistant_periodic_requested=False,
+        _assistant_periodic_health=None,
+        _assistant_proc=None,
+        _assistant_parent_job=None,
+        _assistant_shutdown_path=None,
+        _assistant_shutdown_authority=None,
+        _assistant_soak_duplicate_owner=None,
+        _assistant_unsettled_start_failure=None,
+        _assistant_restart_pending=False,
+        _soak_artifact_capability=None,
+    )
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        module,
+        "create_windows_kill_on_close_job",
+        lambda _process: events.append("assign") or job,
+    )
+    monkeypatch.setattr(
+        module,
+        "resume_windows_process",
+        lambda _process: (_ for _ in ()).throw(OSError("resume failed")),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="post-spawn construction failed"):
+        module.LauncherWindow._start_assistant(host)
+
+    assert events == ["assign"]
+    assert host._assistant_proc is process
+    assert host._assistant_parent_job is job
+    assert isinstance(host._assistant_unsettled_start_failure, OSError)
+
+    process.poll.return_value = 0
+    module.LauncherWindow._stop_assistant(host)
+    assert events == ["assign", "close-job"]
+    assert host._assistant_proc is None
+    assert host._assistant_parent_job is None
 
 
 def test_assistant_post_spawn_failure_retains_process_until_exact_stop(monkeypatch) -> None:
