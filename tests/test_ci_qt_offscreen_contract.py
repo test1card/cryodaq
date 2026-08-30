@@ -389,12 +389,42 @@ def _run_canonical_script(
     script.write_text(_canonical_step()["run"], encoding="utf-8", newline="\n")
 
     env, log = _stub_tree(tmp_path, missing, require_update)
+    # A LOGIN shell rebuilds PATH from its own profile, so an inherited PATH does
+    # not reliably reach the script. On the hosted Windows runner the stub
+    # directory was dropped exactly that way, and the failure was SILENT: the
+    # script's own probe is `dpkg -s "$package" >/dev/null 2>&1`, so a missing
+    # `dpkg` sends its not-found error to /dev/null and every package is marked
+    # absent; the run then died on `sudo: command not found`. This wrapper sets
+    # PATH AFTER the profile has run and then sources the real script, so the
+    # login shell -- the property under test -- is preserved.
+    bin_dir = (tmp_path / "bin").as_posix()
+    wrapper = tmp_path / "run-step.sh"
+    wrapper.write_text(
+        f"BIN='{bin_dir}'\n"
+        # A drive-letter path is not a PATH entry bash can search. The inherited
+        # environment is converted at shell startup, but a path prepended INSIDE
+        # the shell is not, so it is converted here or the lookup silently misses.
+        'if command -v cygpath >/dev/null 2>&1; then BIN="$(cygpath -u "$BIN")"; fi\n'
+        'PATH="$BIN:$PATH"\n'
+        "export PATH\n"
+        "for tool in dpkg apt-get sudo; do\n"
+        '  command -v "$tool" >/dev/null 2>&1 || { echo "STUB_NOT_ON_PATH:$tool" >&2; exit 3; }\n'
+        "done\n"
+        f'. "{script.as_posix()}"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+
     completed = subprocess.run(
-        [bash, "-el", script.as_posix()],
+        [bash, "-el", wrapper.as_posix()],
         cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
+    )
+    assert completed.returncode != 3, (
+        "the stubbed tools never reached the script's PATH, so this run measured nothing "
+        f"about the install path: {completed.stderr.strip()}"
     )
     return completed, _apt_invocations(log), _installed_packages(tmp_path)
 
