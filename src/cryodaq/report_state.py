@@ -136,6 +136,7 @@ def validate_active_experiment_transition_receipt(
     *,
     manager_incarnation: str,
     revision: int,
+    app_mode: str,
     active_experiment_id: str | None,
     state_fingerprint: str,
 ) -> None:
@@ -154,17 +155,34 @@ def validate_active_experiment_transition_receipt(
         or not receipt.get("experiment_id")
         or type(receipt.get("predecessor_revision")) is not int
         or receipt.get("predecessor_revision") < 0
-        or receipt.get("result_revision") != receipt.get("predecessor_revision") + 1
-        or receipt.get("result_revision") != revision
-        or receipt.get("result_active_experiment_id") != active_experiment_id
-        or receipt.get("result_state_fingerprint") != state_fingerprint
-        or (receipt.get("operation") == "finalize" and receipt.get("result_active_experiment_id") is not None)
-        or (
-            receipt.get("operation") in {"create", "update"}
-            and receipt.get("result_active_experiment_id") != receipt.get("experiment_id")
-        )
     ):
         raise ReportContractError("active experiment transition receipt is invalid")
+    result_revision = receipt.get("result_revision")
+    if (
+        type(result_revision) is not int
+        or result_revision != receipt.get("predecessor_revision") + 1
+        or result_revision != revision
+    ):
+        raise ReportContractError("active experiment transition receipt result revision is invalid")
+    operation = receipt["operation"]
+    experiment_id = receipt["experiment_id"]
+    result_active_experiment_id = receipt.get("result_active_experiment_id")
+    if (
+        result_active_experiment_id != active_experiment_id
+        or (operation == "finalize" and result_active_experiment_id is not None)
+        or (operation in {"create", "update"} and result_active_experiment_id != experiment_id)
+        or receipt.get("result_state_fingerprint") != state_fingerprint
+    ):
+        raise ReportContractError("active experiment transition receipt result state is invalid")
+    predecessor_active_experiment_id = None if operation == "create" else experiment_id
+    expected_predecessor_state_fingerprint = active_experiment_state_fingerprint(
+        manager_incarnation=manager_incarnation,
+        revision=receipt["predecessor_revision"],
+        app_mode=app_mode,
+        active_experiment_id=predecessor_active_experiment_id,
+    )
+    if receipt.get("predecessor_state_fingerprint") != expected_predecessor_state_fingerprint:
+        raise ReportContractError("active experiment transition receipt predecessor state fingerprint is invalid")
 
 
 def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
@@ -225,6 +243,7 @@ def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
             receipt,
             manager_incarnation=manager_incarnation,
             revision=revision,
+            app_mode=app_mode,
             active_experiment_id=value,
             state_fingerprint=state_fingerprint,
         )

@@ -332,7 +332,7 @@ def test_v2_state_envelope_ambiguity_fails_closed_without_modification(
     before_state = state_path.read_bytes()
     before_metadata = active.metadata_path.read_bytes()
 
-    with pytest.raises(RuntimeError, match="envelope is ambiguous"):
+    with pytest.raises(RuntimeError, match="unexpected fields"):
         _manager(tmp_path)
 
     assert state_path.read_bytes() == before_state
@@ -352,7 +352,7 @@ def test_terminal_receipt_digest_corruption_fails_closed(
     before_state = state_path.read_bytes()
     before_metadata = active.metadata_path.read_bytes()
 
-    with pytest.raises(RuntimeError, match="terminal receipt fingerprint"):
+    with pytest.raises(RuntimeError, match="transition receipt fingerprint"):
         _manager(tmp_path)
 
     assert state_path.read_bytes() == before_state

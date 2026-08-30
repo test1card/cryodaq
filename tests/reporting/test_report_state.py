@@ -365,9 +365,81 @@ def test_receipt_semantics_are_shared_by_authority_and_report_reader(tmp_path: P
 
     with pytest.raises(ReportContractError, match="transition receipt is invalid"):
         load_active_experiment_id(tmp_path)
-    with pytest.raises(RuntimeError, match="terminal receipt is invalid"):
+    with pytest.raises(RuntimeError, match="transition receipt is invalid"):
         ExperimentManager(tmp_path, instruments)
     assert state_path.read_bytes() == malformed_state
+
+
+def _resign_transition_receipt(payload: dict) -> None:
+    receipt = payload["last_transition_receipt"]
+    payload["last_transition_receipt_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            receipt,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _replace_predecessor_fingerprint(payload: dict) -> None:
+    payload["last_transition_receipt"]["predecessor_state_fingerprint"] = "0" * 64
+    _resign_transition_receipt(payload)
+
+
+def _replace_result_revision_with_true(payload: dict) -> None:
+    payload["last_transition_receipt"]["result_revision"] = True
+    _resign_transition_receipt(payload)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_message"),
+    [
+        (_replace_predecessor_fingerprint, "predecessor state fingerprint"),
+        (_replace_result_revision_with_true, "result revision"),
+        (
+            lambda payload: payload.__setitem__(
+                "updated_at",
+                datetime.fromtimestamp(time.time() + 600, tz=UTC).isoformat(),
+            ),
+            "updated_at",
+        ),
+    ],
+    ids=["resigned-predecessor", "boolean-result-revision", "future-updated-at"],
+)
+def test_report_and_manager_reject_the_same_mutated_v2_envelope(
+    tmp_path: Path,
+    mutate,
+    expected_message: str,
+) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    manager.create_experiment("shared-validator", "operator")
+    state_path = tmp_path / "experiment_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    mutated_state = state_path.read_bytes()
+
+    report_error = None
+    try:
+        load_active_experiment_id(tmp_path)
+    except ReportContractError as exc:
+        report_error = exc
+    manager_error = None
+    try:
+        ExperimentManager(tmp_path, instruments)
+    except RuntimeError as exc:
+        manager_error = exc
+
+    assert isinstance(report_error, ReportContractError)
+    assert expected_message in str(report_error)
+    assert isinstance(manager_error, RuntimeError)
+    assert isinstance(manager_error.__cause__, ReportContractError)
+    assert str(manager_error.__cause__) == str(report_error)
+    assert state_path.read_bytes() == mutated_state
 
 
 def test_reports_root_rejects_symlinked_reports_and_children(tmp_path: Path) -> None:

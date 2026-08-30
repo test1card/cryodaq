@@ -25,7 +25,6 @@ from typing import Any
 import yaml
 
 from cryodaq.report_state import (
-    ACTIVE_EXPERIMENT_STATE_FIELDS,
     ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION,
     ReportContractError,
     active_experiment_state_fingerprint,
@@ -36,7 +35,6 @@ from cryodaq.report_state import (
     resolve_report_artifact,
     resolve_report_paths,
     validate_active_experiment_state,
-    validate_active_experiment_transition_receipt,
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
@@ -1622,83 +1620,52 @@ class ExperimentManager:
             _STATE_SCHEMA_VERSION,
         }:
             raise RuntimeError("Experiment state authority has an unsupported schema.")
-        legacy_keys = {
-            "schema_version",
-            "app_mode",
-            "active_experiment_id",
-            "updated_at",
-        }
-        v2_keys = ACTIVE_EXPERIMENT_STATE_FIELDS
-        expected_keys = legacy_keys if schema_version == 1 else v2_keys
-        if set(payload) != expected_keys:
-            raise RuntimeError("Experiment state authority envelope is ambiguous.")
-        if type(payload.get("app_mode")) is not str:
-            raise RuntimeError("Experiment state application mode is invalid.")
-        app_mode = self._normalize_app_mode(payload["app_mode"])
-        active_experiment_id = payload.get("active_experiment_id")
-        if active_experiment_id is not None and (type(active_experiment_id) is not str or not active_experiment_id):
-            raise RuntimeError("Experiment state active identity is invalid.")
-        updated_at = payload.get("updated_at")
-        if type(updated_at) is not str:
-            raise RuntimeError("Experiment state update timestamp is invalid.")
-        try:
-            parsed_updated_at = _parse_time(updated_at)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("Experiment state update timestamp is invalid.") from exc
-        if parsed_updated_at is None:
-            raise RuntimeError("Experiment state update timestamp is invalid.")
-
-        revision = 0 if schema_version == 1 else payload.get("revision")
-        if type(revision) is not int or revision < 0:
-            raise RuntimeError("Experiment state revision is invalid.")
-        receipt = None if schema_version == 1 else payload.get("last_transition_receipt")
-        if receipt is not None and not isinstance(receipt, dict):
-            raise RuntimeError("Experiment state terminal receipt is invalid.")
-        receipt_fingerprint = None if schema_version == 1 else payload.get("last_transition_receipt_fingerprint")
-        if schema_version == _STATE_SCHEMA_VERSION:
-            manager_incarnation = payload.get("manager_incarnation")
-            if not _is_lower_hex(manager_incarnation, _HEX_ID_LENGTH):
-                raise RuntimeError("Experiment manager incarnation is invalid.")
-            self._manager_incarnation = manager_incarnation
-            expected_fingerprint = self._state_fingerprint(
-                revision=revision,
-                app_mode=app_mode,
-                active_experiment_id=active_experiment_id,
-            )
-            if (
-                not _is_lower_hex(payload.get("state_fingerprint"), _SHA256_LENGTH)
-                or payload.get("state_fingerprint") != expected_fingerprint
-            ):
-                raise RuntimeError("Experiment state fingerprint is invalid.")
-            expected_receipt_fingerprint = _canonical_digest(receipt) if receipt is not None else None
-            if receipt_fingerprint != expected_receipt_fingerprint or (
-                receipt_fingerprint is not None and not _is_lower_hex(receipt_fingerprint, _SHA256_LENGTH)
-            ):
-                raise RuntimeError("Experiment state terminal receipt fingerprint is invalid.")
-            if receipt is not None:
-                try:
-                    validate_active_experiment_transition_receipt(
-                        receipt,
-                        manager_incarnation=self._manager_incarnation,
-                        revision=revision,
-                        active_experiment_id=active_experiment_id,
-                        state_fingerprint=expected_fingerprint,
-                    )
-                except ReportContractError as exc:
-                    raise RuntimeError("Experiment state terminal receipt is invalid.") from exc
-        elif self._transition_path.exists():
-            # A legacy journal cannot be upgraded safely because it has no
-            # predecessor cut. Preserve both files for operator recovery.
+        if schema_version == 1:
+            legacy_keys = {
+                "schema_version",
+                "app_mode",
+                "active_experiment_id",
+                "updated_at",
+            }
+            if set(payload) != legacy_keys:
+                raise RuntimeError("Experiment state authority envelope is ambiguous.")
+            if type(payload.get("app_mode")) is not str:
+                raise RuntimeError("Experiment state application mode is invalid.")
+            app_mode = self._normalize_app_mode(payload["app_mode"])
+            active_experiment_id = payload.get("active_experiment_id")
+            if active_experiment_id is not None and (type(active_experiment_id) is not str or not active_experiment_id):
+                raise RuntimeError("Experiment state active identity is invalid.")
+            updated_at = payload.get("updated_at")
+            if type(updated_at) is not str:
+                raise RuntimeError("Experiment state update timestamp is invalid.")
+            try:
+                parsed_updated_at = _parse_time(updated_at)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("Experiment state update timestamp is invalid.") from exc
+            if parsed_updated_at is None:
+                raise RuntimeError("Experiment state update timestamp is invalid.")
             self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
-            self._state_revision = revision
-            self._last_transition_receipt = receipt
+            self._state_revision = 0
+            self._last_transition_receipt = None
+            if self._transition_path.exists():
+                # A legacy journal cannot be upgraded safely because it has no
+                # predecessor cut. Preserve both files for operator recovery.
+                return
+            self._write_state(revision=0, transition_receipt=None)
             return
+
+        try:
+            active_experiment_id = validate_active_experiment_state(payload)
+        except ReportContractError as exc:
+            raise RuntimeError(f"Experiment state authority is invalid: {exc}") from exc
+        app_mode = self._normalize_app_mode(payload["app_mode"])
+        revision = payload["revision"]
+        receipt = payload["last_transition_receipt"]
+        self._manager_incarnation = payload["manager_incarnation"]
 
         self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
         self._state_revision = revision
         self._last_transition_receipt = dict(receipt) if receipt is not None else None
-        if schema_version == 1:
-            self._write_state(revision=revision, transition_receipt=receipt)
 
     def _load_state(self) -> None:
         self._load_state_authority()
