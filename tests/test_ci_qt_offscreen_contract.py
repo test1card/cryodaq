@@ -25,6 +25,9 @@ a distinct way the jobs go blind again underneath a green guard:
 - the script exercised under `bash -c`, while production runs it through the
   `bash -el` login shell whose `~/.bash_logout` is what turned four successful
   installs into four failed jobs in run 32306229771;
+- the script sourced by a login-shell wrapper, which makes top-level `return`
+  valid even though the workflow's direct `bash -el <step-file>` invocation
+  rejects it;
 - the step present and correct, but ORDERED after the command that needs it;
 - `apt-get` reached, but with `--simulate`, so nothing is installed;
 - every package probed together, hiding a script that only ever probes one;
@@ -394,12 +397,13 @@ def _run_canonical_script(
     # directory was dropped exactly that way, and the failure was SILENT: the
     # script's own probe is `dpkg -s "$package" >/dev/null 2>&1`, so a missing
     # `dpkg` sends its not-found error to /dev/null and every package is marked
-    # absent; the run then died on `sudo: command not found`. This wrapper sets
-    # PATH AFTER the profile has run and then sources the real script, so the
-    # login shell -- the property under test -- is preserved.
+    # absent; the run then died on `sudo: command not found`. BASH_ENV is read
+    # after the login profile, so this bootstrap can restore and verify the stub
+    # PATH without sourcing the target. The target itself remains the file passed
+    # directly to `bash -el`, exactly as it is in the workflow.
     bin_dir = (tmp_path / "bin").as_posix()
-    wrapper = tmp_path / "run-step.sh"
-    wrapper.write_text(
+    bootstrap = tmp_path / "bash-env.sh"
+    bootstrap.write_text(
         f"BIN='{bin_dir}'\n"
         # A drive-letter path is not a PATH entry bash can search. The inherited
         # environment is converted at shell startup, but a path prepended INSIDE
@@ -409,14 +413,14 @@ def _run_canonical_script(
         "export PATH\n"
         "for tool in dpkg apt-get sudo; do\n"
         '  command -v "$tool" >/dev/null 2>&1 || { echo "STUB_NOT_ON_PATH:$tool" >&2; exit 3; }\n'
-        "done\n"
-        f'. "{script.as_posix()}"\n',
+        "done\n",
         encoding="utf-8",
         newline="\n",
     )
+    env["BASH_ENV"] = bootstrap.as_posix()
 
     completed = subprocess.run(
-        [bash, "-el", wrapper.as_posix()],
+        [bash, "-el", script.as_posix()],
         cwd=tmp_path,
         env=env,
         capture_output=True,

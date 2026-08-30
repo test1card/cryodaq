@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NIGHTLY-QT-LOGIN-PATH-AND-DIRECT-STEP-BOUNDARY-FALSE-GREEN-409
+    status: open
+    scope: repository
+    runtime_prevention_id: NIGHTLY-QT-LIBRARIES-BLIND-JOB-001
+    guard: tests/test_ci_qt_offscreen_contract.py::test_the_step_skips_the_network_when_every_package_is_present
+    ci_partition: remaining
+    red_evidence: measured_2026_08_30_on_python_3_14_6_two_in_place_controls_against_the_exact_registered_guard_and_shared_execution_helper; replacing_the_post_login_PATH_with_STUB_ROOT_missing_bin_reintroduced_the_stub_PATH_loss_and_pytest_exited_1_with_1_failed_on_STUB_NOT_ON_PATH_dpkg_then_restoring_the_corrected_test_blob_66b8a38399403e591a73bbc77907f2fd25473bbe_made_the_exact_node_1_passed; appending_return_0_to_all_three_byte_identical_workflow_scripts_reintroduced_the_sourced_target_process_boundary_escape_and_the_full_contract_exited_1_with_7_failed_7_passed_each_executed_script_node_observing_bash_exit_2_can_only_return_from_a_function_or_sourced_script_then_main_blob_4adea30ebf869505c871f28252adf8b805ae9c1a_and_nightly_blob_53a74a12854ad3ae57d1856c668a3c3cbed8c21c_were_restored_byte_identical_pending_immutable_capture
+    green_evidence: pending
   - id: NIGHTLY-QT-DIVERGENT-STEP-COPY-FALSE-GREEN-401
     status: open
     scope: repository
