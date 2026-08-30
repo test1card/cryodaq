@@ -10,6 +10,7 @@ import pytest
 from cryodaq.core import broker as broker_module
 from cryodaq.core.broker import (
     PERSISTENCE_AUTHORITATIVE_METADATA_KEY,
+    PUBLISHER_AUTHORITY_METADATA_KEY,
     DataBroker,
     OverflowPolicy,
     RequiredPublication,
@@ -51,6 +52,28 @@ async def test_publish_delivers_to_subscriber() -> None:
     received = q.get_nowait()
     assert received == r
     assert received is not r
+
+
+async def test_reserved_source_state_rejects_passive_publisher_and_broker_stamps_owner() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("reader", maxsize=10)
+    channel = "analytics/keithley_channel_state/smua"
+    authority = broker.reserve_publisher("safety_manager_source_state_v1", (channel,))
+    forged = Reading.now(
+        channel,
+        0.0,
+        "",
+        instrument_id="safety_manager",
+        metadata={"state": "off", PUBLISHER_AUTHORITY_METADATA_KEY: "safety_manager_source_state_v1"},
+    )
+
+    with pytest.raises(RuntimeError, match="reserved publisher authority"):
+        await broker.publish(forged)
+
+    assert queue.empty()
+    await broker.publish(forged, publisher_authority=authority)
+    delivered = queue.get_nowait()
+    assert delivered.metadata[PUBLISHER_AUTHORITY_METADATA_KEY] == "safety_manager_source_state_v1"
 
 
 # ---------------------------------------------------------------------------

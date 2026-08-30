@@ -16,6 +16,7 @@ from cryodaq.analytics.calibration import (
     CalibrationZone,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
 # ---------------------------------------------------------------------------
@@ -819,12 +820,9 @@ async def test_read_status_not_connected_raises() -> None:
         await driver.read_status()
 
 
-async def test_status_refresh_failure_marks_cached_status_stale() -> None:
+async def test_status_refresh_failure_is_unknown_not_cached_fault() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._connected = True
-    driver._last_status_result = {1: 17}
-    # Fresh WSL instances can have monotonic uptime below the 60 s refresh interval.
-    driver._last_status_check = -float("inf")
     driver.read_status = AsyncMock(side_effect=RuntimeError("RDGST unavailable"))  # type: ignore[method-assign]
     driver._read_krdg_channels = AsyncMock(
         return_value=[
@@ -840,9 +838,100 @@ async def test_status_refresh_failure_marks_cached_status_stale() -> None:
 
     result = await driver.read_channels()
 
-    assert result[0].metadata["sensor_status"] == 17
+    assert result[0].status is ChannelStatus.OK
+    assert result[0].value == pytest.approx(4.2)
+    assert "sensor_status" not in result[0].metadata
     assert result[0].metadata["sensor_status_availability"] == {
-        "available": True,
-        "stale": True,
+        "available": False,
+        "stale": False,
         "reason": "RDGST unavailable",
     }
+
+
+async def test_instrument_status_fault_masks_380_and_clean_380_still_trips() -> None:
+    """RDGST, not the numeric ceiling, discriminates a broken sensor from heat."""
+    from cryodaq.core.broker import DataBroker
+    from cryodaq.core.interlock import InterlockCondition, InterlockEngine
+
+    status_ch1 = "64"  # sensor-units over-range (the open-sensor direction)
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            return status_ch1 if command == "RDGST? 1" else "0"
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        channel_labels={1: "Т1"},
+        mock=False,
+    )
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    tripped: list[str] = []
+
+    async def emergency_off() -> SourceOffResult:
+        tripped.append("emergency_off")
+        return SourceOffResult.COMMAND_ACCEPTED
+
+    engine = InterlockEngine(DataBroker(), actions={"emergency_off": emergency_off})
+    engine.add_condition(
+        InterlockCondition(
+            name="overheat_cryostat",
+            description="cryostat overheat",
+            channel_ids=frozenset({"Т1"}),
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+        )
+    )
+
+    faulted = (await driver.read_channels())[0]
+    assert faulted.status is ChannelStatus.SENSOR_ERROR
+    assert math.isnan(faulted.value)
+    assert faulted.raw is None
+    assert faulted.metadata["instrument_status_fault_reasons"] == ["sensor_units_over_range"]
+    await engine._process_reading(faulted)
+    assert tripped == [], "an instrument-confirmed sensor fault is not temperature evidence"
+
+    status_ch1 = "0"
+    clean = (await driver.read_channels())[0]
+    assert clean.status is ChannelStatus.OK
+    assert clean.value == pytest.approx(380.0)
+    await engine._process_reading(clean)
+    assert tripped == ["emergency_off"], "a genuine clean-status 380 K reading must still trip"
+
+
+async def test_unavailable_rdgst_is_unknown_and_does_not_reuse_a_cached_fault() -> None:
+    """Unsupported/failed status acquisition must keep the numeric reading usable."""
+    status_available = True
+    high_response = ",".join(["+380.000E+0", *(["+004.200E+0"] * 7)])
+
+    async def query(command: str, timeout_ms=None) -> str:
+        del timeout_ms
+        if command == "KRDG?":
+            return high_response
+        if command.startswith("RDGST? "):
+            if status_available:
+                return "64" if command == "RDGST? 1" else "0"
+            raise RuntimeError("RDGST unsupported")
+        raise AssertionError(f"unexpected query: {command}")
+
+    driver = LakeShore218S("LS218_1", "GPIB0::12::INSTR", mock=False)
+    driver._connected = True
+    driver._query = AsyncMock(side_effect=query)  # type: ignore[method-assign]
+
+    first = (await driver.read_channels())[0]
+    assert first.status is ChannelStatus.SENSOR_ERROR
+
+    status_available = False
+    unknown = (await driver.read_channels())[0]
+    assert unknown.status is ChannelStatus.OK
+    assert unknown.value == pytest.approx(380.0)
+    assert "instrument_status_fault_reasons" not in unknown.metadata
+    assert unknown.metadata["sensor_status_availability"]["available"] is False

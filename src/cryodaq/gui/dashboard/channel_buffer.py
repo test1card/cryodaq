@@ -16,6 +16,8 @@ import math
 from collections import deque
 from collections.abc import Iterable
 
+from cryodaq.drivers.base import ChannelStatus
+
 # Bounded samples per channel; 86,400 equals 24 hours only at 1 Hz.
 _BUFFER_MAXLEN = 86400
 
@@ -45,33 +47,52 @@ class ChannelBufferStore:
     """Rolling per-channel deque store with last-value lookup."""
 
     def __init__(self, maxlen: int = _BUFFER_MAXLEN) -> None:
-        self._buffers: dict[str, deque[tuple[float, float]]] = {}
-        self._last_value: dict[str, tuple[float, float]] = {}
+        self._buffers: dict[str, deque[tuple[float, float, ChannelStatus]]] = {}
+        self._last_value: dict[str, tuple[float, float, ChannelStatus]] = {}
         self._maxlen = maxlen
 
-    def append(self, channel: str, timestamp_epoch: float, value: float) -> None:
-        """Append a single sample to the channel's buffer."""
+    def append(
+        self,
+        channel: str,
+        timestamp_epoch: float,
+        value: float,
+        status: ChannelStatus = ChannelStatus.OK,
+    ) -> None:
+        """Append one full-rate sample without discarding its status evidence."""
         if channel not in self._buffers:
             self._buffers[channel] = deque(maxlen=self._maxlen)
-        self._buffers[channel].append((timestamp_epoch, value))
-        self._last_value[channel] = (timestamp_epoch, value)
+        self._buffers[channel].append((timestamp_epoch, value, status))
+        self._last_value[channel] = (timestamp_epoch, value, status)
 
     def get_history(self, channel: str) -> list[tuple[float, float]]:
-        """Return a list copy of the channel's buffer for plotting."""
+        """Return usable finite samples for plotting, excluding status failures."""
         buf = self._buffers.get(channel)
         if buf is None:
             return []
-        return list(buf)
+        return [
+            (timestamp, value)
+            for timestamp, value, status in buf
+            if status is ChannelStatus.OK and math.isfinite(value)
+        ]
 
     def get_history_since(self, channel: str, since_epoch: float) -> list[tuple[float, float]]:
         """Return entries newer than since_epoch."""
         buf = self._buffers.get(channel)
         if buf is None:
             return []
-        return [(t, v) for (t, v) in buf if t >= since_epoch]
+        return [
+            (timestamp, value)
+            for timestamp, value, status in buf
+            if timestamp >= since_epoch and status is ChannelStatus.OK and math.isfinite(value)
+        ]
 
     def get_last(self, channel: str) -> tuple[float, float] | None:
         """Return (timestamp, value) of the most recent sample, or None."""
+        last = self._last_value.get(channel)
+        return None if last is None else last[:2]
+
+    def get_last_with_status(self, channel: str) -> tuple[float, float, ChannelStatus] | None:
+        """Return the atomic latest timestamp, value, and status sample."""
         return self._last_value.get(channel)
 
     def known_channels(self) -> Iterable[str]:

@@ -62,6 +62,85 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
 
 
+def test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Process:
+        pid = 101
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+
+        def poll(self) -> int | None:
+            events.append("poll")
+            return self.returncode
+
+        def send_signal(self, signum: int) -> None:
+            events.append("signal")
+            self.signals.append(signum)
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            events.append("communicate")
+            self.returncode = 0
+            return b"gui stdout", b"gui stderr"
+
+    class _Job:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            events.append("close")
+            self.close_calls += 1
+
+    process = _Process()
+    job = _Job()
+    creation_flags: list[int] = []
+
+    def create_job(candidate: object) -> _Job | None:
+        events.append("job")
+        return job if candidate is process else None
+
+    def active_processes(candidate: object) -> int:
+        events.append("query")
+        return 1 if candidate is job else 0
+
+    def popen(*_args: object, **kwargs: object) -> _Process:
+        events.append("popen")
+        creation_flags.append(int(kwargs["creationflags"]))
+        return process
+
+    def resume(candidate: object) -> None:
+        assert candidate is process
+        events.append("resume")
+
+    monotonic_values = iter((0.0, 0.0, 0.0, 6.0))
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", popen)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 21, raising=False)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke, "_create_gui_job", create_job)
+    monkeypatch.setattr(smoke, "_resume_gui_process", resume)
+    monkeypatch.setattr(smoke, "_windows_job_active_process_count", active_processes)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
+
+    with pytest.raises(RuntimeError, match=r"descendants survived shutdown: active_processes=1"):
+        smoke._run_gui_startup_cell(Path("CryoDAQ.exe"), tmp_path, tmp_path)
+
+    assert smoke._WINDOWS_CREATE_SUSPENDED == 0x00000004
+    assert creation_flags == [smoke.subprocess.CREATE_NEW_PROCESS_GROUP | smoke._WINDOWS_CREATE_SUSPENDED]
+    assert events.index("popen") < events.index("job") < events.index("resume") < events.index("poll")
+    assert events.index("poll") < events.index("signal")
+    assert events.index("query") < events.index("close")
+    assert process.signals == [smoke.signal.CTRL_BREAK_EVENT]
+    assert job.close_calls == 1
+    assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui stdout"
+
+
 def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
 
@@ -540,3 +619,230 @@ def test_local_non_windows_run_records_external_gate_not_a_fake_pass(tmp_path: P
     assert payload["status"] == "FAIL"
     assert payload["reason"] == "RuntimeError:WINDOWS_REQUIRED"
     assert payload["cells"] == []
+
+
+def test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it(tmp_path: Path) -> None:
+    """The hang was the ONE failure that left nothing to diagnose it with.
+
+    `communicate(timeout=...)` raises TimeoutExpired WITHOUT returning what the child
+    already wrote, and both CTRL_BREAK cells re-raised before `_write_log` ran. The
+    real Windows failure at 7b634e0098 left a `reason` string and no output at all,
+    so nobody could see why the GUI would not exit after CTRL_BREAK.
+
+    This drives a genuine TimeoutExpired against a real child that outlives a real
+    deadline, then does what the cells do on their failure path, and asserts the
+    child's output survived.
+    """
+
+    import subprocess
+    import sys
+
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys, time; "
+            "sys.stdout.write('child-stdout-marker\\n'); sys.stdout.flush(); "
+            "sys.stderr.write('child-stderr-marker\\n'); sys.stderr.flush(); "
+            "time.sleep(120)"
+        ),
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+            process.communicate(timeout=2.0)
+        # Exactly what the cells now do before re-raising.
+        process.terminate()
+        process.wait(timeout=10)
+        smoke._preserve_failure_evidence(process, command, tmp_path, "gui_startup_offscreen", excinfo.value)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    stdout_log = tmp_path / "gui_startup_offscreen.stdout.log"
+    stderr_log = tmp_path / "gui_startup_offscreen.stderr.log"
+    assert stdout_log.is_file(), "a timed-out cell wrote no stdout log; its failure cannot be diagnosed"
+    assert stderr_log.is_file(), "a timed-out cell wrote no stderr log; its failure cannot be diagnosed"
+    assert b"child-stdout-marker" in stdout_log.read_bytes(), "the child's stdout was discarded on the timeout path"
+    assert b"child-stderr-marker" in stderr_log.read_bytes(), "the child's stderr was discarded on the timeout path"
+
+
+def test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler() -> None:
+    """The previous guard did not bind, and that is the defect it was guarding against.
+
+    It asserted only that the first `_preserve_failure_evidence(` SUBSTRING appeared
+    before the re-raise. Move either call above the `try:` - or anywhere else earlier
+    in the function - and the guard stayed green while `communicate(timeout=20)` could
+    time out without the helper ever executing. A guard that a legal rearrangement can
+    satisfy is not attached to the property it names.
+
+    So this reads control flow instead of text: the call must be a statement INSIDE
+    the `except BaseException:` handler, before the `raise`, in BOTH cells. It also
+    asserts the handler BINDS its exception and passes it on, because the timeout
+    object carries partial output on POSIX and discarding it discards evidence.
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    for cell in (smoke._run_gui_startup_cell, smoke._run_assistant_cell):
+        function = ast.parse(textwrap.dedent(inspect.getsource(cell))).body[0]
+        assert isinstance(function, ast.FunctionDef)
+
+        guarded_tries = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Try)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "communicate"
+                and any(
+                    keyword.arg == "timeout" and isinstance(keyword.value, ast.Constant) and keyword.value.value == 20
+                    for keyword in call.keywords
+                )
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+        ]
+        assert len(guarded_tries) == 1, (
+            f"{cell.__name__} has {len(guarded_tries)} try statements containing communicate(timeout=20); "
+            "re-check this guard"
+        )
+        handlers = [
+            handler
+            for handler in guarded_tries[0].handlers
+            if isinstance(handler.type, ast.Name) and handler.type.id == "BaseException"
+        ]
+        assert len(handlers) == 1, (
+            f"{cell.__name__}'s bounded communicate has {len(handlers)} BaseException handlers; re-check this guard"
+        )
+        handler = handlers[0]
+        assert handler.name is not None, (
+            f"{cell.__name__} does not bind its failure, so the timeout's own partial output is discarded"
+        )
+
+        preserved_at: int | None = None
+        preserved_call: ast.Call | None = None
+        raised_at: int | None = None
+        for index, statement in enumerate(handler.body):
+            if (
+                preserved_call is None
+                and isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id == "_preserve_failure_evidence"
+            ):
+                preserved_at, preserved_call = index, statement.value
+            if raised_at is None and isinstance(statement, ast.Raise):
+                raised_at = index
+
+        assert preserved_call is not None, (
+            f"{cell.__name__} does not preserve evidence INSIDE its BaseException handler; "
+            "a call anywhere else in the function does not run when communicate() times out"
+        )
+        assert raised_at is not None, f"{cell.__name__} no longer re-raises; its failure would be swallowed"
+        assert preserved_at < raised_at, (
+            f"{cell.__name__} re-raises before preserving evidence, so the log is never written"
+        )
+        assert (
+            preserved_call.args
+            and isinstance(preserved_call.args[-1], ast.Name)
+            and preserved_call.args[-1].id == handler.name
+        ), f"{cell.__name__} does not pass its caught failure, so a POSIX timeout's partial output is thrown away"
+
+
+def test_preserving_evidence_never_replaces_the_real_failure() -> None:
+    """Bookkeeping must not become the error the operator sees.
+
+    A child that cannot be drained, or an evidence directory that cannot be written,
+    is a worse thing to report than the failure that was already happening. Every
+    step in the helper is suppressed for that reason.
+    """
+
+    class _Unusable:
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise OSError("the pipe is gone")
+
+    # An evidence directory that does not exist makes _write_log raise too.
+    smoke._preserve_failure_evidence(_Unusable(), ["x"], Path("/nonexistent-evidence-dir"), "gui_startup_offscreen")
+
+
+def test_a_drain_that_also_times_out_still_writes_what_was_collected(tmp_path: Path) -> None:
+    """Empty logs are worse than no logs: they look like captured evidence.
+
+    An outliving descendant that inherited the parent's stdout or stderr handle keeps
+    the pipe open and the reader blocked, so the second `communicate()` times out too.
+    The first version suppressed that and wrote empty files.
+
+    `TimeoutExpired` carries `.output` and `.stderr`, so both timeouts are evidence
+    and both must be read. The cases below cover drain-only, initial-only, and
+    distinct payloads from both attempts.
+    """
+
+    import subprocess
+
+    argv = ["CryoDAQ.exe", "--mode=gui"]
+
+    class _DrainTimesOutCarryingBytes:
+        """POSIX: the drain times out but hands back what it read."""
+
+        returncode = None
+        poll_calls = 0
+
+        def poll(self) -> int:
+            self.poll_calls += 1
+            return 19
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout-bytes", stderr=b"drain-stderr-bytes")
+
+    drain_process = _DrainTimesOutCarryingBytes()
+    smoke._preserve_failure_evidence(drain_process, argv, tmp_path, "drain_carried", None)
+    assert (tmp_path / "drain_carried.stdout.log").read_bytes() == b"drain-stdout-bytes"
+    assert (tmp_path / "drain_carried.stderr.log").read_bytes() == b"drain-stderr-bytes"
+    assert json.loads((tmp_path / "drain_carried.failure-drain.json").read_text(encoding="utf-8")) == {
+        "process_poll_at_drain": 19,
+        "process_poll_error": None,
+        "schema": 1,
+    }
+    assert drain_process.poll_calls == 1
+
+    class _DrainTimesOutBare:
+        """Windows: `_communicate` raises TimeoutExpired with NOTHING attached."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+    initial = subprocess.TimeoutExpired(argv, 20, output=b"initial-stdout-bytes", stderr=b"initial-stderr-bytes")
+    smoke._preserve_failure_evidence(_DrainTimesOutBare(), argv, tmp_path, "drain_bare", initial)
+    assert (tmp_path / "drain_bare.stdout.log").read_bytes() == b"initial-stdout-bytes", (
+        "the initial timeout's own output was discarded, so a wedged tree leaves an empty log"
+    )
+    assert (tmp_path / "drain_bare.stderr.log").read_bytes() == b"initial-stderr-bytes"
+
+    class _DrainTimesOutWithDistinctBytes:
+        """Both attempts carry unique evidence, so neither one may win by length."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout", stderr=b"drain-stderr")
+
+    distinct_initial = subprocess.TimeoutExpired(
+        argv,
+        20,
+        output=b"initial-stdout\n",
+        stderr=b"initial-stderr\n",
+    )
+    smoke._preserve_failure_evidence(
+        _DrainTimesOutWithDistinctBytes(), argv, tmp_path, "drain_distinct", distinct_initial
+    )
+    assert (tmp_path / "drain_distinct.stdout.log").read_bytes() == b"initial-stdout\ndrain-stdout"
+    assert (tmp_path / "drain_distinct.stderr.log").read_bytes() == b"initial-stderr\ndrain-stderr"

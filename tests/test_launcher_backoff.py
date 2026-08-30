@@ -47,8 +47,17 @@ def _make_launcher_mock(
     w._runtime_callbacks_open = True
     w._runtime_callback_epoch = 1
     w._restart_generation = 0
+    w._runtime_engine_readiness_state = None
     w._replay_session_verified = False
+    w._replay_session_id = "c" * 32
+    w._replay_speed = 1.0
     w._bridge = MagicMock()
+
+    def _publish_replacement_replay_identity() -> None:
+        if w._replay_source is not None:
+            w._replay_session_id = "d" * 32
+
+    w._wait_engine_ready.side_effect = _publish_replacement_replay_identity
 
     # Fake engine proc that reports the given returncode.
     if returncode is not None:
@@ -59,6 +68,15 @@ def _make_launcher_mock(
         w._engine_proc = None
 
     return w
+
+
+def _complete_runtime_engine_readiness(w: MagicMock, mock_qtimer: MagicMock) -> None:
+    """Drive the real worker-to-Qt handoff without weakening its ownership gate."""
+    state = w._runtime_engine_readiness_state
+    assert type(state) is dict
+    assert state["done"].wait(1.0), "runtime readiness worker did not settle"
+    readiness_tick = mock_qtimer.singleShot.call_args_list[-1].args[1]
+    readiness_tick()
 
 
 def _make_assistant_launcher_mock() -> MagicMock:
@@ -315,8 +333,11 @@ def test_clean_pre_spawn_live_restart_recovery_stays_operator_retryable() -> Non
         # The first attempt settled the commanded stop and bridge cleanup. The
         # operator may explicitly retry; no unknown incarnation was invented.
         LauncherWindow._restart_engine(w)
+        assert w._restart_pending is True
+        w._bridge.start.assert_not_called()
+        _complete_runtime_engine_readiness(w, mock_qtimer)
 
-    w._start_engine.assert_called_once_with()
+    w._start_engine.assert_called_once_with(wait_for_ready=False)
     w._bridge.start.assert_called_once_with()
     assert w._bridge.shutdown.call_count == 3
     assert w._engine_unsettled_incarnation is None
@@ -584,11 +605,14 @@ def test_restart_shot_fires_when_still_pending():
         with patch("cryodaq.launcher.time") as mock_time:
             mock_time.monotonic.return_value = 0.0
             LauncherWindow._handle_engine_exit(w)
+        do_restart = mock_qtimer.singleShot.call_args[0][1]
+        do_restart()
+        assert w._restart_pending is True
+        w._bridge.start.assert_not_called()
+        _complete_runtime_engine_readiness(w, mock_qtimer)
 
-    do_restart = mock_qtimer.singleShot.call_args[0][1]
-    do_restart()
-
-    w._start_engine.assert_called_once_with()
+    w._start_engine.assert_called_once_with(wait_for_ready=False)
+    w._bridge.start.assert_called_once_with()
     assert w._restart_pending is False
 
 
@@ -600,7 +624,12 @@ def test_stale_restart_generation_cannot_consume_a_new_crash_restart() -> None:
     events: list[str] = []
     w._invalidate_engine_producer.side_effect = lambda: events.append("invalidate")
     w._bridge.shutdown.side_effect = lambda: events.append("bridge.shutdown")
-    w._start_engine.side_effect = lambda: events.append("start_engine")
+
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
+        events.append("start_engine")
+
+    w._start_engine.side_effect = _start_engine
     w._bridge.start.side_effect = lambda: events.append("bridge.start")
 
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
@@ -624,6 +653,8 @@ def test_stale_restart_generation_cannot_consume_a_new_crash_restart() -> None:
             assert w._restart_pending is True
 
             timer_b()
+            assert w._restart_pending is True
+            _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert events == ["invalidate", "bridge.shutdown", "start_engine", "bridge.start"]
     assert w._restart_pending is False
@@ -707,9 +738,12 @@ def test_replay_readiness_failure_settles_child_before_scheduling_next_generatio
     live_child = MagicMock()
     live_child.poll.return_value = None
 
-    def _failed_start() -> None:
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
         events.append("start_engine")
         w._engine_proc = live_child
+
+    def _failed_readiness() -> None:
         raise RuntimeError("readiness receipt rejected")
 
     def _settle_child() -> None:
@@ -717,7 +751,8 @@ def test_replay_readiness_failure_settles_child_before_scheduling_next_generatio
         assert w._engine_proc is live_child
         w._engine_proc = None
 
-    w._start_engine.side_effect = _failed_start
+    w._start_engine.side_effect = _start_engine
+    w._wait_engine_ready.side_effect = _failed_readiness
     w._stop_engine.side_effect = _settle_child
     w._bridge.shutdown.side_effect = lambda: events.append("bridge.shutdown")
     w._bridge.start.side_effect = lambda: events.append("bridge.start")
@@ -731,6 +766,7 @@ def test_replay_readiness_failure_settles_child_before_scheduling_next_generatio
 
             events.clear()
             first_timer()
+            _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert events[:5] == [
         "invalidate",
@@ -743,7 +779,7 @@ def test_replay_readiness_failure_settles_child_before_scheduling_next_generatio
     assert w._engine_proc is None
     assert w._replay_session_verified is False
     assert w._restart_pending is True
-    assert mock_qtimer.singleShot.call_count == 2
+    assert mock_qtimer.singleShot.call_count == 3
 
 
 def test_replay_readiness_failure_with_unsettled_child_latches_hold_without_retry() -> None:
@@ -751,7 +787,15 @@ def test_replay_readiness_failure_with_unsettled_child_latches_hold_without_retr
     from cryodaq.launcher import LauncherWindow
 
     w = _make_launcher_mock(returncode=1)
-    w._start_engine.side_effect = RuntimeError("readiness receipt rejected")
+    live_child = MagicMock()
+    live_child.poll.return_value = None
+
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
+        w._engine_proc = live_child
+
+    w._start_engine.side_effect = _start_engine
+    w._wait_engine_ready.side_effect = RuntimeError("readiness receipt rejected")
     w._stop_engine.side_effect = RuntimeError("child remained alive")
 
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
@@ -765,11 +809,13 @@ def test_replay_readiness_failure_with_unsettled_child_latches_hold_without_retr
                 match="readiness failed and ownership remains unsettled",
             ):
                 first_timer()
+                _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert w._restart_giving_up is True
     assert w._replay_session_verified is False
     assert w._restart_pending is False
-    assert mock_qtimer.singleShot.call_count == 1
+    assert mock_qtimer.singleShot.call_count == 3
+    w._start_engine.assert_called_once_with(wait_for_ready=False)
     w._bridge.start.assert_not_called()
     w._show_engine_down_banner.assert_called()
 
@@ -799,19 +845,24 @@ def test_manual_live_restart_startup_failure_settles_new_child_before_backoff() 
             w._engine_shutdown_transport_identity = None
             w._engine_shutdown_receipt = None
 
-    def _failed_start() -> None:
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
         w._engine_proc = live_child
         w._engine_instance_id = "a" * 32
         w._engine_shutdown_capability = "b" * 64
+
+    def _failed_readiness() -> None:
         raise RuntimeError("readiness receipt rejected")
 
     w._stop_engine.side_effect = _stop_engine
-    w._start_engine.side_effect = _failed_start
+    w._start_engine.side_effect = _start_engine
+    w._wait_engine_ready.side_effect = _failed_readiness
 
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
         with patch("cryodaq.launcher.time") as mock_time:
             mock_time.monotonic.return_value = 0.0
             LauncherWindow._restart_engine(w)
+            _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert stop_calls == 2
     assert w._engine_proc is None
@@ -819,7 +870,7 @@ def test_manual_live_restart_startup_failure_settles_new_child_before_backoff() 
     assert w._engine_shutdown_capability is None
     assert w._engine_shutdown_transport_identity is None
     assert w._restart_pending is True
-    assert mock_qtimer.singleShot.call_count == 1
+    assert mock_qtimer.singleShot.call_count == 2
     w._data_timer.start.assert_not_called()
     w._health_timer.start.assert_not_called()
 
@@ -862,9 +913,9 @@ def test_manual_replay_bridge_attach_failure_settles_new_child_before_backoff() 
             w._engine_proc = None
             w._replay_session_verified = False
 
-    def _start_engine() -> None:
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
         w._engine_proc = live_child
-        w._replay_session_verified = True
 
     w._stop_engine.side_effect = _stop_engine
     w._start_engine.side_effect = _start_engine
@@ -874,13 +925,14 @@ def test_manual_replay_bridge_attach_failure_settles_new_child_before_backoff() 
         with patch("cryodaq.launcher.time") as mock_time:
             mock_time.monotonic.return_value = 0.0
             LauncherWindow._restart_engine(w)
+            _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert stop_calls == 2
     assert w._engine_proc is None
     assert w._replay_session_verified is False
     assert w._restart_pending is True
     assert w._restart_giving_up is False
-    assert mock_qtimer.singleShot.call_count == 1
+    assert mock_qtimer.singleShot.call_count == 2
     w._data_timer.start.assert_not_called()
     w._health_timer.start.assert_not_called()
 
@@ -893,9 +945,9 @@ def test_replay_bridge_attach_failure_settles_verified_child_before_retry() -> N
     live_child = MagicMock()
     live_child.poll.return_value = None
 
-    def _start_engine() -> None:
+    def _start_engine(*, wait_for_ready: bool = True) -> None:
+        assert wait_for_ready is False
         w._engine_proc = live_child
-        w._replay_session_verified = True
 
     def _settle_child() -> None:
         assert w._engine_proc is live_child
@@ -912,17 +964,18 @@ def test_replay_bridge_attach_failure_settles_verified_child_before_retry() -> N
             LauncherWindow._handle_engine_exit(w)
             restart = mock_qtimer.singleShot.call_args_list[-1].args[1]
             restart()
+            _complete_runtime_engine_readiness(w, mock_qtimer)
 
     assert w._engine_proc is None
     assert w._replay_session_verified is False
     assert w._restart_pending is True
     assert w._restart_giving_up is False
-    assert mock_qtimer.singleShot.call_count == 2
+    assert mock_qtimer.singleShot.call_count == 3
     w._stop_engine.assert_called_once_with()
 
 
 def test_start_engine_has_no_readiness_bypass_and_health_does_not_call_it_directly():
-    """No caller can bypass readiness, and health delegates restart scheduling.
+    """Construction waits inline; runtime transfers the same proof off the Qt thread.
 
     The only auto-restart path is via _handle_engine_exit → QTimer.singleShot.
     """
@@ -930,8 +983,15 @@ def test_start_engine_has_no_readiness_bypass_and_health_does_not_call_it_direct
 
     from cryodaq import launcher as mod
 
-    assert list(inspect.signature(mod.LauncherWindow._start_engine).parameters) == ["self"]
+    parameters = inspect.signature(mod.LauncherWindow._start_engine).parameters
+    assert list(parameters) == ["self", "wait_for_ready"]
+    assert parameters["wait_for_ready"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["wait_for_ready"].default is True
     src = inspect.getsource(mod.LauncherWindow._check_engine_health)
     assert "_start_engine(" not in src, (
         "_check_engine_health still contains direct _start_engine call — should delegate to _handle_engine_exit"
     )
+    for restart_owner in (mod.LauncherWindow._restart_engine, mod.LauncherWindow._handle_engine_exit):
+        restart_src = inspect.getsource(restart_owner)
+        assert "_start_engine(wait_for_ready=False)" in restart_src
+        assert "_begin_engine_restart_readiness(" in restart_src

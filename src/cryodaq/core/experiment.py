@@ -34,6 +34,12 @@ from cryodaq.report_state import (
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
+from cryodaq.storage.conductivity_run import (
+    ConductivityRunFormatError,
+    read_conductivity_run,
+    recover_conductivity_run_after_verified_off,
+    validate_conductivity_descriptor_parameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,16 @@ def _canonical_digest(payload: dict[str, Any]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_json_bytes(payload: object) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _is_lower_hex(value: Any, length: int) -> bool:
@@ -499,6 +515,7 @@ class ExperimentManager:
         self._mutation_lock = threading.RLock()
         self._durable_mutation_id: str | None = None
         self._manager_incarnation = uuid.uuid4().hex
+        self._restart_recoverable_conductivity_record_ids: set[str] = set()
         self._state_revision = 0
         self._last_transition_receipt: dict[str, Any] | None = None
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
@@ -508,6 +525,11 @@ class ExperimentManager:
             self._load_state()
         if self._active is not None:
             self._operator_phase = self.get_current_phase()
+            self._restart_recoverable_conductivity_record_ids = {
+                record.record_id
+                for record in self.list_run_records(active_only=True)
+                if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+            }
         self._refresh_operator_snapshot(force=True)
 
     @property
@@ -936,6 +958,124 @@ class ExperimentManager:
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
+    def has_restart_recoverable_conductivity_runs(self, experiment_id: str | None = None) -> bool:
+        """Return whether every active autosweep guard was inherited at startup."""
+
+        active = self._require_active(experiment_id)
+        running = [
+            record
+            for record in self.list_run_records(experiment_id=active.experiment_id)
+            if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+        ]
+        return bool(running) and all(
+            record.record_id in self._restart_recoverable_conductivity_record_ids for record in running
+        )
+
+    @_serialized_lifecycle_mutation
+    def recover_conductivity_runs_after_verified_off(
+        self,
+        experiment_id: str | None = None,
+        *,
+        verified_off: bool,
+        finished_at: datetime | str | None = None,
+    ) -> list[RunRecord]:
+        """Reconcile restart-inherited RUNNING autosweeps after exact OFF proof."""
+
+        self._assert_mutation_available()
+        if verified_off is not True:
+            raise RuntimeError("Restart autosweep recovery requires verified OFF.")
+        active = self._require_active(experiment_id)
+        records = self.list_run_records(experiment_id=active.experiment_id)
+        running = [
+            record
+            for record in records
+            if record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+        ]
+        if not running:
+            return []
+        if any(record.record_id not in self._restart_recoverable_conductivity_record_ids for record in running):
+            raise RuntimeError("A live autosweep cannot be recovered as a restart orphan.")
+        recovery_time = _parse_time(finished_at) or datetime.now(UTC)
+        replacements: dict[str, RunRecord] = {}
+        for record in running:
+            existing_csv_paths = [
+                Path(path)
+                for path in record.artifact_paths
+                if Path(path).suffix.lower() == ".csv" and Path(path).exists()
+            ]
+            if not existing_csv_paths:
+                reservation_only = (
+                    record.result_summary.get("reservation_state") == "reserved"
+                    and record.result_summary.get("point_count") == 0
+                )
+                if not reservation_only:
+                    raise ConductivityRunFormatError(f"Restart autosweep artifact is missing: {record.source_run_id}")
+                replacements[record.record_id] = RunRecord(
+                    record_id=record.record_id,
+                    source_run_id=record.source_run_id,
+                    source_tab=record.source_tab,
+                    source_module=record.source_module,
+                    run_type=record.run_type,
+                    status="FAILED",
+                    started_at=record.started_at,
+                    finished_at=max(recovery_time, record.started_at),
+                    parameters=dict(record.parameters),
+                    result_summary={
+                        **record.result_summary,
+                        "artifact_format": "conductivity_run_v1",
+                        "persistence_error": "writer_creation_interrupted_by_restart",
+                        "point_count": 0,
+                        "recovery_required": False,
+                        "reservation_state": "failed_prearm",
+                    },
+                    artifact_paths=(),
+                    experiment_context=dict(record.experiment_context),
+                )
+                continue
+            if len(existing_csv_paths) != 1:
+                raise ConductivityRunFormatError("Restart autosweep artifact identity is ambiguous.")
+            snapshot = read_conductivity_run(existing_csv_paths[0])
+            if (
+                not snapshot.durable_format
+                or snapshot.run_id != record.source_run_id
+                or snapshot.started_at != record.started_at
+                or not snapshot.binding_recorded
+                or snapshot.bound_experiment_id != active.experiment_id
+                or _canonical_json_bytes(snapshot.parameters) != _canonical_json_bytes(record.parameters)
+            ):
+                raise ConductivityRunFormatError("Restart autosweep artifact does not match its run record.")
+            if snapshot.terminal is None:
+                snapshot = recover_conductivity_run_after_verified_off(
+                    existing_csv_paths[0],
+                    finished_at=max(recovery_time, record.started_at),
+                )
+            if snapshot.finished_at is None:
+                raise ConductivityRunFormatError("Recovered autosweep has no terminal completion time.")
+            replacements[record.record_id] = RunRecord(
+                record_id=record.record_id,
+                source_run_id=record.source_run_id,
+                source_tab=record.source_tab,
+                source_module=record.source_module,
+                run_type=record.run_type,
+                status=snapshot.status,
+                started_at=record.started_at,
+                finished_at=snapshot.finished_at,
+                parameters=dict(record.parameters),
+                result_summary={
+                    **record.result_summary,
+                    "artifact_format": "conductivity_run_v1",
+                    "point_count": snapshot.accepted_point_count,
+                    "recovery_required": False,
+                    "reservation_state": "recovered",
+                },
+                artifact_paths=record.artifact_paths,
+                experiment_context=dict(record.experiment_context),
+            )
+        updated = [replacements.get(record.record_id, record) for record in records]
+        self._write_artifact(active, run_records=updated)
+        self._restart_recoverable_conductivity_record_ids.difference_update(replacements)
+        return list(replacements.values())
+
     @_serialized_lifecycle_mutation
     def create_experiment(
         self,
@@ -1185,6 +1325,15 @@ class ExperimentManager:
         self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
+        run_records = self.list_run_records(experiment_id=active.experiment_id)
+        if any(
+            record.run_type.strip().casefold() == "autosweep" and record.status.strip().upper() == "RUNNING"
+            for record in run_records
+        ):
+            raise RuntimeError(
+                "Нельзя завершить эксперимент: автоизмерение теплопроводности ещё активно. "
+                "Сначала остановите автоизмерение и дождитесь подтверждения сохранения."
+            )
 
         finished_at = _parse_time(end_time) or datetime.now(UTC)
         if finished_at < active.start_time:
@@ -1215,7 +1364,6 @@ class ExperimentManager:
             retroactive=active.retroactive,
         )
 
-        run_records = self.list_run_records(experiment_id=finished.experiment_id)
         archive_snapshot = self._build_archive_snapshot(finished, run_records)
         self._commit_transition(
             "finalize",
@@ -2854,8 +3002,10 @@ class ExperimentManager:
                 )
         return len(run_records)
 
-    def _collect_conductivity_rows(self, run_records: list[RunRecord]) -> list[dict[str, float]]:
-        rows: list[dict[str, float]] = []
+    def _collect_conductivity_rows(self, run_records: list[RunRecord]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen_paths: set[Path] = set()
+        seen_durable_run_ids: set[str] = set()
         for record in run_records:
             if record.run_type != "autosweep":
                 continue
@@ -2864,29 +3014,168 @@ class ExperimentManager:
                 if path.suffix.lower() != ".csv" or not path.exists():
                     continue
                 try:
-                    with path.open(encoding="utf-8", newline="") as handle:
-                        reader = csv.DictReader(line for line in handle if not line.startswith("#"))
-                        for item in reader:
-                            try:
-                                row = {
-                                    "temperature_k": float(item.get("T_avg_K", "")),
-                                    "conductance_wk": float(item.get("G_WK", "")),
-                                    "resistance_kw": float(item.get("R_KW", "")),
-                                }
-                            except (TypeError, ValueError):
-                                continue
-                            if all(math.isfinite(value) for value in row.values()):
-                                rows.append(row)
-                except Exception as exc:
+                    resolved = path.resolve(strict=True)
+                    if resolved in seen_paths:
+                        logger.warning("Ignoring repeated autosweep artifact path %s", resolved)
+                        continue
+                    seen_paths.add(resolved)
+                    snapshot = read_conductivity_run(resolved)
+                except (ConductivityRunFormatError, csv.Error, OSError, UnicodeError) as exc:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
+                    continue
+                if not snapshot.durable_format:
+                    # Legacy records predate the artifact-format marker.  Their
+                    # lack of descriptor-bound parameters is the compatibility
+                    # boundary; current runs always reserve those descriptors.
+                    historical = "bound_descriptors" not in record.parameters
+                    if not historical:
+                        logger.warning(
+                            "Ignoring legacy autosweep artifact %s: run record has current descriptor authority",
+                            resolved,
+                        )
+                        continue
+                    rows.extend(snapshot.rows)
+                    continue
+                if snapshot.run_id != record.source_run_id:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: source_run_id mismatch (%s != %s)",
+                        resolved,
+                        snapshot.run_id,
+                        record.source_run_id,
+                    )
+                    continue
+                if snapshot.started_at != record.started_at:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: started_at mismatch (%s != %s)",
+                        resolved,
+                        snapshot.started_at,
+                        record.started_at,
+                    )
+                    continue
+                try:
+                    artifact_descriptors = validate_conductivity_descriptor_parameters(snapshot.parameters)
+                    record_descriptors = validate_conductivity_descriptor_parameters(record.parameters)
+                except ConductivityRunFormatError as exc:
+                    logger.warning("Ignoring autosweep artifact %s: descriptor identity is invalid (%s)", resolved, exc)
+                    continue
+                if artifact_descriptors.power.canonical_json != record_descriptors.power.canonical_json or tuple(
+                    item.canonical_json for item in artifact_descriptors.temperatures
+                ) != tuple(item.canonical_json for item in record_descriptors.temperatures):
+                    logger.warning("Ignoring autosweep artifact %s: descriptor identity mismatch", resolved)
+                    continue
+                try:
+                    artifact_parameters = _canonical_json_bytes(snapshot.parameters)
+                    record_parameters = _canonical_json_bytes(record.parameters)
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: parameters are not canonical JSON (%s)",
+                        resolved,
+                        exc,
+                    )
+                    continue
+                if artifact_parameters != record_parameters:
+                    logger.warning("Ignoring autosweep artifact %s: persisted parameters mismatch", resolved)
+                    continue
+                record_experiment_id = record.experiment_context.get("experiment_id")
+                if (
+                    type(record_experiment_id) is not str
+                    or not record_experiment_id
+                    or not snapshot.binding_recorded
+                    or snapshot.bound_experiment_id != record_experiment_id
+                ):
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: experiment binding mismatch (%s != %s)",
+                        resolved,
+                        snapshot.bound_experiment_id if snapshot.binding_recorded else "missing",
+                        record_experiment_id,
+                    )
+                    continue
+                if snapshot.run_id in seen_durable_run_ids:
+                    logger.warning("Ignoring repeated durable autosweep run_id %s", snapshot.run_id)
+                    continue
+                if snapshot.status != record.status.strip().upper():
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: status mismatch (%s != %s)",
+                        resolved,
+                        snapshot.status,
+                        record.status,
+                    )
+                    continue
+                if snapshot.terminal is not None:
+                    if snapshot.finished_at != record.finished_at:
+                        logger.warning(
+                            "Ignoring autosweep artifact %s: finished_at mismatch (%s != %s)",
+                            resolved,
+                            snapshot.finished_at,
+                            record.finished_at,
+                        )
+                        continue
+                    recorded_count = record.result_summary.get("point_count")
+                    if type(recorded_count) is not int or recorded_count != snapshot.accepted_point_count:
+                        logger.warning(
+                            "Ignoring autosweep artifact %s: terminal/count mismatch (%s != %s)",
+                            resolved,
+                            recorded_count,
+                            snapshot.accepted_point_count,
+                        )
+                        continue
+                elif snapshot.status != "RUNNING" or not snapshot.recovery_required:
+                    logger.warning("Ignoring autosweep artifact %s: nonterminal state is inconsistent", resolved)
+                    continue
+                seen_durable_run_ids.add(snapshot.run_id)
+                hot = artifact_descriptors.temperatures[0]
+                cold = artifact_descriptors.temperatures[-1]
+                power = artifact_descriptors.power
+                identity = {
+                    "power_channel_id": power.channel_id,
+                    "power_instrument_id": power.instrument_id,
+                    "power_source_key": power.source_key,
+                    "power_descriptor_hash": power.descriptor_hash,
+                    "power_descriptor_revision": power.descriptor_revision,
+                    "hot_channel_id": hot.channel_id,
+                    "hot_instrument_id": hot.instrument_id,
+                    "hot_source_key": hot.source_key,
+                    "hot_descriptor_hash": hot.descriptor_hash,
+                    "hot_descriptor_revision": hot.descriptor_revision,
+                    "cold_channel_id": cold.channel_id,
+                    "cold_instrument_id": cold.instrument_id,
+                    "cold_source_key": cold.source_key,
+                    "cold_descriptor_hash": cold.descriptor_hash,
+                    "cold_descriptor_revision": cold.descriptor_revision,
+                }
+                rows.extend({**row, **identity} for row in snapshot.rows)
         return rows
 
-    def _write_conductivity_table(self, path: Path, rows: list[dict[str, float]]) -> None:
+    def _write_conductivity_table(self, path: Path, rows: list[dict[str, Any]]) -> None:
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
+            identity_columns = [
+                "power_channel_id",
+                "power_instrument_id",
+                "power_source_key",
+                "power_descriptor_hash",
+                "power_descriptor_revision",
+                "hot_channel_id",
+                "hot_instrument_id",
+                "hot_source_key",
+                "hot_descriptor_hash",
+                "hot_descriptor_revision",
+                "cold_channel_id",
+                "cold_instrument_id",
+                "cold_source_key",
+                "cold_descriptor_hash",
+                "cold_descriptor_revision",
+            ]
+            writer.writerow(["temperature_k", "conductance_wk", "resistance_kw", *identity_columns])
             for item in rows:
-                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
+                writer.writerow(
+                    [
+                        item["temperature_k"],
+                        item["conductance_wk"],
+                        item["resistance_kw"],
+                        *(item.get(column, "") for column in identity_columns),
+                    ]
+                )
 
     def _maybe_write_channel_plot(
         self,

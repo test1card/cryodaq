@@ -294,6 +294,12 @@ class DynamicSensorGrid(QWidget):
         for cell in self._cells.values():
             cell.set_read_only(self._read_only)
 
+    def refresh_display_precision(self) -> None:
+        """Re-render every cell after the operator changes display precision."""
+
+        for cell in self._cells.values():
+            cell.refresh_display_precision()
+
     # ------------------------------------------------------------------
     # Channel manager hooks
     # ------------------------------------------------------------------

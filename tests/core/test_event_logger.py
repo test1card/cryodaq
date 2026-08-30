@@ -71,10 +71,11 @@ async def test_writer_error_is_swallowed_and_logged_as_warning(mock_em, caplog) 
 
     with caplog.at_level("WARNING", logger="cryodaq.core.event_logger"):
         # Should not raise despite the writer raising.
-        await lg.log_event("test", "msg")
+        committed = await lg.log_event("test", "msg")
 
     # The write was actually attempted (not short-circuited before the call) ...
     writer.append_operator_log.assert_awaited_once()
+    assert committed is False
     # ... and the swallowed error was logged as a warning.
     assert any(rec.levelname == "WARNING" and "Failed to auto-log event" in rec.message for rec in caplog.records)
 
@@ -94,7 +95,8 @@ async def test_successful_writer_still_publishes_event_logged(mock_writer, mock_
     event_bus = MagicMock()
     event_bus.publish = AsyncMock()
 
-    await EventLogger(mock_writer, mock_em, event_bus=event_bus).log_event("test", "msg")
+    committed = await EventLogger(mock_writer, mock_em, event_bus=event_bus).log_event("test", "msg")
 
+    assert committed is True
     event_bus.publish.assert_awaited_once()
     assert event_bus.publish.await_args.args[0].event_type == "event_logged"

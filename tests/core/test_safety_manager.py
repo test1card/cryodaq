@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Coroutine
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.core.broker import DataBroker
+from cryodaq.core.broker import DataBroker, PublisherAuthority
+from cryodaq.core.event_logger import EventLogger
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
@@ -21,6 +26,7 @@ from cryodaq.drivers.contracts import (
 )
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
 from cryodaq.engine_wiring.supervision import TaskSupervisor
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 from tests.qualification_support import issued_test_qualification_receipt
 
 
@@ -98,6 +104,7 @@ class _RunPublicationGate(DataBroker):
         *,
         persistence_authoritative: bool = False,
         descriptor_envelope: bytes | None = None,
+        publisher_authority: PublisherAuthority | None = None,
     ) -> None:
         if (
             not self._gated
@@ -111,6 +118,7 @@ class _RunPublicationGate(DataBroker):
             reading,
             persistence_authoritative=persistence_authoritative,
             descriptor_envelope=descriptor_envelope,
+            publisher_authority=publisher_authority,
         )
 
 
@@ -172,6 +180,8 @@ class _ExactRunSource:
 def _engine_command_context(
     manager: SafetyManager,
     event_logger: AsyncMock,
+    *,
+    writer: object | None = None,
 ) -> EngineCommandContext:
     return EngineCommandContext(
         safety_manager=manager,
@@ -190,7 +200,7 @@ def _engine_command_context(
         vacuum_guard=None,
         alarm_dispatch_tasks=set(),
         calibration_store=None,
-        writer=None,
+        writer=writer,
         drivers_by_name={},
         sensor_diag=None,
         vacuum_trend=None,
@@ -201,13 +211,50 @@ def _engine_command_context(
     )
 
 
-def _start_command() -> dict[str, object]:
+async def _await_executor_progress[T](awaitable: Coroutine[object, object, T]) -> T:
+    """Keep this sandbox's loop cycling while a fast executor future settles."""
+
+    task = asyncio.create_task(awaitable)
+    progress = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    while not task.done():
+        loop.call_later(0.001, progress.set)
+        await progress.wait()
+        progress.clear()
+    return task.result()
+
+
+async def _close_test_writer_without_nested_default_executor(writer: SQLiteWriter) -> None:
+    """Settle test-owned pools without this sandbox's nested shutdown hang."""
+
+    writer._stopping = True
+    await writer._settle_owned_tasks(writer._owned_write_tasks)
+    await writer._settle_owned_tasks(writer._owned_read_tasks)
+    writer._executor.shutdown(wait=True)
+    writer._read_executor.shutdown(wait=True)
+    # Bypassing stop() also bypasses its connection settlement, so a live sqlite3
+    # handle would survive this helper. Its ResourceWarning is raised wherever the
+    # collector happens to reach it, which reads as a failure of an unrelated test.
+    writer._retry_control_connection_settlement_sync()
+    owned_connection = writer._conn
+    if owned_connection is not None:
+        owned_connection.close()
+        writer._conn = None
+
+
+def _start_command(*, warning: str) -> dict[str, object]:
     return {
         "cmd": "keithley_start",
         "channel": "smua",
         "p_target": 0.1,
         "v_comp": 1.0,
         "i_comp": 0.1,
+        "operator_warning_choice": {
+            "schema": "cryodaq.keithley_warning_choice.v1",
+            "request_id": "a" * 32,
+            "warning": warning,
+            "choice": "start",
+        },
         "protocol_major": 1,
         "mutation_capability": "cryodaq_mutation_v1",
         "capability_token": "test-mutation-token-1",
@@ -1576,6 +1623,290 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
         await manager.stop()
 
 
+async def test_a_committed_start_still_shows_the_operator_the_warning() -> None:
+    """A Start that succeeds must not present generic success under a warning.
+
+    Codex P1 at c9d1326ea: on the success path the Safety layer returns
+    `operator_warnings` as a LIST and no scalar `warning`; `engine.py` added the
+    scalar only for an UNCOMMITTED receipt, and `_SmuChannelBlock._on_command_result`
+    reads only `error` or `warning`.  So a predictor-unavailable Start could
+    energise the source, commit a receipt, and show the operator nothing at all
+    about the condition it ran under.
+
+    The check ran, the record exists, and he never saw it - the owner's third
+    clause, MAKE SURE HE KNOWS WHAT IS UP, failing from the silence side.
+
+    The sibling test above covers the uncommitted path, where the persistence
+    notice must be APPENDED to the real warning rather than replace it.
+    """
+
+    committed: list[str] = []
+
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogCommitResult:
+        committed.append(str(kwargs.get("message", "")))
+        return OperatorLogCommitResult(
+            entry=OperatorLogEntry(
+                id=1,
+                timestamp=datetime.now(UTC),
+                message=str(kwargs.get("message", "")),
+                author=str(kwargs.get("author", "")),
+                source=str(kwargs.get("source", "")),
+                experiment_id=kwargs.get("experiment_id"),
+                tags=tuple(kwargs.get("tags") or ()),
+            ),
+            replayed=False,
+        )
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
+    event_logger = AsyncMock()
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
+
+    result = await asyncio.wait_for(
+        _handle_gui_command(_start_command(warning=warning), context=context),
+        timeout=2.0,
+    )
+
+    assert result["ok"] is True
+    assert committed, "the receipt was not committed, so this is not the committed path"
+    assert result["operator_warning_receipt"]["committed"] is True
+    assert warning in result.get("warning", ""), (
+        f"a committed Start energised under a warning the operator never saw: warning={result.get('warning')!r}"
+    )
+
+
+async def test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record() -> None:
+    """The broken re-arm remains a warning, but silence is not permissive design.
+
+    This drives the production control-trip owner, the real two-pass Start, the
+    engine's scalar warning mapping, and the successful-command journal call.
+    The callback must run only after preflight; its failure neither blocks Start
+    nor disappears into the engine log.
+    """
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+    rearm_calls: list[str] = []
+
+    def broken_rearm() -> list[str]:
+        rearm_calls.append("rearm")
+        raise RuntimeError("injected re-arm failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    event_logger = AsyncMock()
+    context = _engine_command_context(manager, event_logger)
+    try:
+        result = await _handle_gui_command(_start_command(warning=""), context=context)
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        assert rearm_calls == ["rearm"], "preflight must not invoke or duplicate the re-arm hook"
+        assert "operator_warning_receipt" not in result, (
+            "the late re-arm observation must remain outside the two-phase preflight receipt"
+        )
+        warnings = result.get("operator_warnings")
+        assert type(warnings) is list and len(warnings) == 1
+        warning = warnings[0]
+        assert warning["code"] == "interlock_rearm_unconfirmed"
+        assert "heater_overtemperature" in warning["operator_text"]
+        assert "heater_overtemperature" in result.get("warning", ""), (
+            "the scalar field read by the source panel omitted the possibly blind guard"
+        )
+
+        event_logger.log_event.assert_awaited_once()
+        log_call = event_logger.log_event.await_args
+        assert log_call.args[0] == "keithley"
+        assert "heater_overtemperature" in log_call.args[1], (
+            "the run's successful-Start record omitted the possibly blind guard"
+        )
+        assert log_call.kwargs["extra_tags"] == ["interlock_rearm_unconfirmed"]
+    finally:
+        await manager.stop()
+
+
+async def test_rearm_failure_record_is_committed_by_production_writer(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await _await_executor_progress(writer.start_immediate())
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+
+    def broken_rearm() -> list[str]:
+        raise RuntimeError("injected re-arm failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    event_logger = EventLogger(writer, SimpleNamespace(active_experiment_id="week-run"))
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    try:
+        result = await _await_executor_progress(_handle_gui_command(_start_command(warning=""), context=context))
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        entries = await _await_executor_progress(writer.get_operator_log(experiment_id="week-run"))
+        assert len(entries) == 1, "the production SQLite writer did not commit exactly one Start record"
+        assert "heater_overtemperature" in entries[0].message, (
+            "the durably reread Start record omitted the possibly blind guard"
+        )
+        assert entries[0].tags == ("auto", "keithley", "interlock_rearm_unconfirmed")
+        assert "журнале оператора не подтверждена" not in result.get("warning", "")
+    finally:
+        await manager.stop()
+        await _close_test_writer_without_nested_default_executor(writer)
+
+
+async def test_failed_rearm_journal_write_is_appended_to_warning_without_refusing_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await _await_executor_progress(writer.start_immediate())
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.on_interlock_trip(
+        "heater_overtemperature",
+        "Т1 Криостат верх",
+        380.0,
+        action="stop_source",
+    )
+
+    def broken_rearm() -> list[str]:
+        raise RuntimeError("injected re-arm failure")
+
+    def failed_write(**_kwargs: object) -> None:
+        raise OSError("injected operator-log volume failure")
+
+    manager.set_interlock_rearm(broken_rearm)
+    monkeypatch.setattr(writer, "_write_operator_log_entry", failed_write)
+    event_logger = EventLogger(writer, SimpleNamespace(active_experiment_id="week-run"))
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    try:
+        result = await _await_executor_progress(_handle_gui_command(_start_command(warning=""), context=context))
+
+        assert result["ok"] is True, result
+        assert manager.state is SafetyState.RUNNING
+        assert source.active_channels == ["smua"]
+        rendered = result.get("warning", "")
+        assert "heater_overtemperature" in rendered, "the underlying blind-guard warning was replaced"
+        assert "журнале оператора не подтверждена" in rendered, (
+            "the failed production journal append did not reach the operator warning"
+        )
+        assert await _await_executor_progress(writer.get_operator_log(experiment_id="week-run")) == []
+    finally:
+        await manager.stop()
+        await _close_test_writer_without_nested_default_executor(writer)
+
+
+async def test_stalled_warning_persistence_does_not_block_operator_requested_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persistence_entered = asyncio.Event()
+    persistence_cancelled = asyncio.Event()
+
+    async def persist_warning_choice(**_kwargs: object) -> OperatorLogCommitResult:
+        persistence_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            persistence_cancelled.set()
+
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
+    event_logger = AsyncMock()
+    writer = SimpleNamespace(append_operator_log_idempotent=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
+    monkeypatch.setattr(
+        "cryodaq.engine._KEITHLEY_WARNING_PERSISTENCE_TIMEOUT_S",
+        0.01,
+        raising=False,
+    )
+
+    try:
+        result = await asyncio.wait_for(
+            _handle_gui_command(_start_command(warning=warning), context=context),
+            timeout=1.0,
+        )
+
+        assert persistence_entered.is_set()
+        await asyncio.wait_for(persistence_cancelled.wait(), timeout=1.0)
+        assert result["ok"] is True
+        # BOTH must reach him.  This used to assert the warning was ONLY the
+        # persistence notice, which is exactly the defect Codex named at
+        # c9d1326ea: "even the uncommitted path displays only the persistence
+        # notice, not the underlying warning".  Losing the real warning in order
+        # to report a bookkeeping failure is the same silence in another coat.
+        assert "Прогноз траектории захолаживания НЕДОСТУПЕН" in result["warning"]
+        assert (
+            "Долговременная запись выбора оператора после предупреждения Safety "
+            "не подтверждена; запрос Start продолжен."
+        ) in result["warning"]
+        assert result["operator_warning_receipt"] == {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": "a" * 32,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": "persistence_timeout",
+        }
+        assert source.active_channels == ["smua"]
+        assert manager._active_sources == {"smua"}
+        assert manager.state is SafetyState.RUNNING
+        event_logger.log_event.assert_awaited_once_with("keithley", "Keithley smua: запуск")
+    finally:
+        await manager.stop()
+
+
+async def test_missing_warning_persistence_is_receipted_without_refusing_start() -> None:
+    source = _ExactRunSource()
+    manager, _broker = await _make_manager(mock=False, keithley=source)
+    manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
+    event_logger = AsyncMock()
+    context = _engine_command_context(manager, event_logger)
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
+
+    try:
+        result = await _handle_gui_command(_start_command(warning=warning), context=context)
+
+        assert result["ok"] is True
+        assert result["operator_warning_receipt"] == {
+            "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+            "request_id": "a" * 32,
+            "committed": False,
+            "operator_log_id": None,
+            "replayed": None,
+            "error_code": "persistence_unavailable",
+        }
+        assert source.active_channels == ["smua"]
+        assert manager._active_sources == {"smua"}
+        assert manager.state is SafetyState.RUNNING
+        event_logger.log_event.assert_awaited_once_with("keithley", "Keithley smua: запуск")
+    finally:
+        await manager.stop()
+
+
 @pytest.mark.parametrize(
     "revocation",
     (
@@ -1602,9 +1933,26 @@ async def test_post_publication_authority_cut_revokes_run_receipt_and_start_audi
         data_broker=data_broker,
     )
     manager._config.critical_channels = []
+    await manager.set_cooldown_predictor_status(False, "injected unavailable predictor")
     event_logger = AsyncMock()
-    context = _engine_command_context(manager, event_logger)
-    run_task = asyncio.create_task(_handle_gui_command(_start_command(), context=context))
+
+    async def persist_warning_choice(**kwargs: object) -> OperatorLogEntry:
+        return OperatorLogEntry(
+            id=1,
+            timestamp=datetime.now(UTC),
+            experiment_id=None,
+            author=str(kwargs["author"]),
+            source=str(kwargs["source"]),
+            message=str(kwargs["message"]),
+            tags=tuple(kwargs["tags"]),
+        )
+
+    writer = SimpleNamespace(append_operator_log=persist_warning_choice)
+    context = _engine_command_context(manager, event_logger, writer=writer)
+    warning = manager._cooldown_operator_warnings()[0]["operator_text"]
+    run_task = asyncio.create_task(
+        _handle_gui_command(_start_command(warning=warning), context=context),
+    )
     competing_task: asyncio.Task[object] | None = None
     try:
         await data_broker.entered.wait()

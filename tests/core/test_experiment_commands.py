@@ -11,10 +11,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+import cryodaq.engine as engine_module
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
@@ -25,6 +27,7 @@ from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.engine import (
     EngineCommandContext,
     _drain_experiment_command_tasks,
+    _execute_owned_experiment_command,
     _handle_gui_command,
     _is_mutating_command,
     _owned_experiment_task_done,
@@ -32,6 +35,7 @@ from cryodaq.engine import (
     _run_experiment_command,
     _run_keithley_command,
 )
+from cryodaq.storage.conductivity_run import ConductivityRunWriter, read_conductivity_run
 from cryodaq.storage.sqlite_writer import OperatorLogPublicationOutboxRecord, SQLiteWriter
 
 _MUTATION_TOKEN = "test-mutation-token-1"
@@ -180,9 +184,10 @@ def _context(
     calibration: _Calibration | None = None,
     writer=None,
     broker=None,
+    safety_manager=None,
 ) -> EngineCommandContext:
     return EngineCommandContext(
-        safety_manager=None,
+        safety_manager=safety_manager,
         event_logger=event_logger or _EventLogger(),
         sink_registry=SimpleNamespace(sinks=[]),
         interlock_engine=None,
@@ -253,6 +258,73 @@ async def test_experiment_start_and_finalize_commands(manager: ExperimentManager
     assert finalize["ok"] is True
     assert finalize["experiment"]["notes"] == "Completed cleanly"
     assert finalize["experiment"]["status"] == "COMPLETED"
+
+
+async def test_experiment_start_binds_an_already_settled_blind_guard_once_per_experiment(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module.asyncio, "to_thread", _inline_to_thread)
+    records: list[dict[str, object]] = []
+
+    async def record_blind_guard(**entry: object) -> None:
+        records.append(dict(entry))
+
+    safety = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    blind_reading = Reading.now(
+        "Т1 Криостат верх",
+        380.0,
+        "K",
+        status=ChannelStatus.SENSOR_ERROR,
+        instrument_id="LS218_1",
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+    settled = await safety.on_interlock_dead_channel(
+        "overheat_zone",
+        blind_reading.channel,
+        value=blind_reading.value,
+        reading=blind_reading,
+    )
+    assert bool(settled) is True
+    assert [record.get("experiment_id") for record in records] == [None]
+
+    context = _context(manager, safety_manager=safety)
+    first = await _execute_owned_experiment_command(
+        "experiment_start",
+        {"template_id": "cooldown_test", "title": "Blind A", "operator": "Operator"},
+        context,
+    )
+    assert first["ok"] is True, first
+    first_id = first["experiment_id"]
+    assert [record.get("experiment_id") for record in records] == [None, first_id]
+
+    await safety.record_blind_guards_for_experiment(first_id)
+    assert [record.get("experiment_id") for record in records] == [None, first_id]
+
+    finalized = await _execute_owned_experiment_command(
+        "experiment_finalize",
+        {"experiment_id": first_id, "status": "COMPLETED"},
+        context,
+    )
+    assert finalized["ok"] is True, finalized
+    second = await _execute_owned_experiment_command(
+        "experiment_start",
+        {"template_id": "cooldown_test", "title": "Blind B", "operator": "Operator"},
+        context,
+    )
+    assert second["ok"] is True, second
+    assert [record.get("experiment_id") for record in records] == [None, first_id, second["experiment_id"]]
 
 
 async def test_experiment_lifecycle_commands(manager: ExperimentManager) -> None:
@@ -328,6 +400,118 @@ async def test_experiment_abort_command(manager: ExperimentManager) -> None:
     assert aborted["ok"] is True
     assert aborted["experiment"]["status"] == "ABORTED"
     assert aborted["experiment"]["notes"] == "Manual abort"
+
+
+async def test_restart_orphan_abort_requires_global_off_and_reconciles_artifact(
+    monkeypatch,
+    tmp_path: Path,
+    instruments_yaml: Path,
+    templates_dir: Path,
+) -> None:
+    async def _inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module.asyncio, "to_thread", _inline_to_thread)
+    manager = ExperimentManager(tmp_path, instruments_yaml, templates_dir=templates_dir)
+    experiment = manager.create_experiment("Restart recovery", "Operator")
+    started_at = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    parameters = {"power_values_w": [0.01]}
+    path = tmp_path / "restart-orphan.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="restart-orphan",
+        started_at=started_at,
+        parameters=parameters,
+    )
+    writer.append_binding(experiment.experiment_id)
+    writer.append_point(
+        {
+            "timestamp_utc": "2026-08-27T12:00:30+00:00",
+            "P_W": 0.01,
+            "T_hot_K": 110.0,
+            "T_cold_K": 100.0,
+            "T_avg_K": 105.0,
+            "dT_K": 10.0,
+            "R_KW": 1000.0,
+            "G_WK": 0.001,
+            "settled_pct": 99.0,
+        }
+    )
+    writer.close()
+    manager.attach_run_record(
+        experiment_id=experiment.experiment_id,
+        source_tab="conductivity",
+        source_module="conductivity_panel",
+        run_type="autosweep",
+        status="RUNNING",
+        source_run_id="restart-orphan",
+        started_at=started_at,
+        parameters=parameters,
+        result_summary={
+            "artifact_format": "conductivity_run_v1",
+            "point_count": 0,
+            "recovery_required": True,
+            "reservation_state": "artifact_ready",
+        },
+        artifact_paths=[str(path)],
+    )
+    restarted = ExperimentManager(tmp_path, instruments_yaml, templates_dir=templates_dir)
+
+    class _RecoverySafety:
+        def __init__(self) -> None:
+            self.verified = False
+            self.calls: list[None] = []
+
+        async def emergency_off(self, channel=None) -> dict[str, object]:
+            self.calls.append(channel)
+            return {
+                "ok": self.verified,
+                "active_channels": [] if self.verified else ["smua"],
+                "off_evidence": {
+                    "off_tier": "verified_off" if self.verified else "unknown",
+                    "channel_off_results": {
+                        "smua": "device_reported_off" if self.verified else "unknown",
+                        "smub": "device_reported_off" if self.verified else "unknown",
+                    },
+                    "verified_off": self.verified,
+                },
+            }
+
+    safety = _RecoverySafety()
+    context = _context(restarted, safety_manager=safety)
+    command = {"experiment_id": experiment.experiment_id, "notes": "Recovered after restart"}
+
+    refused = await _execute_owned_experiment_command("experiment_abort", command, context)
+
+    assert refused["error_code"] == "conductivity_recovery_global_off_unverified"
+    assert restarted.get_active_experiment() is not None
+    assert restarted.list_run_records(experiment_id=experiment.experiment_id)[0].status == "RUNNING"
+    running_snapshot = read_conductivity_run(path)
+    assert running_snapshot.terminal is None
+    assert running_snapshot.accepted_point_count == 1
+    assert running_snapshot.checkpoint_count == 1
+
+    safety.verified = True
+    aborted = await _execute_owned_experiment_command(
+        "experiment_abort",
+        command,
+        _context(restarted, safety_manager=safety),
+    )
+
+    assert aborted["ok"] is True
+    assert aborted["experiment"]["status"] == "ABORTED"
+    assert safety.calls == [None, None]
+    snapshot = read_conductivity_run(path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.finished_at is not None
+    assert snapshot.accepted_point_count == 1
+    assert snapshot.checkpoint_count == 1
+    assert snapshot.terminal is not None
+    assert snapshot.terminal["accepted_point_count"] == snapshot.checkpoint_count
+    archived_record = restarted.list_run_records(experiment_id=experiment.experiment_id)[0]
+    assert archived_record.status == "ABORTED"
+    assert archived_record.finished_at == snapshot.finished_at
+    assert archived_record.result_summary["point_count"] == 1
 
 
 async def test_experiment_attach_run_record_persists_metadata(manager: ExperimentManager) -> None:
@@ -964,6 +1148,185 @@ async def test_emergency_off_omitted_channel_dispatches_once_to_global_scope(
 
     assert reply == {"ok": True, "channel": None}
     assert calls == [None]
+
+
+async def test_keithley_start_persists_warning_choice_before_request_run(
+    manager: ExperimentManager,
+) -> None:
+    order: list[str] = []
+    persisted: list[dict[str, object]] = []
+    warning = {
+        "code": "cooldown_predictor_unavailable",
+        "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+        "consequence": "Расчёт времени до завершения не выполняется",
+        "reason": "injected unavailable predictor",
+    }
+
+    class Safety:
+        async def request_run(
+            self,
+            p_target: float,
+            v_comp: float,
+            i_comp: float,
+            *,
+            channel: str,
+            warning_choice_committer: object,
+        ) -> dict[str, object]:
+            assert callable(warning_choice_committer)
+            receipt = await warning_choice_committer([warning])
+            order.append("request_run")
+            return {
+                "ok": True,
+                "channel": channel,
+                "operator_warnings": [warning],
+                "operator_warning_receipt": receipt,
+            }
+
+    class Writer:
+        async def append_operator_log_idempotent(self, **kwargs: object) -> OperatorLogCommitResult:
+            order.append("warning_receipt")
+            persisted.append(kwargs)
+            return OperatorLogCommitResult(
+                entry=OperatorLogEntry(
+                    id=17,
+                    timestamp=datetime.now(UTC),
+                    experiment_id=kwargs["experiment_id"],
+                    author=str(kwargs["author"]),
+                    source=str(kwargs["source"]),
+                    message=str(kwargs["message"]),
+                    tags=tuple(kwargs["tags"]),
+                ),
+                replayed=False,
+            )
+
+    context = _context(manager, writer=Writer())
+    context.safety_manager = Safety()
+    command = _mutation(
+        {
+            "cmd": "keithley_start",
+            "channel": "smua",
+            "p_target": 0.5,
+            "v_comp": 40.0,
+            "i_comp": 1.0,
+            "operator_warning_choice": {
+                "schema": "cryodaq.keithley_warning_choice.v1",
+                "request_id": "a" * 32,
+                "warning": warning["operator_text"],
+                "choice": "start",
+            },
+        }
+    )
+
+    reply = await _handle_gui_command(command, context=context)
+
+    assert order == ["warning_receipt", "request_run"]
+    assert reply["ok"] is True
+    assert reply["operator_warning_receipt"] == {
+        "schema": "cryodaq.keithley_warning_choice_receipt.v1",
+        "request_id": "a" * 32,
+        "committed": True,
+        "operator_log_id": 17,
+        "replayed": False,
+        "error_code": None,
+    }
+    assert len(persisted) == 1
+    record = persisted[0]
+    assert record["author"] == "system"
+    assert record["source"] == "auto"
+    assert record["tags"] == (
+        "auto",
+        "keithley",
+        "start",
+        "operator_warning_choice",
+        "cooldown_predictor_unavailable",
+    )
+    assert "намерение запуска подтверждено" in str(record["message"])
+    assert warning["operator_text"] in str(record["message"])
+
+
+async def test_keithley_start_rejects_missing_required_warning_choice_before_dispatch(
+    manager: ExperimentManager,
+) -> None:
+    """Historical node: a missing durable receipt is visible and never vetoes RUN."""
+
+    calls: list[str] = []
+    warning = {
+        "code": "cooldown_predictor_unavailable",
+        "operator_text": "Прогноз траектории захолаживания НЕДОСТУПЕН",
+        "consequence": "Расчёт времени до завершения не выполняется",
+        "reason": "injected unavailable predictor",
+    }
+
+    class Safety:
+        async def request_run(
+            self,
+            *args: object,
+            warning_choice_committer: object,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            assert callable(warning_choice_committer)
+            receipt = await warning_choice_committer([warning])
+            calls.append("request_run")
+            return {
+                "ok": True,
+                "operator_warnings": [warning],
+                "operator_warning_receipt": receipt,
+            }
+
+    context = _context(manager)
+    context.safety_manager = Safety()
+
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "keithley_start",
+                "channel": "smua",
+                "p_target": 0.5,
+                "v_comp": 40.0,
+                "i_comp": 1.0,
+            }
+        ),
+        context=context,
+    )
+
+    assert reply["ok"] is True
+    assert reply["operator_warning_receipt"]["committed"] is False
+    assert reply["operator_warning_receipt"]["error_code"] == "persistence_unavailable"
+    assert calls == ["request_run"]
+
+
+async def test_keithley_start_missing_warning_is_rejected_by_real_safety_owner(
+    manager: ExperimentManager,
+) -> None:
+    """Historical node: the real owner warns and accepts absent persistence."""
+
+    safety = SafetyManager(SafetyBroker(), mock=True)
+    await safety.start()
+    try:
+        await safety.set_cooldown_predictor_status(False, "injected unavailable predictor")
+        context = _context(manager)
+        context.safety_manager = safety
+
+        reply = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "keithley_start",
+                    "channel": "smua",
+                    "p_target": 0.5,
+                    "v_comp": 40.0,
+                    "i_comp": 1.0,
+                }
+            ),
+            context=context,
+        )
+
+        assert reply["ok"] is True
+        assert reply["operator_warning_receipt"]["committed"] is False
+        assert reply["operator_warning_receipt"]["error_code"] == "persistence_unavailable"
+        assert reply["operator_warnings"][0]["code"] == "cooldown_predictor_unavailable"
+        assert safety._active_sources == {"smua"}
+    finally:
+        await safety.stop()
 
 
 @pytest.mark.parametrize(
@@ -2307,3 +2670,94 @@ def test_lifecycle_admission_is_atomic_with_durable_mutation_reservation(
     assert len(failures) == 1
     assert isinstance(failures[0], RuntimeError)
     assert "identity mismatch" in str(failures[0]).lower()
+
+
+async def test_attach_run_record_command_rejects_terminal_rebind_from_experiment_a_to_b(
+    manager: ExperimentManager,
+) -> None:
+    started_a = _run_experiment_command(
+        "experiment_start",
+        {
+            "template_id": "cooldown_test",
+            "title": "Experiment A",
+            "operator": "Operator",
+        },
+        manager,
+    )
+    experiment_a = started_a["experiment_id"]
+    running = _run_experiment_command(
+        "experiment_attach_run_record",
+        {
+            "experiment_id": experiment_a,
+            "source_tab": "conductivity",
+            "source_module": "conductivity_panel",
+            "run_type": "autosweep",
+            "status": "RUNNING",
+            "source_run_id": "conductivity-run-1",
+            "started_at": "2026-08-27T12:00:00+00:00",
+            "result_summary": {"point_count": 0, "recovery_required": True},
+            "artifact_paths": ["C:/data/conductivity-run-1.csv"],
+        },
+        manager,
+    )
+    assert running["attached"] is True
+    assert running["run_record"]["experiment_context"]["experiment_id"] == experiment_a
+
+    stopped = _run_experiment_command(
+        "experiment_attach_run_record",
+        {
+            "experiment_id": experiment_a,
+            "source_tab": "conductivity",
+            "source_module": "conductivity_panel",
+            "run_type": "autosweep",
+            "status": "ABORTED",
+            "source_run_id": "conductivity-run-1",
+            "started_at": "2026-08-27T12:00:00+00:00",
+            "finished_at": "2026-08-27T12:05:00+00:00",
+            "result_summary": {"point_count": 0, "recovery_required": False},
+            "artifact_paths": ["C:/data/conductivity-run-1.csv"],
+        },
+        manager,
+    )
+    assert stopped["attached"] is True
+    assert stopped["run_record"]["status"] == "ABORTED"
+    assert stopped["run_record"]["experiment_context"]["experiment_id"] == experiment_a
+
+    _run_experiment_command(
+        "experiment_finalize",
+        {"experiment_id": experiment_a, "status": "COMPLETED"},
+        manager,
+    )
+    started_b = _run_experiment_command(
+        "experiment_start",
+        {
+            "template_id": "cooldown_test",
+            "title": "Experiment B",
+            "operator": "Operator",
+        },
+        manager,
+    )
+    experiment_b = started_b["experiment_id"]
+
+    with pytest.raises(ValueError, match="does not match active"):
+        _run_experiment_command(
+            "experiment_attach_run_record",
+            {
+                "experiment_id": experiment_a,
+                "source_tab": "conductivity",
+                "source_module": "conductivity_panel",
+                "run_type": "autosweep",
+                "status": "COMPLETED",
+                "source_run_id": "conductivity-run-1",
+                "started_at": "2026-08-27T12:00:00+00:00",
+                "finished_at": "2026-08-27T12:10:00+00:00",
+                "result_summary": {"point_count": 1},
+                "artifact_paths": ["C:/data/conductivity-run-1.csv"],
+            },
+            manager,
+        )
+
+    assert manager.list_run_records(experiment_id=experiment_b) == []
+    records_a = manager.list_run_records(experiment_id=experiment_a)
+    assert len(records_a) == 1
+    assert records_a[0].status == "ABORTED"

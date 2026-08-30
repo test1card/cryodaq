@@ -2731,7 +2731,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json
-      sha256: sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a
+      sha256: sha256:7be4e5c86758d07e1dc06e465ee24d680affc463bd5177646f077273fe399153
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
     status: reopened
@@ -2741,7 +2741,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
-      sha256: sha256:5c2f64c78dddee10b943d9b3c0645fa377550fcadfa1e88eea2adff61835cb14
+      sha256: sha256:b55bde2824fbc881032e8b535505ea920c895e93643d0d2b59f0a6456b7d7a5e
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -2755,7 +2755,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
-      sha256: sha256:fcdb209b1f77ee9c8f4b630492d98447723288210c184835a7a464ef14f75f22
+      sha256: sha256:c2825ed9761b49119c88aae6a0a39642733a17816deedfd1aeb7ca76eac2271f
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -3410,7 +3410,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
-      sha256: sha256:5c86df35ead7fd1d341814b8e5426391cfb9301fea85d2cbb92145f1a2af2fd7
+      sha256: sha256:5f7f85390f784e75fb04d2e71e45be0b4c9faa9defa39b45ce10d24cec0e40f9
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
     status: open
@@ -3420,7 +3420,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
-      sha256: sha256:3aa74ab9b75463ed7f550387125ee7d1490568b51fd3145c85098d8180a892a8
+      sha256: sha256:edfaf3d6fc39dd33aa23b8789ce2fafb339df076fb36194509861b0926d840f3
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
     status: open
@@ -3430,7 +3430,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
-      sha256: sha256:ce7d9e552bb0faddb528974c0831eb819ef890216016b619bef315413c2186cc
+      sha256: sha256:14091460355fc04a5d4d32d4f8b131a9effdce426e4b0db6688d247ec7f38988
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -3440,7 +3440,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
-      sha256: sha256:5c4c2bf65344ad269e904131c397ba086924234abfb066a5a314ab3ab031cf3f
+      sha256: sha256:f4fed4cdaf3cf257005ed698a777e9628d6d886a7205e1b59cae800579fda42e
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -3450,7 +3450,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_keithley_acquisition_false_green_081.json
-      sha256: sha256:5c8451e01643dc2a16f46016476450fc5ba786274f4b68ac1595ef345a77111c
+      sha256: sha256:c61a7cf31d715ab2729cb8cf211a547117fdab1195c08ee00f44661ef9f07d83
     green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
     status: open
@@ -3665,6 +3665,54 @@ false_green_pairs:
     platform: posix
     red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: ONEDIR-SMOKE-EVIDENCE-GUARD-UNBOUND-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ONEDIR-SMOKE-TIMEOUT-EVIDENCE-DISCARDED-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler
+    ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_an_asserted_mutation_moved_the_gui_preserve_failure_evidence_call_exactly_once_from_its_except_handler_to_the_pre_try_region_the_old_substring_index_guard_printed_PASS_on_that_mutant_while_test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler_reddened_one_failed_the_production_file_restored_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_and_the_ast_guard_then_passed_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+  - id: WINDOWS-SIGBREAK-ORPHAN-COVERAGE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: WINDOWS-SIGBREAK-ORPHANS-ENGINE-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job
+    ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_the_suite_was_green_while_SIGBREAK_was_unhandled_and_the_ONEDIR_smoke_could_not_distinguish_a_hung_GUI_from_an_orphan_holding_its_pipes_because_communicate_returns_on_pipe_EOF_rather_than_process_exit_the_intermittent_failure_occurred_in_4_of_the_last_24_runs_on_this_branch_and_was_previously_misdiagnosed_as_a_slow_cold_start_severing_the_descendant_assertion_at_added_line_764_one_copy_in_build_scripts_windows_onedir_smoke_py_reddened_tests_test_windows_onedir_smoke_contract_py_test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job_restored_sha256_7e14e71d16f6e9773ed8ed0219bc1596827943cd1b7f19192ab5c43071631911_29_passed_the_GUI_cell_must_fail_when_any_descendant_survives_shutdown_and_the_failure_drain_must_record_process_poll_so_the_two_modes_are_distinguishable_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+  - id: INTERLOCK-REARM-WARNING-GUARD-MISSING-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/core/test_safety_manager.py::test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_deleting_only_the_operator_warnings_append_block_at_diff_added_line_1503_left_the_start_permitted_and_the_source_active_but_reddened_test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record_on_the_missing_list_exit_1_the_inverse_patch_restored_src_cryodaq_core_safety_manager_py_to_sha256_556f85831c817a117676cda224d77c0a5c8ac8ca8695ec64ac55a90b8e2d2bfb_byte_identical
+    green_evidence: measured_2026_08_30_on_ubuntu_22_04_python_3_14_6_after_byte_identical_restore_one_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+  - id: INTERLOCK-REARM-JOURNAL-CALL-ONLY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/core/test_safety_manager.py::test_rearm_failure_record_is_committed_by_production_writer
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_production_SQLiteWriter_and_EventLogger_changing_added_EventLogger_line_64_return_True_to_return_False_left_the_row_durably_reread_but_reddened_the_false_unconfirmed_notice_assertion_1_failed_then_restored_sha256_5ca95e0ba85fab20d651635abb4d0abf1a532d46da2eae0e07a23a7d45af8762_byte_identical_and_1_passed_changing_added_engine_line_5753_is_not_True_to_is_None_reddened_the_failed_append_operator_notice_assertion_1_failed_then_restored_sha256_6c303fa2190576d7028bb753caef5ebb9e9cb339ed52929cd5beac60d9970118_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_each_exact_core_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
+  - id: INTERLOCK-REARM-PANEL-PROJECTION-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: INTERLOCK-REARM-FAILURE-SILENT-001
+    guard: tests/gui/shell/overlays/test_keithley_panel.py::test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path
+    ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_changing_the_panel_production_projection_line_756_warning_key_to_warninG_reddened_the_visible_banner_equality_assertion_1_failed_then_restored_sha256_ed9f0eaacbe0cd05e855b4fb4bde0467fb32cbb307cec0275f092876d226d42c_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_exact_gui_guard_1_passed_after_byte_identical_restore_pending_immutable_capture
+  - id: LAKESHORE-MIXED-RDGST-GUARD-GAP-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAKESHORE-UNKNOWN-RDGST-ADVISORY-FAIL-OPEN-001
+    guard: tests/core/test_interlock_nan_debounce.py::test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+    ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_left_the_existing_unknown_only_node_green_but_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_1_passed_exit_1_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -5792,7 +5840,7 @@ records:
         ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
-      sha256: sha256:5c2f64c78dddee10b943d9b3c0645fa377550fcadfa1e88eea2adff61835cb14
+      sha256: sha256:b55bde2824fbc881032e8b535505ea920c895e93643d0d2b59f0a6456b7d7a5e
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -5823,7 +5871,7 @@ records:
         ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
-      sha256: sha256:fcdb209b1f77ee9c8f4b630492d98447723288210c184835a7a464ef14f75f22
+      sha256: sha256:c2825ed9761b49119c88aae6a0a39642733a17816deedfd1aeb7ca76eac2271f
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -6336,7 +6384,7 @@ records:
       false-green pair must remain open.
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json
-      sha256: sha256:423bf8c0878c732f22f98f5bf23b6883f1bfc2d648c390c21d87a9e4434cc9ef
+      sha256: sha256:0a6d424ca879ed01a4b88ec88c4a01f8c17d8a3ef051e52007fbb2d8d2ddc091
     green_evidence: pending
   - id: GUARD-COVERAGE-REGRESSION-034
     status: open
@@ -7056,7 +7104,7 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
-      sha256: sha256:305b9c74d3d4eeda82903c00cc927ce18e9931e2de75956c167120821900a869
+      sha256: sha256:84c3179fcf66cefbdbc5b193c5694744dca4011d9ad554e2f2d6f06d520d5ed8
     green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     status: open
@@ -7293,6 +7341,170 @@ records:
         platform: windows
     red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
     green_evidence: pending
+  - id: SAFETY-EXPIRED-OFF-PROOF-AUTHORISES-START-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every path that reads SafetyManager._reviewed_source_off_evidence.verified_off for authorisation, specifically the operator snapshot in _refresh_operator_safety_snapshot and the request_run command boundary.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Verified-OFF evidence that aged past stale_timeout_s was downgraded to UNKNOWN only in the PUBLISHED READING, leaving verified_off true, so the operator snapshot and request_run continued to authorise a Start from expired proof. The GUI hid Start after receiving UNKNOWN, which made the interface the only thing standing between an expired proof and an energised source; a REQ client issuing keithley_start without reading the snapshot could energise anyway. The false-green coverage escape is registered as open debt below.
+    invariant: Retained OFF proof older than stale_timeout_s is REVOKED in the Safety-owned evidence itself, and the revocation runs at the request_run command boundary as well as in the operator snapshot, because request_run contains no snapshot refresh and a client may never read one.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_action_dispatch.py::test_expired_off_proof_is_revoked_and_current_proof_is_not
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_the_command_boundary_expires_off_proof_itself
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_two_independent_mutants_a_expiry_that_reports_revocation_but_revokes_nothing_reddens_test_expired_off_proof_is_revoked_and_current_proof_is_not_and_removing_the_request_run_boundary_call_reddens_test_the_command_boundary_expires_off_proof_itself_both_restored_sha256_identical_nineteen_passed_two_earlier_versions_of_these_guards_were_vacuous_and_passed_against_the_same_mutants_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: OPERATOR-LOG-RECORDS-UNMADE-WARNING-CHOICE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: _persist_keithley_warning_choice_intent and _warning_choice_request_id in src/cryodaq/engine.py, for every keithley_start that carries operator warnings.
+    classification: incorrect_evidence_claim
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The operator log recorded that launch intent was CONFIRMED under the warning whenever the committer ran, but the GUI attaches operator_warning_choice only when the safety gate is not ready, so every Start taken while Safety was READY wrote a confirmation the operator never made. The correlation ID was accepted on lexical form alone, so a receipt could carry the GUI identifier for a choice the GUI never sent, which a consumer reconciling by that ID would tie together. This is data misrepresented in the record a week-long run is judged from.
+    invariant: A Start is recorded as CONFIRMED only when operator_warning_choice is exactly valid in schema, request-ID form, warning type and choice value; otherwise the entry states that the Start proceeded WITHOUT operator confirmation, carries the operator_warning_unconfirmed tag, and is given a fresh correlation ID rather than borrowing one from an uninterpretable payload. Start itself is never refused.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_action_dispatch.py::test_a_start_without_a_choice_is_not_recorded_as_confirmed
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_a_start_with_a_valid_choice_is_recorded_as_confirmed
+        ci_partition: core
+      - node: tests/core/test_interlock_action_dispatch.py::test_an_invalid_choice_does_not_lend_its_correlation_id
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_mutant_confirmed_equals_true_reddens_the_no_choice_and_invalid_id_guards_and_mutant_taking_the_correlation_id_on_lexical_form_alone_reddens_the_invalid_id_guard_restored_sha256_identical_twenty_two_passed_the_opposite_direction_is_pinned_so_a_fix_recording_everything_as_unconfirmed_also_fails_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: START-RESULT-HIDES-OPERATOR-WARNING-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The keithley_start result mapping in src/cryodaq/engine.py and every operator surface that reads the scalar warning field, including _SmuChannelBlock._on_command_result.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: SafetyManager returned operator_warnings as a list and no scalar warning on the success path, and engine.py added the scalar only for an uncommitted receipt, while the source panel reads only error or warning and otherwise presents generic success. A predictor-unavailable Start could energise the source, commit a receipt, and tell the operator nothing about the condition it ran under. On the uncommitted path the persistence notice REPLACED the underlying warning, hiding it in a second way.
+    invariant: Every Start outcome that carries operator warnings renders them into the scalar warning field the operator surface reads, and the warning-persistence notice is appended to those texts rather than substituted for them.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_safety_manager.py::test_a_committed_start_still_shows_the_operator_the_warning
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_stalled_warning_persistence_does_not_block_operator_requested_start
+        ci_partition: core
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_mutant_setting_raw_operator_warnings_to_none_at_its_assignment_reddens_both_guards_restored_sha256_identical_one_hundred_and_eight_passed_an_earlier_mutation_placed_before_the_real_assignment_was_overwritten_and_changed_nothing_so_that_run_proved_nothing_and_is_recorded_here_as_a_measurement_error_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ONEDIR-SMOKE-TIMEOUT-EVIDENCE-DISCARDED-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The CTRL_BREAK failure paths of _run_gui_startup_cell and _run_assistant_cell in build_scripts/windows_onedir_smoke.py, and the _preserve_failure_evidence helper that serves both.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Both cells signal CTRL_BREAK and then wait on communicate(timeout=20), and both re-raised out of except BaseException before _write_log ran. So a child that would not exit - the only failure that actually needs diagnosing, and the one that went red on 7b634e0098 - was the single failure shape that left no stdout and no stderr behind. TimeoutExpired also carries the partial output it had already collected, which was discarded as well, and when the post-mortem drain itself timed out the harness wrote EMPTY log files, which read as captured evidence rather than as absent evidence.
+    invariant: A ONEDIR smoke cell that fails after starting its child writes that child's stdout and stderr into the evidence directory before re-raising, taking the bytes from the bounded drain and from every TimeoutExpired that carried any, and the failure still fails.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_windows_onedir_smoke_contract.py::test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_a_drain_that_also_times_out_still_writes_what_was_collected
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_preserving_evidence_never_replaces_the_real_failure
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler
+        ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_python_3_14_6_three_separately_asserted_behavioral_unit_mutations_discarding_the_initial_timeout_payload_discarding_the_drain_timeout_payload_and_replacing_the_both_payload_merge_with_longest_wins_each_reddened_test_a_drain_that_also_times_out_still_writes_what_was_collected_one_failed_and_each_restore_returned_the_production_file_to_sha256_8fa01c7d6ee6efa033e398794a56757ed3bf9aaad362f17363ab990edda46f9f_the_asserted_pre_try_call_movement_also_reddened_the_separate_structural_handler_guard_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+  - id: WINDOWS-SIGBREAK-ORPHANS-ENGINE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The Windows CTRL_BREAK_EVENT path from main() signal registration through LauncherWindow._do_shutdown, and the frozen ONEDIR GUI cell that verifies settlement of the complete Windows Job process tree.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: On Windows CTRL_BREAK_EVENT delivers SIGBREAK, but main() registered SIGINT and registered SIGTERM only off Windows. With nothing handling SIGBREAK, the OS terminated the GUI process with STATUS_CONTROL_C_EXIT and window._do_shutdown never ran, bypassing the function whose own contract stops the engine subprocess rather than orphaning it and leaving that engine orphaned on every ungraceful Windows stop delivered through CTRL_BREAK_EVENT.
+    invariant: On Windows main() registers SIGINT and SIGBREAK to the same handler and that handler schedules window._do_shutdown on the Qt event loop. The frozen GUI cell fails when any descendant remains in its Windows Job after shutdown, and its bounded failure drain records process.poll() so a live GUI and a terminated GUI whose descendant still holds its pipes remain distinguishable.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_launcher_signals.py::test_main_registers_sigbreak_to_the_shutdown_handler_on_windows
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job
+        ci_partition: remaining
+    red_evidence: measured_2026_08_29_on_ubuntu_22_04_with_the_resolved_package_path_asserted_inside_this_worktree_severing_the_SIGBREAK_registration_at_added_line_8667_one_copy_in_src_cryodaq_launcher_py_reddened_tests_test_launcher_signals_py_test_main_registers_sigbreak_to_the_shutdown_handler_on_windows_restored_sha256_1c1ec9a0b8013b709cf055a4cc8a737ac28b3ad9ab319df1009235e788697b15_2_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: pending
+
+  - id: INTERLOCK-REARM-FAILURE-SILENT-001
+    status: reopened
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: The production SafetyManager control-trip owner, deliberate-Start interlock re-arm hook, EventLogger SQLite commit outcome, keithley_start scalar warning projection, _SmuChannelBlock._on_command_result, and the successful-Start operator-journal record.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: When the production re-arm callback raised, SafetyManager originally wrote only an engine-file error and continued to start_source. After the first correction, the operator surface and an AsyncMock call claimed the warning was recorded, but EventLogger swallowed a failed SQLite append and the registered core-only guard never executed the panel. The source could therefore run with blind guards while either the dataset lacked its promised record or the operator saw generic success.
+    invariant: A failed real re-arm pass never refuses the operator's Start, but the successful Start outcome carries interlock_rearm_unconfirmed with every control-interlock name observed on the real trip path. EventLogger returns an exact durable outcome; a production SQLite commit is reread from the journal, and an unconfirmed append is added after the underlying warning without changing Start success. The engine scalar reaches the production Keithley panel as a visibly retained accessible warning. The hook remains after preflight and expected-warning comparison, so it runs once and does not retroactively falsify the two-phase warning receipt.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_safety_manager.py::test_rearm_failure_start_is_permitted_and_names_blind_guards_on_operator_surface_and_record
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_rearm_failure_record_is_committed_by_production_writer
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_failed_rearm_journal_write_is_appended_to_warning_without_refusing_start
+        ci_partition: core
+      - node: tests/gui/shell/overlays/test_keithley_panel.py::test_successful_start_keeps_blind_guard_warning_visible_on_the_production_panel_path
+        ci_partition: gui
+    red_evidence: measured_2026_08_30_on_python_3_14_6_parse_preserving_controls_reddened_real_assertions_for_the_production_SQLite_commit_outcome_failed_append_operator_notice_and_panel_warning_projection_each_restore_was_sha256_byte_identical_details_are_bound_in_INTERLOCK_REARM_JOURNAL_CALL_ONLY_FALSE_GREEN_001_and_INTERLOCK_REARM_PANEL_PROJECTION_FALSE_GREEN_001_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_focused_production_paths_12_passed_before_final_registry_regeneration_pending_immutable_capture
+
+  - id: LAKESHORE-UNKNOWN-RDGST-ADVISORY-FAIL-OPEN-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: LakeShore218S._with_instrument_status through Reading.instrument_status_fault_reasons, InterlockEngine._handle_nonusable, and SafetyManager.on_interlock_dead_channel for every in-range RDGST bitmap containing at least one undocumented bit, alone or mixed with documented fault bits.
+    classification: unknown_as_authority
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A reserved or future RDGST bit, alone or mixed with a documented fault, could be discarded while a nonempty exact-fault tuple was published, so persistent unusable input removed the generic dead-channel blocker and received the non-blocking advisory exception while a source could be active.
+    invariant: An exact advisory requires the entire RDGST bitmap to contain only documented bits. Any nonzero bitmap containing an undocumented bit preserves the raw bitmap, failed reading status, and NaN value but carries no exact fault-reason tuple, so persistent input follows the pre-existing generic active-source fail-closed path. Every debounce and physical threshold remains unchanged.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_interlock_nan_debounce.py::test_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+        ci_partition: core
+      - node: tests/core/test_interlock_nan_debounce.py::test_mixed_known_and_unknown_rdgst_bits_keep_the_generic_dead_channel_path_fail_closed
+        ci_partition: core
+    red_evidence: measured_2026_08_30_on_python_3_14_6_restoring_the_entire_production_lakeshore_218s_py_to_exact_HEAD_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_still_parsed_and_reddened_the_mixed_0x42_exact_advisory_evidence_assertion_1_failed_while_the_existing_unknown_only_node_passed_then_restored_corrected_sha256_9c2ef716108b03dc65f24cb5f2b1a4f1f725d6f575cccdc8b5a03f87847f44f1_byte_identical; prior_unknown_only_control_measured_2026_08_30_on_python_3_14_6_changing_added_lakeshore_line_233_if_reasons_to_append_unknown_status_bits_0x02_within_that_same_parsing_line_reddened_the_exact_advisory_evidence_assertion_1_failed_then_restored_sha256_782caf11415538fcfaec43af9668ac67e0ce52f97ae4e483bc500814cdf86def_byte_identical_and_1_passed_no_immutable_receipt_is_bound_yet_pending_immutable_capture
+    green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_exact_core_nodes_2_passed_pending_immutable_capture
+
   - id: LAUNCHER-COLD-START-READINESS-001
     status: open
     scope: product_contract

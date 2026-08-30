@@ -7,16 +7,34 @@ import logging
 import math
 import random
 import time as _time
+from dataclasses import replace
 from typing import Any
 
 from cryodaq.analytics.calibration import CalibrationStore
-from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
+from cryodaq.drivers.base import (
+    INSTRUMENT_STATUS_FAULT_REASONS_KEY,
+    INSTRUMENT_STATUS_REGISTER_KEY,
+    LAKESHORE_218_RDGST_REGISTER,
+    ChannelStatus,
+    InstrumentDriver,
+    InstrumentStatusFaultReason,
+    Reading,
+)
 from cryodaq.drivers.transport.gpib import GPIBTransport
 from cryodaq.drivers.transport.mock_instrument import ExternalMockInstrumentClient
 
 log = logging.getLogger(__name__)
 
 _MOCK_BASE_TEMPS: tuple[float, ...] = (4.2, 4.8, 77.0, 77.5, 4.5, 4.1, 3.9, 300.0)
+
+_RDGST_FAULT_BITS: tuple[tuple[int, InstrumentStatusFaultReason], ...] = (
+    (1, InstrumentStatusFaultReason.INVALID_READING),
+    (16, InstrumentStatusFaultReason.TEMPERATURE_UNDER_RANGE),
+    (32, InstrumentStatusFaultReason.TEMPERATURE_OVER_RANGE),
+    (64, InstrumentStatusFaultReason.SENSOR_UNITS_OVER_RANGE),
+    (128, InstrumentStatusFaultReason.SENSOR_UNITS_ZERO),
+)
+_RDGST_KNOWN_MASK = sum(bit for bit, _reason in _RDGST_FAULT_BITS)
 
 
 def _mock_sensor_unit(temp_k: float) -> float:
@@ -62,9 +80,6 @@ class LakeShore218S(InstrumentDriver):
         self._srdg_batch_retry_interval_s: float = 60.0
         self._krdg_last_batch_retry: float = 0.0
         self._srdg_last_batch_retry: float = 0.0
-        self._last_status_check: float = 0.0
-        self._last_status_result: dict[int, int] = {}
-        self._last_status_reason: str | None = None
 
     async def connect(self) -> None:
         try:
@@ -143,18 +158,12 @@ class LakeShore218S(InstrumentDriver):
     async def disconnect(self) -> None:
         await self._transport.close()
         self._connected = False
-        self._last_status_check = 0.0
-        self._last_status_result = {}
-        self._last_status_reason = None
 
     async def abort_connect(self) -> None:
         """Settle partial transport ownership before connection truth commits."""
 
         await self._transport.abort_open()
         self._connected = False
-        self._last_status_check = 0.0
-        self._last_status_result = {}
-        self._last_status_reason = None
 
     async def read_channels(self) -> list[Reading]:
         if not self._connected:
@@ -171,43 +180,77 @@ class LakeShore218S(InstrumentDriver):
             raw_readings = await self.read_srdg_channels() if needs_curve else []
             readings = self._merge_runtime_readings(temperature_readings, raw_readings, runtime_policies)
 
-        # Periodic RDGST? status check (every 60s)
-        now = _time.monotonic()
-        if (not self.mock or self._mock_instrument_client is not None) and now - self._last_status_check > 60.0:
-            self._last_status_check = now
-            try:
-                self._last_status_result = await self.read_status()
-                self._last_status_reason = None
-            except Exception as exc:
-                log.debug("%s: RDGST? periodic check failed: %s", self.name, exc)
-                self._last_status_reason = str(exc) or type(exc).__name__
-        # Attach status bits as metadata
-        for r in readings:
-            ch_num = (r.metadata or {}).get("raw_channel")
-            if ch_num is None:
-                continue
-            if r.metadata is None:
-                r.metadata = {}
-            status = self._last_status_result.get(ch_num)
-            if status is None or status < 0:
-                reason = self._last_status_reason or f"RDGST? unavailable for channel {ch_num}"
-                r.metadata["sensor_status_availability"] = {
-                    "available": False,
-                    "stale": True,
-                    "reason": reason,
-                }
-            else:
-                r.metadata["sensor_status"] = status
-                r.metadata["sensor_status_availability"] = {
-                    "available": True,
-                    "stale": self._last_status_reason is not None,
-                    "reason": self._last_status_reason,
-                }
+        status_reason: str | None = None
+        try:
+            status_by_channel = await self.read_status()
+        except Exception as exc:
+            status_by_channel = {}
+            status_reason = str(exc) or type(exc).__name__
+            log.debug("%s: RDGST? acquisition failed: %s", self.name, exc)
+        readings = [
+            self._with_instrument_status(
+                reading,
+                status_by_channel=status_by_channel,
+                unavailable_reason=status_reason,
+            )
+            for reading in readings
+        ]
 
         for reading in readings:
             reading.metadata["acquisition_started_at"] = acquisition_started_at
             reading.metadata["acquisition_started_monotonic"] = acquisition_started_monotonic
         return readings
+
+    def _with_instrument_status(
+        self,
+        reading: Reading,
+        *,
+        status_by_channel: dict[int, int],
+        unavailable_reason: str | None,
+    ) -> Reading:
+        channel_num = reading.metadata.get("raw_channel")
+        metadata = dict(reading.metadata)
+        if type(channel_num) is not int:
+            return reading
+        bitmap = status_by_channel.get(channel_num)
+        if type(bitmap) is not int or not 0 <= bitmap <= 255:
+            metadata["sensor_status_availability"] = {
+                "available": False,
+                "stale": False,
+                "reason": unavailable_reason or f"RDGST? unavailable for channel {channel_num}",
+            }
+            return replace(reading, metadata=metadata)
+
+        metadata["sensor_status"] = bitmap
+        metadata["sensor_status_availability"] = {
+            "available": True,
+            "stale": False,
+            "reason": None,
+        }
+        if bitmap == 0:
+            return replace(reading, metadata=metadata)
+
+        reasons = [reason.value for bit, reason in _RDGST_FAULT_BITS if bitmap & bit]
+        if reasons and bitmap & ~_RDGST_KNOWN_MASK == 0:
+            # An exact advisory requires the entire bitmap to be understood.
+            # Reserved/future bits retain the failed observation but carry no
+            # exact fault reasons, so the generic dead-channel path stays
+            # fail-closed even when documented bits are also present.
+            metadata[INSTRUMENT_STATUS_REGISTER_KEY] = LAKESHORE_218_RDGST_REGISTER
+            metadata[INSTRUMENT_STATUS_FAULT_REASONS_KEY] = reasons
+        if bitmap & 32 and not bitmap & 16:
+            status = ChannelStatus.OVERRANGE
+        elif bitmap & 16 and not bitmap & 32:
+            status = ChannelStatus.UNDERRANGE
+        else:
+            status = ChannelStatus.SENSOR_ERROR
+        return replace(
+            reading,
+            value=float("nan"),
+            status=status,
+            raw=None,
+            metadata=metadata,
+        )
 
     async def _query(self, command: str, timeout_ms: int | None = None) -> str:
         if self._mock_instrument_client is not None:
@@ -427,7 +470,9 @@ class LakeShore218S(InstrumentDriver):
         """Query RDGST? for all channels. Returns {channel_num: status_bitmap}.
 
         Bitmap bits: 0=invalid, 4=T_under, 5=T_over, 6=sensor_overrange, 7=sensor_zero.
-        Call periodically (every 30-60s), not every poll cycle.
+        Called for every temperature acquisition so the status describes that
+        reading cycle.  An unavailable channel is returned as ``-1`` and is
+        treated as unknown, never as affirmative fault evidence.
         """
         if self.mock and self._mock_instrument_client is None:
             return {ch: 0 for ch in range(1, 9)}

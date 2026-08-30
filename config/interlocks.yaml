@@ -9,7 +9,7 @@
 #   channel_bindings — объявленные физические привязки (instrument_id + source_key)
 #   threshold       — пороговое значение
 #   comparison      — оператор: ">" (больше) или "<" (меньше)
-#   action          — имя защитного действия: "emergency_off" или "stop_source"
+#   action          — действие: "emergency_off", "stop_source" или операторское "warning"
 #   cooldown_s      — минимальный интервал между повторными срабатываниями (секунды)
 
 interlocks:
@@ -19,59 +19,89 @@ interlocks:
   # channel_id. Поэтому переименование идентификатора не отвяжет interlock от
   # датчика, а raw ADC-компаньоны не попадут в привязку.
   - name: "overheat_cryostat"
-    description: "Перегрев криостата — аварийное отключение нагревателя"
+    description: "Перегрев (Т11/Т12) — аварийное отключение нагревателя"
     channel_bindings:
-      - {instrument_id: "LS218_1", source_key: "input.1.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.2.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.3.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.4.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.5.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.6.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.7.temperature"}
-      - {instrument_id: "LS218_1", source_key: "input.8.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
+      - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 350.0
     comparison: ">"
     action: "emergency_off"
     cooldown_s: 10.0
 
   # ─── Температурные блокировки компрессорной линии (каналы Т9–Т12) ───────────
-  - name: "overheat_compressor"
-    description: "Перегрев компрессорной линии"
+  # ─── ПАРКОВАН до подключения компрессора Sumitomo F-100 ─────────────────────
+  # Владелец, 2026-08-29: «overheat compressor does not concern lakeshore. this is
+  # an internal f-100 sumitomo sensor, for water, helium and other stuff» и «I want
+  # to wire up sumitomo compressor straight to the cryodaq, but it is postponed for
+  # now».
+  #
+  # Пока F-100 не подключён напрямую, эта блокировка НИЧЕГО НЕ ЗАЩИЩАЕТ: она
+  # смотрела на каналы теплообменников LakeShore, а не на компрессор, который
+  # защищает себя сам по своим датчикам воды и гелия.  При этом на 320 K она
+  # выдавала emergency_off на тех же каналах, где source_overtemp даёт постепенный
+  # stop_source, то есть молча отменяла ступенчатую реакцию.
+  #
+  # Строка сохранена, а не удалена: намерение подключить F-100 остаётся.
+#   - name: "overheat_compressor"
+#     description: "Перегрев теплообменников Т11/Т12"
+#     channel_bindings:
+#       - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
+#       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
+#     threshold: 320.0
+#     comparison: ">"
+#     action: "emergency_off"
+#     cooldown_s: 10.0
+
+#   # ─── Верхняя граница температуры при работе источника ────────────────────────
+#   # Та же полная физическая привязка LS218_1, что у аварийного overheat_cryostat.
+#   # Порог 320 K находится выше документированного допустимого диапазона Т1–Т7
+#   # и остаётся ниже аварийных 350 K. Условие допускается только при активном
+#   # жизненном цикле источника; в idle оно остаётся ARMED.
+  - name: "source_overtemp"
+    description: "Т11/Т12 выше 320 K — остановка источника"
     channel_bindings:
-      - {instrument_id: "LS218_2", source_key: "input.1.temperature"}
-      - {instrument_id: "LS218_2", source_key: "input.2.temperature"}
       - {instrument_id: "LS218_2", source_key: "input.3.temperature"}
       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
     threshold: 320.0
     comparison: ">"
-    action: "emergency_off"
+    action: "stop_source"
     cooldown_s: 10.0
 
-  # ─── Защита детектора ────────────────────────────────────────────────────────
-  # Примечание: фазовое условие (только в фазе measurement при активном источнике)
-  # обеспечивается Alarm Engine v2 (detector_warmup_interlock в alarms_v3.yaml).
-  # Данный интерлок — аппаратная страховка для любой фазы при Т12 > 10 K.
+  # ─── Предупреждение о рабочей температуре детектора ─────────────────────────
+  # Это операторское предупреждение о качестве измерений, а не аппаратная
+  # страховка: источник не отключается при Т12 > 10 K.
   # Т12 — 2-я ступень GM-cooler, на которой смонтирован детектор.
-  - name: "detector_warmup"
-    description: "Нагрев 2-й ступени (Т12) выше рабочей температуры — остановка источника"
-    channel_bindings:
-      - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
-    threshold: 10.0
-    comparison: ">"
-    action: "stop_source"
-    cooldown_s: 5.0
+  # ─── ПАРКОВАН: детектора в криостате нет ────────────────────────────
+  # Владелец, 2026-08-29: «what's detector warmup? there is no detector in the
+  # cryostat!»
+  #
+  # Эта строка сторожила устройство, которого не существует.  При пороге 10 K на T12,
+  # в криостате, который в норме стоит около 4 K, она срабатывала при каждом
+  # отогреве.  Предупреждение, которое оператор приучается игнорировать, — это то,
+  # как пропускают настоящее.
+  #
+  # Строка сохранена, а не удалена: если детектор появится, пусть будет что
+  # обсуждать, а не что изобретать заново.
+#   - name: "detector_warmup"
+#     description: "2-я ступень (Т12) выше рабочей температуры — данные измерения могут быть недостоверны"
+#     channel_bindings:
+#       - {instrument_id: "LS218_2", source_key: "input.4.temperature"}
+#     threshold: 10.0
+#     comparison: ">"
+#     action: "warning"
+#     cooldown_s: 5.0
 
-  # undercool_shield (Т5 < 50 K) — УДАЛЁН: ложное срабатывание при штатном cooldown.
-  # Физическое обоснование: см. alarm_tz_physics_v3.md §4.2 "Undercool false alarm".
+#   # undercool_shield (Т5 < 50 K) — УДАЛЁН: ложное срабатывание при штатном cooldown.
+#   # Физическое обоснование: см. alarm_tz_physics_v3.md §4.2 "Undercool false alarm".
 
-# ─── NaN-доктрина P2-5: дебаунс непригодных показаний на interlock-каналах ───
-# Непригодное показание (NaN / error-status) на защищённом интерлоком канале:
-#   • транзиент (одиночный blip) → CRITICAL-лог + alarm-v2, БЕЗ trip;
-#   • персистентность (≥ min_samples подряд И ≥ min_duration_s) при активном
-#     источнике (safety-состояние RUNNING) → эскалация в SafetyManager (FAULT).
-# Mature dead interlock channels remain RUN/READY blockers while idle until usable persisted recovery.
-# Обоснование: Т1–Т10 защищены ТОЛЬКО интерлоками (critical_channels — лишь
-# Т11/Т12). Устойчиво мёртвый датчик на нагреваемой зоне — fail-open без этого.
-nonusable_escalation:
-  min_duration_s: 10.0   # минимальная длительность серии непригодных показаний
-  min_samples: 5         # минимум непригодных показаний подряд
+# # ─── NaN-доктрина P2-5: дебаунс непригодных показаний на interlock-каналах ───
+# # Непригодное показание (NaN / error-status) на защищённом интерлоком канале:
+# #   • транзиент (одиночный blip) → CRITICAL-лог + alarm-v2, БЕЗ trip;
+# #   • персистентность (≥ min_samples подряд И ≥ min_duration_s) при активном
+# #     источнике (safety-состояние RUNNING) → эскалация в SafetyManager (FAULT).
+# # Mature dead interlock channels remain RUN/READY blockers while idle until usable persisted recovery.
+# # Обоснование: Т1–Т10 защищены ТОЛЬКО интерлоками (critical_channels — лишь
+# # Т11/Т12). Устойчиво мёртвый датчик на нагреваемой зоне — fail-open без этого.
+# nonusable_escalation:
+#   min_duration_s: 10.0   # минимальная длительность серии непригодных показаний
+#   min_samples: 5         # минимум непригодных показаний подряд

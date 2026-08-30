@@ -263,11 +263,11 @@ class DashboardView(QScrollArea):
 
         if channel.startswith("\u0422"):  # cyrillic Т
             short_id = channel.split(" ")[0]
-            self._buffer_store.append(short_id, timestamp_epoch, float(value))
+            self._buffer_store.append(short_id, timestamp_epoch, float(value), reading.status)
             if self._sensor_grid is not None:
                 self._sensor_grid.dispatch_reading(reading, identity_status)
         elif channel.endswith("/pressure"):
-            self._buffer_store.append(channel, timestamp_epoch, float(value))
+            self._buffer_store.append(channel, timestamp_epoch, float(value), reading.status)
 
         # B.5.5: route analytics readings to phase widget
         if channel.startswith("analytics/") and self._phase_widget is not None:
@@ -280,6 +280,12 @@ class DashboardView(QScrollArea):
 
         self._read_only = bool(read_only)
         self._update_mutation_authority()
+
+    def refresh_display_precision(self) -> None:
+        """Refresh dashboard measurement text after a preference change."""
+
+        if self._sensor_grid is not None:
+            self._sensor_grid.refresh_display_precision()
 
     def set_connected(self, connected: bool) -> None:
         connected = bool(connected)
