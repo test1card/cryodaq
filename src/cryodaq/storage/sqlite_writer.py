@@ -7328,7 +7328,7 @@ class SQLiteWriter:
         bound = batch
         by_day: dict[date, list[Reading]] = {}
         # The descriptor ADMISSION chose, per reading, so a row cannot disagree with its
-        # own receipt when the emitted label it keeps would resolve to something else.
+        # own receipt when the durable unbound label it keeps would resolve elsewhere.
         admitted_by_day: dict[date, list[str]] = {}
         unbound_emitted_by_day: dict[date, list[str | None]] = {}
         admitted_is_unbound_by_day: dict[date, list[bool]] = {}
@@ -7343,18 +7343,21 @@ class SQLiteWriter:
             # which is what makes the persisted row, the receipt entry and the descriptor
             # agree. For a reading admitted against the RESERVED entry there is no canonical
             # identity to adopt, and the emitted label is the only truth left about which
-            # channel produced the value -- so it is kept, verbatim.
+            # channel produced the value. Admission keeps it verbatim when it fits the
+            # durable reader grammar; otherwise it keeps a useful prefix plus the full
+            # digest, rather than refusing this reading's whole acquisition batch.
             #
-            # THE LABEL IS NOT A BUDGET. An earlier version stored at most a bounded number
-            # of distinct labels under their own name and collapsed the rest to the reserved
-            # channel_id through a process-local set that a FAILED batch could consume
+            # THE LABEL COUNT IS NOT A BUDGET. An earlier version stored at most a bounded
+            # number of distinct labels under their own name and collapsed the rest to the
+            # reserved channel_id through a process-local set that a FAILED batch could consume
             # before persistence and that a RESTART emptied -- review measured one physical
             # channel stored as `cryodaq.unbound` before a restart and as its own name after
             # it. Durable identity may never depend on process history: what an undescribed
-            # reading keeps is exactly the label the instrument emitted, on disk, for as
-            # long as the row exists. The reader side bounds how many such labels a bounded
-            # query materialises (see archive_reader._MAX_MATERIALIZED_UNBOUND_CHANNELS),
-            # which is where the roster bound belongs.
+            # reading keeps is a deterministic function of the label the instrument emitted,
+            # on disk, for as long as the row exists. The reader side bounds how many such
+            # labels a bounded query materialises (see
+            # archive_reader._MAX_MATERIALIZED_UNBOUND_CHANNELS), which is where the roster
+            # bound belongs.
             admitted_is_unbound = is_reserved_descriptor(item.descriptor)
             if admitted_is_unbound:
                 stable = reading

@@ -6,6 +6,7 @@ publish readings, infer vendor semantics, or grant source/control authority.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,7 @@ MAX_LIVE_METADATA_ITEMS: Final = 1024
 MAX_LIVE_METADATA_TEXT_BYTES: Final = 65_536
 MAX_LIVE_METADATA_AGGREGATE_BYTES: Final = 1_048_576
 MAX_LIVE_READING_TEXT_BYTES: Final = 1024
+MAX_PERSISTED_READING_ID_BYTES: Final = 256
 MAX_LIVE_DESCRIPTOR_CONFIG_BYTES: Final = 256 * 1024
 MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH: Final = 8
 
@@ -727,6 +729,24 @@ def _bounded_live_text(value: object, *, field: str, maximum: int) -> str:
     return value
 
 
+def _durable_unbound_channel_label(label: str) -> str:
+    """Keep an unknown channel useful while fitting every durable reader boundary.
+
+    Refusing an overlong unknown label here would refuse its whole acquisition batch,
+    recreating the data loss reserved admission exists to prevent. A plain prefix
+    truncation could alias two physical channels, so the durable form keeps a UTF-8-safe
+    prefix and the full digest of the exact emitted label.
+    """
+
+    encoded = label.encode("utf-8")
+    if len(encoded) <= MAX_PERSISTED_READING_ID_BYTES:
+        return label
+    suffix = f"~sha256:{hashlib.sha256(encoded).hexdigest()}"
+    prefix_budget = MAX_PERSISTED_READING_ID_BYTES - len(suffix.encode("ascii"))
+    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    return prefix + suffix
+
+
 def _freeze_live_metadata(value: object) -> _FrozenDict:
     """Validate and freeze the bounded Reading metadata data grammar.
 
@@ -1164,6 +1184,9 @@ class LiveChannelDescriptorCatalog:
         except ChannelNotDescribedError:
             pass
         owned = _own_live_reading(reading)
+        bounded_channel = _durable_unbound_channel_label(owned.channel)
+        if bounded_channel != owned.channel:
+            owned = replace(owned, channel=bounded_channel)
         descriptor = _reserved_entry_of(self._catalog)
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
         selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
@@ -1727,6 +1750,7 @@ __all__ = [
     "MAX_LIVE_METADATA_ITEMS",
     "MAX_LIVE_METADATA_TEXT_BYTES",
     "MAX_LIVE_READING_TEXT_BYTES",
+    "MAX_PERSISTED_READING_ID_BYTES",
     "ChannelDescriptorProjection",
     "ChannelDescriptorStorageError",
     "DescriptorBoundReading",

@@ -26,6 +26,7 @@ from urllib.parse import quote
 
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
+    MAX_PERSISTED_READING_ID_BYTES,
     UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
     verify_descriptor_storage,
@@ -49,16 +50,17 @@ logger = logging.getLogger(__name__)
 # describe. Recognised by EXACT EQUALITY on an opaque hash -- never by inspecting a
 # channel's spelling -- and recognised BEFORE the descriptor's fields are compared with
 # the row's, because the reserved entry deliberately describes no real channel. The
-# row keeps the label the instrument emitted; see
-# sqlite_writer._write_live_batch for why that label is durable and unbounded.
+# row keeps the label the instrument emitted, or its collision-resistant bounded form;
+# see LiveChannelDescriptorCatalog.admit for the durable boundary.
 _UNBOUND_DESCRIPTOR_HASH = UNBOUND_DESCRIPTOR_HASH
 
 # How many DISTINCT unbound labels one bounded query materialises as rows, beyond the
 # caller's `max_channels` described-channel budget.
 #
-# The durable identity of an undescribed reading is its emitted label, and every distinct
-# label is a CHANNEL to a reader: discovery feeds a per-channel fetch loop on the hot
-# path, so an unbounded roster would turn one query into thousands -- lag on a week run.
+# The durable identity of an undescribed reading is its emitted label or the admission
+# layer's collision-resistant bounded form, and every distinct label is a CHANNEL to
+# a reader: discovery feeds a per-channel fetch loop on the hot path, so an unbounded
+# roster would turn one query into thousands -- lag on a week run.
 # But hiding a committed row is data loss, and hiding it while reporting complete is
 # misrepresentation. So discovery remembers at most this many unbound labels (plus one
 # overflow marker) for materialisation; EVERY further unbound presence still marks the
@@ -707,6 +709,7 @@ class ArchiveReader:
         unbound_any = False
         if selected is None:
             discovered: set[str] = set()
+            sqlite_discovery_max_ids: dict[str, int] = {}
             # Unbound rows are recognised by their reserved descriptor hash, never by
             # spelling, and they NEVER consume the described-channel budget. They are
             # remembered here (bounded) for materialisation and, merely by existing,
@@ -728,6 +731,7 @@ class ArchiveReader:
                         max_channels=max_channels,
                         channels=source_channels,
                         unbound_channels=source_unbound,
+                        snapshot_max_ids=sqlite_discovery_max_ids,
                         deadline_monotonic=deadline_monotonic,
                         batch_rows=batch_rows,
                         issues=issues,
@@ -795,6 +799,7 @@ class ArchiveReader:
                     batch_rows=batch_rows,
                     collector=staged,
                     issues=issues,
+                    discovery_max_id=(sqlite_discovery_max_ids[source.token] if explicit_channels is None else None),
                 )
             else:
                 ok = self._read_parquet_bounded(
@@ -916,7 +921,11 @@ class ArchiveReader:
         normalized: list[str] = []
         seen: set[str] = set()
         for raw in channels:
-            channel = _bounded_text(raw, minimum=1, maximum=256)
+            channel = _bounded_text(
+                raw,
+                minimum=1,
+                maximum=MAX_PERSISTED_READING_ID_BYTES,
+            )
             if channel in seen:
                 raise ValueError("channels must be unique")
             seen.add(channel)
@@ -1231,6 +1240,7 @@ class ArchiveReader:
         max_channels: int,
         channels: set[str],
         unbound_channels: set[str],
+        snapshot_max_ids: dict[str, int],
         deadline_monotonic: float,
         batch_rows: int,
         issues: _IssueLedger,
@@ -1241,7 +1251,18 @@ class ArchiveReader:
         ok = True
         try:
             conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
+            # Every discovery page and its append watermark belong to one snapshot.
+            # A later materialisation snapshot compares only rows appended past this
+            # watermark, avoiding another scan of a week-sized source.
+            conn.execute("BEGIN").close()
             reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+            maximum_row = conn.execute("SELECT MAX(id) FROM readings").fetchone()
+            if maximum_row is None or len(maximum_row) != 1:
+                raise ValueError("invalid discovery maximum id row")
+            maximum_id = maximum_row[0]
+            if maximum_id is not None and (type(maximum_id) is not int or maximum_id < 1):
+                raise ValueError("invalid discovery maximum id")
+            snapshot_max_ids[source.token] = 0 if maximum_id is None else maximum_id
             has_descriptor_hash = "descriptor_hash" in reading_columns
             legacy = conn.execute("SELECT 1 FROM readings WHERE typeof(timestamp) = 'text' LIMIT 1")
             try:
@@ -1280,7 +1301,11 @@ class ArchiveReader:
                             raise ValueError("invalid discovery keyset id")
                         last_id = row_id
                         count += 1
-                        channel = _bounded_text(raw_channel, minimum=1, maximum=256)
+                        channel = _bounded_text(
+                            raw_channel,
+                            minimum=1,
+                            maximum=MAX_PERSISTED_READING_ID_BYTES,
+                        )
                         descriptor_hash = row[2] if has_descriptor_hash else None
                         if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
                             # THE ROW SAYS SO ITSELF. The label it keeps is the emitted one,
@@ -1327,6 +1352,7 @@ class ArchiveReader:
         batch_rows: int,
         collector: _BoundedReadingCollector,
         issues: _IssueLedger,
+        discovery_max_id: int | None,
     ) -> bool:
         conn = None
         identity = None
@@ -1334,7 +1360,33 @@ class ArchiveReader:
         ok = True
         try:
             conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
+            # Materialisation must observe one coherent SQLite snapshot. For an
+            # auto-discovered query, compare its append watermark with this snapshot
+            # before filtering. Only rows beyond the discovery maximum can be new, so
+            # this stays bounded even for a week-sized hot source. A new label may stay
+            # outside the returned projection, but it must make completeness false.
+            # Foreign-key enforcement must be enabled before BEGIN; the descriptor
+            # verifier rechecks it inside the snapshot, where SQLite will not change it.
+            conn.execute("PRAGMA foreign_keys=ON").close()
+            conn.execute("BEGIN").close()
             placeholders = ",".join("?" for _ in channels)
+            if discovery_max_id is not None:
+                comparison_sql = (
+                    "SELECT 1 FROM readings NOT INDEXED WHERE id > ? "
+                    "AND typeof(timestamp) IN ('real','integer') "
+                    "AND timestamp >= ? AND timestamp < ?"
+                )
+                comparison_params: list[object] = [
+                    discovery_max_id,
+                    start_us / 1_000_000.0,
+                    end_us / 1_000_000.0,
+                ]
+                if channels:
+                    comparison_sql += f" AND channel NOT IN ({placeholders})"
+                    comparison_params.extend(channels)
+                comparison_sql += " LIMIT 1"
+                if conn.execute(comparison_sql, comparison_params).fetchone() is not None:
+                    collector.mark_incomplete()
             reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
             has_descriptor_hash = "descriptor_hash" in reading_columns
             descriptor_map: dict[str, ResolvedStorageDescriptor] = {}
@@ -1422,8 +1474,16 @@ class ArchiveReader:
                                 timestamp_us = _sqlite_epoch_microseconds(timestamp)
                                 if not start_us <= timestamp_us < end_us:
                                     raise ValueError("timestamp outside normalized interval")
-                                instrument_text = _bounded_text(instrument, minimum=1, maximum=256)
-                                channel_text = _bounded_text(raw_channel, minimum=1, maximum=256)
+                                instrument_text = _bounded_text(
+                                    instrument,
+                                    minimum=1,
+                                    maximum=MAX_PERSISTED_READING_ID_BYTES,
+                                )
+                                channel_text = _bounded_text(
+                                    raw_channel,
+                                    minimum=1,
+                                    maximum=MAX_PERSISTED_READING_ID_BYTES,
+                                )
                                 unit_text = _bounded_text(unit, minimum=0, maximum=64)
                                 status_text = _bounded_text(status_value, minimum=0, maximum=64)
                                 decoded = _bounded_value(value, status_text)
@@ -2014,7 +2074,11 @@ class ArchiveReader:
                         if time.monotonic() >= deadline_monotonic:
                             issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                             return False
-                        channel = _bounded_text(filtered["channel"][index].as_py(), minimum=1, maximum=256)
+                        channel = _bounded_text(
+                            filtered["channel"][index].as_py(),
+                            minimum=1,
+                            maximum=MAX_PERSISTED_READING_ID_BYTES,
+                        )
                         if time.monotonic() >= deadline_monotonic:
                             issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                             return False
@@ -2193,14 +2257,14 @@ class ArchiveReader:
                             instrument = _bounded_text(
                                 filtered["instrument_id"][index].as_py(),
                                 minimum=1,
-                                maximum=256,
+                                maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             channel = _bounded_text(
                                 filtered["channel"][index].as_py(),
                                 minimum=1,
-                                maximum=256,
+                                maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)

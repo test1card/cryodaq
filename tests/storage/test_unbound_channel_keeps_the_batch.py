@@ -710,6 +710,113 @@ async def test_the_live_path_keeps_the_batch_when_one_channel_is_undescribed(
     assert persisted[1][2] == unbound_channel_descriptor().descriptor_hash
 
 
+def test_a_257_byte_unknown_label_cannot_hide_the_described_measurement(
+    tmp_path: Path,
+) -> None:
+    """Reserved admission and the bounded reader must share one durable label bound.
+
+    This is the live catalog -> writer -> SQLite -> bounded-reader path.  A 257-byte
+    unknown label is otherwise a valid reading; before the guard, both rows committed
+    but discovery rejected the stored label and quarantined the described row with it.
+    The admitted representation therefore has to retain a useful prefix while fitting
+    the reader's 256-byte grammar, without relabelling the row as described.
+    """
+
+    import hashlib
+
+    long_label = "sensor." + "x" * (257 - len("sensor."))
+    assert len(long_label.encode("utf-8")) == 257
+    owner = _live()
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    try:
+        admitted = tuple(owner.admit(reading) for reading in (_reading("sensor.main", 4.2), _reading(long_label, 4.3)))
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    persisted = _rows(tmp_path)
+    assert len(persisted) == 2, "the fixture must reach durable SQLite as one valid batch"
+
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    by_value = {row.value: row for row in result.rows}
+    assert 4.2 in by_value, "an unknown label must never quarantine the described row"
+    assert by_value[4.2].channel == "sensor.main"
+    assert by_value[4.2].descriptor is not None
+    assert 4.3 in by_value, "the bounded unknown identity must remain materialisable"
+    bounded_label = by_value[4.3].channel
+    assert bounded_label.startswith("sensor."), "the bounded form must still name the channel usefully"
+    assert bounded_label != long_label
+    assert len(bounded_label.encode("utf-8")) <= 256
+    assert bounded_label.endswith(hashlib.sha256(long_label.encode("utf-8")).hexdigest())
+    assert by_value[4.3].descriptor is None
+    assert result.complete is False
+
+
+def test_a_new_unknown_label_after_discovery_cannot_leave_the_read_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real commit between hot discovery and materialisation is reported missing.
+
+    The scheduling hook only holds the exact boundary open.  Discovery, live catalog
+    admission, SQLite persistence, and bounded materialisation all remain production
+    implementations.  The reader may return its discovery snapshot, but it may not call
+    that projection complete after the read snapshot contains another channel.
+    """
+
+    owner = _live()
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+
+    def commit(readings: tuple[Reading, ...]) -> None:
+        admitted = tuple(owner.admit(reading) for reading in readings)
+        assert writer._write_live_batch(admitted) == admitted
+
+    commit((_reading("sensor.main", 4.2),))
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+    reader = ArchiveReader(tmp_path, archive)
+    discover = reader._discover_sqlite_channels
+    boundary_commits = 0
+
+    def pause_after_discovery(*args: object, **kwargs: object) -> bool:
+        nonlocal boundary_commits
+        result = discover(*args, **kwargs)  # type: ignore[arg-type]
+        commit((_reading("sensor.new.after.discovery", 4.3),))
+        boundary_commits += 1
+        return result
+
+    monkeypatch.setattr(reader, "_discover_sqlite_channels", pause_after_discovery)
+
+    try:
+        result = reader.query_reading_rows_bounded(
+            start=TIMESTAMP - timedelta(hours=1),
+            end=TIMESTAMP + timedelta(hours=1),
+            channels=None,
+            max_channels=64,
+            max_points_per_channel=1024,
+            max_total_points=4096,
+            max_retained_bytes=4 * 1024 * 1024,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    assert boundary_commits == 1, "the real discovery/read boundary must be exercised exactly once"
+    assert len(_rows(tmp_path)) == 2, "the boundary commit must be durably present"
+    assert [row.channel for row in result.rows] == ["sensor.main"]
+    assert result.complete is False, "a row excluded by the discovery snapshot makes the read incomplete"
+
+
 async def test_the_live_path_keeps_the_label_the_instrument_emitted(tmp_path: Path) -> None:
     """A described reading adopts the canonical channel id; an undescribed one cannot.
 
