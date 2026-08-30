@@ -1788,8 +1788,59 @@ def _launcher_status_window():
     return window
 
 
-def test_launcher_status_poll_keeps_finished_worker_children_bounded(monkeypatch) -> None:
+def test_launcher_status_poll_keeps_finished_worker_children_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Repeated real launcher health ticks must not retain historical QThreads."""
+
+    # The global QApplication can contain deferred widget deletions from earlier
+    # GUI guards. Flushing DeferredDelete below must still prove this window and
+    # its workers settle, but doing so in that shared application can destroy an
+    # unrelated stale QGraphicsScene and segfault before pytest emits a receipt.
+    # Keep the real Qt lifecycle boundary and -W error, isolated in a child where
+    # any QThread/Qt crash remains a hard non-zero failure.
+    child_marker = "CRYODAQ_LAUNCHER_STATUS_RETENTION_PROBE"
+    if os.environ.get(child_marker) != "1":
+        env = os.environ.copy()
+        env[child_marker] = "1"
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        repo_root = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(repo_root / "src")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "pytest_asyncio.plugin",
+                "-p",
+                "pytest_timeout",
+                "-W",
+                "error",
+                "--basetemp",
+                str(tmp_path / "isolated-launcher-status-retention"),
+                f"{Path(__file__).resolve()}::test_launcher_status_poll_keeps_finished_worker_children_bounded",
+                "-q",
+                "--timeout=120",
+                "--timeout-method=thread",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"isolated launcher status retention probe failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        return
 
     from PySide6.QtCore import QCoreApplication, QEvent
     from PySide6.QtWidgets import QApplication
