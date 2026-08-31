@@ -3745,6 +3745,38 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: measured_2026_08_30_on_python_3_14_6_with_the_real_live_catalog_writer_SQLite_and_bounded_reader_at_base_archive_reader_blob_fee8af1a53f3838aa15d3766487357f4c0535fd1_the_boundary_hook_committed_the_second_row_after_production_discovery_the_reader_returned_only_sensor_main_and_reported_complete_True_and_the_guard_failed_1_exit_1_the_final_append_watermark_disable_control_reproduced_that_exact_assertion_failure_1_in_0_13s_exit_1_then_restored_corrected_archive_reader_blob_80fceaa82c94e0b1389195a0d152e996ea9773c1_byte_identical
     green_evidence: measured_2026_08_30_on_python_3_14_6_after_byte_identical_restore_both_final_real_path_guards_passed_2_in_0_18s_exit_0_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-LEGACY-HOT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_an_upgrade_normalizes_legacy_oversized_unbound_fields_before_bounded_read
+    ci_partition: remaining
+    red_evidence: measured_2026_08_31_on_python_3_14_3_at_candidate_b60f8c3a1f007b6ef6ec1bebdaf619093bfe848f_after_restoring_only_archive_reader_and_channel_descriptors_to_exact_base_42163b944199aa212f8d85ef3c6250d56fcb6f5c_the_legacy_oversized_channel_quarantined_both_rows_and_this_guard_failed_with_pytest_exit_1
+    green_evidence: measured_2026_08_31_on_python_3_14_3_after_byte_identical_candidate_restore_the_exact_five_node_control_passed_5_in_3_40s_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-LEGACY-COLD-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_rotated_unbound_row_is_reported_too
+    ci_partition: remaining
+    red_evidence: measured_2026_08_31_on_python_3_14_3_at_candidate_b60f8c3a1f007b6ef6ec1bebdaf619093bfe848f_after_restoring_only_archive_reader_and_channel_descriptors_to_exact_base_42163b944199aa212f8d85ef3c6250d56fcb6f5c_the_rotated_legacy_oversized_channel_quarantined_the_cold_source_and_this_guard_failed_with_pytest_exit_1
+    green_evidence: measured_2026_08_31_on_python_3_14_3_after_byte_identical_candidate_restore_the_exact_five_node_control_passed_5_in_3_40s_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-COVERSION-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_new_writes_keep_the_pre_upgrade_durable_channel_identity
+    ci_partition: remaining
+    red_evidence: measured_2026_08_31_on_python_3_14_3_at_candidate_b60f8c3a1f007b6ef6ec1bebdaf619093bfe848f_after_restoring_only_archive_reader_and_channel_descriptors_to_exact_base_42163b944199aa212f8d85ef3c6250d56fcb6f5c_the_same_emitted_channel_received_the_new_incompatible_base64_identity_and_this_guard_failed_with_pytest_exit_1
+    green_evidence: measured_2026_08_31_on_python_3_14_3_after_byte_identical_candidate_restore_the_exact_five_node_control_passed_5_in_3_40s_pending_immutable_candidate_capture
+  - id: LIVE-RESERVED-LABEL-NAMESPACE-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LIVE-RESERVED-LABEL-DURABLE-BOUND-001
+    guard: tests/storage/test_unbound_channel_keeps_the_batch.py::test_generated_unbound_channel_cannot_equal_an_authoritative_descriptor_id
+    ci_partition: remaining
+    red_evidence: measured_2026_08_31_on_python_3_14_3_at_candidate_b60f8c3a1f007b6ef6ec1bebdaf619093bfe848f_after_restoring_only_archive_reader_and_channel_descriptors_to_exact_base_42163b944199aa212f8d85ef3c6250d56fcb6f5c_the_generated_reserved_identity_equalled_an_authoritative_descriptor_id_and_this_guard_failed_with_pytest_exit_1
+    green_evidence: measured_2026_08_31_on_python_3_14_3_after_byte_identical_candidate_restore_the_exact_five_node_control_passed_5_in_3_40s_pending_immutable_candidate_capture
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -7571,14 +7603,22 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A reserved reading label accepted at 257 through 1024 UTF-8 bytes could commit beside valid described readings, then exceed the bounded archive reader's 256-byte identity grammar and quarantine every row from that source, hiding the valid measurement as well as the unknown one.
-    invariant: Reserved admission emits a deterministic at-most-256-byte durable channel label. Labels already within the bound are byte-preserved; longer valid labels retain a UTF-8-safe useful prefix plus the full SHA-256 of their exact original bytes, so admission does not recreate whole-batch refusal and prefix truncation does not silently alias distinct sources. The real writer and bounded reader return both committed rows while the unbound row keeps no fabricated descriptor and completeness remains false.
+    consequence: A reserved reading label accepted at 257 through 1024 UTF-8 bytes could commit beside valid described readings, then exceed the bounded archive reader's 256-byte identity grammar and quarantine every row from that source, hiding the valid measurement as well as the unknown one. An upgrade could also split one physical channel between two durable identities or let a generated reserved identity equal an authoritative descriptor id and replace its reading.
+    invariant: Reserved admission emits a deterministic at-most-256-byte durable channel label. Labels already within the bound are byte-preserved unless they occupy the generated suffix namespace; longer valid labels retain a UTF-8-safe useful prefix plus the full hexadecimal SHA-256 of their exact original bytes. New writes keep the deployed pre-upgrade spelling. Hot and cold readers normalize pre-contract oversized reserved labels before bounded validation while querying the persisted raw label. Generated identities stay outside the authoritative 128-byte descriptor-id grammar, so admission does not recreate whole-batch refusal, split history, or alias distinct sources. The real writer and bounded reader return both committed rows while the unbound row keeps no fabricated descriptor and completeness remains false.
     rule_refs:
       - AGENTS.md#architecture-and-extension-rules
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_257_byte_unknown_label_cannot_hide_the_described_measurement
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_an_upgrade_normalizes_legacy_oversized_unbound_fields_before_bounded_read
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_a_rotated_unbound_row_is_reported_too
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_new_writes_keep_the_pre_upgrade_durable_channel_identity
+        ci_partition: remaining
+      - node: tests/storage/test_unbound_channel_keeps_the_batch.py::test_generated_unbound_channel_cannot_equal_an_authoritative_descriptor_id
         ci_partition: remaining
     red_evidence: measured_2026_08_30_on_python_3_14_6_the_real_live_catalog_writer_SQLite_and_bounded_reader_committed_the_valid_described_row_and_the_otherwise_valid_257_byte_unknown_row_then_returned_zero_rows_the_combined_new_guard_run_failed_2_in_0_22s_exit_1_and_the_final_call_removal_reversion_control_failed_this_exact_node_1_in_0_11s_exit_1
     green_evidence: measured_2026_08_30_on_python_3_14_6_after_the_collision_resistant_256_byte_admission_boundary_both_final_real_path_guards_passed_2_in_0_18s_and_after_byte_identical_control_restore_this_node_passed_1_in_0_11s_pending_immutable_candidate_capture
