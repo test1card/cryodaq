@@ -98,6 +98,10 @@ class _TokenRedactFilter(logging.Filter):
 # to a record still owed to the operator.
 _MAX_DEFERRED_RECORDS = 64
 _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
+# One acquisition may perform the initial replay and one teardown-race follow-up.
+# A still-rejected record remains pending for a later successful foreign emission;
+# it cannot keep the thread that proved recovery inside replay indefinitely.
+_MAX_REPLAY_CYCLES_PER_OWNERSHIP = 2
 # Every mutation of the queue takes this lock: defer_record's bound check, replay's
 # snapshot, and replay's merge all race with each other across threads. It is never
 # held across an emission, so a handler can never block on it.
@@ -288,8 +292,10 @@ def _replay_deferred_records() -> None:
     owner_held = True
     with _replay_state_lock:
         _replay_in_progress = True
+    replay_cycles = 0
     try:
         while True:
+            replay_cycles += 1
             with _deferred_records_lock:
                 held, _deferred_records[:] = list(_deferred_records), []
             logger = logging.getLogger("cryodaq.startup")
@@ -313,10 +319,14 @@ def _replay_deferred_records() -> None:
                 _deferred_records[:] = merged[:_MAX_DEFERRED_RECORDS]
                 _replay_pending = bool(_deferred_records)
             with _replay_state_lock:
-                if _replay_followup_requested:
+                if _replay_followup_requested and replay_cycles < _MAX_REPLAY_CYCLES_PER_OWNERSHIP:
                     _replay_followup_requested = False
                     _replay_finalizing = False
                     continue
+                # A later successful foreign emission may acquire a fresh owner. Drop
+                # only this owner's extra follow-up request; retained records and their
+                # pending trigger remain intact.
+                _replay_followup_requested = False
 
                 # Release replay ownership as part of the same state transition that
                 # makes direct recovery-triggered replay eligible. A handler can never

@@ -725,6 +725,71 @@ def test_recovery_during_replay_teardown_replays_the_retained_record(monkeypatch
     assert written.count(target) == 1
 
 
+def test_replay_ownership_bounds_followups_for_record_specific_rejection(monkeypatch):
+    """One logging call cannot spin forever when only one retained record rejects."""
+
+    from cryodaq import logging_setup
+
+    assert logging_setup._MAX_REPLAY_CYCLES_PER_OWNERSHIP == 2
+    monkeypatch.setattr(logging_setup, "_MAX_REPLAY_CYCLES_PER_OWNERSHIP", 1)
+    target = "permanently rejected retained diagnostic"
+    target_attempts: list[str] = []
+
+    class RejectOnlyTargetStream:
+        closed = False
+
+        def write(self, message):
+            if target in message:
+                target_attempts.append(message)
+                raise OSError("this diagnostic remains record-specifically rejected")
+            return len(message)
+
+        def flush(self):
+            pass
+
+    class FinalizingSuccessGate:
+        """Hold the exact follow-up signal produced by successful foreign logging."""
+
+        def __init__(self, lock) -> None:
+            self._lock = lock
+            self._signals = 0
+
+        def __enter__(self):
+            self._lock.acquire()
+            if logging_setup._replay_finalizing and self._signals < 3:
+                self._signals += 1
+                logging_setup._replay_followup_requested = True
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            self._lock.release()
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(logging.INFO)
+    root.addHandler(logging_setup._EmissionTrackingStreamHandler(RejectOnlyTargetStream()))
+    logging_setup._deferred_records.clear()
+    logging_setup._replay_pending = False
+    logging_setup.defer_record(logging.ERROR, target)
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+    finalizing_gate = FinalizingSuccessGate(logging_setup._replay_state_lock)
+    monkeypatch.setattr(
+        logging_setup,
+        "_replay_state_lock",
+        finalizing_gate,
+    )
+
+    logging_setup._replay_deferred_records()
+
+    assert finalizing_gate._signals == 1
+    assert len(target_attempts) == 1
+    assert logging_setup._deferred_records == [(logging.ERROR, target, ())]
+    assert logging_setup._replay_pending
+    assert logging_setup._replay_owner_lock.acquire(blocking=False)
+    logging_setup._replay_owner_lock.release()
+
+
 def test_replay_owner_lock_makes_contended_entry_nonblocking():
     """Simultaneous handler recovery must not deadlock on replay ownership.
 
