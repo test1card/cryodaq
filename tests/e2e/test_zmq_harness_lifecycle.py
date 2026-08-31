@@ -44,6 +44,10 @@ def _process_resource_count() -> int:
     pytest.skip("process handle/fd count is unavailable on this platform")
 
 
+def _assert_flat_resource_samples(samples: list[int]) -> None:
+    assert len(set(samples)) == 1, f"process resource count grew across fixture cycles: {samples}"
+
+
 def test_stop_join_close_loop_releases_the_real_event_loop() -> None:
     """The real fixture teardown must close its loop and self-pipe sockets."""
     generator, harness = _start_real_fixture()
@@ -165,4 +169,10 @@ def test_repeated_real_fixture_lifecycle_has_flat_resource_slope() -> None:
         del harness, generator
         samples.append(_process_resource_count())
 
-    assert max(samples) - min(samples) <= 4, f"process resource count grew across fixture cycles: {samples}"
+    _assert_flat_resource_samples(samples)
+
+
+def test_resource_slope_guard_rejects_one_per_cycle_growth() -> None:
+    """The lifecycle guard must reject the exact leak its old range admitted."""
+    with pytest.raises(AssertionError, match="resource count grew"):
+        _assert_flat_resource_samples([100, 101, 102, 103, 104])

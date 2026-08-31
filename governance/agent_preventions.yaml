@@ -6211,6 +6211,8 @@ records:
         ci_partition: gui
       - node: tests/e2e/test_zmq_harness_lifecycle.py::test_stop_join_close_loop_releases_the_real_event_loop
         ci_partition: remaining
+      - node: tests/e2e/test_zmq_harness_lifecycle.py::test_fixture_loop_factory_is_selector_capable_on_windows
+        ci_partition: remaining
       - node: tests/e2e/test_zmq_harness_lifecycle.py::test_setup_failure_after_loop_start_settles_the_loop
         ci_partition: remaining
       - node: tests/e2e/test_zmq_harness_lifecycle.py::test_setup_failure_after_bridge_start_settles_every_owner
