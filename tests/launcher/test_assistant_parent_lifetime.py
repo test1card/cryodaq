@@ -7,11 +7,13 @@ import errno
 import json
 import os
 import platform
+import queue
 import selectors
 import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +22,10 @@ import pytest
 _LINUX_ONLY = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="the Ubuntu laboratory parent-death contract uses Linux pidfds and PR_SET_PDEATHSIG",
+)
+_WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt" or sys.platform != "win32",
+    reason="the native launcher Job-object boundary exists only on Windows",
 )
 _PIDFD_OPEN_SYSCALL = {
     "x86_64": 434,
@@ -122,6 +128,64 @@ def _read_line(stream, *, timeout: float) -> str:
     return line.decode("ascii", errors="strict").strip()
 
 
+def _read_line_from_windows_pipe(stream, *, timeout: float) -> str:
+    """Bound a blocking Windows anonymous-pipe read without psutil."""
+
+    received: queue.Queue[bytes | BaseException] = queue.Queue(maxsize=1)
+
+    def read() -> None:
+        try:
+            received.put(stream.readline())
+        except BaseException as exc:
+            received.put(exc)
+
+    threading.Thread(target=read, daemon=True).start()
+    try:
+        result = received.get(timeout=timeout)
+    except queue.Empty as exc:
+        raise AssertionError("launcher harness did not publish its process identities") from exc
+    if isinstance(result, BaseException):
+        raise result
+    if not result:
+        raise AssertionError("launcher harness exited before publishing its process identities")
+    return result.decode("ascii", errors="strict").strip()
+
+
+def _open_windows_process_identity(pid: int):
+    """Open one exact process identity for native wait and bounded cleanup."""
+
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    process_terminate = 0x0001
+    synchronize = 0x00100000
+    handle = kernel32.OpenProcess(process_terminate | synchronize, False, pid)
+    if not handle:
+        code = ctypes.get_last_error()
+        raise OSError(code, f"OpenProcess failed for {pid}")
+    return kernel32, handle
+
+
+def _wait_windows_process(kernel32, handle, *, timeout: float) -> bool:
+    wait_object_0 = 0
+    wait_timeout = 258
+    result = int(kernel32.WaitForSingleObject(handle, int(timeout * 1000)))
+    if result == wait_object_0:
+        return True
+    if result == wait_timeout:
+        return False
+    code = ctypes.get_last_error()
+    raise OSError(code, f"WaitForSingleObject failed with result {result}")
+
+
 def _read_available_bytes(stream, *, limit: int, timeout: float) -> bytes:
     descriptor = stream.fileno()
     was_blocking = os.get_blocking(descriptor)
@@ -205,8 +269,8 @@ def _write_launcher_harness(path: Path) -> None:
             engine = None
             if mode == "engine-death":
                 engine = subprocess.Popen(
-                    [sys.executable, "-B", "-c", "import time; time.sleep(600)"],
-                    stdin=subprocess.DEVNULL,
+                    [sys.executable, "-B", "-c", "import sys; sys.stdin.buffer.read()"],
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -427,6 +491,83 @@ def test_assistant_is_owned_by_launcher_not_engine(tmp_path: Path) -> None:
     assert assistant_exited, "assistant survived launcher death after the launcher had reaped its dead engine"
 
 
+@_WINDOWS_ONLY
+def test_real_windows_job_kills_assistant_when_launcher_dies(tmp_path: Path) -> None:
+    """Exercise the real launcher Job handle and a real assistant process."""
+
+    runtime_root = tmp_path / "runtime"
+    _write_runtime_config(runtime_root)
+    harness = tmp_path / "launcher_assistant_harness.py"
+    _write_launcher_harness(harness)
+    env = os.environ.copy()
+    env.update(
+        {
+            "CRYODAQ_ROOT": str(_ROOT),
+            "CRYODAQ_STATE_ROOT": str(runtime_root),
+            "CRYODAQ_HARNESS_RUNTIME_ROOT": str(runtime_root),
+            "PYTHONPATH": str(_SRC),
+            "QT_QPA_PLATFORM": "offscreen",
+        }
+    )
+    parent: subprocess.Popen[bytes] | None = None
+    kernel32 = None
+    assistant_handle = None
+    parent_settled = False
+    try:
+        parent = subprocess.Popen(
+            [sys.executable, "-B", str(harness), "launcher-kill"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        assert parent.stdin is not None
+        assert parent.stdout is not None
+        parent.stdin.write(b"START\n")
+        parent.stdin.flush()
+        report = json.loads(_read_line_from_windows_pipe(parent.stdout, timeout=15.0))
+        assert report["launcher_pid"] == parent.pid
+        assistant_pid = report["assistant_pid"]
+        assert type(assistant_pid) is int and assistant_pid > 1
+        kernel32, assistant_handle = _open_windows_process_identity(assistant_pid)
+
+        readiness_path = runtime_root / "data"
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not readiness_path.is_dir():
+            if _wait_windows_process(kernel32, assistant_handle, timeout=0):
+                raise AssertionError("real assistant exited before readiness")
+            time.sleep(0.05)
+        assert readiness_path.is_dir(), "real assistant never reached its post-binding data setup"
+        assert not _wait_windows_process(kernel32, assistant_handle, timeout=0)
+
+        parent.kill()
+        parent.wait(timeout=10.0)
+        parent_settled = True
+        assert _wait_windows_process(kernel32, assistant_handle, timeout=10.0), (
+            "real assistant survived closure of the launcher's production Job handle"
+        )
+    finally:
+        if parent is not None and not parent_settled:
+            parent.kill()
+            parent.wait(timeout=10.0)
+        if kernel32 is not None and assistant_handle is not None:
+            if not _wait_windows_process(kernel32, assistant_handle, timeout=0):
+                if not kernel32.TerminateProcess(assistant_handle, 91):
+                    code = ctypes.get_last_error()
+                    raise OSError(code, "TerminateProcess failed during assistant cleanup")
+                assert _wait_windows_process(kernel32, assistant_handle, timeout=10.0)
+            if not kernel32.CloseHandle(assistant_handle):
+                code = ctypes.get_last_error()
+                raise OSError(code, "CloseHandle failed for assistant process identity")
+        if parent is not None:
+            if parent.stdin is not None:
+                parent.stdin.close()
+            if parent.stdout is not None:
+                parent.stdout.close()
+            if parent.stderr is not None:
+                parent.stderr.close()
+
+
 def test_early_exit_diagnostic_is_bounded_while_writer_remains_open() -> None:
     read_fd, write_fd = os.pipe()
     stream = os.fdopen(read_fd, "rb")
@@ -520,3 +661,27 @@ def test_engine_identity_is_cleaned_if_readiness_fails_after_report(
     assert 1303 in signalled
     assert 303 in reaped
     assert 1303 in closed
+
+
+@_LINUX_ONLY
+def test_engine_exits_on_launcher_death_when_pidfd_open_fails_after_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness owns a pre-established EOF cleanup path before pidfd_open."""
+
+    real_pidfd_open = _pidfd_open
+    calls = 0
+
+    def fail_engine_pidfd(pid: int) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError(errno.EMFILE, "forced engine pidfd exhaustion")
+        return real_pidfd_open(pid)
+
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_open", fail_engine_pidfd)
+
+    with pytest.raises(OSError, match="forced engine pidfd exhaustion"):
+        _exercise_launcher_parent_death(tmp_path, "engine-death")
+    assert calls == 3

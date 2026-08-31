@@ -157,14 +157,27 @@ def create_windows_kill_on_close_job(process: subprocess.Popen[Any]) -> WindowsK
     return WindowsKillOnCloseJob(process)
 
 
+def _load_windows_ntdll() -> Any:
+    """Load the native process-resume API without an optional dependency."""
+
+    import ctypes
+
+    return ctypes.WinDLL("ntdll", use_last_error=True)
+
+
 def resume_windows_process(process: subprocess.Popen[Any]) -> None:
     """Resume a suspended Windows child after its Job owns the process."""
 
     if not windows_job_objects_available():
         raise RuntimeError("Windows process resume requires native Windows")
-    import psutil
+    from ctypes import wintypes
 
-    psutil.Process(process.pid).resume()
+    ntdll = _load_windows_ntdll()
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = wintypes.LONG
+    status = int(ntdll.NtResumeProcess(wintypes.HANDLE(int(process._handle))))  # type: ignore[attr-defined]
+    if status != 0:
+        raise OSError(status, "NtResumeProcess failed")
 
 
 def windows_job_objects_available() -> bool:

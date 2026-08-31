@@ -17,26 +17,34 @@ import pytest
 def test_resume_windows_process_targets_exact_suspended_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import psutil
-
     import cryodaq.process_lifetime as module
 
-    events: list[tuple[str, int]] = []
+    events: list[tuple[str, object]] = []
 
-    class Process:
-        def __init__(self, pid: int) -> None:
-            self.pid = pid
-            events.append(("open", pid))
+    class ResumeCall:
+        argtypes: list[object] = []
+        restype: object = None
 
-        def resume(self) -> None:
-            events.append(("resume", self.pid))
+        def __call__(self, handle: object) -> int:
+            events.append(("resume-handle", handle.value))
+            return 0
+
+    native = SimpleNamespace(NtResumeProcess=ResumeCall())
 
     monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
-    monkeypatch.setattr(psutil, "Process", Process)
+    monkeypatch.setattr(module, "_load_windows_ntdll", lambda: native)
 
-    module.resume_windows_process(SimpleNamespace(pid=7315))  # type: ignore[arg-type]
+    module.resume_windows_process(SimpleNamespace(pid=7315, _handle=9315))  # type: ignore[arg-type]
 
-    assert events == [("open", 7315), ("resume", 7315)]
+    assert events == [("resume-handle", 9315)]
+    assert native.NtResumeProcess.argtypes
+    assert native.NtResumeProcess.restype is not None
+
+
+def test_windows_resume_path_has_no_dev_only_psutil_import() -> None:
+    import cryodaq.process_lifetime as module
+
+    assert "psutil" not in module.resume_windows_process.__code__.co_names
 
 
 def test_windows_assistant_retains_kill_on_close_job_until_child_exit(
