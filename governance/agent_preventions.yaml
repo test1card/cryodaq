@@ -6209,6 +6209,12 @@ records:
         ci_partition: gui
       - node: tests/gui/state/test_operator_snapshot_runtime_roots.py::test_standalone_close_request_exits_event_loop_for_hold_settlement
         ci_partition: gui
+      - node: tests/e2e/test_zmq_harness_lifecycle.py::test_stop_join_close_loop_releases_the_real_event_loop
+        ci_partition: remaining
+      - node: tests/e2e/test_zmq_harness_lifecycle.py::test_setup_failure_after_loop_start_settles_the_loop
+        ci_partition: remaining
+      - node: tests/e2e/test_zmq_harness_lifecycle.py::test_setup_failure_after_bridge_start_settles_every_owner
+        ci_partition: remaining
     red_evidence: synthetic_bridge_liveness_incarnation_queue_replacement_put_only_compatibility_request_owner_leaks_and_shared_fixture_preemption_of_the_production_application_root_escaped_green_test_bodies_until_complete_partition_execution_2026_07_24_pending_immutable_capture
     green_evidence: pending
   - id: GENERATED-EVIDENCE-STAGING-024

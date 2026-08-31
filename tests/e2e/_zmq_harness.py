@@ -19,7 +19,6 @@ Hard rules enforced here:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import socket
 import threading
 import time
@@ -137,12 +136,16 @@ class ZmqHarness:
         queue: asyncio.Queue,
         bridge: ZmqBridge,
         loop: asyncio.AbstractEventLoop,
+        thread: threading.Thread,
     ) -> None:
         self.pub_addr = pub_addr
         self.publisher = publisher
         self._queue = queue
         self.bridge = bridge
         self._loop = loop
+        self._thread = thread
+        self._teardown_lock = threading.Lock()
+        self._teardown_complete = False
 
     def publish(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
         """Drive the production publisher path via its asyncio.Queue.
@@ -191,17 +194,16 @@ class ZmqHarness:
 
     def teardown(self) -> None:
         """Deterministic teardown: bridge shutdown, publisher stop, loop cleanup."""
-        # 1. Shutdown the bridge subprocess first so no new items arrive.
-        with contextlib.suppress(Exception):
-            self.bridge.shutdown()
-
-        # 2. Stop the publisher (cancels _publish_loop task, closes socket LINGER=0).
-        future = asyncio.run_coroutine_threadsafe(self.publisher.stop(), self._loop)
-        with contextlib.suppress(Exception):
-            future.result(timeout=5.0)
-
-        # 3. Stop the event loop and thread.
-        self._loop.call_soon_threadsafe(self._loop.stop)
+        with self._teardown_lock:
+            if self._teardown_complete:
+                return
+            _settle_harness_resources(
+                publisher=self.publisher,
+                bridge=self.bridge,
+                loop=self._loop,
+                thread=self._thread,
+            )
+            self._teardown_complete = True
 
 
 # ---------------------------------------------------------------------------
@@ -217,10 +219,65 @@ def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 def _stop_join_close_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
     """Stop the fixture loop, settle its thread, then release loop-owned sockets."""
-    loop.call_soon_threadsafe(loop.stop)
+    if loop.is_running():
+        loop.call_soon_threadsafe(loop.stop)
     thread.join(timeout=5.0)
     assert not thread.is_alive(), "ZMQ harness event-loop thread did not stop within 5 seconds"
-    loop.close()
+    if not loop.is_closed():
+        loop.close()
+
+
+def _stop_publisher(publisher: ZMQPublisher, loop: asyncio.AbstractEventLoop) -> None:
+    """Stop a possibly-partial publisher without creating an unawaited coroutine."""
+    if loop.is_closed():
+        return
+    if loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(publisher.stop(), loop)
+        future.result(timeout=5.0)
+        return
+    loop.run_until_complete(publisher.stop())
+
+
+def _settle_harness_resources(
+    *,
+    publisher: ZMQPublisher | None,
+    bridge: ZmqBridge | None,
+    loop: asyncio.AbstractEventLoop,
+    thread: threading.Thread,
+) -> None:
+    """Settle every harness owner, continuing after an individual failure."""
+    failures: list[tuple[str, BaseException]] = []
+    if bridge is not None:
+        try:
+            # Let both reply consumers leave through their timeout path before
+            # shutdown closes the child pipe.  Otherwise the expected EOF is
+            # retained by the consumer's ``failure`` traceback together with
+            # the bridge and every multiprocessing semaphore it owns.
+            bridge._reply_stop.set()
+            consumers = (
+                (bridge._reply_consumer, bridge._reply_consumer_started),
+                (bridge._safe_reply_consumer, bridge._safe_reply_consumer_started),
+            )
+            for consumer, started in consumers:
+                if started and consumer is not None:
+                    consumer.join(timeout=2.0)
+                    if consumer.is_alive():
+                        raise RuntimeError("ZMQ bridge reply consumer did not stop within 2 seconds")
+            bridge.close()
+        except BaseException as exc:
+            failures.append(("bridge close", exc))
+    if publisher is not None:
+        try:
+            _stop_publisher(publisher, loop)
+        except BaseException as exc:
+            failures.append(("publisher stop", exc))
+    try:
+        _stop_join_close_loop(loop, thread)
+    except BaseException as exc:
+        failures.append(("event-loop close", exc))
+    if failures:
+        detail = "; ".join(f"{label}: {type(exc).__name__}" for label, exc in failures)
+        raise RuntimeError(f"ZMQ harness teardown incomplete: {detail}") from failures[0][1]
 
 
 @pytest.fixture()
@@ -240,54 +297,65 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
     t = threading.Thread(target=_run_loop, args=(loop,), daemon=True)
     t.start()
 
-    publisher = ZMQPublisher(pub_addr, topic=DEFAULT_TOPIC)
-    queue: asyncio.Queue = asyncio.Queue(maxsize=10_000)
+    publisher: ZMQPublisher | None = None
+    bridge: ZmqBridge | None = None
+    try:
+        publisher = ZMQPublisher(pub_addr, topic=DEFAULT_TOPIC)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=10_000)
 
-    # Start the publisher (binds the PUB socket, spawns _publish_loop task).
-    fut = asyncio.run_coroutine_threadsafe(publisher.start(queue), loop)
-    fut.result(timeout=10.0)
+        # Start the publisher (binds the PUB socket, spawns _publish_loop task).
+        fut = asyncio.run_coroutine_threadsafe(publisher.start(queue), loop)
+        fut.result(timeout=10.0)
 
-    # Start the bridge subprocess subscriber.
-    bridge = ZmqBridge(pub_addr=pub_addr)
-    bridge.start()
+        # Start the bridge subprocess subscriber.
+        bridge = ZmqBridge(pub_addr=pub_addr)
+        bridge.start()
 
-    # Synchronise on a sentinel reading: publish dummy readings in a tight loop
-    # until at least one arrives at the bridge's data_queue.  This is the only
-    # reliable way to know that the subprocess SUB socket has completed
-    # connect()+subscribe() on Windows (ZMQ connect is non-blocking; the TCP
-    # handshake and subscription filter propagation happen asynchronously, and
-    # messages published before they complete are silently dropped).
-    #
-    # The sentinel uses a known channel id "e2e.sentinel" that the test ignores.
-    # drain_until filters on count only; the test validates channel ids separately.
-    _sentinel_channel = "e2e.sentinel"
-    _sentinel_reading = Reading(
-        timestamp=datetime.fromtimestamp(0, tz=UTC),
-        instrument_id="test_harness",
-        channel=_sentinel_channel,
-        value=0.0,
-        unit="K",
-        status=ChannelStatus.OK,
-    )
+        # Synchronise on a sentinel reading: publish dummy readings in a tight loop
+        # until at least one arrives at the bridge's data_queue.  This is the only
+        # reliable way to know that the subprocess SUB socket has completed
+        # connect()+subscribe() on Windows (ZMQ connect is non-blocking; the TCP
+        # handshake and subscription filter propagation happen asynchronously, and
+        # messages published before they complete are silently dropped).
+        #
+        # The sentinel uses a known channel id "e2e.sentinel" that the test ignores.
+        # drain_until filters on count only; the test validates channel ids separately.
+        _sentinel_channel = "e2e.sentinel"
+        _sentinel_reading = Reading(
+            timestamp=datetime.fromtimestamp(0, tz=UTC),
+            instrument_id="test_harness",
+            channel=_sentinel_channel,
+            value=0.0,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
 
-    _sync_deadline = time.monotonic() + 15.0
-    _sentinel_arrived = False
-    while time.monotonic() < _sync_deadline and not _sentinel_arrived:
-        # Publish one sentinel every 100 ms (matches SUB RCVTIMEO).
-        asyncio.run_coroutine_threadsafe(queue.put(_sentinel_reading), loop).result(timeout=2.0)
-        time.sleep(0.1)
-        # Drain and look for the sentinel.
-        batch = bridge.poll_readings_with_descriptor()
-        for qr in batch:
-            if qr.reading.channel == _sentinel_channel:
-                _sentinel_arrived = True
-                break
+        _sync_deadline = time.monotonic() + 15.0
+        _sentinel_arrived = False
+        while time.monotonic() < _sync_deadline and not _sentinel_arrived:
+            # Publish one sentinel every 100 ms (matches SUB RCVTIMEO).
+            asyncio.run_coroutine_threadsafe(queue.put(_sentinel_reading), loop).result(timeout=2.0)
+            time.sleep(0.1)
+            # Drain and look for the sentinel.
+            batch = bridge.poll_readings_with_descriptor()
+            for qr in batch:
+                if qr.reading.channel == _sentinel_channel:
+                    _sentinel_arrived = True
+                    break
 
-    if not _sentinel_arrived:
-        bridge.shutdown()
-        asyncio.run_coroutine_threadsafe(publisher.stop(), loop).result(timeout=3.0)
-        _stop_join_close_loop(loop, t)
-        pytest.fail("ZmqBridge SUB socket did not receive sentinel reading within 15 s")
+        if not _sentinel_arrived:
+            pytest.fail("ZmqBridge SUB socket did not receive sentinel reading within 15 s")
+    except BaseException as setup_error:
+        try:
+            _settle_harness_resources(
+                publisher=publisher,
+                bridge=bridge,
+                loop=loop,
+                thread=t,
+            )
+        except BaseException as cleanup_error:
+            setup_error.add_note(f"fixture cleanup also failed: {cleanup_error}")
+        raise
 
     harness = ZmqHarness(
         pub_addr=pub_addr,
@@ -295,9 +363,10 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
         queue=queue,
         bridge=bridge,
         loop=loop,
+        thread=t,
     )
 
-    yield harness
-
-    harness.teardown()
-    _stop_join_close_loop(loop, t)
+    try:
+        yield harness
+    finally:
+        harness.teardown()

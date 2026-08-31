@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import os
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -936,10 +937,20 @@ def test_t3_static_all_five_invalidate_before_start() -> None:
     launcher_py = _WT / "src" / "cryodaq" / "launcher.py"
 
     _check_branch_level(app_py.read_text(encoding="utf-8"), "app.py", expected_restart_branches=2)
-    _check_branch_level(launcher_py.read_text(encoding="utf-8"), "launcher.py", expected_restart_branches=3)
+    launcher_source = launcher_py.read_text(encoding="utf-8")
+    direct_restart_branches = _check_branch_level(
+        launcher_source,
+        "launcher.py direct restart",
+        expected_restart_branches=1,
+    )
+    split_restart_roots = _check_split_restart_readiness_contract(launcher_source, "launcher.py")
+    assert direct_restart_branches + split_restart_roots == 3, (
+        "launcher.py: expected exactly three restart lifecycles: one direct watchdog "
+        "replacement plus manual and scheduled replacements completed after readiness"
+    )
 
 
-def _check_branch_level(source: str, label: str, expected_restart_branches: int) -> None:
+def _check_branch_level(source: str, label: str, expected_restart_branches: int) -> int:
     """Assert every restart bridge.start() has an in-scope authority invalidate first.
 
     Branch/single-lifecycle association via
@@ -974,6 +985,118 @@ def _check_branch_level(source: str, label: str, expected_restart_branches: int)
         f"(shutdown+authority-invalidate+start); found {restart_branches}. "
         "T5: a dropped restart branch changes this count."
     )
+    return restart_branches
+
+
+def _check_split_restart_readiness_contract(source: str, label: str) -> int:
+    """Bind both split restart roots to the sole post-readiness bridge attach."""
+
+    tree = ast.parse(source)
+    launcher_classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LauncherWindow"]
+    assert len(launcher_classes) == 1, f"{label}: expected one LauncherWindow class"
+    launcher_class = launcher_classes[0]
+
+    def _direct_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        matches = [
+            node
+            for node in launcher_class.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name
+        ]
+        assert len(matches) == 1, f"{label}: expected one LauncherWindow.{name} method"
+        return matches[0]
+
+    def _nested_function(
+        owner: ast.FunctionDef | ast.AsyncFunctionDef,
+        name: str,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        matches = [
+            node
+            for node in ast.walk(owner)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node is not owner and node.name == name
+        ]
+        assert len(matches) == 1, f"{label}: expected one {owner.name}.{name} closure"
+        return matches[0]
+
+    def _call_lines(node: ast.AST, predicate: Callable[[ast.AST], bool]) -> list[int]:
+        return sorted(call.lineno for call in ast.walk(node) if isinstance(call, ast.Call) and predicate(call))
+
+    def _is_readiness_handoff(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_begin_engine_restart_readiness"
+        )
+
+    manual = _direct_method("_restart_engine")
+    scheduled = _nested_function(_direct_method("_handle_engine_exit"), "_do_restart")
+    completion_owner = _direct_method("_begin_engine_restart_readiness")
+    completion = _nested_function(completion_owner, "_readiness_succeeded")
+
+    for root_name, root in (("manual", manual), ("scheduled", scheduled)):
+        invalidates = _call_lines(root, _is_invalidate_call)
+        shutdowns = _call_lines(root, _is_bridge_shutdown_call)
+        handoffs = _call_lines(root, _is_readiness_handoff)
+        starts = _call_lines(root, _is_bridge_start_call)
+        assert len(invalidates) == 1, f"{label}: {root_name} split restart must invalidate exactly once"
+        assert len(shutdowns) == 1, f"{label}: {root_name} split restart must settle one old bridge"
+        assert len(handoffs) == 1, f"{label}: {root_name} split restart must have one readiness handoff"
+        assert not starts, f"{label}: {root_name} split restart attached bridge before readiness"
+        assert invalidates[0] < shutdowns[0] < handoffs[0], (
+            f"{label}: {root_name} split restart must order invalidate -> shutdown -> readiness handoff"
+        )
+
+    completion_starts = _call_lines(completion, _is_bridge_start_call)
+    assert len(completion_starts) == 1, f"{label}: readiness success must attach exactly one bridge"
+    all_completion_owner_starts = _call_lines(completion_owner, _is_bridge_start_call)
+    assert all_completion_owner_starts == completion_starts, (
+        f"{label}: bridge attach escaped the readiness-success closure"
+    )
+    return 2
+
+
+def test_t3_split_restart_readiness_regression_guard() -> None:
+    """The split-lifecycle guard rejects removal, reordering, and early attach."""
+
+    well_formed = """
+class LauncherWindow:
+    def _restart_engine(self):
+        self._invalidate_engine_producer()
+        self._bridge.shutdown()
+        self._begin_engine_restart_readiness()
+
+    def _handle_engine_exit(self):
+        def _do_restart():
+            self._invalidate_engine_producer()
+            self._bridge.shutdown()
+            self._begin_engine_restart_readiness()
+
+    def _begin_engine_restart_readiness(self):
+        def _readiness_succeeded():
+            self._bridge.start()
+"""
+    assert _check_split_restart_readiness_contract(well_formed, "well_formed") == 2
+
+    mutations = {
+        "missing readiness handoff": well_formed.replace("        self._begin_engine_restart_readiness()\n", "", 1),
+        "missing scheduled invalidation": well_formed.replace(
+            "            self._invalidate_engine_producer()\n", "", 1
+        ),
+        "handoff before shutdown": well_formed.replace(
+            "        self._bridge.shutdown()\n        self._begin_engine_restart_readiness()\n",
+            "        self._begin_engine_restart_readiness()\n        self._bridge.shutdown()\n",
+            1,
+        ),
+        "attach before readiness": well_formed.replace(
+            "        self._begin_engine_restart_readiness()\n",
+            "        self._bridge.start()\n        self._begin_engine_restart_readiness()\n",
+            1,
+        ),
+        "missing readiness attach": well_formed.replace("            self._bridge.start()\n", "            pass\n"),
+    }
+    for mutation_name, mutated_source in mutations.items():
+        assert mutated_source != well_formed, f"{mutation_name}: mutation did not apply"
+        with pytest.raises(AssertionError):
+            _check_split_restart_readiness_contract(mutated_source, mutation_name)
 
 
 def test_t3_fix_a_branch_awareness_regression_guard() -> None:
@@ -1474,6 +1597,9 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
         _bridge=zmq_harness.bridge,  # REAL
         _main_window=w,  # REAL
         _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=23,
+        _runtime_engine_readiness_state=None,
         _engine_unsettled_incarnation=None,
         _restart_generation=restart_generation_before,
         _engine_instance_id=old_engine_instance_id,
@@ -1502,11 +1628,12 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
         _data_timer=MagicMock(name="_data_timer"),
         _health_timer=MagicMock(name="_health_timer"),
     )
-    min_self._start_engine.side_effect = lambda: setattr(
-        min_self,
-        "_engine_instance_id",
-        replacement_engine_instance_id,
-    )
+
+    def _record_replacement_start(*, wait_for_ready: bool) -> None:
+        assert wait_for_ready is False, "runtime restart must not block the Qt thread for readiness"
+        min_self._engine_instance_id = replacement_engine_instance_id
+
+    min_self._start_engine.side_effect = _record_replacement_start
     min_self._invalidate_launcher_status_authority = LauncherWindow._invalidate_launcher_status_authority.__get__(
         min_self, LauncherWindow
     )
@@ -1537,8 +1664,31 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
         )
         return real_start(*a, **k)
 
-    with patch.object(zmq_harness.bridge, "start", side_effect=_wrapped_start) as start_probe:
+    def _complete_runtime_readiness(
+        readiness_self: object,
+        *,
+        restart_generation: int,
+        restart_epoch: int,
+        on_ready: Callable[[], None],
+        on_failed: Callable[[Exception], None],
+    ) -> bool:
+        assert readiness_self is min_self
+        assert restart_generation == restart_generation_before + 1
+        assert restart_epoch == min_self._runtime_callback_epoch
+        assert callable(on_failed)
+        on_ready()
+        return True
+
+    with (
+        patch.object(
+            LauncherWindow,
+            "_begin_runtime_engine_readiness",
+            side_effect=_complete_runtime_readiness,
+        ) as readiness_probe,
+        patch.object(zmq_harness.bridge, "start", side_effect=_wrapped_start) as start_probe,
+    ):
         LauncherWindow._restart_engine.__get__(min_self, LauncherWindow)()
+    readiness_probe.assert_called_once()
     start_probe.assert_called_once_with()
 
     # (d) A REAL bridge restart committed only after old-owner settlement, producer
