@@ -815,7 +815,14 @@ def _json_wire_safe(value: Any) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
-        return value if math.isfinite(value) else None
+        # float(...) is not redundant: numpy scalars pass isinstance(x, float)
+        # but the reply validator tests `type(x) in {bool, int, float}`
+        # exactly, so a numpy.float64 is rejected as an unsupported value.
+        # The analytics fits are numpy-based, so every vacuum-trend reply hit
+        # this and was discarded whole.
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, int):
+        return int(value)
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, dict):
@@ -1264,6 +1271,22 @@ async def _drain_dispatch_tasks(
 # ``_drain_dispatch_tasks``).
 
 
+def _channel_is_visible(channel: str) -> bool:
+    """Whether the operator still shows this channel in the GUI.
+
+    Same authority the dashboard reads (``channels.yaml`` via ChannelManager).
+    ``is_visible()`` splits a full emitted label to its short id and treats
+    channels it does not know — Keithley SMU keys, pressure — as visible.
+    Fail-open: any lookup problem keeps the notification.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        return bool(get_channel_manager().is_visible(channel))
+    except Exception:  # pragma: no cover - notification must never break acquisition
+        return True
+
+
 async def _dispatch_alarm_notification(
     event_bus: EventBus,
     alarm_dispatch_tasks: set[asyncio.Task[Any]],
@@ -1281,13 +1304,28 @@ async def _dispatch_alarm_notification(
     *alarm_dispatch_tasks* so it survives GC and drains cleanly on shutdown
     (see ``_drain_dispatch_tasks``).
     """
-    if telegram_bot is not None:
+    # A channel the operator switched off in Настройки (visible: false in
+    # channels.yaml) does not page anyone. It is switched off precisely
+    # because it is a known-dead input, and repeating it every poll trains
+    # the operator to ignore the alerts that matter.
+    #
+    # Telegram ONLY. The alarm still fires in full below — event bus, GUI,
+    # sound and the operator log all still receive it — so hiding a channel
+    # suppresses the notification, never the record.
+    telegram_suppressed = bool(channel) and not _channel_is_visible(channel)
+    if telegram_bot is not None and not telegram_suppressed:
         t = asyncio.create_task(
             telegram_bot._send_to_all(f"⚠ [{level}] {alarm_id}\n{message}"),
             name=f"{alarm_id}_tg",
         )
         alarm_dispatch_tasks.add(t)
         t.add_done_callback(alarm_dispatch_tasks.discard)
+    elif telegram_suppressed:
+        logger.debug(
+            "Telegram-уведомление подавлено для скрытого канала %s (аларм %s)",
+            channel,
+            alarm_id,
+        )
     await event_bus.publish(
         EngineEvent(
             event_type="alarm_fired",

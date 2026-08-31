@@ -31,10 +31,11 @@ engine:
 # --------------------------------------------------------------------------
 channel_groups:
   calibrated:    [Т11, Т12]
-  # Т4, Т8, Т16 включены обратно 2026-08-31: приборы подтвердили, что
-  # эти входы читаются (Т4 ≈ 380 K, Т8/Т16 = 0.000 K), но LakeShore
-  # НЕ выставляет для них флаг RDGST. Без членства в группах ни один
-  # аларм их не покрывает и неисправность выглядит как исправность.
+  # Группы перечисляют полный список каналов стенда. Отключение
+  # конкретного входа — задача Настроек: канал с visible: false в
+  # channels.yaml автоматически исключается из оценки алармов,
+  # диагностики, отчётов и Telegram (AlarmEvaluator._resolve_channels).
+  # Правьте этот файл только при изменении самого состава стенда.
   uncalibrated:  [Т1, Т2, Т3, Т4, Т5, Т6, Т7, Т8, Т9, Т10,
                   Т13, Т14, Т15, Т16, Т17, Т18, Т19, Т20]
   all_temp:      [Т1, Т2, Т3, Т4, Т5, Т6, Т7, Т8, Т9, Т10,
@@ -213,28 +214,36 @@ phase_alarms:
       alarm_type: composite
       operator: AND
       conditions:
+        # 2026-08-31, по стенду: за 60 мин форвакуумный насос должен
+        # выйти на ~1 mbar. 1e-4 mbar — цель высоковакуумной ступени,
+        # недостижимая за час, поэтому прежний порог срабатывал всегда.
         - channel: VSP63D_1/pressure
           check: above
-          threshold: 1.0e-4
+          threshold: 1.0
         - channel: phase_elapsed_s
           check: above
           threshold: 3600        # 60 мин
       level: WARNING
-      message: "Не достигнут вакуум 1e-4 mbar за 60 мин."
+      message: "Не достигнут вакуум 1 mbar за 60 мин."
       notify: [gui]
 
-    vacuum_stall:
-      alarm_type: rate
-      channel: VSP63D_1/pressure
-      check: relative_rate_near_zero
-      rate_threshold: 0.01       # |dP/P| < 1% за окно
-      additional_condition:
-        channel: VSP63D_1/pressure
-        check: above
-        threshold: 1.0e-5
-      level: INFO
-      message: "Давление перестало падать при P > 1e-5."
-      notify: [gui]
+    # vacuum_stall отключён 2026-08-31 по решению оператора: выход
+    # откачки на полку — нормальное поведение насоса, а не отказ.
+    # Прежнее условие (P > 1e-5) держало аларм включённым практически
+    # всю откачку. Оставлено закомментированным, чтобы порог можно было
+    # вернуть, если понадобится ловить именно ранний застой.
+    # vacuum_stall:
+    #   alarm_type: rate
+    #   channel: VSP63D_1/pressure
+    #   check: relative_rate_near_zero
+    #   rate_threshold: 0.01
+    #   additional_condition:
+    #     channel: VSP63D_1/pressure
+    #     check: above
+    #     threshold: 1.0e-5
+    #   level: INFO
+    #   message: "Давление перестало падать при P > 1e-5."
+    #   notify: [gui]
 
   cooldown:
     excessive_cooling_rate:

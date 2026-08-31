@@ -10,8 +10,9 @@ import logging
 import math
 import time
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -93,6 +94,7 @@ class SensorCell(QFrame):
     rename_requested = Signal(str, str)  # channel_id, new_name
     hide_requested = Signal(str)  # channel_id
     show_on_plot_requested = Signal(str)  # channel_id
+    plot_toggle_requested = Signal(str)  # channel_id — click toggles its curve
     history_requested = Signal(str)  # channel_id
 
     def __init__(
@@ -123,10 +125,15 @@ class SensorCell(QFrame):
         # separate from _read_only so the Скрыть entry can be withheld
         # without also disabling rename.
         self._hide_enabled = True
+        self._plot_hidden = False
+        self._click_timer: QTimer | None = None
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
         self._display_value: float | None = None
         self._build_ui()
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.timeout.connect(self._emit_plot_toggle)
 
     # ------------------------------------------------------------------
     # Build
@@ -162,12 +169,7 @@ class SensorCell(QFrame):
         value_row.setSpacing(theme.SPACE_1)
 
         self._value_widget = QLabel("\u2014")  # em dash
-        self._value_widget.setStyleSheet(
-            f"color: {theme.TEXT_PRIMARY}; "
-            f"font-family: '{theme.FONT_MONO}'; "
-            f"font-size: {theme.FONT_MONO_VALUE_SIZE}px; "
-            f"font-weight: {theme.FONT_MONO_VALUE_WEIGHT};"
-        )
+        self._apply_value_text_style()
         value_row.addWidget(self._value_widget)
 
         self._unit_widget = QLabel("")
@@ -203,6 +205,16 @@ class SensorCell(QFrame):
     # ------------------------------------------------------------------
     # Status styling
     # ------------------------------------------------------------------
+
+    def _apply_value_text_style(self) -> None:
+        """Colour the value text: muted while the curve is hidden."""
+        colour = theme.TEXT_DISABLED if self._plot_hidden else theme.TEXT_PRIMARY
+        self._value_widget.setStyleSheet(
+            f"color: {colour}; "
+            f"font-family: '{theme.FONT_MONO}'; "
+            f"font-size: {theme.FONT_MONO_VALUE_SIZE}px; "
+            f"font-weight: {theme.FONT_MONO_VALUE_WEIGHT};"
+        )
 
     def _apply_status_style(self, status: ChannelStatus) -> None:
         """Update border color based on channel status."""
@@ -376,7 +388,44 @@ class SensorCell(QFrame):
     # Inline rename
     # ------------------------------------------------------------------
 
+    def mousePressEvent(self, event):  # noqa: ANN001
+        """Arm a single-click plot toggle that a double-click cancels.
+
+        A bare click toggles this channel's curve on the temperature plot;
+        a double-click still opens inline rename. The two are separated by
+        the platform double-click interval so a rename never leaves the
+        curve toggled behind it.
+        """
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self._is_renaming
+            and self._click_timer is not None
+        ):
+            self._click_timer.start(QApplication.doubleClickInterval())
+        super().mousePressEvent(event)
+
+    def _emit_plot_toggle(self) -> None:
+        if not self._is_renaming:
+            self.plot_toggle_requested.emit(self._channel_id)
+
+    def set_plot_hidden(self, hidden: bool) -> None:
+        """Grey the reading while this channel's curve is off the plot.
+
+        Only the TEXT changes. The border keeps its status colour, because
+        the border answers a different question — is this reading fresh and
+        healthy — and a channel removed from the plot is still being
+        acquired normally. Dimming the border instead would say "stale",
+        which would be a lie.
+        """
+        hidden = bool(hidden)
+        if hidden == self._plot_hidden:
+            return
+        self._plot_hidden = hidden
+        self._apply_value_text_style()
+
     def mouseDoubleClickEvent(self, event):  # noqa: ANN001
+        if self._click_timer is not None:
+            self._click_timer.stop()  # the click was part of a double-click
         if not self._read_only and event.button() == Qt.MouseButton.LeftButton:
             self._enter_rename_mode()
         super().mouseDoubleClickEvent(event)

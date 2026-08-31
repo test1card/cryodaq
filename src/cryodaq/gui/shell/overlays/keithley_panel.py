@@ -927,7 +927,27 @@ class _SmuChannelBlock(QFrame):
         self._i_spin.setEnabled(interactive_ok)
         # Only authoritative OFF permits Start. Unknown/fault remain fail-closed.
         start_enabled = interactive_ok and self._channel_state == "off"
-        stop_enabled = interactive_ok and self._channel_state == "on"
+        # Stop is the SAFE direction and must never be gated on Safety
+        # readiness. `ready` requires lifecycle == READY, so energizing the
+        # source moved lifecycle to RUNNING, cleared interactive_ok, and
+        # disabled Stop — pressing Start locked the operator out of the only
+        # control that turns the source back off, exactly while it was live.
+        # An OFF path is never refused for lack of readiness anywhere else in
+        # this system (see SafetyManager._energizing_mutation_refusal, which
+        # is documented as "never used by OFF paths"); this aligns the GUI
+        # with that rule.
+        #
+        # The remaining conditions still hold: transport must be connected,
+        # replay must not be in force, a pending command or an unreconciled
+        # unknown outcome still blocks a second write, and the channel must be
+        # authoritatively ON — an unknown or faulted state stays fail-closed.
+        stop_enabled = (
+            self._connected
+            and not self._read_only
+            and self._unknown_outcome_requires is None
+            and self._normal_pending_token is None
+            and self._channel_state == "on"
+        )
         self._start_btn.setEnabled(start_enabled)
         self._stop_btn.setEnabled(stop_enabled)
         # Proactive cue for the unknown-outcome latch: the operator must be
@@ -984,7 +1004,18 @@ class _SmuChannelBlock(QFrame):
             return "предыдущая команда имеет неизвестный исход; нужна свежая сверка state и Safety"
         if self._normal_pending_token is not None:
             return "для канала уже выполняется команда"
-        if not self._safety_ready and self._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE:
+        # Stop joins keithley_emergency_off above in being exempt from the
+        # readiness gate: both are OFF paths, and refusing to turn a live
+        # source off for want of a Safety receipt is the wrong failure
+        # direction. Energizing moves lifecycle to RUNNING, which clears
+        # readiness — so without this the very act of starting revoked the
+        # authority to stop. Every other guard below still applies: pending
+        # command, unreconciled unknown outcome, and the confirmed ON state.
+        if (
+            command_name != "keithley_stop"
+            and not self._safety_ready
+            and self._safety_gate_cause is SafetyGateCause.AUTHORITY_UNAVAILABLE
+        ):
             return "нет свежего разрешения Safety"
         required_state = "off" if command_name == "keithley_start" else "on"
         if command_name not in {

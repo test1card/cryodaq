@@ -54,6 +54,13 @@ class VacuumPrediction:
 # ---------------------------------------------------------------------------
 
 
+# Lower bound shared by every curve_fit call below for the fitted
+# log10(ultimate pressure). A result resting on it means the window does not
+# constrain the asymptote at all, so the value carries no information.
+_LOG_P_ULT_MIN = -20.0
+_LOG_P_ULT_BOUND_EPS = 0.05
+
+
 def _exponential_model(t: np.ndarray, log_p_ult: float, A: float, tau: float) -> np.ndarray:
     """log₁₀(P(t)) = log₁₀(P_ult) + A * exp(-t/τ)"""
     return log_p_ult + A * np.exp(-t / tau)
@@ -211,7 +218,26 @@ class VacuumTrendPredictor:
         t_extrap = np.linspace(max(t_max, 1.0), horizon, 200)
         logP_extrap = best.predict(t_extrap)
 
-        p_ult = 10.0 ** best.params.get("log_p_ult", float("nan"))
+        # log_p_ult is a FITTED parameter bounded to [-20, 5]. When the data
+        # window shows no asymptote yet — still on the steep part of the
+        # pump-down — the optimizer simply drives it to the lower bound and
+        # the reported "ultimate pressure" comes out as 1e-20 mbar, which is
+        # not a prediction but the floor of the search space. Reporting that
+        # as a physical base pressure is worse than reporting nothing: it is
+        # a confident-looking number with no information in it.
+        #
+        # Treat a parameter resting on its bound as unidentified.
+        log_p_ult = best.params.get("log_p_ult", float("nan"))
+        if math.isfinite(log_p_ult) and log_p_ult <= _LOG_P_ULT_MIN + _LOG_P_ULT_BOUND_EPS:
+            logger.debug(
+                "Vacuum fit %s: log_p_ult rests on its lower bound (%.3f); "
+                "ultimate pressure is not identifiable from this window",
+                best.model_type,
+                log_p_ult,
+            )
+            p_ult = float("nan")
+        else:
+            p_ult = 10.0**log_p_ult
 
         self._prediction = VacuumPrediction(
             model_type=best.model_type,
@@ -251,7 +277,7 @@ class VacuumTrendPredictor:
                 t,
                 logP,
                 p0=[log_p_last, A_init, tau_init],
-                bounds=([-20, 0, 1], [5, 30, 1e7]),
+                bounds=([_LOG_P_ULT_MIN, 0, 1], [5, 30, 1e7]),
                 maxfev=5000,
             )
             y_fit = _exponential_model(t, *popt)
@@ -283,7 +309,7 @@ class VacuumTrendPredictor:
                 t,
                 logP,
                 p0=[log_p_last, B_init, alpha_init],
-                bounds=([-20, 0, 0.01], [5, 30, 5.0]),
+                bounds=([_LOG_P_ULT_MIN, 0, 0.01], [5, 30, 5.0]),
                 maxfev=5000,
             )
             y_fit = _power_law_model(t, *popt)
@@ -316,7 +342,7 @@ class VacuumTrendPredictor:
                 t,
                 logP,
                 p0=[log_p_last, A_init, tau_init, B_init, 1.0],
-                bounds=([-20, 0, 1, 0, 0.01], [5, 30, 1e7, 30, 5.0]),
+                bounds=([_LOG_P_ULT_MIN, 0, 1, 0, 0.01], [5, 30, 1e7, 30, 5.0]),
                 maxfev=10000,
             )
             y_fit = _combined_model(t, *popt)

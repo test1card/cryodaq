@@ -277,24 +277,32 @@ def test_dashboard_restores_unresolved_quick_log_with_russian_operator_text(app)
 
 
 def test_dashboard_connection_contract_disables_mutations_until_live_and_after_loss(app):
+    """Mutation authority gates phase, quick log and channel HIDING.
+
+    Renaming is deliberately excluded: a display label carries no instrument
+    or safety authority and must stay correctable while the stand is
+    unqualified, faulted or disconnected — exactly when a wrong name is most
+    dangerous to read. The surviving invariant, "no persisted configuration
+    change without authority", is asserted here through _hide_enabled.
+    """
     view = DashboardView(ChannelManager())
 
     assert not view._connected
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
     view.set_connected(True)
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
     view.set_operator_snapshot(_operator_snapshot())
     assert view._phase_widget._create_btn.isEnabled()
     assert view._quick_log._send_btn.isEnabled()
-    assert view._sensor_grid._read_only is False
+    assert view._sensor_grid._hide_enabled is True
 
     view.set_connected(False)
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
 
 def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
@@ -311,14 +319,14 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     assert view._authority_valid is False
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
     ready = _operator_snapshot(experiment_id="exp-1", revision=1)
     view.set_operator_snapshot(ready)
     assert view._authority_valid is True
     assert view._authority_experiment_id == "exp-1"
     assert view._authority_producer_id == "engine-test"
-    assert view._sensor_grid._read_only is False
+    assert view._sensor_grid._hide_enabled is True
     view.set_operator_snapshot(ready)
     assert view._authority_valid is True
 
@@ -326,7 +334,7 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     # when both snapshots claim READY.
     view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=1))
     assert view._authority_valid is False
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
     # An equivocal equal-revision delivery revokes the previously optimistic
     # cut, and the original READY object cannot replay that authority.
@@ -344,7 +352,7 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
 
     view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=2))
     assert view._authority_valid is True
-    assert view._sensor_grid._read_only is False
+    assert view._sensor_grid._hide_enabled is True
 
     view.set_operator_snapshot(
         _operator_snapshot(
@@ -357,7 +365,7 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     assert view._authority_valid is False
     assert view._authority_revision == 3
     assert view._authority_producer_id == "engine-test"
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
     # An older READY cut and a READY-looking producer replacement cannot
     # restore authority after revocation. A real reconnect is required for a
@@ -371,7 +379,7 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     view.set_connected(False)
     assert view._authority_producer_id is None
     assert view._authority_revision is None
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
 
 def test_explicit_producer_retirement_allows_fast_successor_without_silence_timeout(app):
@@ -394,7 +402,7 @@ def test_explicit_producer_retirement_allows_fast_successor_without_silence_time
     assert view._authority_valid is False
     assert view._authority_producer_id is None
     assert view._authority_revision is None
-    assert view._sensor_grid._read_only is True
+    assert view._sensor_grid._hide_enabled is False
 
     view.set_connected(True)
     view.set_operator_snapshot(
@@ -407,7 +415,7 @@ def test_explicit_producer_retirement_allows_fast_successor_without_silence_time
     assert view._authority_valid is True
     assert view._authority_producer_id == "engine-b"
     assert view._authority_revision == 1
-    assert view._sensor_grid._read_only is False
+    assert view._sensor_grid._hide_enabled is True
 
 
 def test_dashboard_replay_cut_advances_highwater_and_cannot_restore_live_authority(app):

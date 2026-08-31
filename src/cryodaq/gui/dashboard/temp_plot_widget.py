@@ -200,6 +200,31 @@ class TempPlotWidget(QWidget):
             item.setClipToView(True)
             self._plot_items[ch_id] = item
 
+    def set_channel_plotted(self, channel_id: str, plotted: bool) -> None:
+        """Show or hide one curve, keeping its legend entry in sync.
+
+        Same effect as clicking the legend entry, exposed so the dashboard's
+        sensor cards can drive it too. Silently ignores unknown channels —
+        the grid and the plot can hold different channel sets between a
+        visibility change and the next rebuild.
+        """
+        item = self._plot_items.get(channel_id)
+        if item is None:
+            return
+        item.setVisible(bool(plotted))
+        legend = self._plot.getPlotItem().legend
+        if legend is not None:
+            for sample, label in legend.items:
+                if getattr(sample, "item", None) is item and hasattr(label, "_sync_opacity"):
+                    label._sync_opacity()
+                    sample.update()
+                    break
+
+    def is_channel_plotted(self, channel_id: str) -> bool:
+        """Whether this channel's curve is currently drawn."""
+        item = self._plot_items.get(channel_id)
+        return True if item is None else bool(item.isVisible())
+
     def _on_channels_changed(self) -> None:
         self._rebuild_curves()
 

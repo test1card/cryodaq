@@ -91,6 +91,7 @@ class DynamicSensorGrid(QWidget):
     rename_requested = Signal(str, str)  # channel_id, new_name
     hide_requested = Signal(str)  # channel_id
     show_on_plot_requested = Signal(str)  # channel_id
+    plot_toggle_requested = Signal(str)  # channel_id
     history_requested = Signal(str)  # channel_id
 
     _MIN_CELL_WIDTH = 160
@@ -175,6 +176,7 @@ class DynamicSensorGrid(QWidget):
             cell.rename_requested.connect(self.rename_requested)
             cell.hide_requested.connect(self.hide_requested)
             cell.show_on_plot_requested.connect(self.show_on_plot_requested)
+            cell.plot_toggle_requested.connect(self.plot_toggle_requested)
             cell.history_requested.connect(self.history_requested)
             self._cells[ch_id] = cell
 
@@ -295,6 +297,13 @@ class DynamicSensorGrid(QWidget):
         self._read_only = bool(read_only)
         for cell in self._cells.values():
             cell.set_read_only(self._read_only)
+
+    def set_plot_hidden(self, channel_id: str, hidden: bool) -> None:
+        """Dim one cell while its curve is hidden from the plot."""
+
+        cell = self._cells.get(channel_id)
+        if cell is not None:
+            cell.set_plot_hidden(hidden)
 
     def set_hide_enabled(self, enabled: bool) -> None:
         """Propagate the hide-authority gate to every sensor cell.

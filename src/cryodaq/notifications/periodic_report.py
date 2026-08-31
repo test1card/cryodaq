@@ -35,6 +35,26 @@ logger = logging.getLogger("cryodaq.notifications.periodic_report")
 _SUBSCRIPTION_NAME = "periodic_reporter"
 
 
+def _channel_visible(channel: str) -> bool:
+    """Whether the operator still shows this channel in the GUI.
+
+    Reads the same authority the dashboard uses (``channels.yaml`` via
+    ChannelManager), so switching a dead sensor off in Настройки also stops
+    it appearing in Telegram. Channels the manager does not know about —
+    Keithley SMU and pressure keys, which are not in ``channels.yaml`` — are
+    reported as before. Fail-open: any lookup problem keeps the channel in
+    the report rather than silently dropping data from it.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        # is_visible() already splits "Т1 Криостат верх" to its short id and
+        # defaults unknown channels (Keithley SMU keys, pressure) to visible.
+        return bool(get_channel_manager().is_visible(channel))
+    except Exception:  # pragma: no cover - notification must never crash acquisition
+        return True
+
+
 def _natural_sort_key(channel: str) -> tuple:
     """Т1→(0,1), Т10→(0,10), Keithley/smua/voltage→(1,'...')."""
     m = re.match(r"^\u0422(\d+)", channel)
@@ -169,6 +189,15 @@ class PeriodicReporter:
 
                 # Фильтр по списку каналов (если задан)
                 if self._include_channels is not None and channel not in self._include_channels:
+                    continue
+
+                # Канал, отключённый оператором в настройках (visible: false
+                # в channels.yaml), не попадает в отчёт: оператор убрал его
+                # с дашборда именно чтобы не видеть мёртвый датчик, и отчёт
+                # не должен возвращать его обратно. Это НЕ временное
+                # переключение кривой на графике — то состояние в
+                # channels.yaml не сохраняется и сюда не доходит.
+                if not _channel_visible(channel):
                     continue
 
                 # Создать буфер для нового канала

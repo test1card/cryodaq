@@ -159,6 +159,23 @@ class SetpointProvider:
 _DEFAULT_RATE_WINDOW_S = 120.0
 
 
+def _channel_alarms_enabled(channel: str) -> bool:
+    """Whether alarms should be evaluated for this channel.
+
+    Reads the operator's own visibility choice from channels.yaml via
+    ChannelManager. ``is_visible()`` splits a full emitted label to its short
+    id and treats channels it does not know — Keithley SMU keys, pressure,
+    phase pseudo-channels — as visible. Fail-open: any lookup problem keeps
+    the alarm active rather than silently disarming it.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        return bool(get_channel_manager().is_visible(channel))
+    except Exception:  # pragma: no cover - alarms must never break on lookup
+        return True
+
+
 class AlarmEvaluator:
     """Вычисляет условие аларма по текущему состоянию системы.
 
@@ -627,14 +644,28 @@ class AlarmEvaluator:
         )
 
     def _resolve_channels(self, cfg: dict) -> list[str]:
-        """Раскрыть каналы из channel / channels / channel_group в config."""
+        """Раскрыть каналы из channel / channels / channel_group в config.
+
+        Каналы, отключённые оператором в Настройках (``visible: false`` в
+        channels.yaml), исключаются из оценки алармов целиком. Оператор
+        выключает вход именно потому, что датчик заведомо мёртв, и
+        постоянный аларм по нему приучает игнорировать те, что важны:
+        Т17–Т20 без датчиков держали CRITICAL «ПОЛНАЯ ПОТЕРЯ ДАННЫХ»
+        включённым при полностью исправном потоке данных.
+
+        Это НЕ отменяет защиту источника: SafetyManager ведёт свои
+        critical_channels из safety.yaml независимо от этого списка, а
+        interlocks оцениваются отдельно. Отключение канала убирает аларм,
+        но не снимает аппаратную блокировку.
+        """
         if "channels" in cfg:
-            return list(cfg["channels"])
-        if "channel" in cfg:
+            declared = list(cfg["channels"])
+        elif "channel" in cfg:
             ch = cfg["channel"]
-            if ch != "phase_elapsed_s":
-                return [ch]
-        return []
+            declared = [ch] if ch != "phase_elapsed_s" else []
+        else:
+            declared = []
+        return [ch for ch in declared if _channel_alarms_enabled(ch)]
 
     @staticmethod
     def _format_message(template: str, channel: str = "", value: object = 0.0) -> str:

@@ -6367,7 +6367,7 @@ class LauncherWindow(QMainWindow):
             return
         self._periodic_reporting_fault = True
         logger.error("Periodic PNG runtime unavailable: %s", _PERIODIC_RUNTIME_UNAVAILABLE_CODE)
-        if self._periodic_status_banner is not None:
+        if self._periodic_status_banner is not None and not getattr(self, "_periodic_status_banner_dismissed", False):
             self._periodic_status_banner.show()
         if hasattr(self, "_tray") and self._tray is not None:
             self._tray.showMessage(
@@ -6376,6 +6376,17 @@ class LauncherWindow(QMainWindow):
                 QSystemTrayIcon.MessageIcon.Warning,
                 5000,
             )
+
+    @Slot()
+    def _on_dismiss_periodic_status_banner(self) -> None:
+        """Hide the H3 status banner until a later, distinct fault.
+
+        Only the banner is hidden: _periodic_reporting_fault stays true, so
+        engine state, logging and the tray notification are untouched.
+        """
+        self._periodic_status_banner_dismissed = True
+        if self._periodic_status_banner is not None:
+            self._periodic_status_banner.hide()
 
     def _clear_periodic_reporting_fault(self) -> None:
         """Clear H3 status only after a strictly newer ready heartbeat."""
@@ -6387,6 +6398,8 @@ class LauncherWindow(QMainWindow):
             "Periodic PNG runtime %s",
             "recovered" if previous is True else "authority established",
         )
+        # Re-arm the dismiss: a later, distinct fault must be visible again.
+        self._periodic_status_banner_dismissed = False
         if self._periodic_status_banner is not None:
             self._periodic_status_banner.hide()
 
@@ -6422,15 +6435,37 @@ class LauncherWindow(QMainWindow):
         self._engine_down_banner.hide()
         root.addWidget(self._engine_down_banner)
 
-        self._periodic_status_banner = QLabel(
+        # Dismissible: this is an informational H3 status ("PNG reports are
+        # unavailable, hardware control is unaffected"), not a safety
+        # annunciation, and it was previously clearable only by a newer ready
+        # heartbeat — so an operator whose H3 runtime stays down had a yellow
+        # bar across the window for the rest of the session with no way to
+        # close it. Dismissal is per-occurrence: _clear_periodic_reporting_fault
+        # re-arms it, so a LATER fault shows the banner again.
+        self._periodic_status_banner = QWidget()
+        self._periodic_status_banner.setStyleSheet("background-color: #FFB000;")
+        banner_row = QHBoxLayout(self._periodic_status_banner)
+        banner_row.setContentsMargins(12, 8, 8, 8)
+        banner_row.setSpacing(8)
+        self._periodic_status_label = QLabel(
             "Периодические PNG-отчёты недоступны "
             f"({_PERIODIC_RUNTIME_UNAVAILABLE_CODE}). "
             "Управление оборудованием не затронуто."
         )
-        self._periodic_status_banner.setWordWrap(True)
-        self._periodic_status_banner.setStyleSheet(
-            "background-color: #FFB000; color: #161616; font-weight: bold; padding: 8px 12px;"
+        self._periodic_status_label.setWordWrap(True)
+        self._periodic_status_label.setStyleSheet("color: #161616; font-weight: bold; background: transparent;")
+        banner_row.addWidget(self._periodic_status_label, 1)
+        self._periodic_status_dismiss = QPushButton("✕")
+        self._periodic_status_dismiss.setFixedWidth(28)
+        self._periodic_status_dismiss.setToolTip("Скрыть сообщение до следующего сбоя")
+        self._periodic_status_dismiss.setAccessibleName("Скрыть сообщение о PNG-отчётах")
+        self._periodic_status_dismiss.setStyleSheet(
+            "QPushButton { background: transparent; color: #161616; font-weight: bold; border: none; }"
+            "QPushButton:hover { background: rgba(0,0,0,0.12); }"
         )
+        self._periodic_status_dismiss.clicked.connect(self._on_dismiss_periodic_status_banner)
+        banner_row.addWidget(self._periodic_status_dismiss, 0)
+        self._periodic_status_banner_dismissed = False
         self._periodic_status_banner.hide()
         root.addWidget(self._periodic_status_banner)
 

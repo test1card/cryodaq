@@ -496,12 +496,28 @@ class MainWindowV2(QMainWindow):
         self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_unavailable)
         if self._keithley_panel is not None:
             self._keithley_panel.set_safety_ready(ready, reason, cause=cause)
+        # A source that is RUNNING is not a source whose state is unknown.
+        # `ready` requires lifecycle == READY, so energizing dropped it, and
+        # the revocation below then pushed UNKNOWN to BOTH SMU channels —
+        # blanking the other channel's badge and controls for one cycle every
+        # time the operator pressed Start, until the real source-state
+        # observation arrived. The cut is coherent here: live, matching
+        # experiment, transport healthy. It reports the source as on, which is
+        # knowledge, not the absence of it.
+        source_live_and_coherent = (
+            not transport_unavailable
+            and readiness.lifecycle
+            in {
+                SafetyLifecycle.RUN_PERMITTED,
+                SafetyLifecycle.RUNNING,
+            }
+        )
         if (
             bridge_instance_id is not None
             and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
             and experiment_matches
-            and (ready or cause is SafetyGateCause.AUTHORITY_UNAVAILABLE)
+            and (ready or (cause is SafetyGateCause.AUTHORITY_UNAVAILABLE and not source_live_and_coherent))
         ):
             # Periodic typed cuts cover isolated loss of the best-effort
             # source-state topic. READY provides verified-OFF evidence; a cut

@@ -8,6 +8,7 @@ placeholder until B.4-B.6.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
 from typing import Any
@@ -76,6 +77,36 @@ def _log_result_is_unknown(result: object) -> bool:
         and result.get("committed") is False
         and result.get("error_code") in _KNOWN_UNCOMMITTED_LOG_ERRORS
     )
+
+
+def _same_cut_ignoring_transport(left: object, right: object) -> bool:
+    """Whether two snapshots are the same producer cut.
+
+    Equality alone is the wrong test for a same-revision delivery, because the
+    GUI re-derives its OWN transport freshness: OperatorSnapshotIngress polls
+    every 0.5 s and, on any tick that drains no new cut, re-emits the stored
+    snapshot with an updated ``status.transport_age_s``. Snapshots arrive at
+    ~1 Hz, so roughly every other delivery was a same-revision refresh that
+    compared unequal — revoking mutation authority and making every gated
+    control flap at about 1 Hz.
+
+    A transport age the GUI advanced by itself is not the producer
+    contradicting itself, so ``transport_age_s`` is ignored here. EVERYTHING
+    else still counts: a second producer cut under one revision differs in
+    ``cut.observed_at``/``received_at`` and is still equivocation, which the
+    caller revokes on. Transport genuinely degrading is caught separately, by
+    the ``valid`` recomputation (state/reason codes), not by this comparison.
+    """
+    if dataclasses.is_dataclass(left) and dataclasses.is_dataclass(right):
+        if type(left) is not type(right):
+            return False
+        for field in dataclasses.fields(left):
+            if field.name == "transport_age_s":
+                continue
+            if not _same_cut_ignoring_transport(getattr(left, field.name), getattr(right, field.name)):
+                return False
+        return True
+    return bool(left == right)
 
 
 # Zone definitions: (objectName, label_or_None, stretch)
@@ -185,6 +216,7 @@ class DashboardView(QScrollArea):
                 )
                 self._sensor_grid.rename_requested.connect(self._on_rename_requested)
                 self._sensor_grid.hide_requested.connect(self._on_hide_requested)
+                self._sensor_grid.plot_toggle_requested.connect(self._on_plot_toggle_requested)
                 self._sensor_grid.show_on_plot_requested.connect(self._on_show_on_plot_requested)
                 self._sensor_grid.history_requested.connect(self._on_history_requested)
                 zone.layout().addWidget(self._sensor_grid)
@@ -406,8 +438,30 @@ class DashboardView(QScrollArea):
                 self._update_mutation_authority()
                 return
             if cut.revision == previous_revision:
-                exact_duplicate = snapshot == self._authority_snapshot
-                if not exact_duplicate or not self._authority_valid or not valid:
+                # Whole-object equality is the wrong divergence test here, and
+                # it made every mutation control flap at ~1 Hz.
+                #
+                # The GUI re-derives its OWN transport freshness:
+                # OperatorSnapshotIngress polls every 0.5 s, and on any tick
+                # that drains no new cut it calls
+                # OperatorSnapshotStore.observe_transport(), which re-emits the
+                # SAME revision with an updated transport age. Snapshots arrive
+                # at ~1 Hz, so roughly every other delivery was a same-revision
+                # refresh that is not object-equal — authority was revoked, the
+                # phase buttons and quick log went dead, "нет текущего
+                # подтверждённого разрешения на изменение" appeared, and the
+                # next real cut restored it. A transport age the GUI itself
+                # advanced is not evidence that the producer contradicted
+                # itself.
+                #
+                # Compare the authority-bearing identity instead: producer,
+                # runtime domain and experiment. Divergence in any of those,
+                # or a cut that is no longer valid, still revokes; and a
+                # revision that has already been revoked can never be
+                # resurrected without a new one.
+                previous = self._authority_snapshot
+                same_authority = previous is not None and _same_cut_ignoring_transport(snapshot, previous)
+                if not same_authority or not self._authority_valid or not valid:
                     self._authority_valid = False
                     self._authority_experiment_id = None
                 self._authority_snapshot = snapshot
@@ -456,6 +510,21 @@ class DashboardView(QScrollArea):
             return
         self._channel_mgr.set_visible(channel_id, False)
         self._channel_mgr.save()
+
+    def _on_plot_toggle_requested(self, channel_id: str) -> None:
+        """Operator clicked a sensor card: show or hide its curve.
+
+        Presentation only — it draws no authority and persists nothing, so it
+        is deliberately available whenever the cards are (replay included).
+        The card dims while its curve is hidden so the plot and the grid
+        never disagree about what is being drawn.
+        """
+        if self._temp_plot is None:
+            return
+        plotted = not self._temp_plot.is_channel_plotted(channel_id)
+        self._temp_plot.set_channel_plotted(channel_id, plotted)
+        if self._sensor_grid is not None:
+            self._sensor_grid.set_plot_hidden(channel_id, not plotted)
 
     def _on_show_on_plot_requested(self, channel_id: str) -> None:
         """Stub: plot focus deferred to later block."""

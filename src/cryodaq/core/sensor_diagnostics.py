@@ -117,6 +117,22 @@ class DiagnosticsSummary:
     worst_flags: list[str] = field(default_factory=list)
 
 
+def _channel_diagnostics_enabled(channel_id: str) -> bool:
+    """Whether the operator still shows this channel in the GUI.
+
+    Same authority as the dashboard (channels.yaml via ChannelManager).
+    ``is_visible()`` splits a full emitted label to its short id and treats
+    unknown channels as visible. Fail-open: any lookup problem keeps the
+    channel under diagnostics rather than silently dropping it.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        return bool(get_channel_manager().is_visible(channel_id))
+    except Exception:  # pragma: no cover - diagnostics must never break intake
+        return True
+
+
 @dataclass
 class _AnomalyState:
     """Per-channel anomaly tracking state for alarm publishing (F10)."""
@@ -315,6 +331,17 @@ class SensorDiagnosticsEngine:
         and including them produces a wall of red zeroes in the panel.
         """
         if not is_physical_sensor(channel_id, self._channel_catalog):
+            return
+        # A channel the operator switched off in Настройки carries no
+        # diagnostics either. Health scoring a disconnected input produces a
+        # permanent anomaly and a permanent `diag:<channel>` alarm — Т4, Т5
+        # and Т10 were doing exactly that in the hourly Telegram report while
+        # being hidden from the dashboard. Filtering at the single intake
+        # keeps them out of the buffers, the panel, and the alarm publisher
+        # together.
+        if not _channel_diagnostics_enabled(channel_id):
+            self._buffers.pop(channel_id, None)
+            self._diagnostics.pop(channel_id, None)
             return
         buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))

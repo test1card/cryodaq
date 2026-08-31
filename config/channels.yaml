@@ -165,7 +165,7 @@ channels:
       - 2.5
       - 320.0
   Т13:
-    name: 2 Низ образец 2
+    name: 1 Низ образец 2
     visible: true
     is_cold: true
     group: компрессор
