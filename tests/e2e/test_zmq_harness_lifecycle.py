@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import os
+import socket
 import sys
 import time
 
@@ -54,10 +55,37 @@ def test_stop_join_close_loop_releases_the_real_event_loop() -> None:
     assert loop.is_closed() is True
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows event-loop contract")
+def test_fixture_loop_factory_is_selector_capable_on_windows() -> None:
+    """The fixture loop must service socket readers, as pyzmq requires."""
+    loop = harness_module._new_zmq_event_loop()
+    reader, writer = socket.socketpair()
+    observed: list[bytes] = []
+    reader_registered = False
+
+    def receive() -> None:
+        observed.append(reader.recv(1))
+        loop.stop()
+
+    try:
+        loop.add_reader(reader, receive)
+        reader_registered = True
+        writer.sendall(b"x")
+        loop.call_later(1.0, loop.stop)
+        loop.run_forever()
+        assert observed == [b"x"]
+    finally:
+        if reader_registered:
+            loop.remove_reader(reader)
+        reader.close()
+        writer.close()
+        loop.close()
+
+
 def test_setup_failure_after_loop_start_settles_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """A publisher setup exception must not strand the fixture loop thread."""
     loops: list[asyncio.AbstractEventLoop] = []
-    real_new_event_loop = asyncio.new_event_loop
+    real_new_event_loop = harness_module._new_zmq_event_loop
 
     def recording_new_event_loop() -> asyncio.AbstractEventLoop:
         loop = real_new_event_loop()
@@ -67,7 +95,7 @@ def test_setup_failure_after_loop_start_settles_the_loop(monkeypatch: pytest.Mon
     async def fail_start(_publisher: object, _queue: object) -> None:
         raise RuntimeError("injected publisher setup failure")
 
-    monkeypatch.setattr(harness_module.asyncio, "new_event_loop", recording_new_event_loop)
+    monkeypatch.setattr(harness_module, "_new_zmq_event_loop", recording_new_event_loop)
     monkeypatch.setattr(harness_module.ZMQPublisher, "start", fail_start)
     generator = zmq_harness.__wrapped__()
 
@@ -83,7 +111,7 @@ def test_setup_failure_after_bridge_start_settles_every_owner(monkeypatch: pytes
     """A late setup exception must close bridge queues, publisher, and loop."""
     loops: list[asyncio.AbstractEventLoop] = []
     bridges: list[object] = []
-    real_new_event_loop = asyncio.new_event_loop
+    real_new_event_loop = harness_module._new_zmq_event_loop
     real_bridge_start = harness_module.ZmqBridge.start
 
     def recording_new_event_loop() -> asyncio.AbstractEventLoop:
@@ -96,7 +124,7 @@ def test_setup_failure_after_bridge_start_settles_every_owner(monkeypatch: pytes
         real_bridge_start(bridge)
         raise RuntimeError("injected post-bridge-start failure")
 
-    monkeypatch.setattr(harness_module.asyncio, "new_event_loop", recording_new_event_loop)
+    monkeypatch.setattr(harness_module, "_new_zmq_event_loop", recording_new_event_loop)
     monkeypatch.setattr(harness_module.ZmqBridge, "start", fail_after_bridge_start)
     generator = zmq_harness.__wrapped__()
 

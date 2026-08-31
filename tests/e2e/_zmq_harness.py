@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 import threading
 import time
 from collections.abc import Generator
@@ -57,6 +58,13 @@ def _allocate_ephemeral_port() -> int:
 def allocate_pub_addr() -> str:
     """Return a loopback TCP address with an ephemeral port."""
     return f"tcp://127.0.0.1:{_allocate_ephemeral_port()}"
+
+
+def _new_zmq_event_loop() -> asyncio.AbstractEventLoop:
+    """Construct the same selector-capable Windows loop used by production."""
+    if sys.platform == "win32":  # pragma: win32 cover
+        return asyncio.SelectorEventLoop()
+    return asyncio.new_event_loop()
 
 
 # ---------------------------------------------------------------------------
@@ -290,10 +298,10 @@ def zmq_harness() -> Generator[ZmqHarness, None, None]:
     """
     pub_addr = allocate_pub_addr()
 
-    # Start a dedicated event loop in a background thread.
-    # Production uses WindowsSelectorEventLoopPolicy (set in tests/conftest.py);
-    # we create the loop directly here to avoid policy mutation mid-test.
-    loop = asyncio.new_event_loop()
+    # Start a dedicated event loop in a background thread.  On Windows this
+    # must be a SelectorEventLoop, matching production's explicit construction;
+    # the default ProactorEventLoop cannot provide pyzmq's reader callbacks.
+    loop = _new_zmq_event_loop()
     t = threading.Thread(target=_run_loop, args=(loop,), daemon=True)
     t.start()
 
