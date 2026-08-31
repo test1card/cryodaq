@@ -13,6 +13,7 @@ the truth about it, and the fact is said and counted.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import tempfile
@@ -365,7 +366,11 @@ async def test_a_batch_that_crosses_midnight_describes_both_days(tmp_path: Path)
         assert installed == 2, f"{name} does not carry the catalog and its reserved entry"
 
 
-async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_oversized_channel", (False, True))
+async def test_a_rotated_unbound_row_is_reported_too(
+    tmp_path: Path,
+    legacy_oversized_channel: bool,
+) -> None:
     """Cold data carries the same rule, proved through the REAL rotation service.
 
     Once a day is rotated to Parquet the hot database is gone, so a change that only
@@ -392,6 +397,18 @@ async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
     writer = SQLiteWriter(data, channel_catalog=ChannelCatalog([_descriptor()]))
     assert await writer.write_immediate([_reading("sensor.main", 4.2), _reading("sensor.rewired", 4.3)]) is True
     await writer.stop()
+
+    expected_unknown = "sensor.rewired"
+    if legacy_oversized_channel:
+        emitted = "legacy.rotated.channel." + "x" * 300
+        conn = sqlite3.connect(str(data / "data_2026-07-12.db"))
+        try:
+            conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.3))
+            conn.commit()
+        finally:
+            conn.close()
+        suffix = f"~sha256:{hashlib.sha256(emitted.encode()).hexdigest()}"
+        expected_unknown = emitted.encode()[: 256 - len(suffix)].decode(errors="ignore") + suffix
 
     results = await asyncio.to_thread(
         lambda: asyncio.run(
@@ -423,9 +440,9 @@ async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
     )
 
     by_channel = {row.channel: row for row in result.rows}
-    assert set(by_channel) == {"sensor.main", "sensor.rewired"}, sorted(by_channel)
+    assert set(by_channel) == {"sensor.main", expected_unknown}, sorted(by_channel)
     assert by_channel["sensor.main"].descriptor is not None
-    assert by_channel["sensor.rewired"].descriptor is None
+    assert by_channel[expected_unknown].descriptor is None
     # The day is intact. Before this was measured, one unbound row emptied the whole
     # rotated day, because a source that reports a problem is quarantined WHOLE.
     assert result.complete is False
@@ -724,7 +741,6 @@ def test_a_257_byte_unknown_label_cannot_hide_the_described_measurement(
     the reader's 256-byte grammar, without relabelling the row as described.
     """
 
-    import base64
     import hashlib
 
     long_label = "sensor." + "x" * (257 - len("sensor."))
@@ -753,11 +769,9 @@ def test_a_257_byte_unknown_label_cannot_hide_the_described_measurement(
     bounded_label = by_value[4.3].channel
     assert bounded_label != long_label
     assert len(bounded_label.encode("utf-8")) <= 256
-    digest = base64.urlsafe_b64encode(hashlib.sha256(long_label.encode("utf-8")).digest()).rstrip(b"=").decode()
-    namespace, stored_digest, visible_prefix = bounded_label.split(":", maxsplit=2)
-    assert namespace == "~sha256b64"
-    assert stored_digest == digest
-    assert visible_prefix.startswith("sensor."), "the bounded form must still name the channel usefully"
+    suffix = f"~sha256:{hashlib.sha256(long_label.encode('utf-8')).hexdigest()}"
+    assert bounded_label.endswith(suffix)
+    assert bounded_label.startswith("sensor."), "the bounded form must still name the channel usefully"
     assert by_value[4.3].descriptor is None
     assert result.complete is False
 
@@ -808,6 +822,7 @@ def test_an_oversized_unknown_field_cannot_quarantine_its_described_neighbor(
     ("field", "oversized_value"),
     (
         ("instrument_id", "legacy.instrument." + "i" * 300),
+        ("channel", "legacy.channel." + "c" * 300),
         ("unit", "legacy-unit-" + "u" * 80),
     ),
 )
@@ -833,10 +848,7 @@ def test_an_upgrade_normalizes_legacy_oversized_unbound_fields_before_bounded_re
 
     conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
     try:
-        if field == "instrument_id":
-            conn.execute("UPDATE readings SET instrument_id = ? WHERE value = ?", (oversized_value, 4.3))
-        else:
-            conn.execute("UPDATE readings SET unit = ? WHERE value = ?", (oversized_value, 4.3))
+        conn.execute(f"UPDATE readings SET {field} = ? WHERE value = ?", (oversized_value, 4.3))
         conn.commit()
     finally:
         conn.close()
@@ -846,8 +858,61 @@ def test_an_upgrade_normalizes_legacy_oversized_unbound_fields_before_bounded_re
     assert set(by_value) == {4.2, 4.3}, "a legacy reserved row must not quarantine its described neighbour"
     assert by_value[4.2].descriptor is not None
     assert by_value[4.3].descriptor is None
-    assert getattr(by_value[4.3], field).startswith("~sha256b64:")
+    normalized = getattr(by_value[4.3], field)
+    maximum = 64 if field == "unit" else 256
+    assert len(normalized.encode("utf-8")) <= maximum
     assert result.complete is False
+
+
+def test_new_writes_keep_the_pre_upgrade_durable_channel_identity() -> None:
+    """A restart after upgrading cannot split one physical channel's history."""
+
+    import hashlib
+
+    emitted = "sensor." + "x" * 300
+    encoded = emitted.encode("utf-8")
+    suffix = f"~sha256:{hashlib.sha256(encoded).hexdigest()}"
+    prefix = encoded[: 256 - len(suffix.encode("ascii"))].decode("utf-8", errors="ignore")
+    expected_pre_upgrade_identity = prefix + suffix
+
+    admitted = _live().admit(_reading(emitted, 4.2))
+    assert admitted.reading.channel == expected_pre_upgrade_identity
+
+
+def test_generated_unbound_channel_cannot_equal_an_authoritative_descriptor_id(
+    tmp_path: Path,
+) -> None:
+    """A generated unbound identity cannot replace a described row in the collector."""
+
+    import base64
+    import hashlib
+
+    emitted = "~sha256b64:literal"
+    digest = base64.urlsafe_b64encode(hashlib.sha256(emitted.encode()).digest()).rstrip(b"=").decode()
+    colliding_id = f"~sha256b64:{digest}:{emitted}"
+    assert len(colliding_id.encode("utf-8")) <= 128
+
+    described = _descriptor(channel_id=colliding_id, source_key="input.2.temperature")
+    owner = LiveChannelDescriptorCatalog(ChannelCatalog([described]))
+    described_reading = _reading(colliding_id, 4.2)
+    unknown_reading = _reading(emitted, 4.3)
+    admitted = (owner.admit(described_reading), owner.admit(unknown_reading))
+    assert admitted[0].reading.channel == colliding_id
+    assert admitted[1].reading.channel != colliding_id
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    try:
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    assert {row.value for row in result.rows} == {4.2, 4.3}
+    assert len({row.channel for row in result.rows}) == 2
 
 
 def test_a_literal_reserved_form_cannot_alias_the_long_label_that_generated_it(
@@ -923,7 +988,11 @@ async def test_write_immediate_bounds_every_unbound_field_before_durable_insert(
     unbound = by_value[4.3]
     assert unbound.descriptor is None
     assert len(getattr(unbound, field).encode("utf-8")) <= maximum
-    assert getattr(unbound, field).startswith("~sha256b64:")
+    normalized = getattr(unbound, field)
+    if field == "channel":
+        assert normalized.endswith(f"~sha256:{hashlib.sha256(oversized_value.encode()).hexdigest()}")
+    else:
+        assert normalized.startswith("~sha256b64:")
     assert result.complete is False
 
 

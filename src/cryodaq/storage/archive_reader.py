@@ -16,7 +16,7 @@ import stat
 import struct
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -30,6 +30,7 @@ from cryodaq.storage.channel_descriptors import (
     MAX_PERSISTED_READING_UNIT_BYTES,
     UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
+    normalize_persisted_unbound_channel,
     normalize_persisted_unbound_reading_fields,
     verify_descriptor_storage,
 )
@@ -712,6 +713,7 @@ class ArchiveReader:
         if selected is None:
             discovered: set[str] = set()
             sqlite_discovery_max_ids: dict[str, int] = {}
+            unbound_query_channels_by_source: dict[str, dict[str, str]] = {}
             # Unbound rows are recognised by their reserved descriptor hash, never by
             # spelling, and they NEVER consume the described-channel budget. They are
             # remembered here (bounded) for materialisation and, merely by existing,
@@ -724,7 +726,7 @@ class ArchiveReader:
                     discovery_ok = False
                     break
                 source_channels: set[str] = set()
-                source_unbound: set[str] = set()
+                source_unbound: dict[str, str] = {}
                 if source.kind == "sqlite":
                     ok = self._discover_sqlite_channels(
                         source,
@@ -755,6 +757,7 @@ class ArchiveReader:
                     discovery_ok = False
                     break
                 discovered.update(source_channels)
+                unbound_query_channels_by_source[source.token] = source_unbound
                 unbound_seen.update(source_unbound)
                 if len(discovered) > max_channels:
                     issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
@@ -802,6 +805,9 @@ class ArchiveReader:
                     collector=staged,
                     issues=issues,
                     discovery_max_id=(sqlite_discovery_max_ids[source.token] if explicit_channels is None else None),
+                    unbound_query_channels=(
+                        unbound_query_channels_by_source.get(source.token, {}) if explicit_channels is None else {}
+                    ),
                 )
             else:
                 ok = self._read_parquet_bounded(
@@ -814,6 +820,9 @@ class ArchiveReader:
                     max_arrow_batch_bytes=max_arrow_batch_bytes,
                     collector=staged,
                     issues=issues,
+                    unbound_query_channels=(
+                        unbound_query_channels_by_source.get(source.token, {}) if explicit_channels is None else {}
+                    ),
                 )
             if ok:
                 collector.merge_verified(staged)
@@ -1241,7 +1250,7 @@ class ArchiveReader:
         end_us: int,
         max_channels: int,
         channels: set[str],
-        unbound_channels: set[str],
+        unbound_channels: dict[str, str],
         snapshot_max_ids: dict[str, int],
         deadline_monotonic: float,
         batch_rows: int,
@@ -1303,13 +1312,13 @@ class ArchiveReader:
                             raise ValueError("invalid discovery keyset id")
                         last_id = row_id
                         count += 1
-                        channel = _bounded_text(
-                            raw_channel,
-                            minimum=1,
-                            maximum=MAX_PERSISTED_READING_ID_BYTES,
-                        )
                         descriptor_hash = row[2] if has_descriptor_hash else None
                         if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            channel = _bounded_text(
+                                normalize_persisted_unbound_channel(raw_channel),
+                                minimum=1,
+                                maximum=MAX_PERSISTED_READING_ID_BYTES,
+                            )
                             # THE ROW SAYS SO ITSELF. The label it keeps is the emitted one,
                             # and it never competes for the described-channel budget: it is
                             # remembered (bounded) for materialisation instead. Past the
@@ -1317,8 +1326,13 @@ class ArchiveReader:
                             # rows, and the non-empty set alone holds completeness at False
                             # upstream, so this must NEVER fail the source.
                             if len(unbound_channels) <= _MAX_MATERIALIZED_UNBOUND_CHANNELS:
-                                unbound_channels.add(channel)
+                                unbound_channels.setdefault(channel, raw_channel)
                             continue
+                        channel = _bounded_text(
+                            raw_channel,
+                            minimum=1,
+                            maximum=MAX_PERSISTED_READING_ID_BYTES,
+                        )
                         channels.add(channel)
                         if len(channels) > max_channels:
                             issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
@@ -1355,6 +1369,7 @@ class ArchiveReader:
         collector: _BoundedReadingCollector,
         issues: _IssueLedger,
         discovery_max_id: int | None,
+        unbound_query_channels: Mapping[str, str],
     ) -> bool:
         conn = None
         identity = None
@@ -1371,7 +1386,8 @@ class ArchiveReader:
             # verifier rechecks it inside the snapshot, where SQLite will not change it.
             conn.execute("PRAGMA foreign_keys=ON").close()
             conn.execute("BEGIN").close()
-            placeholders = ",".join("?" for _ in channels)
+            query_channels = tuple(unbound_query_channels.get(channel, channel) for channel in channels)
+            placeholders = ",".join("?" for _ in query_channels)
             if discovery_max_id is not None:
                 comparison_sql = (
                     "SELECT 1 FROM readings NOT INDEXED WHERE id > ? "
@@ -1383,9 +1399,9 @@ class ArchiveReader:
                     start_us / 1_000_000.0,
                     end_us / 1_000_000.0,
                 ]
-                if channels:
+                if query_channels:
                     comparison_sql += f" AND channel NOT IN ({placeholders})"
-                    comparison_params.extend(channels)
+                    comparison_params.extend(query_channels)
                 comparison_sql += " LIMIT 1"
                 if conn.execute(comparison_sql, comparison_params).fetchone() is not None:
                     collector.mark_incomplete()
@@ -1421,9 +1437,9 @@ class ArchiveReader:
                         raise _DescriptorReadError(self._descriptor_adapter_issue(exc)) from exc
             legacy_sql = "SELECT 1 FROM readings WHERE typeof(timestamp) = 'text'"
             legacy_params: tuple[object, ...] = ()
-            if channels:
+            if query_channels:
                 legacy_sql += f" AND channel IN ({placeholders})"
-                legacy_params = tuple(channels)
+                legacy_params = query_channels
             legacy_sql += " LIMIT 1"
             legacy = conn.execute(legacy_sql, legacy_params)
             try:
@@ -1434,6 +1450,7 @@ class ArchiveReader:
                 legacy.close()
 
             for channel in channels:
+                query_channel = unbound_query_channels.get(channel, channel)
                 last: tuple[float, int] | None = None
                 while True:
                     if time.monotonic() >= deadline_monotonic:
@@ -1448,7 +1465,7 @@ class ArchiveReader:
                     params: list[object] = [
                         start_us / 1_000_000.0,
                         end_us / 1_000_000.0,
-                        channel,
+                        query_channel,
                     ]
                     if last is not None:
                         sql += " AND (timestamp < ? OR (timestamp = ? AND id < ?))"
@@ -1999,7 +2016,7 @@ class ArchiveReader:
         end_us: int,
         max_channels: int,
         channels: set[str],
-        unbound_channels: set[str],
+        unbound_channels: dict[str, str],
         deadline_monotonic: float,
         batch_rows: int,
         max_arrow_batch_bytes: int,
@@ -2086,23 +2103,26 @@ class ArchiveReader:
                         if time.monotonic() >= deadline_monotonic:
                             issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                             return False
-                        channel = _bounded_text(
-                            filtered["channel"][index].as_py(),
-                            minimum=1,
-                            maximum=MAX_PERSISTED_READING_ID_BYTES,
-                        )
-                        if time.monotonic() >= deadline_monotonic:
-                            issues.add(BoundedReadIssueCode.DEADLINE, source.token)
-                            return False
+                        raw_channel = filtered["channel"][index].as_py()
                         descriptor_hash = filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
                         if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            channel = _bounded_text(
+                                normalize_persisted_unbound_channel(raw_channel),
+                                minimum=1,
+                                maximum=MAX_PERSISTED_READING_ID_BYTES,
+                            )
                             # Same rule as the hot discovery, and it must stay the same
                             # rule: hot and cold discovery with different semantics is how
                             # a day reads complete before rotation and disappears after.
                             # Never fails the source; see the hot site for the bound.
                             if len(unbound_channels) <= _MAX_MATERIALIZED_UNBOUND_CHANNELS:
-                                unbound_channels.add(channel)
+                                unbound_channels.setdefault(channel, raw_channel)
                             continue
+                        channel = _bounded_text(
+                            raw_channel,
+                            minimum=1,
+                            maximum=MAX_PERSISTED_READING_ID_BYTES,
+                        )
                         channels.add(channel)
                         if len(channels) > max_channels:
                             issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
@@ -2150,6 +2170,7 @@ class ArchiveReader:
         max_arrow_batch_bytes: int,
         collector: _BoundedReadingCollector,
         issues: _IssueLedger,
+        unbound_query_channels: Mapping[str, str],
     ) -> bool:
         opened: _OpenedIndexedParquet | None = None
         ok = True
@@ -2187,7 +2208,8 @@ class ArchiveReader:
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=end_us),
                 type=pa.timestamp("us", tz="UTC"),
             )
-            channel_array = pa.array(channels, type=pa.string())
+            query_channels = tuple(unbound_query_channels.get(channel, channel) for channel in channels)
+            channel_array = pa.array(query_channels, type=pa.string())
             columns = [
                 "timestamp",
                 "instrument_id",

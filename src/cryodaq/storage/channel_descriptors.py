@@ -81,6 +81,7 @@ _LIVE_DESCRIPTOR_KEYS: Final = frozenset(
 _LIVE_BINDING_KEYS: Final = frozenset({"instrument_id", "emitted_channel", "channel_id"})
 _BOUND_READING_PROVENANCE: Final = object()
 _DURABLE_UNBOUND_TEXT_NAMESPACE: Final = "~sha256b64:"
+_DURABLE_UNBOUND_CHANNEL_SUFFIX: Final = re.compile(r"~sha256:[0-9a-f]{64}$")
 
 SCHEMA_DESCRIPTOR_META: Final = """
 CREATE TABLE IF NOT EXISTS channel_descriptor_meta (
@@ -754,6 +755,25 @@ def _durable_unbound_text(value: str, *, maximum: int) -> str:
     return header + visible_prefix
 
 
+def _durable_unbound_channel_text(value: str) -> str:
+    """Keep the pre-upgrade durable channel spelling and escape its namespace.
+
+    The earlier deployed representation is a UTF-8-safe prefix followed by a full
+    hexadecimal SHA-256 suffix.  It is always longer than the 128-byte descriptor-ID
+    grammar, so a generated unbound identity cannot alias an authoritative channel.
+    A literal emitted value already ending in that generated suffix is encoded again,
+    keeping emitted and generated spellings disjoint.
+    """
+
+    encoded = value.encode("utf-8")
+    if len(encoded) <= MAX_PERSISTED_READING_ID_BYTES and _DURABLE_UNBOUND_CHANNEL_SUFFIX.search(value) is None:
+        return value
+    suffix = f"~sha256:{hashlib.sha256(encoded).hexdigest()}"
+    prefix_budget = MAX_PERSISTED_READING_ID_BYTES - len(suffix.encode("ascii"))
+    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
+    return prefix + suffix
+
+
 def durable_unbound_reading_fields(
     instrument_id: str,
     channel: str,
@@ -778,9 +798,19 @@ def durable_unbound_reading_fields(
 
     return (
         _durable_unbound_text(instrument_id, maximum=MAX_PERSISTED_READING_ID_BYTES),
-        _durable_unbound_text(channel, maximum=MAX_PERSISTED_READING_ID_BYTES),
+        _durable_unbound_channel_text(channel),
         _durable_unbound_text(unit, maximum=MAX_PERSISTED_READING_UNIT_BYTES),
     )
+
+
+def normalize_persisted_unbound_channel(channel: str) -> str:
+    """Return the bounded identity of one pre-contract persisted unbound channel."""
+
+    if type(channel) is not str:
+        raise ChannelDescriptorStorageError("persisted unbound reading channel must be an exact string")
+    if len(channel.encode("utf-8")) <= MAX_PERSISTED_READING_ID_BYTES:
+        return channel
+    return _durable_unbound_channel_text(channel)
 
 
 def normalize_persisted_unbound_reading_fields(
@@ -799,7 +829,9 @@ def normalize_persisted_unbound_reading_fields(
     for field, value, maximum in fields:
         if type(value) is not str:
             raise ChannelDescriptorStorageError(f"persisted unbound reading {field} must be an exact string")
-        if len(value.encode("utf-8")) <= maximum:
+        if field == "channel":
+            normalized.append(normalize_persisted_unbound_channel(value))
+        elif len(value.encode("utf-8")) <= maximum:
             normalized.append(value)
         else:
             normalized.append(_durable_unbound_text(value, maximum=maximum))
@@ -1824,6 +1856,7 @@ __all__ = [
     "initialize_descriptor_storage",
     "install_catalog",
     "load_live_channel_descriptor_catalog",
+    "normalize_persisted_unbound_channel",
     "normalize_persisted_unbound_reading_fields",
     "project_channel_descriptor",
     "project_channel_descriptor_payload",
