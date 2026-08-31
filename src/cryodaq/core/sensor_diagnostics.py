@@ -214,18 +214,24 @@ class SensorDiagnosticsEngine:
 
         self.noise_window_s: float = cfg.get("noise_window_s", 120)
         self.drift_window_s: float = cfg.get("drift_window_s", 600)
-        self.corr_window_s: float = cfg.get("corr_window_s", 600)
+        self.corr_window_s: float = cfg.get("correlation_window_s", cfg.get("corr_window_s", 600))
         self.outlier_window_s: float = cfg.get("outlier_window_s", 300)
         self.outlier_sigma: float = thresholds.get("outlier_sigma", 5.0)
         self.drift_threshold: float = thresholds.get("drift_K_per_min", 0.1)
         self.corr_min: float = thresholds.get("correlation_min", 0.8)
         self.min_points: int = cfg.get("min_points", 10)
         self._channel_catalog = channel_catalog
+        self._retention_window_s: float = max(
+            self.noise_window_s,
+            self.drift_window_s,
+            self.corr_window_s,
+            self.outlier_window_s,
+        )
 
         # channel_id → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
-        # Max buffer size: drift window at 10 Hz + margin
-        self._maxlen: int = max(500, int(max(self.drift_window_s, self.corr_window_s) * 10) + 200)
+        # Max buffer size: longest analysis window at 10 Hz + margin
+        self._maxlen: int = max(500, int(self._retention_window_s * 10) + 200)
 
         # correlation_groups: group_name → list of channel_ids
         self._correlation_groups: dict[str, list[str]] = dict(cfg.get("correlation_groups", {}))
@@ -317,7 +323,12 @@ class SensorDiagnosticsEngine:
         if not is_physical_sensor(channel_id, self._channel_catalog):
             return
         buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
+        clock_progressed = not buf or timestamp >= buf[-1][0]
         buf.append((timestamp, value))
+        if clock_progressed:
+            cutoff = timestamp - self._retention_window_s
+            while buf and buf[0][0] < cutoff:
+                buf.popleft()
 
     def update(self) -> list:
         """Recompute diagnostics for all channels with data.
