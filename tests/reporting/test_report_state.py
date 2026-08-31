@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import cryodaq.report_state as report_state_module
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.report_state import (
     MAX_JSON_BYTES,
@@ -338,6 +339,78 @@ def test_active_experiment_state_rejects_future_timestamp(tmp_path: Path) -> Non
     (tmp_path / "experiment_state.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ReportContractError, match="updated_at"):
         load_active_experiment_id(tmp_path)
+
+
+def test_durable_active_state_survives_wall_clock_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    active = manager.create_experiment("clock-rollback", "operator")
+    observed_now = time.time()
+
+    monkeypatch.setattr(report_state_module.time, "time", lambda: observed_now - 601)
+
+    updated = manager.update_experiment(active.experiment_id, title="still-authoritative")
+    assert updated.title == "still-authoritative"
+    assert load_active_experiment_id(tmp_path) == active.experiment_id
+
+
+def test_report_reader_retains_exact_legacy_state_contract(tmp_path: Path) -> None:
+    state_path = tmp_path / "experiment_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "app_mode": "experiment",
+                "active_experiment_id": "legacy-exp",
+                "updated_at": "2026-07-23T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_active_experiment_id(tmp_path) == "legacy-exp"
+
+
+def test_active_state_replacement_between_check_and_open_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "experiment_state.json"
+    original_path = tmp_path / "original-experiment-state.json"
+    replacement_path = tmp_path / "replacement-experiment-state.json"
+    payload = build_active_experiment_state(
+        app_mode="experiment",
+        active_experiment_id=None,
+        revision=0,
+        manager_incarnation="1" * 32,
+        last_transition_receipt=None,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    replacement_path.write_text(
+        json.dumps({"padding": "x" * MAX_JSON_BYTES}),
+        encoding="utf-8",
+    )
+    real_open = report_state_module.os.open
+    replacement_observed = False
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        nonlocal replacement_observed
+        if Path(path) == state_path and not replacement_observed:
+            replacement_observed = True
+            state_path.replace(original_path)
+            replacement_path.replace(state_path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(report_state_module.os, "open", replace_before_open)
+
+    with pytest.raises(ReportContractError, match="bounded regular file"):
+        load_active_experiment_id(tmp_path)
+    assert replacement_observed
 
 
 def test_real_experiment_manager_state_is_readable_by_report_contract(tmp_path: Path) -> None:

@@ -36,6 +36,7 @@ from cryodaq.report_state import (
     resolve_report_artifact,
     resolve_report_paths,
     validate_active_experiment_state,
+    validate_persisted_active_experiment_state,
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
@@ -1596,10 +1597,10 @@ class ExperimentManager:
 
     def _load_state_authority(self) -> None:
         try:
-            payload = read_active_experiment_state_file(self._data_dir)
+            loaded = read_active_experiment_state_file(self._data_dir)
         except ReportContractError as exc:
             raise RuntimeError(f"Experiment state authority is invalid: {exc}") from exc
-        if payload is None:
+        if loaded is None:
             if self._transition_path.exists():
                 try:
                     json.loads(self._transition_path.read_text(encoding="utf-8"))
@@ -1612,36 +1613,16 @@ class ExperimentManager:
             self._write_state(revision=0, transition_receipt=None)
             return
 
-        schema_version = payload.get("schema_version")
-        if type(schema_version) is not int or schema_version not in {
-            1,
-            _STATE_SCHEMA_VERSION,
-        }:
-            raise RuntimeError("Experiment state authority has an unsupported schema.")
+        payload, observed_at = loaded
+        try:
+            schema_version, app_mode_value, active_experiment_id = validate_persisted_active_experiment_state(
+                payload,
+                observed_at=observed_at,
+            )
+        except ReportContractError as exc:
+            raise RuntimeError(f"Experiment state authority is invalid: {exc}") from exc
+        app_mode = self._normalize_app_mode(app_mode_value)
         if schema_version == 1:
-            legacy_keys = {
-                "schema_version",
-                "app_mode",
-                "active_experiment_id",
-                "updated_at",
-            }
-            if set(payload) != legacy_keys:
-                raise RuntimeError("Experiment state authority envelope is ambiguous.")
-            if type(payload.get("app_mode")) is not str:
-                raise RuntimeError("Experiment state application mode is invalid.")
-            app_mode = self._normalize_app_mode(payload["app_mode"])
-            active_experiment_id = payload.get("active_experiment_id")
-            if active_experiment_id is not None and (type(active_experiment_id) is not str or not active_experiment_id):
-                raise RuntimeError("Experiment state active identity is invalid.")
-            updated_at = payload.get("updated_at")
-            if type(updated_at) is not str:
-                raise RuntimeError("Experiment state update timestamp is invalid.")
-            try:
-                parsed_updated_at = _parse_time(updated_at)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Experiment state update timestamp is invalid.") from exc
-            if parsed_updated_at is None:
-                raise RuntimeError("Experiment state update timestamp is invalid.")
             self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
             self._state_revision = 0
             self._last_transition_receipt = None
@@ -1652,11 +1633,6 @@ class ExperimentManager:
             self._write_state(revision=0, transition_receipt=None)
             return
 
-        try:
-            active_experiment_id = validate_active_experiment_state(payload)
-        except ReportContractError as exc:
-            raise RuntimeError(f"Experiment state authority is invalid: {exc}") from exc
-        app_mode = self._normalize_app_mode(payload["app_mode"])
         revision = payload["revision"]
         receipt = payload["last_transition_receipt"]
         self._manager_incarnation = payload["manager_incarnation"]

@@ -37,6 +37,14 @@ ACTIVE_EXPERIMENT_STATE_FIELDS = frozenset(
         "updated_at",
     }
 )
+LEGACY_ACTIVE_EXPERIMENT_STATE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "app_mode",
+        "active_experiment_id",
+        "updated_at",
+    }
+)
 ACTIVE_EXPERIMENT_TRANSITION_RECEIPT_FIELDS = frozenset(
     {
         "schema",
@@ -185,7 +193,29 @@ def validate_active_experiment_transition_receipt(
         raise ReportContractError("active experiment transition receipt predecessor state fingerprint is invalid")
 
 
-def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
+def _validate_active_experiment_updated_at(
+    updated_at: Any,
+    *,
+    observed_at: float | None,
+) -> None:
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        raise ReportContractError("active experiment state update timestamp is invalid; updated_at is invalid")
+    try:
+        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        timestamp = parsed.timestamp()
+        if not math.isfinite(timestamp):
+            raise ValueError("non-finite timestamp")
+        if observed_at is not None and (not math.isfinite(observed_at) or timestamp > observed_at + 300):
+            raise ValueError("timestamp is newer than its persisted file")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ReportContractError("active experiment state update timestamp is invalid; updated_at is invalid") from exc
+
+
+def validate_active_experiment_state(
+    payload: Mapping[str, Any],
+    *,
+    observed_at: float | None = None,
+) -> str | None:
     """Validate the exact ExperimentManager state envelope and return its active ID."""
     if not isinstance(payload, dict):
         raise ReportContractError("active experiment state root must be a mapping")
@@ -199,16 +229,10 @@ def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
     app_mode = payload["app_mode"]
     if type(app_mode) is not str or app_mode not in {"experiment", "debug"}:
         raise ReportContractError("active experiment app_mode is invalid")
-    updated_at = payload["updated_at"]
-    if not isinstance(updated_at, str) or not updated_at.strip():
-        raise ReportContractError("active experiment updated_at is invalid")
-    try:
-        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-        timestamp = parsed.timestamp()
-        if not math.isfinite(timestamp) or timestamp > time.time() + 300:
-            raise ValueError("future or non-finite timestamp")
-    except (OverflowError, ValueError) as exc:
-        raise ReportContractError("active experiment updated_at is invalid") from exc
+    _validate_active_experiment_updated_at(
+        payload["updated_at"],
+        observed_at=observed_at,
+    )
     value = payload["active_experiment_id"]
     if value is not None:
         if not isinstance(value, str):
@@ -254,6 +278,48 @@ def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
     return value
 
 
+def validate_persisted_active_experiment_state(
+    payload: Mapping[str, Any],
+    *,
+    observed_at: float,
+) -> tuple[int, str, str | None]:
+    """Validate either exact persisted schema and return its common state cut."""
+    if not isinstance(payload, dict):
+        raise ReportContractError("active experiment state root must be a mapping")
+    if "schema_version" not in payload:
+        raise ReportContractError("active experiment state has unexpected fields")
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {
+        1,
+        ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION,
+    }:
+        raise ReportContractError("active experiment state has an unsupported schema")
+    if schema_version == ACTIVE_EXPERIMENT_STATE_SCHEMA_VERSION:
+        active_experiment_id = validate_active_experiment_state(
+            payload,
+            observed_at=observed_at,
+        )
+        return schema_version, payload["app_mode"], active_experiment_id
+    if set(payload) != LEGACY_ACTIVE_EXPERIMENT_STATE_FIELDS:
+        raise ReportContractError("active experiment state envelope is ambiguous; it has unexpected fields")
+    app_mode = payload["app_mode"]
+    if type(app_mode) is not str or app_mode not in {"experiment", "debug"}:
+        raise ReportContractError("active experiment state app_mode is invalid")
+    _validate_active_experiment_updated_at(
+        payload["updated_at"],
+        observed_at=observed_at,
+    )
+    active_experiment_id = payload["active_experiment_id"]
+    if active_experiment_id is not None:
+        if type(active_experiment_id) is not str or not active_experiment_id:
+            raise ReportContractError(
+                "active experiment state active identity is invalid: "
+                "active_experiment_id must be a non-empty string or null"
+            )
+        active_experiment_id = validate_experiment_id(active_experiment_id)
+    return schema_version, app_mode, active_experiment_id
+
+
 def build_active_experiment_state(
     *,
     app_mode: str,
@@ -287,31 +353,107 @@ def build_active_experiment_state(
     return payload
 
 
-def read_active_experiment_state_file(data_dir: Path) -> dict[str, Any] | None:
+def _active_experiment_file_snapshot(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _active_experiment_file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+def read_active_experiment_state_file(
+    data_dir: Path,
+) -> tuple[dict[str, Any], float] | None:
     """Read the bounded regular-file envelope without interpreting its schema."""
     root = Path(data_dir).resolve()
     path = root / "experiment_state.json"
-    if path.is_symlink():
-        raise ReportContractError("active experiment state must be a bounded regular file")
-    if not path.exists():
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
         return None
-    if not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
+    except OSError as exc:
+        raise ReportContractError("active experiment state cannot be read safely") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > MAX_JSON_BYTES
+    ):
+        raise ReportContractError("active experiment state must be a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_size > MAX_JSON_BYTES
+                or _active_experiment_file_identity(opened) != _active_experiment_file_identity(before)
+            ):
+                raise ReportContractError("active experiment state must be a bounded regular file")
+            opened_snapshot = _active_experiment_file_snapshot(opened)
+            chunks: list[bytes] = []
+            remaining = MAX_JSON_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            finished = os.fstat(descriptor)
+            try:
+                after = path.lstat()
+            except OSError as exc:
+                raise ReportContractError("active experiment state changed while reading") from exc
+            if _active_experiment_file_snapshot(finished) != opened_snapshot or _active_experiment_file_identity(
+                after
+            ) != _active_experiment_file_identity(finished):
+                raise ReportContractError("active experiment state changed while reading")
+        finally:
+            os.close(descriptor)
+    except ReportContractError:
+        raise
+    except OSError as exc:
+        raise ReportContractError("active experiment state cannot be read safely") from exc
+    raw = b"".join(chunks)
+    if len(raw) > MAX_JSON_BYTES:
         raise ReportContractError("active experiment state must be a bounded regular file")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise ReportContractError("active experiment state is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise ReportContractError("active experiment state root must be a mapping")
-    return payload
+    return payload, finished.st_mtime
 
 
 def load_active_experiment_id(data_dir: Path) -> str | None:
     """Read the atomic active-experiment guard, failing closed on corruption."""
-    payload = read_active_experiment_state_file(data_dir)
-    if payload is None:
+    loaded = read_active_experiment_state_file(data_dir)
+    if loaded is None:
         return None
-    return validate_active_experiment_state(payload)
+    payload, observed_at = loaded
+    _schema_version, _app_mode, active_experiment_id = validate_persisted_active_experiment_state(
+        payload,
+        observed_at=observed_at,
+    )
+    return active_experiment_id
 
 
 def automatic_report_eligible(
