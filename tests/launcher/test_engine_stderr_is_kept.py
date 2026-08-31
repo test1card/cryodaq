@@ -226,6 +226,25 @@ def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeyp
 
     monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
 
+    # This guard stops at Popen, so no child consumes the engine-readiness channel.
+    # Keep a real pipe and its exact owner, but do not make this environment test
+    # acquire Windows STARTUPINFO handles (or POSIX pass_fds) on the way to the
+    # boundary.  That platform contract has its own production-pipe test in
+    # test_launcher_replay.py.  Coupling the two made Windows stop here before the
+    # intercepted Popen and left the environment assertion vacuous.
+    def _intercepted_ready_pipe():
+        read_fd, write_fd = os.pipe()
+        try:
+            read_stream = os.fdopen(read_fd, "rb", buffering=0)
+            write_owner = launcher._OwnedFileDescriptor(write_fd)
+        except BaseException:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise
+        return read_stream, write_owner, "intercepted:engine-ready", {}
+
+    monkeypatch.setattr(launcher, "_open_child_ready_pipe", _intercepted_ready_pipe)
+
     # The two extras are simply what _start_engine touches on the way to the spawn; they
     # were found by letting it say so, not chosen. Raising from inside Popen lets the
     # method's own descriptor cleanup run on the way out.
