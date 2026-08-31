@@ -396,12 +396,73 @@ def _send_invalid_request_receipt(
     )
 
 
+_VISA_DISCOVERY_MAX_RESOURCES = 256
+
+
+def _contains_ascii_control(value: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+
+
+def _normalized_discovered_usb_resource(resource: object) -> str | None:
+    """Remove only one device-supplied NUL terminating a USB serial token."""
+
+    if not isinstance(resource, str) or not resource.startswith("USB"):
+        return None
+    parts = resource.split("::")
+    if len(parts) not in (5, 6) or parts[-1] != "INSTR":
+        return None
+    serial = parts[3]
+    if serial.count("\x00") != 1 or not serial.endswith("\x00"):
+        return None
+    parts[3] = serial[:-1]
+    normalized = "::".join(parts)
+    if not parts[3] or _contains_ascii_control(normalized):
+        return None
+    return normalized
+
+
+def _resolve_discovered_visa_resource(manager: Any, resource_str: str) -> str:
+    """Map one canonical USB resource to its unique raw VISA enumeration."""
+
+    if not isinstance(resource_str, str) or _contains_ascii_control(resource_str):
+        raise ValueError("configured VISA resource contains a control character")
+    if not resource_str.startswith("USB") or not resource_str.endswith("::INSTR"):
+        return resource_str
+    list_resources = getattr(manager, "list_resources", None)
+    if not callable(list_resources):
+        return resource_str
+    try:
+        resources = list_resources()
+    except Exception:
+        return resource_str
+    if not isinstance(resources, (list, tuple)) or len(resources) > _VISA_DISCOVERY_MAX_RESOURCES:
+        raise ValueError("VISA resource enumeration is malformed or exceeds its bound")
+
+    matches: list[str] = []
+    for item in resources:
+        if item == resource_str:
+            matches.append(item)
+            continue
+        normalized = _normalized_discovered_usb_resource(item)
+        if normalized == resource_str:
+            matches.append(item)
+            continue
+        if isinstance(item, str) and _contains_ascii_control(item):
+            without_controls = "".join(char for char in item if ord(char) >= 0x20 and ord(char) != 0x7F)
+            if without_controls == resource_str:
+                raise ValueError("discovered VISA target contains an unsupported control character")
+    if len(matches) > 1:
+        raise ValueError("VISA resource enumeration is ambiguous")
+    return matches[0] if matches else resource_str
+
+
 def _blocking_open_handles(resource_str: str) -> tuple[Any, Any]:
     import pyvisa
 
     manager = pyvisa.ResourceManager()
     try:
-        resource = manager.open_resource(resource_str)
+        open_resource = _resolve_discovered_visa_resource(manager, resource_str)
+        resource = manager.open_resource(open_resource)
     except BaseException as primary_error:
         try:
             manager.close()
