@@ -165,7 +165,7 @@ def validate_active_experiment_transition_receipt(
     ):
         raise ReportContractError("active experiment transition receipt result revision is invalid")
     operation = receipt["operation"]
-    experiment_id = receipt["experiment_id"]
+    experiment_id = validate_experiment_id(receipt["experiment_id"])
     result_active_experiment_id = receipt.get("result_active_experiment_id")
     if (
         result_active_experiment_id != active_experiment_id
@@ -238,6 +238,10 @@ def validate_active_experiment_state(payload: Mapping[str, Any]) -> str | None:
         receipt_fingerprint is not None and not _is_lower_hex(receipt_fingerprint, 64)
     ):
         raise ReportContractError("active experiment transition receipt fingerprint is invalid")
+    if app_mode == "debug" and (value is not None or receipt is not None):
+        raise ReportContractError("active experiment debug mode cannot carry experiment authority")
+    if value is not None and revision > 0 and receipt is None:
+        raise ReportContractError("revisioned active state requires a transition receipt")
     if receipt is not None:
         validate_active_experiment_transition_receipt(
             receipt,
@@ -283,18 +287,30 @@ def build_active_experiment_state(
     return payload
 
 
-def load_active_experiment_id(data_dir: Path) -> str | None:
-    """Read the atomic active-experiment guard, failing closed on corruption."""
+def read_active_experiment_state_file(data_dir: Path) -> dict[str, Any] | None:
+    """Read the bounded regular-file envelope without interpreting its schema."""
     root = Path(data_dir).resolve()
     path = root / "experiment_state.json"
+    if path.is_symlink():
+        raise ReportContractError("active experiment state must be a bounded regular file")
     if not path.exists():
         return None
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
+    if not path.is_file() or path.stat().st_size > MAX_JSON_BYTES:
         raise ReportContractError("active experiment state must be a bounded regular file")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ReportContractError("active experiment state is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ReportContractError("active experiment state root must be a mapping")
+    return payload
+
+
+def load_active_experiment_id(data_dir: Path) -> str | None:
+    """Read the atomic active-experiment guard, failing closed on corruption."""
+    payload = read_active_experiment_state_file(data_dir)
+    if payload is None:
+        return None
     return validate_active_experiment_state(payload)
 
 

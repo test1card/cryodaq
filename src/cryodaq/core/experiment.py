@@ -31,6 +31,7 @@ from cryodaq.report_state import (
     build_active_experiment_state,
     load_current_manifest,
     load_report_state,
+    read_active_experiment_state_file,
     report_force_context,
     resolve_report_artifact,
     resolve_report_paths,
@@ -1594,7 +1595,11 @@ class ExperimentManager:
         }
 
     def _load_state_authority(self) -> None:
-        if not self._state_path.exists():
+        try:
+            payload = read_active_experiment_state_file(self._data_dir)
+        except ReportContractError as exc:
+            raise RuntimeError(f"Experiment state authority is invalid: {exc}") from exc
+        if payload is None:
             if self._transition_path.exists():
                 try:
                     json.loads(self._transition_path.read_text(encoding="utf-8"))
@@ -1606,13 +1611,6 @@ class ExperimentManager:
             self._last_transition_receipt = None
             self._write_state(revision=0, transition_receipt=None)
             return
-
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError("Experiment state authority is unreadable.") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError("Experiment state authority is invalid.")
 
         schema_version = payload.get("schema_version")
         if type(schema_version) is not int or schema_version not in {

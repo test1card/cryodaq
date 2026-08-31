@@ -46,7 +46,7 @@ def _write_active_experiment_state(data_dir: Path, experiment_id: str) -> None:
     payload = build_active_experiment_state(
         app_mode="experiment",
         active_experiment_id=experiment_id,
-        revision=1,
+        revision=0,
         manager_incarnation="1" * 32,
         last_transition_receipt=None,
         updated_at="2026-07-09T00:00:00+00:00",

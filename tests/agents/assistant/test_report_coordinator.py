@@ -59,7 +59,7 @@ def _write_active_experiment_state(
     payload = build_active_experiment_state(
         app_mode="experiment",
         active_experiment_id=active_experiment_id,
-        revision=1,
+        revision=0,
         manager_incarnation="1" * 32,
         last_transition_receipt=None,
         updated_at=updated_at,

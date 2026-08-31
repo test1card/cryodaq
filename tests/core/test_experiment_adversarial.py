@@ -170,14 +170,27 @@ def test_stale_journal_and_restart_replay_fail_durable_cas(
     assert journal.exists()
     state_path = tmp_path / "experiment_state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["revision"] += 1
-    state["last_transition_receipt"] = None
-    state["last_transition_receipt_fingerprint"] = None
+    predecessor_revision = state["revision"]
+    predecessor_state_fingerprint = state["state_fingerprint"]
+    state["revision"] = predecessor_revision + 1
     state["state_fingerprint"] = manager._state_fingerprint(
         revision=state["revision"],
         app_mode=manager.app_mode,
         active_experiment_id=active.experiment_id,
     )
+    receipt = dict(state["last_transition_receipt"])
+    receipt.update(
+        operation="update",
+        predecessor_revision=predecessor_revision,
+        predecessor_state_fingerprint=predecessor_state_fingerprint,
+        result_revision=state["revision"],
+        result_active_experiment_id=active.experiment_id,
+        result_state_fingerprint=state["state_fingerprint"],
+    )
+    state["last_transition_receipt"] = receipt
+    state["last_transition_receipt_fingerprint"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     state_path.write_text(json.dumps(state), encoding="utf-8")
     before_journal = journal.read_bytes()
     before_metadata = active.metadata_path.read_bytes()

@@ -10,7 +10,9 @@ import pytest
 
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.report_state import (
+    MAX_JSON_BYTES,
     ReportContractError,
+    active_experiment_state_fingerprint,
     build_active_experiment_state,
     build_current_manifest,
     compute_source_fingerprint,
@@ -393,11 +395,37 @@ def _replace_result_revision_with_true(payload: dict) -> None:
     _resign_transition_receipt(payload)
 
 
+def _replace_active_state_with_debug_mode(payload: dict) -> None:
+    receipt = payload["last_transition_receipt"]
+    payload["app_mode"] = "debug"
+    payload["state_fingerprint"] = active_experiment_state_fingerprint(
+        manager_incarnation=payload["manager_incarnation"],
+        revision=payload["revision"],
+        app_mode="debug",
+        active_experiment_id=payload["active_experiment_id"],
+    )
+    receipt["predecessor_state_fingerprint"] = active_experiment_state_fingerprint(
+        manager_incarnation=payload["manager_incarnation"],
+        revision=receipt["predecessor_revision"],
+        app_mode="debug",
+        active_experiment_id=None,
+    )
+    receipt["result_state_fingerprint"] = payload["state_fingerprint"]
+    _resign_transition_receipt(payload)
+
+
+def _drop_active_state_transition_receipt(payload: dict) -> None:
+    payload["last_transition_receipt"] = None
+    payload["last_transition_receipt_fingerprint"] = None
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_message"),
     [
         (_replace_predecessor_fingerprint, "predecessor state fingerprint"),
         (_replace_result_revision_with_true, "result revision"),
+        (_replace_active_state_with_debug_mode, "debug mode"),
+        (_drop_active_state_transition_receipt, "revisioned active state"),
         (
             lambda payload: payload.__setitem__(
                 "updated_at",
@@ -406,7 +434,13 @@ def _replace_result_revision_with_true(payload: dict) -> None:
             "updated_at",
         ),
     ],
-    ids=["resigned-predecessor", "boolean-result-revision", "future-updated-at"],
+    ids=[
+        "resigned-predecessor",
+        "boolean-result-revision",
+        "debug-active-state",
+        "missing-active-receipt",
+        "future-updated-at",
+    ],
 )
 def test_report_and_manager_reject_the_same_mutated_v2_envelope(
     tmp_path: Path,
@@ -440,6 +474,55 @@ def test_report_and_manager_reject_the_same_mutated_v2_envelope(
     assert isinstance(manager_error.__cause__, ReportContractError)
     assert str(manager_error.__cause__) == str(report_error)
     assert state_path.read_bytes() == mutated_state
+
+
+def test_report_and_manager_reject_invalid_finalized_receipt_identity(tmp_path: Path) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(tmp_path, instruments)
+    active = manager.create_experiment("receipt-identity", "operator")
+    manager.finalize_experiment(active.experiment_id)
+    state_path = tmp_path / "experiment_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    receipt = payload["last_transition_receipt"]
+    receipt["experiment_id"] = "../escape"
+    receipt["predecessor_state_fingerprint"] = active_experiment_state_fingerprint(
+        manager_incarnation=payload["manager_incarnation"],
+        revision=receipt["predecessor_revision"],
+        app_mode=payload["app_mode"],
+        active_experiment_id="../escape",
+    )
+    _resign_transition_receipt(payload)
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+    mutated_state = state_path.read_bytes()
+
+    with pytest.raises(ReportContractError, match="experiment_id"):
+        load_active_experiment_id(tmp_path)
+    with pytest.raises(RuntimeError, match="experiment_id"):
+        ExperimentManager(tmp_path, instruments)
+    assert state_path.read_bytes() == mutated_state
+
+
+@pytest.mark.parametrize("kind", ["oversized", "symlink"])
+def test_report_and_manager_apply_same_state_file_contract(tmp_path: Path, kind: str) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    ExperimentManager(tmp_path, instruments)
+    state_path = tmp_path / "experiment_state.json"
+    if kind == "oversized":
+        state_path.write_text(
+            " " * (MAX_JSON_BYTES + 1) + state_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    else:
+        real_path = tmp_path / "alternate-experiment-state.json"
+        state_path.replace(real_path)
+        state_path.symlink_to(real_path)
+
+    with pytest.raises(ReportContractError, match="bounded regular file"):
+        load_active_experiment_id(tmp_path)
+    with pytest.raises(RuntimeError, match="bounded regular file"):
+        ExperimentManager(tmp_path, instruments)
 
 
 def test_reports_root_rejects_symlinked_reports_and_children(tmp_path: Path) -> None:
