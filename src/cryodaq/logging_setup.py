@@ -107,6 +107,13 @@ _logging_configured = False
 # visibility hint for handlers, but it cannot make check-and-set atomic across threads.
 _replay_owner_lock = threading.Lock()
 _replay_in_progress = False
+# Replay emission and replay teardown are different phases. A recovery during emission
+# is already covered by the pending state produced when retained records are merged. A
+# recovery after emission has finished can consume the last handler failure edge while
+# that merge is being finalized, so it must request one owner-held follow-up cycle.
+_replay_state_lock = threading.Lock()
+_replay_finalizing = False
+_replay_followup_requested = False
 # True while records retained by a completed replay are still owed to an operator.
 # Without it, a record that succeeds later in the same replay consumes every handler's
 # failure transition, and the retained prefix finds no future trigger (it would sit in
@@ -177,14 +184,14 @@ class _EmissionTrackingHandlerMixin:
             probe.observe(succeeded)
         self._last_emission_succeeded = succeeded
         self._had_emission_failure = not succeeded
-        if succeeded and (recovered or _replay_pending) and _deferred_records and not _replay_in_progress:
+        if succeeded and (recovered or _replay_pending):
             # This sink had been failing and just took a record (or a previous replay had
             # to retain records against these same handlers): recovery is proven by a real
             # emission, so retained records are replayed now instead of waiting for the
             # next setup_logging() call. Successes from sinks that never failed stay
             # silent, so a backlog is not re-attempted on every unrelated emission while
             # one sink is down.
-            _replay_deferred_records()
+            _replay_after_proven_recovery()
 
     def handleError(self, record: logging.LogRecord) -> None:
         self._emission_failed = True
@@ -231,6 +238,36 @@ def defer_record(level: int, message: str, *args: object) -> None:
             _replay_pending = True
 
 
+def _request_finalizing_replay() -> bool:
+    """Retain a recovery only when replay is in its teardown handoff."""
+
+    global _replay_followup_requested
+    # Ordinary recovery decisions must not serialize here: separate handlers call this
+    # while holding their own handler locks, and replay ownership is deliberately
+    # nonblocking to prevent lock inversion. Only the short teardown handoff needs a
+    # synchronized recheck.
+    if not _replay_finalizing:
+        return False
+    with _replay_state_lock:
+        if not _replay_finalizing:
+            return False
+        _replay_followup_requested = True
+        return True
+
+
+def _replay_after_proven_recovery() -> None:
+    """Replay now, or retain a recovery observed while replay is finalizing."""
+
+    if _request_finalizing_replay():
+        return
+    if _deferred_records and not _replay_in_progress:
+        _replay_deferred_records()
+        return
+    # Teardown may have opened between the first phase check and the ordinary replay
+    # decision. Recheck so a recovery at that boundary cannot consume the last edge.
+    _request_finalizing_replay()
+
+
 def _replay_deferred_records() -> None:
     """Emit everything held from before logging existed, oldest first, exactly once.
 
@@ -245,30 +282,57 @@ def _replay_deferred_records() -> None:
     mixin's trigger for why a partial success inside one replay must not strand it.
     """
 
-    global _replay_in_progress, _replay_pending
+    global _replay_finalizing, _replay_followup_requested, _replay_in_progress, _replay_pending
     if not _replay_owner_lock.acquire(blocking=False):
         return
-    _replay_in_progress = True
+    owner_held = True
+    with _replay_state_lock:
+        _replay_in_progress = True
     try:
-        with _deferred_records_lock:
-            held, _deferred_records[:] = list(_deferred_records), []
-        logger = logging.getLogger("cryodaq.startup")
-        retained: list[tuple[int, str, tuple[object, ...]]] = []
-        for level, message, args in held:
-            probe = EmissionProbe()
-            try:
-                logger.log(level, message, *args, extra={DELIVERY_PROBE_ATTRIBUTE: probe})
-            except Exception:
-                pass
-            if not probe.delivered():
-                retained.append((level, message, args))
-        with _deferred_records_lock:
-            merged = retained + _deferred_records
-            _deferred_records[:] = merged[:_MAX_DEFERRED_RECORDS]
-            _replay_pending = bool(_deferred_records)
+        while True:
+            with _deferred_records_lock:
+                held, _deferred_records[:] = list(_deferred_records), []
+            logger = logging.getLogger("cryodaq.startup")
+            retained: list[tuple[int, str, tuple[object, ...]]] = []
+            for level, message, args in held:
+                probe = EmissionProbe()
+                try:
+                    logger.log(level, message, *args, extra={DELIVERY_PROBE_ATTRIBUTE: probe})
+                except Exception:
+                    pass
+                if not probe.delivered():
+                    retained.append((level, message, args))
+
+            # Open the follow-up window only after this cycle has finished emitting.
+            # This excludes successes produced by replay itself while covering both the
+            # merge and the ownership handoff that follow it.
+            with _replay_state_lock:
+                _replay_finalizing = True
+            with _deferred_records_lock:
+                merged = retained + _deferred_records
+                _deferred_records[:] = merged[:_MAX_DEFERRED_RECORDS]
+                _replay_pending = bool(_deferred_records)
+            with _replay_state_lock:
+                if _replay_followup_requested:
+                    _replay_followup_requested = False
+                    _replay_finalizing = False
+                    continue
+
+                # Release replay ownership as part of the same state transition that
+                # makes direct recovery-triggered replay eligible. A handler can never
+                # observe "not in progress" while the owner lock is still unavailable.
+                _replay_owner_lock.release()
+                owner_held = False
+                _replay_in_progress = False
+                _replay_finalizing = False
+                break
     finally:
-        _replay_in_progress = False
-        _replay_owner_lock.release()
+        if owner_held:
+            with _replay_state_lock:
+                _replay_owner_lock.release()
+                _replay_in_progress = False
+                _replay_finalizing = False
+                _replay_followup_requested = False
 
 
 def _warn_file_logging_failure(component: str, exc: Exception) -> None:

@@ -634,6 +634,97 @@ def test_record_deferred_during_replay_keeps_the_replay_trigger_armed(tmp_path, 
     assert stream.getvalue().count("arrived during replay") == 1
 
 
+def test_recovery_during_replay_teardown_replays_the_retained_record(monkeypatch):
+    """A recovery after merge must not be consumed before replay ownership is released.
+
+    The second deferred-queue lock exit pins the production replay after it has merged
+    the rejected target and armed the pending state, but before teardown clears replay
+    ownership. A real handler emission then proves recovery in that exact window. It is
+    the last foreign record: only the teardown follow-up can deliver the retained target.
+    """
+
+    import threading
+
+    from cryodaq import logging_setup
+
+    target = "retained across replay teardown"
+    teardown_open = threading.Event()
+    recovery_done = threading.Event()
+    recovery_observed_window: list[bool] = []
+
+    class RejectTargetOnceStream:
+        closed = False
+
+        def __init__(self) -> None:
+            self.reject_target = True
+            self.written = io.StringIO()
+
+        def write(self, message):
+            if self.reject_target and target in message:
+                self.reject_target = False
+                raise OSError("sink unavailable for replay target")
+            self.written.write(message)
+            return len(message)
+
+        def flush(self):
+            pass
+
+    class TeardownGate:
+        """Hold the caller after replay's merge lock exits for the first cycle."""
+
+        def __init__(self, lock) -> None:
+            self._lock = lock
+            self._exits = 0
+
+        def __enter__(self):
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, _exc_type, _exc, _traceback):
+            self._lock.release()
+            self._exits += 1
+            if self._exits == 2:
+                teardown_open.set()
+                assert recovery_done.wait(timeout=30), "recovery emission missed teardown window"
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(logging.INFO)
+    stream = RejectTargetOnceStream()
+    root.addHandler(logging_setup._EmissionTrackingStreamHandler(stream))
+    logging_setup._deferred_records.clear()
+    logging_setup._replay_pending = False
+    logging_setup.defer_record(logging.ERROR, target)
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+    monkeypatch.setattr(
+        logging_setup,
+        "_deferred_records_lock",
+        TeardownGate(logging_setup._deferred_records_lock),
+    )
+
+    def emit_recovery() -> None:
+        observed = teardown_open.wait(timeout=30)
+        recovery_observed_window.append(observed)
+        if observed:
+            logging.getLogger("probe.teardown-recovery").error("recovery proven during teardown")
+        recovery_done.set()
+
+    recovery = threading.Thread(target=emit_recovery)
+    recovery.start()
+    try:
+        logging_setup._replay_deferred_records()
+    finally:
+        recovery.join(timeout=30)
+
+    assert recovery_observed_window == [True]
+    assert not recovery.is_alive()
+    assert not logging_setup._deferred_records
+    written = stream.written.getvalue()
+    assert written.count("recovery proven during teardown") == 1
+    assert written.count(target) == 1
+
+
 def test_replay_owner_lock_makes_contended_entry_nonblocking():
     """Simultaneous handler recovery must not deadlock on replay ownership.
 
