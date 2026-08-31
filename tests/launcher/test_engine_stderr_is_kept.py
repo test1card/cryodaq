@@ -36,6 +36,7 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -206,7 +207,10 @@ def test_record_framing_preserves_whitespace_repeated_cr_and_eof_cr() -> None:
     assert captured == [" \t", "", "\r", "\r\r", "terminal\r"]
 
 
-def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeypatch) -> None:
+def test_the_spawn_hands_the_operating_system_the_environment_under_test(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     """Prove _start_engine PASSES that environment, not merely that it builds one.
 
     A helper that production calls and then overwrites, or hands to something other than
@@ -225,6 +229,8 @@ def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeyp
         raise _Stop("spawn intercepted after the environment was fixed")
 
     monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(launcher, "_is_port_busy", lambda _port: False)
 
     # This guard stops at Popen, so no child consumes the engine-readiness channel.
     # Keep a real pipe and its exact owner, but do not make this environment test

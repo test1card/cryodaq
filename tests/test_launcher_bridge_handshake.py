@@ -327,7 +327,7 @@ def test_handshake_rejects_parent_replacement_between_observation_and_resolution
         os.close(read_fd)
 
 
-def _intercepted_spawn_environment(monkeypatch, start, window) -> dict[str, str]:
+def _intercepted_spawn_environment(monkeypatch, tmp_path: Path, start, window) -> dict[str, str]:
     """Read the environment ONE production spawn actually hands the operating system."""
 
     captured: dict[str, dict[str, str]] = {}
@@ -337,6 +337,8 @@ def _intercepted_spawn_environment(monkeypatch, start, window) -> dict[str, str]
         raise RuntimeError("spawn intercepted after its environment was built")
 
     monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(launcher, "_is_port_busy", lambda _port: False)
 
     # Only the engine caller consumes this seam.  Its real readiness transport is
     # separately guarded, including the Windows STARTUPINFO handle list and the POSIX
@@ -405,6 +407,7 @@ def _standalone_gui_window() -> SimpleNamespace:
 )
 def test_every_production_spawn_strips_the_launcher_only_authority(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     name: str,
     start,
     build_window,
@@ -423,7 +426,7 @@ def test_every_production_spawn_strips_the_launcher_only_authority(
     monkeypatch.setenv(launcher._SOAK_ARTIFACT_NONCE_ENV, "d" * 64)
     monkeypatch.setenv("CRYODAQ_SPAWN_CANARY", "kept")
 
-    child = _intercepted_spawn_environment(monkeypatch, start, build_window())
+    child = _intercepted_spawn_environment(monkeypatch, tmp_path, start, build_window())
 
     for variable in (
         launcher._SOAK_BRIDGE_FD_ENV,
