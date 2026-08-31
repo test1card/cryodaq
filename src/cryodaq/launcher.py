@@ -3095,6 +3095,13 @@ class LauncherWindow(QMainWindow):
         # exact object returned by the child constructor.
         stderr_acquisition_owner = _EngineStderrAcquisitionOwner(process.stderr)
         self._engine_stderr_acquisition_owner = stderr_acquisition_owner
+        if not LauncherWindow._runtime_callback_is_current(self):
+            # Popen can return after a signal handler has latched shutdown.
+            # The child and every credential needed to settle it are now
+            # published, so hand ownership straight to shutdown before any
+            # readiness reader, pump, or bounded readiness wait can start.
+            LauncherWindow._finish_latched_shutdown(self)
+            raise _EngineStartCancelledForShutdown("launcher shutdown won at engine spawn completion")
 
         inheritable_reset_error: BaseException | None = None
         if sys.platform == "win32":
@@ -6938,7 +6945,9 @@ class LauncherWindow(QMainWindow):
             try:
                 standby.close()
             except BaseException:
-                pass
+                # Startup failed, but a failed close is still a live owner.
+                # Retain it for the ordinary shutdown settlement ladder.
+                self._watchdog_retired_bridge = standby
             raise
         return standby
 
@@ -6989,10 +6998,12 @@ class LauncherWindow(QMainWindow):
             LauncherWindow._latch_bridge_watchdog_hold(self, phase="shutdown-standby", failure=exc)
             return False
         if not LauncherWindow._runtime_callback_is_current(self):
-            try:
-                shutdown_standby.close()
-            finally:
-                LauncherWindow._finish_latched_shutdown(self)
+            LauncherWindow._promote_watchdog_shutdown_standby(
+                self,
+                retired_bridge=bridge,
+                standby_bridge=shutdown_standby,
+            )
+            LauncherWindow._finish_latched_shutdown(self)
             return False
 
         replacement_generation = current_generation + 1

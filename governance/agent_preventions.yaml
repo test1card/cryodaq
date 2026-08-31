@@ -79,6 +79,62 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_af0936cfd56d725a3e7110b52c57ee35b724effd_with_only_launcher_py_restored_to_parent_blob_6386ab309d836bec80cc64fbff72d78d24f4ddee_failed_the_mid_poll_guard_because_bridge_shutdown_calls_was_1_not_0_pytest_exit_1_then_restored_candidate_blob_17d363b7ebef6c56bec8455d7c80116f3e14cf23_byte_exact_2026_08_31_pending_immutable_capture
     green_evidence: exact_af0936cfd56d725a3e7110b52c57ee35b724effd_local_windows_two_selected_signal_guards_2_passed_and_full_launcher_signal_module_20_passed_2026_08_31_pending_immutable_capture
+  - id: LAUNCHER-SCHEDULED-RESTART-POST-RETIRE-LATCH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_scheduled_restart_shutdown_latch_after_bridge_retirement_blocks_engine_spawn
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-SCHEDULED-RESTART-INFLIGHT-START-LATCH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_scheduled_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-MANUAL-RESTART-PAUSE-LATCH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_manual_restart_shutdown_latch_during_pause_blocks_engine_spawn
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-MANUAL-RESTART-INFLIGHT-START-LATCH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_manual_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-ENGINE-SPAWN-COMPLETION-LATCH-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_engine_spawn_boundary_refuses_latch_before_or_after_popen
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-WATCHDOG-RETIREMENT-SHUTDOWN-CHANNEL-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_signals.py::test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
+  - id: LAUNCHER-WATCHDOG-RETIRED-OWNER-SETTLEMENT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_signals.py::test_shutdown_settles_the_retired_watchdog_bridge_after_engine_stop
+    ci_partition: remaining
+    red_evidence: pending_exact_guard_red_control
+    green_evidence: pending_exact_candidate_green
   - id: LAUNCHER-STATUS-WORKER-RETENTION-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -4706,6 +4762,20 @@ records:
       - node: tests/test_launcher_signals.py::test_pending_restart_callback_cannot_respawn_after_shutdown_latch
         ci_partition: remaining
       - node: tests/test_launcher_signals.py::test_sigterm_latched_mid_poll_blocks_bridge_watchdog_replacement
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_scheduled_restart_shutdown_latch_after_bridge_retirement_blocks_engine_spawn
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_scheduled_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_manual_restart_shutdown_latch_during_pause_blocks_engine_spawn
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_manual_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_engine_spawn_boundary_refuses_latch_before_or_after_popen
+        ci_partition: remaining
+      - node: tests/test_launcher_signals.py::test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start
+        ci_partition: remaining
+      - node: tests/test_launcher_signals.py::test_shutdown_settles_the_retired_watchdog_bridge_after_engine_stop
         ci_partition: remaining
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending

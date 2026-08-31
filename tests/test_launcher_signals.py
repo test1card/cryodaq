@@ -74,6 +74,27 @@ def _host(*, bridge: _Bridge | None = None) -> SimpleNamespace:
     return host
 
 
+def _shutdown_receipt(command: dict[str, str]) -> dict[str, object]:
+    return {
+        "ok": True,
+        "schema": "cryodaq.engine_shutdown.v2",
+        "engine_instance_id": command["engine_instance_id"],
+        "request_id": command["request_id"],
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {
+                "smua": "device_reported_off",
+                "smub": "device_reported_off",
+            },
+            "verified_off": True,
+        },
+        "teardown_requested": True,
+        "delivery_state": "dispatched",
+        "commit_state": "committed",
+        "proto": 2,
+    }
+
+
 def test_launcher_imports_signal_module() -> None:
     import signal as stdlib_signal
 
@@ -333,8 +354,9 @@ def test_sigterm_latched_mid_poll_blocks_bridge_watchdog_replacement(
     assert bridge.start_calls == 0
 
 
-def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() -> None:
-    """A signal after retirement keeps a real verified-OFF command channel."""
+@pytest.mark.parametrize("latch_stage", ["standby_ready", "retired_shutdown"])
+def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start(latch_stage: str) -> None:
+    """A signal around retirement keeps the standby verified-OFF channel."""
 
     host: SimpleNamespace
 
@@ -353,6 +375,7 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
             self.shutdown_calls = 0
             self.start_calls = 0
             self.close_calls = 0
+            self.command_calls = 0
 
         def restart_count(self) -> int:
             return self.start_calls + 1
@@ -369,15 +392,22 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
         def shutdown(self) -> None:
             self.shutdown_calls += 1
             self.running = False
-            host._shutdown_requested = True
+            if latch_stage == "retired_shutdown":
+                host._shutdown_requested = True
 
         def start(self) -> None:
             self.start_calls += 1
             self.running = True
 
+        def send_command(self, command: dict[str, str]) -> dict[str, object]:
+            self.command_calls += 1
+            process.alive = False
+            return _shutdown_receipt(command)
+
         def close(self) -> None:
             self.close_calls += 1
-            assert self.running is False
+            if self.running:
+                self.shutdown()
 
     class _ShutdownStandby:
         def __init__(self) -> None:
@@ -395,30 +425,15 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
             return self.running
 
         def is_healthy(self) -> bool:
+            if latch_stage == "standby_ready":
+                host._shutdown_requested = True
             return self.running
 
         def send_command(self, command: dict[str, str]) -> dict[str, object]:
             assert self.running is True
             self.command_calls += 1
             process.alive = False
-            return {
-                "ok": True,
-                "schema": "cryodaq.engine_shutdown.v2",
-                "engine_instance_id": command["engine_instance_id"],
-                "request_id": command["request_id"],
-                "off_evidence": {
-                    "off_tier": "verified_off",
-                    "channel_off_results": {
-                        "smua": "device_reported_off",
-                        "smub": "device_reported_off",
-                    },
-                    "verified_off": True,
-                },
-                "teardown_requested": True,
-                "delivery_state": "dispatched",
-                "commit_state": "committed",
-                "proto": 2,
-            }
+            return _shutdown_receipt(command)
 
         def shutdown(self) -> None:
             self.shutdown_calls += 1
@@ -464,6 +479,7 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
     assert bridge.running is False
     assert bridge.start_calls == 0
     assert bridge.close_calls == 1
+    assert bridge.command_calls == 0
     assert standby.start_calls == 1
     assert standby.command_calls == 1
     assert standby.shutdown_calls == 1
@@ -476,12 +492,30 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
 
 def test_shutdown_settles_the_retired_watchdog_bridge_after_engine_stop() -> None:
     host = _host()
-    retired_bridge = MagicMock()
-    host._watchdog_retired_bridge = retired_bridge
+
+    class _FailedStandby:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def start(self) -> None:
+            raise RuntimeError("standby start failed")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("standby cleanup remained unsettled")
+
+    retired_bridge = _FailedStandby()
+    host._watchdog_shutdown_bridge_factory = lambda: retired_bridge
+
+    with pytest.raises(RuntimeError, match="standby start failed"):
+        LauncherWindow._start_watchdog_shutdown_standby(host)
+
+    assert host._watchdog_retired_bridge is retired_bridge
 
     assert LauncherWindow._do_shutdown(host) is True
 
-    retired_bridge.close.assert_called_once_with()
+    assert retired_bridge.close_calls == 2
     assert host._watchdog_retired_bridge is None
     assert host.events.index("engine.stop") < host.events.index("app.quit")
 
