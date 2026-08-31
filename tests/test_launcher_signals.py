@@ -333,6 +333,68 @@ def test_sigterm_latched_mid_poll_blocks_bridge_watchdog_replacement(
     assert bridge.start_calls == 0
 
 
+def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() -> None:
+    """A signal landing after entry cannot resurrect the retired bridge."""
+
+    host: SimpleNamespace
+
+    class _SignalInjectingBridge:
+        def __init__(self) -> None:
+            self.running = True
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def restart_count(self) -> int:
+            return self.start_calls + 1
+
+        def is_alive(self) -> bool:
+            return self.running
+
+        def is_healthy(self) -> bool:
+            return self.running
+
+        def process_pid(self) -> int:
+            return 73
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.running = False
+            host._shutdown_requested = True
+
+        def start(self) -> None:
+            self.start_calls += 1
+            self.running = True
+
+    bridge = _SignalInjectingBridge()
+    host = SimpleNamespace(
+        _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
+        _restart_pending=False,
+        _bridge=bridge,
+        _bridge_restart_hold=False,
+        _bridge_restart_fault=False,
+        _bridge_watchdog_generation=0,
+        _invalidate_descriptor_transport=MagicMock(),
+        _soak_bridge_handshake=None,
+        _replay_source=None,
+    )
+
+    with (
+        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+        patch.object(LauncherWindow, "_announce_soak_bridge_turnover"),
+        patch.object(LauncherWindow, "_publish_replay_ui_authority"),
+    ):
+        replaced = LauncherWindow._replace_bridge_from_watchdog(host, reason="heartbeat")
+
+    assert host._shutdown_requested is True
+    assert replaced is False
+    assert bridge.shutdown_calls == 1
+    assert bridge.running is False
+    assert bridge.start_calls == 0
+    finish_shutdown.assert_called_once_with(host)
+
+
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:
     host = _host()
     bridge = host._bridge

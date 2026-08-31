@@ -2580,6 +2580,18 @@ class LauncherWindow(QMainWindow):
             and (epoch is None or epoch == getattr(self, "_runtime_callback_epoch", -1))
         )
 
+    def _finish_latched_shutdown(self) -> bool:
+        """Give a latched shutdown ownership before a restart crosses another boundary."""
+
+        if not getattr(self, "_shutdown_requested", False):
+            return False
+        # A signal handler queues this same state machine on the Qt loop. Running
+        # it now prevents the currently executing restart callback from spawning
+        # or attaching another owner before that queued callback can run.
+        self._restart_pending = False
+        LauncherWindow._do_shutdown(self)
+        return True
+
     def _revoke_runtime_callbacks(self) -> None:
         if getattr(self, "_runtime_callbacks_open", True):
             self._runtime_callback_epoch = getattr(self, "_runtime_callback_epoch", 0) + 1
@@ -5889,6 +5901,8 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=False,
                 )
             return
+        if LauncherWindow._finish_latched_shutdown(self):
+            return
         LauncherWindow._advance_restart_generation(self)
         try:
             self._bridge.shutdown()
@@ -5902,7 +5916,11 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=False,
             )
             return
+        if LauncherWindow._finish_latched_shutdown(self):
+            return
         time.sleep(1)
+        if LauncherWindow._finish_latched_shutdown(self):
+            return
         self._engine_external = False
         try:
             self._start_engine()
@@ -5916,8 +5934,12 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=False,
             )
             return
+        if LauncherWindow._finish_latched_shutdown(self):
+            return
         try:
             self._bridge.start()
+            if LauncherWindow._finish_latched_shutdown(self):
+                return
             LauncherWindow._announce_soak_bridge_turnover(self)
             LauncherWindow._publish_replay_ui_authority(self)
         except Exception as exc:
@@ -6916,10 +6938,14 @@ class LauncherWindow(QMainWindow):
         except Exception as exc:
             LauncherWindow._latch_bridge_watchdog_hold(self, phase="old-settlement", failure=exc)
             return False
+        if LauncherWindow._finish_latched_shutdown(self):
+            return False
 
         start_error: Exception | None = None
         try:
             bridge.start()
+            if LauncherWindow._finish_latched_shutdown(self):
+                return False
             replacement_alive = bridge.is_alive()
             replacement_healthy = bridge.is_healthy()
             replacement_restart_count = bridge.restart_count()
@@ -8155,11 +8181,17 @@ class LauncherWindow(QMainWindow):
                 # live and replay children must not inherit an old transport.
                 phase = "old-bridge-settlement"
                 self._bridge.shutdown()
+                if LauncherWindow._finish_latched_shutdown(self):
+                    return
                 phase = "readiness"
                 child_start_attempted = True
                 self._start_engine()
+                if LauncherWindow._finish_latched_shutdown(self):
+                    return
                 phase = "bridge-attach"
                 self._bridge.start()
+                if LauncherWindow._finish_latched_shutdown(self):
+                    return
                 LauncherWindow._announce_soak_bridge_turnover(self)
                 phase = "ui-authority-bind"
                 LauncherWindow._publish_replay_ui_authority(self)
