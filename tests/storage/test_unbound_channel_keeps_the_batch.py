@@ -192,21 +192,27 @@ async def test_the_memory_of_unbound_channel_names_stays_bounded(tmp_path: Path)
 # ===================================================================
 
 
-def _read_bounded(root: Path, archive: Path):
+def _query_bounded(root: Path, archive: Path, *, channels: tuple[str, ...] | None = None):
     """Drive the bounded reader the way the assistant's replay path drives it."""
 
-    archive.mkdir(exist_ok=True)
-    (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
     return ArchiveReader(root, archive).query_reading_rows_bounded(
         start=TIMESTAMP - timedelta(hours=1),
         end=TIMESTAMP + timedelta(hours=1),
-        channels=None,
+        channels=channels,
         max_channels=64,
         max_points_per_channel=1024,
         max_total_points=4096,
         max_retained_bytes=4 * 1024 * 1024,
         deadline_monotonic=time.monotonic() + 30.0,
     )
+
+
+def _read_bounded(root: Path, archive: Path, *, channels: tuple[str, ...] | None = None):
+    """Build an empty cold index and drive the production bounded reader."""
+
+    archive.mkdir(exist_ok=True)
+    (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+    return _query_bounded(root, archive, channels=channels)
 
 
 async def test_an_unbound_row_is_reported_as_missing_identity_not_pre_catalog_history(
@@ -1348,3 +1354,130 @@ async def test_a_flood_of_undescribed_labels_cannot_empty_a_bounded_read(tmp_pat
         "each overflow reading comes back with exactly the value that was committed for it"
     )
     assert len(result.rows) == len(flood_rows) + 1
+
+
+def _write_unbound_versions(root: Path, emitted: str, values: tuple[float, ...]) -> str:
+    """Persist distinct samples through live admission and return their durable label."""
+
+    owner = _live()
+    writer = SQLiteWriter(root, channel_catalog=owner)
+    admitted = tuple(
+        owner.admit(
+            replace(
+                _reading(emitted, value),
+                timestamp=TIMESTAMP + timedelta(seconds=index),
+            )
+        )
+        for index, value in enumerate(values)
+    )
+    try:
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+    durable_labels = {item.reading.channel for item in admitted}
+    assert len(durable_labels) == 1
+    return durable_labels.pop()
+
+
+def test_explicit_query_resolves_a_precontract_oversized_unbound_spelling(
+    tmp_path: Path,
+) -> None:
+    """The normalized identity returned by discovery must fetch the old raw row."""
+
+    emitted = "legacy.explicit.channel." + "x" * 300
+    normalized = _write_unbound_versions(tmp_path, emitted, (4.2,))
+    assert normalized != emitted
+    conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    try:
+        assert conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.2)).rowcount == 1
+        conn.commit()
+    finally:
+        conn.close()
+    assert _rows(tmp_path)[0][0] == emitted, "the red fixture must contain only the pre-contract spelling"
+
+    result = _read_bounded(tmp_path, tmp_path / "archive", channels=(normalized,))
+
+    assert [(row.channel, row.value) for row in result.rows] == [(normalized, 4.2)]
+    assert result.complete is False
+
+
+def test_literal_reserved_suffix_keeps_one_identity_across_upgrade(tmp_path: Path) -> None:
+    """A pre-upgrade literal and its escaped post-upgrade spelling are one channel."""
+
+    emitted = "sensor.literal~sha256:" + "a" * 64
+    assert len(emitted.encode("utf-8")) <= 128, "the fixture must be a valid authoritative-label width"
+    normalized = _write_unbound_versions(tmp_path, emitted, (4.2, 4.3))
+    assert normalized != emitted, "current admission must escape the reserved generated namespace"
+    conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    try:
+        assert conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.2)).rowcount == 1
+        conn.commit()
+    finally:
+        conn.close()
+    assert {row[0] for row in _rows(tmp_path)} == {emitted, normalized}, (
+        "the red fixture must span the exact pre/post-upgrade spellings"
+    )
+
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+
+    assert {row.value for row in result.rows} == {4.2, 4.3}
+    assert {row.channel for row in result.rows} == {normalized}
+    assert result.complete is False
+
+
+@pytest.mark.parametrize("rotated", (False, True), ids=("hot-sqlite", "cold-parquet"))
+@pytest.mark.asyncio
+async def test_every_persisted_spelling_of_one_normalized_channel_is_returned(
+    tmp_path: Path,
+    rotated: bool,
+) -> None:
+    """One source may contain old raw and new bounded spellings after an upgrade."""
+
+    emitted = "legacy.mixed.channel." + "x" * 300
+    data = tmp_path / "data"
+    data.mkdir()
+    archive = tmp_path / "archive"
+    normalized = _write_unbound_versions(data, emitted, (4.2, 4.3))
+    assert normalized != emitted
+    conn = sqlite3.connect(str(data / "data_2026-07-12.db"))
+    try:
+        assert conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.2)).rowcount == 1
+        conn.commit()
+    finally:
+        conn.close()
+    assert {row[0] for row in _rows(data)} == {emitted, normalized}, (
+        "the red fixture must contain both persisted spellings in one source"
+    )
+
+    read_root = data
+    if rotated:
+        import asyncio
+
+        from cryodaq.storage.cold_rotation import ColdRotationService
+
+        results = await asyncio.to_thread(
+            lambda: asyncio.run(
+                ColdRotationService(
+                    data_dir=data,
+                    archive_dir=archive,
+                    age_days=30,
+                    enabled=True,
+                ).run_once(now=TIMESTAMP + timedelta(days=40))
+            )
+        )
+        assert len(results) == 1 and results[0].rows == 2
+        read_root = tmp_path / "no-hot-data"
+        read_root.mkdir()
+    else:
+        archive.mkdir()
+        (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+
+    result = _query_bounded(read_root, archive)
+
+    assert {row.value for row in result.rows} == {4.2, 4.3}
+    assert {row.channel for row in result.rows} == {normalized}
+    assert result.complete is False

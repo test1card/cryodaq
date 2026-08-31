@@ -82,6 +82,7 @@ _LIVE_BINDING_KEYS: Final = frozenset({"instrument_id", "emitted_channel", "chan
 _BOUND_READING_PROVENANCE: Final = object()
 _DURABLE_UNBOUND_TEXT_NAMESPACE: Final = "~sha256b64:"
 _DURABLE_UNBOUND_CHANNEL_SUFFIX: Final = re.compile(r"~sha256:[0-9a-f]{64}$")
+_MAX_AUTHORITATIVE_CHANNEL_ID_BYTES: Final = 128
 
 SCHEMA_DESCRIPTOR_META: Final = """
 CREATE TABLE IF NOT EXISTS channel_descriptor_meta (
@@ -808,9 +809,24 @@ def normalize_persisted_unbound_channel(channel: str) -> str:
 
     if type(channel) is not str:
         raise ChannelDescriptorStorageError("persisted unbound reading channel must be an exact string")
-    if len(channel.encode("utf-8")) <= MAX_PERSISTED_READING_ID_BYTES:
+    encoded_length = len(channel.encode("utf-8"))
+    if encoded_length <= _MAX_AUTHORITATIVE_CHANNEL_ID_BYTES:
+        # A valid authoritative-width label could be persisted literally before
+        # this suffix became a generated namespace.  The earlier generated form
+        # is necessarily wider than the 128-byte authoritative grammar, so it
+        # stays stable while the persistence codec escapes a literal exactly once.
+        return _durable_unbound_channel_text(channel)
+    if encoded_length <= MAX_PERSISTED_READING_ID_BYTES:
         return channel
     return _durable_unbound_channel_text(channel)
+
+
+def persisted_unbound_channel_may_have_alias(channel: str) -> bool:
+    """Return whether an identity may have an older persisted raw spelling."""
+
+    if type(channel) is not str:
+        raise ChannelDescriptorStorageError("persisted unbound reading channel must be an exact string")
+    return _durable_unbound_channel_text(channel) != channel
 
 
 def normalize_persisted_unbound_reading_fields(
@@ -1857,6 +1873,7 @@ __all__ = [
     "install_catalog",
     "load_live_channel_descriptor_catalog",
     "normalize_persisted_unbound_channel",
+    "persisted_unbound_channel_may_have_alias",
     "normalize_persisted_unbound_reading_fields",
     "project_channel_descriptor",
     "project_channel_descriptor_payload",
