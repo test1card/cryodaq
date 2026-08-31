@@ -8663,6 +8663,9 @@ def main() -> None:
     # via _shutdown_requested flag; QTimer.singleShot dispatches _do_shutdown
     # onto the Qt main thread.
     def _signal_handler(signum: int, frame: object) -> None:
+        if window._shutdown_requested:
+            return
+        window._shutdown_requested = True
         if hasattr(signal, "SIGBREAK") and signum == signal.SIGBREAK:
             sig_name = "SIGBREAK"
         else:

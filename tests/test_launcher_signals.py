@@ -100,7 +100,7 @@ def test_main_registers_sigbreak_to_the_shutdown_handler_on_windows(
 
     app = MagicMock()
     app.exec.return_value = 0
-    window = SimpleNamespace(_do_shutdown=MagicMock())
+    window = SimpleNamespace(_do_shutdown=MagicMock(), _shutdown_requested=False)
     registrations: dict[int, object] = {}
 
     def register(signum: int, handler: object) -> None:
@@ -143,7 +143,96 @@ def test_main_registers_sigbreak_to_the_shutdown_handler_on_windows(
             registrations[module.signal.SIGBREAK](module.signal.SIGBREAK, None)  # type: ignore[operator]
 
     assert callbacks == [window._do_shutdown]
+    assert window._shutdown_requested is True
     assert "Получен SIGBREAK" in caplog.text
+
+
+def test_sigterm_latches_before_queued_shutdown_and_blocks_bridge_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import cryodaq.launcher as module
+
+    class _DeadBridge:
+        def __init__(self) -> None:
+            self.poll_calls = 0
+            self.start_calls = 0
+
+        def poll_readings_with_descriptor(self) -> list[object]:
+            self.poll_calls += 1
+            return []
+
+        def is_healthy(self) -> bool:
+            return False
+
+        def is_alive(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    app = MagicMock()
+    app.exec.return_value = 0
+    bridge = _DeadBridge()
+    window = SimpleNamespace(
+        _do_shutdown=MagicMock(),
+        _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
+        _bridge=bridge,
+        _snapshot_ingress=None,
+        _last_health_watchdog_restart=0.0,
+    )
+    registrations: dict[int, object] = {}
+
+    def register(signum: int, handler: object) -> None:
+        registrations[signum] = handler
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    with (
+        patch("sys.argv", ["cryodaq", "--tray", "--mock"]),
+        patch("cryodaq.logging_setup.setup_logging"),
+        patch("cryodaq.logging_setup.resolve_log_level", return_value="INFO"),
+        patch("cryodaq.launcher._consume_soak_bridge_handshake", return_value=None),
+        patch("cryodaq.launcher._consume_soak_artifact_capability", return_value=None),
+        patch("cryodaq.launcher.QApplication", return_value=app),
+        patch("cryodaq.gui.app._load_bundled_fonts"),
+        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
+        patch("cryodaq.launcher.try_acquire_lock", return_value=73),
+        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
+        patch("cryodaq.launcher.LauncherWindow", return_value=window),
+        patch("cryodaq.launcher.signal.signal", side_effect=register),
+        patch("cryodaq.launcher.release_lock_exact"),
+    ):
+        with pytest.raises(SystemExit) as exited:
+            module.main()
+
+    assert exited.value.code == 0
+    handler = registrations[module.signal.SIGTERM]
+    assert handler is registrations[module.signal.SIGINT]
+    callbacks: list[object] = []
+    with (
+        caplog.at_level("INFO", logger=module.logger.name),
+        patch(
+            "cryodaq.launcher.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callbacks.append(callback),
+        ),
+    ):
+        handler(module.signal.SIGTERM, None)  # type: ignore[operator]
+        assert window._shutdown_requested is True
+        handler(module.signal.SIGTERM, None)  # type: ignore[operator]
+
+        assert callbacks == [window._do_shutdown]
+        with patch.object(LauncherWindow, "_replace_bridge_from_watchdog") as replace_bridge:
+            LauncherWindow._poll_bridge_data(window)
+
+        replace_bridge.assert_not_called()
+        assert bridge.poll_calls == 0
+        assert bridge.start_calls == 0
+        callbacks.pop()()  # type: ignore[operator]
+
+    window._do_shutdown.assert_called_once_with()
+    assert caplog.text.count("Получен SIGTERM") == 1
 
 
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:
