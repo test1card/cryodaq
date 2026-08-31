@@ -235,6 +235,104 @@ def test_sigterm_latches_before_queued_shutdown_and_blocks_bridge_watchdog(
     assert caplog.text.count("Получен SIGTERM") == 1
 
 
+def test_sigterm_latched_mid_poll_blocks_bridge_watchdog_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    handler: object | None = None
+
+    class _SignalInjectingDeadBridge:
+        def __init__(self) -> None:
+            self.running = False
+            self.shutdown_calls = 0
+            self.start_calls = 0
+
+        def poll_readings_with_descriptor(self) -> list[object]:
+            assert handler is not None
+            handler(module.signal.SIGTERM, None)  # type: ignore[operator]
+            return []
+
+        def is_healthy(self) -> bool:
+            return self.running
+
+        def data_flow_stalled(self) -> bool:
+            return False
+
+        def is_alive(self) -> bool:
+            return self.running
+
+        def restart_count(self) -> int:
+            return self.start_calls
+
+        def process_pid(self) -> int:
+            return 73
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.running = False
+
+        def start(self) -> None:
+            self.start_calls += 1
+            self.running = True
+
+    app = MagicMock()
+    app.exec.return_value = 0
+    bridge = _SignalInjectingDeadBridge()
+    window = SimpleNamespace(
+        _do_shutdown=MagicMock(),
+        _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
+        _bridge=bridge,
+        _snapshot_ingress=None,
+        _last_health_watchdog_restart=0.0,
+        _bridge_restart_hold=False,
+        _bridge_restart_fault=False,
+        _bridge_watchdog_generation=0,
+        _invalidate_descriptor_transport=MagicMock(),
+        _soak_bridge_handshake=None,
+        _replay_source=None,
+    )
+    registrations: dict[int, object] = {}
+
+    def register(signum: int, registered_handler: object) -> None:
+        registrations[signum] = registered_handler
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    with (
+        patch("sys.argv", ["cryodaq", "--tray", "--mock"]),
+        patch("cryodaq.logging_setup.setup_logging"),
+        patch("cryodaq.logging_setup.resolve_log_level", return_value="INFO"),
+        patch("cryodaq.launcher._consume_soak_bridge_handshake", return_value=None),
+        patch("cryodaq.launcher._consume_soak_artifact_capability", return_value=None),
+        patch("cryodaq.launcher.QApplication", return_value=app),
+        patch("cryodaq.gui.app._load_bundled_fonts"),
+        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
+        patch("cryodaq.launcher.try_acquire_lock", return_value=73),
+        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
+        patch("cryodaq.launcher.LauncherWindow", return_value=window),
+        patch("cryodaq.launcher.signal.signal", side_effect=register),
+        patch("cryodaq.launcher.release_lock_exact"),
+    ):
+        with pytest.raises(SystemExit) as exited:
+            module.main()
+
+    assert exited.value.code == 0
+    handler = registrations[module.signal.SIGTERM]
+    callbacks: list[object] = []
+    with patch(
+        "cryodaq.launcher.QTimer.singleShot",
+        side_effect=lambda _delay, callback: callbacks.append(callback),
+    ):
+        LauncherWindow._poll_bridge_data(window)
+
+    assert window._shutdown_requested is True
+    assert callbacks == [window._do_shutdown]
+    assert bridge.shutdown_calls == 0
+    assert bridge.start_calls == 0
+
+
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:
     host = _host()
     bridge = host._bridge
@@ -391,9 +489,9 @@ def test_pending_restart_callback_cannot_respawn_after_shutdown_latch() -> None:
     host._restart_pending = False
     host._shutdown_requested = False
     host._engine_proc = SimpleNamespace(poll=lambda: 1)
-    # Only an unowned/external or replay startup may enter backoff. An owned
+    # Only explicit mock or replay mode may enter backoff. Live and ambiguous
     # acquisition death is covered separately and must remain in HOLD.
-    host._engine_external = True
+    host._mock = True
     host._restart_giving_up = False
     host._restart_attempts = 0
     host._restart_backoff_s = [0]
@@ -402,13 +500,18 @@ def test_pending_restart_callback_cannot_respawn_after_shutdown_latch() -> None:
     host._close_engine_stderr_stream = MagicMock()
     host._show_engine_down_banner = MagicMock()
     host._start_engine = MagicMock()
+    host._bridge = MagicMock()
+    host._clear_engine_down_banner = MagicMock()
     callbacks: list[object] = []
 
     with (
         patch("cryodaq.launcher.QTimer.singleShot", side_effect=lambda _delay, callback: callbacks.append(callback)),
         patch("cryodaq.launcher.time.monotonic", return_value=1.0),
+        patch.object(LauncherWindow, "_settle_observed_engine_exit", return_value=True),
     ):
         LauncherWindow._handle_engine_exit(host)
+        assert len(callbacks) == 1
+        assert host._restart_pending is True
         host._shutdown_requested = True
         callbacks.pop()()
 

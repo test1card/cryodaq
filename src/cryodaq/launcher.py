@@ -6875,6 +6875,8 @@ class LauncherWindow(QMainWindow):
     def _replace_bridge_from_watchdog(self, *, reason: str) -> bool:
         """Replace one exact bridge generation or fail visible and closed."""
 
+        if not LauncherWindow._runtime_callback_is_current(self):
+            return False
         if vars(self).get("_bridge_restart_hold", False) is True:
             return False
         current_generation = vars(self).get("_bridge_watchdog_generation", 0)
