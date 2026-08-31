@@ -26,12 +26,14 @@ from urllib.parse import quote
 
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
+    MAX_LIVE_READING_TEXT_BYTES,
     MAX_PERSISTED_READING_ID_BYTES,
     MAX_PERSISTED_READING_UNIT_BYTES,
     UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
     normalize_persisted_unbound_channel,
     normalize_persisted_unbound_reading_fields,
+    persisted_unbound_channel_alias,
     persisted_unbound_channel_may_have_alias,
     verify_descriptor_storage,
 )
@@ -71,6 +73,29 @@ _UNBOUND_DESCRIPTOR_HASH = UNBOUND_DESCRIPTOR_HASH
 # result incomplete. A bounded read therefore never claims completeness over a stored
 # reading it did not return, and hot and cold discovery share exactly these semantics.
 _MAX_MATERIALIZED_UNBOUND_CHANNELS = 32
+
+
+def _coalesce_present_unbound_aliases(channels: dict[str, set[str]]) -> None:
+    """Merge an old literal spelling only when its current escaped row is present.
+
+    A generated-looking spelling wider than 128 bytes is ambiguous in isolation: it can be an
+    old durable identity for a longer emitted label or a literal label from before
+    the namespace was reserved. Coexistence with its escaped spelling resolves that
+    ambiguity without re-hashing already durable history on every read.
+    """
+
+    for channel in tuple(channels):
+        # A 253--256 byte legacy suffix spelling is indistinguishable from the
+        # deployed digest of a genuinely longer UTF-8 label: truncating the
+        # 184-byte visible prefix can discard at most three partial-codepoint
+        # bytes. Preserve that identity; narrower values were persisted literally.
+        if len(channel.encode("utf-8")) > MAX_PERSISTED_READING_ID_BYTES - 4:
+            continue
+        alias = persisted_unbound_channel_alias(channel)
+        if alias is None or alias not in channels:
+            continue
+        channels[alias].update(channels.pop(channel))
+
 
 _MAX_DESCRIPTOR_REFERENCE_ROWS = 10_000_000
 
@@ -757,6 +782,7 @@ class ArchiveReader:
                 if not ok:
                     discovery_ok = False
                     break
+                _coalesce_present_unbound_aliases(source_unbound)
                 discovered.update(source_channels)
                 unbound_query_channels_by_source[source.token] = source_unbound
                 unbound_seen.update(source_unbound)
@@ -821,6 +847,7 @@ class ArchiveReader:
                             complete=False,
                             discovered_channels=tuple(selected),
                         )
+                    _coalesce_present_unbound_aliases(source_unbound)
                     unbound_query_channels_by_source[source.token] = source_unbound
                     unbound_any = unbound_any or bool(source_unbound)
         discovered_channels = tuple(selected)
@@ -1362,13 +1389,21 @@ class ArchiveReader:
                         count += 1
                         descriptor_hash = row[2] if has_descriptor_hash else None
                         if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            raw_channel = _bounded_text(
+                                raw_channel,
+                                minimum=1,
+                                maximum=MAX_LIVE_READING_TEXT_BYTES,
+                            )
                             channel = _bounded_text(
                                 normalize_persisted_unbound_channel(raw_channel),
                                 minimum=1,
                                 maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if requested_unbound_channels is not None and channel not in requested_unbound_channels:
-                                continue
+                                alias = persisted_unbound_channel_alias(raw_channel)
+                                if alias not in requested_unbound_channels:
+                                    continue
+                                channel = alias
                             # THE ROW SAYS SO ITSELF. The label it keeps is the emitted one,
                             # and it never competes for the described-channel budget: it is
                             # remembered (bounded) for materialisation instead. Past the
@@ -1511,7 +1546,8 @@ class ArchiveReader:
                 legacy.close()
 
             for channel in channels:
-                query_channel_set = tuple(sorted(unbound_query_channels.get(channel, {channel})))
+                known_unbound_aliases = unbound_query_channels.get(channel)
+                query_channel_set = tuple(sorted(known_unbound_aliases or {channel}))
                 query_placeholders = ",".join("?" for _ in query_channel_set)
                 last: tuple[float, int] | None = None
                 while True:
@@ -1555,6 +1591,7 @@ class ArchiveReader:
                                 timestamp_us = _sqlite_epoch_microseconds(timestamp)
                                 if not start_us <= timestamp_us < end_us:
                                     raise ValueError("timestamp outside normalized interval")
+                                persisted_channel = raw_channel
                                 if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
                                     instrument, raw_channel, unit = normalize_persisted_unbound_reading_fields(
                                         instrument,
@@ -1571,6 +1608,13 @@ class ArchiveReader:
                                     minimum=1,
                                     maximum=MAX_PERSISTED_READING_ID_BYTES,
                                 )
+                                if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                    if known_unbound_aliases is not None:
+                                        if persisted_channel not in known_unbound_aliases:
+                                            continue
+                                        channel_text = channel
+                                    elif channel_text != channel:
+                                        continue
                                 unit_text = _bounded_text(
                                     unit,
                                     minimum=0,
@@ -2169,13 +2213,21 @@ class ArchiveReader:
                         raw_channel = filtered["channel"][index].as_py()
                         descriptor_hash = filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
                         if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            raw_channel = _bounded_text(
+                                raw_channel,
+                                minimum=1,
+                                maximum=MAX_LIVE_READING_TEXT_BYTES,
+                            )
                             channel = _bounded_text(
                                 normalize_persisted_unbound_channel(raw_channel),
                                 minimum=1,
                                 maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
                             if requested_unbound_channels is not None and channel not in requested_unbound_channels:
-                                continue
+                                alias = persisted_unbound_channel_alias(raw_channel)
+                                if alias not in requested_unbound_channels:
+                                    continue
+                                channel = alias
                             # Same rule as the hot discovery, and it must stay the same
                             # rule: hot and cold discovery with different semantics is how
                             # a day reads complete before rotation and disappears after.
@@ -2286,6 +2338,12 @@ class ArchiveReader:
                 )
             )
             channel_array = pa.array(query_channels, type=pa.string())
+            selected_channels = frozenset(channels)
+            unbound_channel_by_raw_alias = {
+                raw_alias: channel
+                for channel, raw_aliases in unbound_query_channels.items()
+                for raw_alias in raw_aliases
+            }
             columns = [
                 "timestamp",
                 "instrument_id",
@@ -2370,6 +2428,7 @@ class ArchiveReader:
                             descriptor_hash = (
                                 filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
                             )
+                            persisted_channel = raw_channel
                             if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
                                 raw_instrument, raw_channel, raw_unit = normalize_persisted_unbound_reading_fields(
                                     raw_instrument,
@@ -2388,6 +2447,12 @@ class ArchiveReader:
                                 minimum=1,
                                 maximum=MAX_PERSISTED_READING_ID_BYTES,
                             )
+                            if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                expected_channel = unbound_channel_by_raw_alias.get(persisted_channel)
+                                if expected_channel is not None:
+                                    channel = expected_channel
+                                elif channel not in selected_channels:
+                                    continue
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             unit = _bounded_text(

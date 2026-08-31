@@ -812,21 +812,27 @@ def normalize_persisted_unbound_channel(channel: str) -> str:
     encoded_length = len(channel.encode("utf-8"))
     if encoded_length <= _MAX_AUTHORITATIVE_CHANNEL_ID_BYTES:
         # A valid authoritative-width label could be persisted literally before
-        # this suffix became a generated namespace.  The earlier generated form
-        # is necessarily wider than the 128-byte authoritative grammar, so it
-        # stays stable while the persistence codec escapes a literal exactly once.
+        # this suffix became a generated namespace. The persistence codec escapes
+        # that literal exactly once.
         return _durable_unbound_channel_text(channel)
     if encoded_length <= MAX_PERSISTED_READING_ID_BYTES:
         return channel
     return _durable_unbound_channel_text(channel)
 
 
-def persisted_unbound_channel_may_have_alias(channel: str) -> bool:
-    """Return whether an identity may have an older persisted raw spelling."""
+def persisted_unbound_channel_alias(channel: str) -> str | None:
+    """Return the current escaped alias for a possibly legacy literal spelling."""
 
     if type(channel) is not str:
         raise ChannelDescriptorStorageError("persisted unbound reading channel must be an exact string")
-    return _durable_unbound_channel_text(channel) != channel
+    alias = _durable_unbound_channel_text(channel)
+    return alias if alias != channel else None
+
+
+def persisted_unbound_channel_may_have_alias(channel: str) -> bool:
+    """Return whether an identity may have an older persisted raw spelling."""
+
+    return persisted_unbound_channel_alias(channel) is not None
 
 
 def normalize_persisted_unbound_reading_fields(
@@ -1225,9 +1231,12 @@ class LiveChannelDescriptorCatalog:
         channel_id = self._bindings.get((owned.instrument_id, owned.channel))
         if channel_id is None:
             canonical_descriptor = self._catalog.by_channel_id.get(owned.channel)
-            if canonical_descriptor is not None or any(
+            collides_with_declared_channel = any(
                 emitted_channel == owned.channel for _, emitted_channel in self._bindings
-            ):
+            )
+            if (
+                canonical_descriptor is not None and canonical_descriptor.channel_id != UNBOUND_CHANNEL_ID
+            ) or collides_with_declared_channel:
                 raise ChannelDescriptorStorageError(
                     "live reading instrument_id disagrees with the explicit descriptor binding"
                 )
@@ -1873,6 +1882,7 @@ __all__ = [
     "install_catalog",
     "load_live_channel_descriptor_catalog",
     "normalize_persisted_unbound_channel",
+    "persisted_unbound_channel_alias",
     "persisted_unbound_channel_may_have_alias",
     "normalize_persisted_unbound_reading_fields",
     "project_channel_descriptor",

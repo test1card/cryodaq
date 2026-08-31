@@ -1481,3 +1481,168 @@ async def test_every_persisted_spelling_of_one_normalized_channel_is_returned(
     assert {row.value for row in result.rows} == {4.2, 4.3}
     assert {row.channel for row in result.rows} == {normalized}
     assert result.complete is False
+
+
+def test_wide_literal_reserved_suffix_keeps_one_identity_across_upgrade(tmp_path: Path) -> None:
+    """All pre-namespace live widths converge on the escaped current identity."""
+
+    emitted = "sensor." + "x" * 70 + "~sha256:" + "a" * 64
+    assert 128 < len(emitted.encode("utf-8")) <= 256
+    normalized = _write_unbound_versions(tmp_path, emitted, (4.2, 4.3))
+    assert normalized != emitted
+    conn = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    try:
+        changed = conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.2)).rowcount
+        assert changed == 1, "the pre-upgrade spelling mutation must reach exactly one row"
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+
+    assert {row.value for row in result.rows} == {4.2, 4.3}
+    assert {row.channel for row in result.rows} == {normalized}
+    assert result.complete is False
+
+
+@pytest.mark.parametrize("rotated", (False, True), ids=("hot-sqlite", "cold-parquet"))
+@pytest.mark.asyncio
+async def test_explicit_literal_suffix_query_cannot_return_its_escaped_unbound_alias(
+    tmp_path: Path,
+    rotated: bool,
+) -> None:
+    """Post-normalization filtering preserves the exact explicit-query identity."""
+
+    emitted = "sensor.literal~sha256:" + "b" * 64
+    assert len(emitted.encode("utf-8")) <= 128
+    data = tmp_path / "data"
+    data.mkdir()
+    archive = tmp_path / "archive"
+    normalized = _write_unbound_versions(data, emitted, (4.2,))
+    assert normalized != emitted
+    conn = sqlite3.connect(str(data / "data_2026-07-12.db"))
+    try:
+        changed = conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (emitted, 4.2)).rowcount
+        assert changed == 1, "the raw legacy alias mutation must reach exactly one row"
+        conn.commit()
+    finally:
+        conn.close()
+
+    read_root = data
+    if rotated:
+        import asyncio
+
+        from cryodaq.storage.cold_rotation import ColdRotationService
+
+        results = await asyncio.to_thread(
+            lambda: asyncio.run(
+                ColdRotationService(
+                    data_dir=data,
+                    archive_dir=archive,
+                    age_days=30,
+                    enabled=True,
+                ).run_once(now=TIMESTAMP + timedelta(days=40))
+            )
+        )
+        assert len(results) == 1 and results[0].rows == 1
+        read_root = tmp_path / "no-hot-data"
+        read_root.mkdir()
+    else:
+        archive.mkdir()
+        (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+
+    result = _query_bounded(read_root, archive, channels=(emitted,))
+
+    assert result.rows == (), "an explicit literal query must not return another escaped identity"
+
+
+@pytest.mark.parametrize("rotated", (False, True), ids=("hot-sqlite", "cold-parquet"))
+@pytest.mark.asyncio
+async def test_oversized_legacy_raw_alias_is_rejected_before_retention(
+    tmp_path: Path,
+    rotated: bool,
+) -> None:
+    """Neither hot nor cold discovery retains an alias outside the live grammar."""
+
+    data = tmp_path / "data"
+    data.mkdir()
+    archive = tmp_path / "archive"
+    owner = _live()
+    writer = SQLiteWriter(data, channel_catalog=owner)
+    admitted = tuple(owner.admit(reading) for reading in (_reading("sensor.main", 4.2), _reading("unknown", 4.3)))
+    try:
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    oversized = "x" * 1025
+    conn = sqlite3.connect(str(data / "data_2026-07-12.db"))
+    try:
+        changed = conn.execute("UPDATE readings SET channel = ? WHERE value = ?", (oversized, 4.3)).rowcount
+        assert changed == 1, "the invalid pre-contract alias mutation must reach exactly one row"
+        conn.commit()
+    finally:
+        conn.close()
+
+    read_root = data
+    if rotated:
+        import asyncio
+
+        from cryodaq.storage.cold_rotation import ColdRotationService
+
+        results = await asyncio.to_thread(
+            lambda: asyncio.run(
+                ColdRotationService(
+                    data_dir=data,
+                    archive_dir=archive,
+                    age_days=30,
+                    enabled=True,
+                ).run_once(now=TIMESTAMP + timedelta(days=40))
+            )
+        )
+        assert len(results) == 1 and results[0].rows == 2
+        read_root = tmp_path / "no-hot-data"
+        read_root.mkdir()
+    else:
+        archive.mkdir()
+        (archive / "index.json").write_text(json.dumps({"files": []}), encoding="utf-8")
+
+    result = _query_bounded(read_root, archive)
+
+    assert BoundedReadIssueCode.INVALID_ROW in {issue.code for issue in result.issues}
+    assert result.rows == (), "an invalid source is quarantined rather than retaining attacker-sized aliases"
+    assert result.complete is False
+
+
+def test_literal_reserved_channel_id_is_admitted_as_undescribed(tmp_path: Path) -> None:
+    """The persistence-only reserved entry cannot turn a live label into a mismatch."""
+
+    from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
+
+    owner = _live()
+    admitted = tuple(
+        owner.admit(reading) for reading in (_reading("sensor.main", 4.2), _reading(UNBOUND_CHANNEL_ID, 4.3))
+    )
+    assert admitted[1].descriptor == unbound_channel_descriptor()
+    assert admitted[1].reading.channel == UNBOUND_CHANNEL_ID
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=owner)
+    try:
+        assert writer._write_live_batch(admitted) == admitted
+    finally:
+        if writer._conn is not None:
+            writer._conn.close()
+            writer._conn = None
+        writer._executor.shutdown(wait=True)
+        writer._read_executor.shutdown(wait=True)
+
+    persisted = _rows(tmp_path)
+    assert [(channel, value) for channel, value, _ in persisted] == [
+        ("sensor.main", 4.2),
+        (UNBOUND_CHANNEL_ID, 4.3),
+    ]
+    assert persisted[1][2] == unbound_channel_descriptor().descriptor_hash
