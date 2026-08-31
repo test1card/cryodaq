@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import deque
 from dataclasses import asdict
 
 import numpy as np
@@ -401,6 +402,91 @@ def test_buffer_window_sliding() -> None:
     assert diag.noise_std < 1e-9
 
 
+@pytest.mark.parametrize(
+    ("window_override", "expected_points"),
+    [
+        pytest.param({}, 301, id="default-drift-correlation-window"),
+        pytest.param({"noise_window_s": 720}, 361, id="noise-window-uniquely-largest"),
+        pytest.param({"drift_window_s": 720}, 361, id="drift-window-uniquely-largest"),
+        pytest.param({"correlation_window_s": 720}, 361, id="correlation-window-uniquely-largest"),
+        pytest.param({"outlier_window_s": 720}, 361, id="outlier-window-uniquely-largest"),
+    ],
+)
+def test_shipped_cadence_retention_matches_untrimmed_diagnostics(
+    window_override: dict[str, float],
+    expected_points: int,
+) -> None:
+    """Two hours at the shipped cadence retain exactly the longest configured window."""
+    channels = [f"T{index}" for index in range(1, 25)]
+    config = {"correlation_groups": {"all": channels}, **window_override}
+    bounded = SensorDiagnosticsEngine(config=config)
+    untrimmed = SensorDiagnosticsEngine(config=config)
+
+    for sample_index in range(3_600):
+        timestamp = sample_index * 2.0
+        for channel_index, channel_id in enumerate(channels):
+            value = 4.2 + channel_index * 0.001 + ((sample_index % 17) - 8) * 1e-5
+            bounded.push(channel_id, timestamp, value)
+            baseline = untrimmed._buffers.setdefault(channel_id, deque(maxlen=untrimmed._maxlen))
+            baseline.append((timestamp, value))
+
+    assert sum(len(buffer) for buffer in bounded._buffers.values()) == len(channels) * expected_points
+    assert {len(buffer) for buffer in bounded._buffers.values()} == {expected_points}
+    assert sum(len(buffer) for buffer in untrimmed._buffers.values()) == 86_400
+
+    bounded.update()
+    untrimmed.update()
+    bounded_diagnostics = {
+        channel_id: asdict(diagnostic) for channel_id, diagnostic in bounded.get_diagnostics().items()
+    }
+    untrimmed_diagnostics = {
+        channel_id: asdict(diagnostic) for channel_id, diagnostic in untrimmed.get_diagnostics().items()
+    }
+    for diagnostics in (bounded_diagnostics, untrimmed_diagnostics):
+        for diagnostic in diagnostics.values():
+            diagnostic.pop("updated_at")
+
+    assert bounded_diagnostics == untrimmed_diagnostics
+    assert asdict(bounded.get_summary()) == asdict(untrimmed.get_summary())
+
+
+def test_non_monotonic_timestamps_remain_bounded_by_maxlen() -> None:
+    """A regressing clock falls back to the deque cap, then recovers."""
+    engine = SensorDiagnosticsEngine(
+        config={
+            "noise_window_s": 1,
+            "drift_window_s": 1,
+            "corr_window_s": 1,
+            "outlier_window_s": 1,
+        }
+    )
+
+    for timestamp in range(600, 0, -1):
+        engine.push("T1", float(timestamp), 4.2)
+
+    assert len(engine._buffers["T1"]) == engine._maxlen == 500
+    engine.push("T1", 1_000.0, 4.2)
+    assert list(engine._buffers["T1"]) == [(1_000.0, 4.2)]
+
+
+def test_maxlen_cannot_undercut_uniquely_largest_analysis_window() -> None:
+    engine = SensorDiagnosticsEngine(
+        config={
+            "noise_window_s": 720,
+            "drift_window_s": 1,
+            "correlation_window_s": 1,
+            "outlier_window_s": 1,
+        }
+    )
+
+    for sample_index in range(6_501):
+        engine.push("T1", sample_index / 10, 4.2)
+
+    assert engine._retention_window_s == 720
+    assert engine._maxlen == 7_400
+    assert len(engine._buffers["T1"]) == 6_501
+
+
 # ---------------------------------------------------------------------------
 # 20. test_serialization — asdict → JSON-compatible
 # ---------------------------------------------------------------------------
@@ -461,11 +547,33 @@ def test_engine_config_loading() -> None:
     engine = SensorDiagnosticsEngine(config=config)
     assert engine.noise_window_s == 120
     assert engine.drift_window_s == 600
+    assert engine.corr_window_s == 600
     assert engine.drift_threshold == 0.1
     assert engine.corr_min == 0.8
     assert "T1" in engine._channel_to_group
     assert engine._channel_to_group["T1"] == "shield"
     assert engine._channel_to_group["T9"] == "cold"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param({"correlation_window_s": 321}, 321, id="shipped-key"),
+        pytest.param({"corr_window_s": 222}, 222, id="legacy-alias"),
+        pytest.param(
+            {"correlation_window_s": 321, "corr_window_s": 222},
+            321,
+            id="shipped-key-precedes-legacy-alias",
+        ),
+    ],
+)
+def test_correlation_window_key_and_legacy_alias_precedence(
+    config: dict[str, float],
+    expected: float,
+) -> None:
+    engine = SensorDiagnosticsEngine(config=config)
+
+    assert engine.corr_window_s == expected
 
 
 def test_engine_feed_and_command_response() -> None:
