@@ -85,6 +85,9 @@ def main_assistant() -> None:
 
     multiprocessing.freeze_support()
 
+    from cryodaq.process_lifetime import bind_child_lifetime_from_environment
+
+    bind_child_lifetime_from_environment()
     from cryodaq.agents.assistant_bootstrap import main
 
     main()
@@ -159,6 +162,9 @@ def _dispatch() -> None:
 
         main()
     elif mode == "assistant":
+        from cryodaq.process_lifetime import bind_child_lifetime_from_environment
+
+        bind_child_lifetime_from_environment()
         from cryodaq.agents.assistant_bootstrap import main
 
         main()

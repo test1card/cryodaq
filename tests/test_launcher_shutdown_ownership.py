@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
+import ctypes
 import errno
+import importlib
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -33,6 +37,21 @@ def test_resume_windows_process_targets_exact_suspended_child(
 
     monkeypatch.setattr(module, "windows_job_objects_available", lambda: True)
     monkeypatch.setattr(module, "_load_windows_ntdll", lambda: native)
+    real_import = builtins.__import__
+    real_import_module = importlib.import_module
+
+    def reject_psutil_import(name: str, *args: object, **kwargs: object):
+        if name == "psutil" or name.startswith("psutil."):
+            raise AssertionError("production resume path imported optional psutil")
+        return real_import(name, *args, **kwargs)
+
+    def reject_psutil_import_module(name: str, package: str | None = None):
+        if name == "psutil" or name.startswith("psutil."):
+            raise AssertionError("production resume path imported optional psutil")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(builtins, "__import__", reject_psutil_import)
+    monkeypatch.setattr(importlib, "import_module", reject_psutil_import_module)
 
     module.resume_windows_process(SimpleNamespace(pid=7315, _handle=9315))  # type: ignore[arg-type]
 
@@ -41,10 +60,53 @@ def test_resume_windows_process_targets_exact_suspended_child(
     assert native.NtResumeProcess.restype is not None
 
 
-def test_windows_resume_path_has_no_dev_only_psutil_import() -> None:
+def test_windows_job_close_failure_retains_exact_handle_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.process_lifetime as module
 
-    assert "psutil" not in module.resume_windows_process.__code__.co_names
+    class Kernel32:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def CloseHandle(self, handle: int) -> bool:
+            self.calls.append(handle)
+            return False
+
+    job = module.WindowsKillOnCloseJob.__new__(module.WindowsKillOnCloseJob)
+    job._kernel32 = Kernel32()
+    job._handle = 9182
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+
+    with pytest.raises(OSError, match="CloseHandle failed"):
+        job.close()
+
+    assert job._handle == 9182
+    assert job._kernel32.calls == [9182]
+
+
+def test_development_assistant_binds_parent_before_importing_yaml(tmp_path: Path) -> None:
+    marker = tmp_path / "yaml-imported"
+    (tmp_path / "yaml.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported', encoding='ascii')\n",
+        encoding="utf-8",
+    )
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    env = os.environ.copy()
+    env.update(
+        {
+            "CRYODAQ_PARENT_PID": "2147483647",
+            "PYTHONPATH": os.pathsep.join((str(tmp_path), str(source_root))),
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", "import cryodaq.agents.assistant_bootstrap"],
+        env=env,
+        check=False,
+        timeout=10.0,
+    )
+
+    assert completed.returncode == 0
+    assert not marker.exists(), "assistant imported YAML before validating its parent grant"
 
 
 def test_windows_assistant_retains_kill_on_close_job_until_child_exit(

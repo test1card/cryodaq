@@ -118,14 +118,27 @@ def _set_subreaper(enabled: bool) -> bool:
 
 
 def _read_line(stream, *, timeout: float) -> str:
-    with selectors.DefaultSelector() as selector:
-        selector.register(stream, selectors.EVENT_READ)
-        if not selector.select(timeout):
-            raise AssertionError("launcher harness did not publish its process identities")
-    line = stream.readline()
-    if not line:
-        raise AssertionError("launcher harness exited before publishing its process identities")
-    return line.decode("ascii", errors="strict").strip()
+    descriptor = stream.fileno()
+    was_blocking = os.get_blocking(descriptor)
+    deadline = time.monotonic() + timeout
+    captured = bytearray()
+    try:
+        os.set_blocking(descriptor, False)
+        while time.monotonic() < deadline:
+            try:
+                byte = os.read(descriptor, 1)
+            except BlockingIOError:
+                byte = None
+            if byte == b"":
+                raise AssertionError("launcher harness exited before publishing its process identities")
+            if byte:
+                captured.extend(byte)
+                if byte == b"\n":
+                    return bytes(captured[:-1]).decode("ascii", errors="strict")
+            time.sleep(0.01)
+    finally:
+        os.set_blocking(descriptor, was_blocking)
+    raise AssertionError("launcher harness did not publish its process identities")
 
 
 def _read_line_from_windows_pipe(stream, *, timeout: float) -> str:
@@ -265,6 +278,24 @@ def _write_launcher_harness(path: Path) -> None:
                 _assistant_restart_pending=False,
                 _soak_artifact_capability=None,
             )
+            assignment_pid_path = os.environ.get("CRYODAQ_HARNESS_ASSIGNMENT_PID_PATH")
+            assignment_release_path = os.environ.get("CRYODAQ_HARNESS_ASSIGNMENT_RELEASE_PATH")
+            if assignment_pid_path and assignment_release_path:
+                import cryodaq.launcher as launcher_module
+
+                os.environ["CRYODAQ_HARNESS_LAUNCHER_PID"] = str(os.getpid())
+                create_real_job = launcher_module.create_windows_kill_on_close_job
+
+                def delayed_create_job(process):
+                    pending_pid_path = assignment_pid_path + ".pending"
+                    with open(pending_pid_path, "w", encoding="ascii") as stream:
+                        stream.write(str(process.pid))
+                    os.replace(pending_pid_path, assignment_pid_path)
+                    while not os.path.exists(assignment_release_path):
+                        time.sleep(0.01)
+                    return create_real_job(process)
+
+                launcher_module.create_windows_kill_on_close_job = delayed_create_job
             LauncherWindow._start_assistant(host)
             engine = None
             if mode == "engine-death":
@@ -437,12 +468,12 @@ def _exercise_launcher_parent_death(tmp_path: Path, mode: str) -> tuple[bool, bo
             except BaseException as exc:
                 cleanup_errors.append(exc)
         if parent is not None:
-            if parent.stdin is not None:
-                parent.stdin.close()
-            if parent.stdout is not None:
-                parent.stdout.close()
-            if parent.stderr is not None:
-                parent.stderr.close()
+            for stream in (parent.stdin, parent.stdout, parent.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
         if assistant_pid is not None and parent_settled:
             try:
                 _reap_adopted_child(assistant_pid)
@@ -509,6 +540,27 @@ def test_real_windows_job_kills_assistant_when_launcher_dies(tmp_path: Path) -> 
             "QT_QPA_PLATFORM": "offscreen",
         }
     )
+    assignment_pid_path = tmp_path / "assignment.pid"
+    assignment_release_path = tmp_path / "assignment.release"
+    execution_marker_path = tmp_path / "assistant-executed"
+    (tmp_path / "sitecustomize.py").write_text(
+        textwrap.dedent(
+            """
+            import os
+            from pathlib import Path
+
+            launcher_pid = os.environ.get("CRYODAQ_HARNESS_LAUNCHER_PID")
+            marker = os.environ.get("CRYODAQ_HARNESS_EXECUTION_MARKER_PATH")
+            if launcher_pid and marker and str(os.getpid()) != launcher_pid:
+                Path(marker).write_text("executed", encoding="ascii")
+            """
+        ),
+        encoding="utf-8",
+    )
+    env["CRYODAQ_HARNESS_ASSIGNMENT_PID_PATH"] = str(assignment_pid_path)
+    env["CRYODAQ_HARNESS_ASSIGNMENT_RELEASE_PATH"] = str(assignment_release_path)
+    env["CRYODAQ_HARNESS_EXECUTION_MARKER_PATH"] = str(execution_marker_path)
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(_SRC)))
     parent: subprocess.Popen[bytes] | None = None
     kernel32 = None
     assistant_handle = None
@@ -525,11 +577,29 @@ def test_real_windows_job_kills_assistant_when_launcher_dies(tmp_path: Path) -> 
         assert parent.stdout is not None
         parent.stdin.write(b"START\n")
         parent.stdin.flush()
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not assignment_pid_path.is_file():
+            if parent.poll() is not None:
+                raise AssertionError("launcher harness exited before delayed Job assignment")
+            time.sleep(0.01)
+        assert assignment_pid_path.is_file(), "launcher never reached delayed Job assignment"
+        assistant_pid = int(assignment_pid_path.read_text(encoding="ascii"))
+        kernel32, assistant_handle = _open_windows_process_identity(assistant_pid)
+        execution_deadline = time.monotonic() + 2.0
+        while time.monotonic() < execution_deadline and not execution_marker_path.exists():
+            if _wait_windows_process(kernel32, assistant_handle, timeout=0):
+                break
+            time.sleep(0.01)
+        assert not execution_marker_path.exists(), "assistant executed before Job assignment"
+        assert not _wait_windows_process(kernel32, assistant_handle, timeout=0)
+        assignment_release_path.write_text("release\n", encoding="ascii")
         report = json.loads(_read_line_from_windows_pipe(parent.stdout, timeout=15.0))
         assert report["launcher_pid"] == parent.pid
-        assistant_pid = report["assistant_pid"]
-        assert type(assistant_pid) is int and assistant_pid > 1
-        kernel32, assistant_handle = _open_windows_process_identity(assistant_pid)
+        assert report["assistant_pid"] == assistant_pid
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not execution_marker_path.is_file():
+            time.sleep(0.01)
+        assert execution_marker_path.is_file(), "assistant did not execute after Job assignment and resume"
 
         readiness_path = runtime_root / "data"
         deadline = time.monotonic() + 15.0
@@ -547,25 +617,41 @@ def test_real_windows_job_kills_assistant_when_launcher_dies(tmp_path: Path) -> 
             "real assistant survived closure of the launcher's production Job handle"
         )
     finally:
+        cleanup_errors: list[BaseException] = []
         if parent is not None and not parent_settled:
-            parent.kill()
-            parent.wait(timeout=10.0)
+            try:
+                parent.kill()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            try:
+                parent.wait(timeout=10.0)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         if kernel32 is not None and assistant_handle is not None:
-            if not _wait_windows_process(kernel32, assistant_handle, timeout=0):
-                if not kernel32.TerminateProcess(assistant_handle, 91):
+            try:
+                if not _wait_windows_process(kernel32, assistant_handle, timeout=0):
+                    if not kernel32.TerminateProcess(assistant_handle, 91):
+                        code = ctypes.get_last_error()
+                        raise OSError(code, "TerminateProcess failed during assistant cleanup")
+                    if not _wait_windows_process(kernel32, assistant_handle, timeout=10.0):
+                        raise AssertionError("assistant cleanup did not reach exact process exit")
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            try:
+                if not kernel32.CloseHandle(assistant_handle):
                     code = ctypes.get_last_error()
-                    raise OSError(code, "TerminateProcess failed during assistant cleanup")
-                assert _wait_windows_process(kernel32, assistant_handle, timeout=10.0)
-            if not kernel32.CloseHandle(assistant_handle):
-                code = ctypes.get_last_error()
-                raise OSError(code, "CloseHandle failed for assistant process identity")
+                    raise OSError(code, "CloseHandle failed for assistant process identity")
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         if parent is not None:
-            if parent.stdin is not None:
-                parent.stdin.close()
-            if parent.stdout is not None:
-                parent.stdout.close()
-            if parent.stderr is not None:
-                parent.stderr.close()
+            for stream in (parent.stdin, parent.stdout, parent.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
 
 def test_early_exit_diagnostic_is_bounded_while_writer_remains_open() -> None:
@@ -578,6 +664,91 @@ def test_early_exit_diagnostic_is_bounded_while_writer_remains_open() -> None:
     finally:
         stream.close()
         os.close(write_fd)
+
+
+def test_identity_line_read_is_bounded_on_partial_frame_with_live_writer() -> None:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    result: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
+
+    def read() -> None:
+        try:
+            result.put(_read_line(stream, timeout=0.05))
+        except BaseException as exc:
+            result.put(exc)
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        os.write(write_fd, b'{"assistant_pid":')
+        reader.start()
+        reader.join(timeout=0.5)
+        assert not reader.is_alive(), "partial identity frame exceeded its deadline"
+        outcome = result.get_nowait()
+        assert isinstance(outcome, AssertionError)
+        assert "did not publish" in str(outcome)
+    finally:
+        os.close(write_fd)
+        reader.join(timeout=1.0)
+        stream.close()
+
+
+def test_linux_harness_attempts_all_stream_closes_after_first_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Stream:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def close(self) -> None:
+            events.append(f"close:{self.name}")
+            if self.fail:
+                raise OSError(errno.EIO, "injected stream close failure")
+
+    class Parent:
+        pid = 101
+        stdin = Stream("stdin", fail=True)
+        stdout = Stream("stdout")
+        stderr = Stream("stderr")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout > 0
+            events.append("wait")
+            return 0
+
+    monkeypatch.setattr(sys.modules[__name__], "_preflight_kernel_identity", lambda: None)
+
+    def set_subreaper(enabled: bool) -> bool:
+        events.append(f"subreaper:{enabled}")
+        return False
+
+    monkeypatch.setattr(sys.modules[__name__], "_set_subreaper", set_subreaper)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: Parent())
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_pidfd_open",
+        lambda _pid: (_ for _ in ()).throw(OSError(errno.EMFILE, "injected pidfd failure")),
+    )
+
+    with pytest.raises(AssertionError, match="cleanup failed") as caught:
+        _exercise_launcher_parent_death(tmp_path, "launcher-kill")
+
+    assert isinstance(caught.value.__cause__, OSError)
+    assert events == [
+        "subreaper:True",
+        "kill",
+        "wait",
+        "close:stdin",
+        "close:stdout",
+        "close:stderr",
+        "subreaper:False",
+    ]
 
 
 def test_parent_creation_failure_restores_subreaper(

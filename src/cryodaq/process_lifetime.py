@@ -147,7 +147,13 @@ class WindowsKillOnCloseJob:
 
     def close(self) -> None:
         if self._handle:
-            self._kernel32.CloseHandle(self._handle)
+            handle = self._handle
+            if not self._kernel32.CloseHandle(handle):
+                # The Job remains the only kill-on-close owner. Retain the
+                # exact handle so launcher shutdown can retry settlement.
+                import ctypes
+
+                raise OSError(ctypes.get_last_error(), "CloseHandle failed for kill-on-close Job")
             self._handle = None
 
 
