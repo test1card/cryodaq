@@ -964,6 +964,73 @@ def test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_gu
         assert pair.get("platform") == runtime_guard.get("platform")
 
 
+def test_assistant_unknown_outcome_runtime_registers_falsey_recipient_guard() -> None:
+    payload = validate_registry(_registry())
+    runtime = next(
+        record for record in payload["records"] if record["id"] == "ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340"
+    )
+
+    guards = {(guard["node"], guard["ci_partition"]) for guard in runtime["guards"]}
+    assert (
+        "tests/agents/assistant/test_output_router.py::test_falsey_telegram_recipient_outcomes_are_reported_as_failed",
+        "agents",
+    ) in guards
+
+
+@pytest.mark.parametrize(
+    ("guard", "pair_id"),
+    [
+        (
+            "tests/agents/assistant/test_diagnostic.py::"
+            "test_diagnostic_reports_successful_insufficient_history_as_no_data",
+            "ASSISTANT-DIAGNOSTIC-INSUFFICIENT-HISTORY-FALSE-GREEN-345",
+        ),
+        (
+            "tests/agents/assistant/test_output_router.py::"
+            "test_untyped_telegram_recipient_outcomes_are_not_reported_as_delivered",
+            "ASSISTANT-UNTYPED-RECIPIENT-OUTCOME-FALSE-GREEN-346",
+        ),
+        (
+            "tests/agents/assistant/test_output_router.py::"
+            "test_falsey_telegram_recipient_outcomes_are_reported_as_failed",
+            "ASSISTANT-FALSEY-RECIPIENT-OUTCOME-FALSE-GREEN-347",
+        ),
+    ],
+    ids=["diagnostic_insufficient", "untyped_recipient", "falsey_recipient"],
+)
+def test_assistant_unknown_outcome_branch_guards_have_separate_false_green_pairs(guard: str, pair_id: str) -> None:
+    payload = validate_registry(_registry())
+    pairs = {pair["guard"]: pair for pair in payload["false_green_pairs"]}
+    assert pairs[guard]["id"] == pair_id
+    assert pairs[guard]["runtime_prevention_id"] == "ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340"
+    assert pairs[guard]["ci_partition"] == "agents"
+
+
+def test_assistant_unknown_outcome_false_green_pair_baseline_is_current() -> None:
+    payload = validate_registry(_registry())
+    pairs = {pair["id"]: pair for pair in payload["false_green_pairs"]}
+    baseline = json.loads((ROOT / "governance" / "agent_preventions_baseline.json").read_text(encoding="utf-8"))
+    assert baseline["false_green_pair_count_floor"] == len(payload["false_green_pairs"])
+    for pair_id in (
+        "ASSISTANT-DIAGNOSTIC-INSUFFICIENT-HISTORY-FALSE-GREEN-345",
+        "ASSISTANT-UNTYPED-RECIPIENT-OUTCOME-FALSE-GREEN-346",
+        "ASSISTANT-FALSEY-RECIPIENT-OUTCOME-FALSE-GREEN-347",
+    ):
+        assert baseline["digests"][pair_id] == closure_semantics_sha256(pairs[pair_id])
+
+
+def test_assistant_unknown_outcome_prevention_covers_pressure_reader() -> None:
+    payload = validate_registry(_registry())
+    runtime = next(
+        record for record in payload["records"] if record["id"] == "ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340"
+    )
+
+    assert "ContextBuilder._read_pressure_trend" in runtime["applies_to"]
+    assert "failed pressure-trend read" in runtime["consequence"]
+    assert "failed pressure-trend read" in runtime["invariant"]
+    assert "authoritatively insufficient pressure trend" in runtime["invariant"]
+
+
 def test_registry_guard_partitions_match_candidate_runner_selection() -> None:
     payload = validate_registry(_registry())
     assignments = [(pair["guard"], pair["ci_partition"]) for pair in payload["false_green_pairs"]]
