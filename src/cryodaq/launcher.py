@@ -407,6 +407,14 @@ class _LauncherConstructionHold(RuntimeError):
         self.phase = phase
 
 
+class _EngineStartCancelledForShutdown(RuntimeError):
+    """Stop a pre-spawn start transaction after the shutdown latch wins."""
+
+
+class _BridgeStartCancelledForShutdown(RuntimeError):
+    """Stop a bridge start transaction after the shutdown latch wins."""
+
+
 @dataclass(slots=True)
 class _PeriodicHealthObservation:
     """Local observation clock for the domain-wide H3 health heartbeat."""
@@ -2592,6 +2600,20 @@ class LauncherWindow(QMainWindow):
         LauncherWindow._do_shutdown(self)
         return True
 
+    def _spawn_engine_process(self, command: list[str], **kwargs: Any) -> subprocess.Popen:
+        """Cross the engine spawn boundary only while runtime authority is open."""
+
+        if not LauncherWindow._runtime_callback_is_current(self):
+            raise _EngineStartCancelledForShutdown("launcher shutdown won before engine spawn")
+        return subprocess.Popen(command, **kwargs)
+
+    def _start_bridge_if_runtime_open(self, bridge: ZmqBridge) -> None:
+        """Cross a bridge process start boundary only with live runtime authority."""
+
+        if not LauncherWindow._runtime_callback_is_current(self):
+            raise _BridgeStartCancelledForShutdown("launcher shutdown won before bridge start")
+        bridge.start()
+
     def _revoke_runtime_callbacks(self) -> None:
         if getattr(self, "_runtime_callbacks_open", True):
             self._runtime_callback_epoch = getattr(self, "_runtime_callback_epoch", 0) + 1
@@ -3004,7 +3026,8 @@ class LauncherWindow(QMainWindow):
                     True,
                     label="child readiness writer for engine spawn",
                 )
-            process = subprocess.Popen(
+            process = LauncherWindow._spawn_engine_process(
+                self,
                 cmd,
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -5924,6 +5947,9 @@ class LauncherWindow(QMainWindow):
         self._engine_external = False
         try:
             self._start_engine()
+        except _EngineStartCancelledForShutdown:
+            LauncherWindow._finish_latched_shutdown(self)
+            return
         except Exception as exc:
             LauncherWindow._recover_failed_engine_restart(
                 self,
@@ -5937,11 +5963,14 @@ class LauncherWindow(QMainWindow):
         if LauncherWindow._finish_latched_shutdown(self):
             return
         try:
-            self._bridge.start()
+            LauncherWindow._start_bridge_if_runtime_open(self, self._bridge)
             if LauncherWindow._finish_latched_shutdown(self):
                 return
             LauncherWindow._announce_soak_bridge_turnover(self)
             LauncherWindow._publish_replay_ui_authority(self)
+        except _BridgeStartCancelledForShutdown:
+            LauncherWindow._finish_latched_shutdown(self)
+            return
         except Exception as exc:
             LauncherWindow._recover_failed_engine_restart(
                 self,
@@ -6894,6 +6923,37 @@ class LauncherWindow(QMainWindow):
             restart_count=self._bridge.restart_count(),
         )
 
+    def _start_watchdog_shutdown_standby(self) -> ZmqBridge:
+        """Start an unregistered bridge that preserves the safe shutdown lane."""
+
+        factory = getattr(self, "_watchdog_shutdown_bridge_factory", ZmqBridge)
+        standby = factory()
+        try:
+            LauncherWindow._start_bridge_if_runtime_open(self, standby)
+            alive = standby.is_alive()
+            healthy = standby.is_healthy()
+            if type(alive) is not bool or not alive or type(healthy) is not bool or not healthy:
+                raise RuntimeError("watchdog shutdown standby failed exact liveness validation")
+        except BaseException:
+            try:
+                standby.close()
+            except BaseException:
+                pass
+            raise
+        return standby
+
+    def _promote_watchdog_shutdown_standby(
+        self,
+        *,
+        retired_bridge: ZmqBridge,
+        standby_bridge: ZmqBridge,
+    ) -> None:
+        """Transfer shutdown ownership without exposing a retired command lane."""
+
+        self._watchdog_retired_bridge = retired_bridge
+        self._bridge = standby_bridge
+        set_bridge(standby_bridge)
+
     def _replace_bridge_from_watchdog(self, *, reason: str) -> bool:
         """Replace one exact bridge generation or fail visible and closed."""
 
@@ -6923,11 +6983,27 @@ class LauncherWindow(QMainWindow):
             )
             return False
 
+        try:
+            shutdown_standby = LauncherWindow._start_watchdog_shutdown_standby(self)
+        except Exception as exc:
+            LauncherWindow._latch_bridge_watchdog_hold(self, phase="shutdown-standby", failure=exc)
+            return False
+        if not LauncherWindow._runtime_callback_is_current(self):
+            try:
+                shutdown_standby.close()
+            finally:
+                LauncherWindow._finish_latched_shutdown(self)
+            return False
+
         replacement_generation = current_generation + 1
         self._bridge_watchdog_generation = replacement_generation
         try:
             self._invalidate_descriptor_transport()
         except Exception as exc:
+            try:
+                shutdown_standby.close()
+            except Exception:
+                self._watchdog_retired_bridge = shutdown_standby
             LauncherWindow._latch_bridge_watchdog_hold(self, phase="authority-invalidation", failure=exc)
             return False
         try:
@@ -6936,15 +7012,30 @@ class LauncherWindow(QMainWindow):
             if type(retired_alive) is not bool or retired_alive:
                 raise RuntimeError("retired bridge remained alive after shutdown")
         except Exception as exc:
+            try:
+                shutdown_standby.close()
+            except Exception:
+                self._watchdog_retired_bridge = shutdown_standby
             LauncherWindow._latch_bridge_watchdog_hold(self, phase="old-settlement", failure=exc)
             return False
-        if LauncherWindow._finish_latched_shutdown(self):
+        if not LauncherWindow._runtime_callback_is_current(self):
+            LauncherWindow._promote_watchdog_shutdown_standby(
+                self,
+                retired_bridge=bridge,
+                standby_bridge=shutdown_standby,
+            )
+            LauncherWindow._finish_latched_shutdown(self)
             return False
 
         start_error: Exception | None = None
         try:
-            bridge.start()
-            if LauncherWindow._finish_latched_shutdown(self):
+            LauncherWindow._start_bridge_if_runtime_open(self, bridge)
+            if not LauncherWindow._runtime_callback_is_current(self):
+                try:
+                    shutdown_standby.close()
+                except Exception:
+                    self._watchdog_retired_bridge = shutdown_standby
+                LauncherWindow._finish_latched_shutdown(self)
                 return False
             replacement_alive = bridge.is_alive()
             replacement_healthy = bridge.is_healthy()
@@ -6970,6 +7061,14 @@ class LauncherWindow(QMainWindow):
             start_error = exc
 
         if start_error is not None:
+            if not LauncherWindow._runtime_callback_is_current(self):
+                LauncherWindow._promote_watchdog_shutdown_standby(
+                    self,
+                    retired_bridge=bridge,
+                    standby_bridge=shutdown_standby,
+                )
+                LauncherWindow._finish_latched_shutdown(self)
+                return False
             cleanup_error: Exception | None = None
             try:
                 bridge.shutdown()
@@ -6979,10 +7078,24 @@ class LauncherWindow(QMainWindow):
             except Exception as exc:
                 cleanup_error = exc
             if cleanup_error is not None:
+                try:
+                    shutdown_standby.close()
+                except Exception:
+                    self._watchdog_retired_bridge = shutdown_standby
                 LauncherWindow._latch_bridge_watchdog_hold(
                     self,
                     phase="replacement-cleanup",
                     failure=cleanup_error,
+                )
+                return False
+            try:
+                shutdown_standby.close()
+            except Exception as exc:
+                self._watchdog_retired_bridge = shutdown_standby
+                LauncherWindow._latch_bridge_watchdog_hold(
+                    self,
+                    phase="shutdown-standby-cleanup",
+                    failure=exc,
                 )
                 return False
             self._bridge_restart_fault = True
@@ -6993,6 +7106,17 @@ class LauncherWindow(QMainWindow):
             )
             self._show_engine_down_banner(
                 "ZMQ bridge replacement failed after exact cleanup; bounded watchdog retry remains pending."
+            )
+            return False
+
+        try:
+            shutdown_standby.close()
+        except Exception as exc:
+            self._watchdog_retired_bridge = shutdown_standby
+            LauncherWindow._latch_bridge_watchdog_hold(
+                self,
+                phase="shutdown-standby-cleanup",
+                failure=exc,
             )
             return False
 
@@ -7578,6 +7702,13 @@ class LauncherWindow(QMainWindow):
             attempt("assistant", self._stop_assistant)
             attempt("engine", self._stop_engine)
             if "engine" in self._shutdown_settled:
+                retired_watchdog_bridge = getattr(self, "_watchdog_retired_bridge", None)
+                if retired_watchdog_bridge is None:
+                    self._shutdown_settled.add("watchdog_retired_bridge_terminal")
+                else:
+                    attempt("watchdog_retired_bridge_terminal", retired_watchdog_bridge.close)
+                    if "watchdog_retired_bridge_terminal" in self._shutdown_settled:
+                        self._watchdog_retired_bridge = None
                 bridge = getattr(self, "_bridge", None)
                 if bridge is None:
                     self._shutdown_settled.update({"bridge_shutdown", "bridge_terminal", "bridge_registration"})
@@ -8189,12 +8320,15 @@ class LauncherWindow(QMainWindow):
                 if LauncherWindow._finish_latched_shutdown(self):
                     return
                 phase = "bridge-attach"
-                self._bridge.start()
+                LauncherWindow._start_bridge_if_runtime_open(self, self._bridge)
                 if LauncherWindow._finish_latched_shutdown(self):
                     return
                 LauncherWindow._announce_soak_bridge_turnover(self)
                 phase = "ui-authority-bind"
                 LauncherWindow._publish_replay_ui_authority(self)
+            except (_EngineStartCancelledForShutdown, _BridgeStartCancelledForShutdown):
+                LauncherWindow._finish_latched_shutdown(self)
+                return
             except Exception as restart_error:
                 LauncherWindow._recover_failed_engine_restart(
                     self,

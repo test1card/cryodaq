@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from types import MethodType, SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -334,15 +334,25 @@ def test_sigterm_latched_mid_poll_blocks_bridge_watchdog_replacement(
 
 
 def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() -> None:
-    """A signal landing after entry cannot resurrect the retired bridge."""
+    """A signal after retirement keeps a real verified-OFF command channel."""
 
     host: SimpleNamespace
+
+    class _EngineProcess:
+        def __init__(self) -> None:
+            self.alive = True
+
+        def poll(self) -> int | None:
+            return None if self.alive else 0
+
+    process = _EngineProcess()
 
     class _SignalInjectingBridge:
         def __init__(self) -> None:
             self.running = True
             self.shutdown_calls = 0
             self.start_calls = 0
+            self.close_calls = 0
 
         def restart_count(self) -> int:
             return self.start_calls + 1
@@ -365,25 +375,86 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
             self.start_calls += 1
             self.running = True
 
+        def close(self) -> None:
+            self.close_calls += 1
+            assert self.running is False
+
+    class _ShutdownStandby:
+        def __init__(self) -> None:
+            self.running = False
+            self.start_calls = 0
+            self.shutdown_calls = 0
+            self.close_calls = 0
+            self.command_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+            self.running = True
+
+        def is_alive(self) -> bool:
+            return self.running
+
+        def is_healthy(self) -> bool:
+            return self.running
+
+        def send_command(self, command: dict[str, str]) -> dict[str, object]:
+            assert self.running is True
+            self.command_calls += 1
+            process.alive = False
+            return {
+                "ok": True,
+                "schema": "cryodaq.engine_shutdown.v2",
+                "engine_instance_id": command["engine_instance_id"],
+                "request_id": command["request_id"],
+                "off_evidence": {
+                    "off_tier": "verified_off",
+                    "channel_off_results": {
+                        "smua": "device_reported_off",
+                        "smub": "device_reported_off",
+                    },
+                    "verified_off": True,
+                },
+                "teardown_requested": True,
+                "delivery_state": "dispatched",
+                "commit_state": "committed",
+                "proto": 2,
+            }
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self.running = False
+
+        def close(self) -> None:
+            self.close_calls += 1
+            assert self.running is False
+
     bridge = _SignalInjectingBridge()
-    host = SimpleNamespace(
-        _shutdown_requested=False,
-        _runtime_callbacks_open=True,
-        _runtime_callback_epoch=1,
-        _restart_pending=False,
-        _bridge=bridge,
-        _bridge_restart_hold=False,
-        _bridge_restart_fault=False,
-        _bridge_watchdog_generation=0,
-        _invalidate_descriptor_transport=MagicMock(),
-        _soak_bridge_handshake=None,
-        _replay_source=None,
-    )
+    standby = _ShutdownStandby()
+    host = _host(bridge=bridge)
+    host._restart_pending = False
+    host._bridge_restart_hold = False
+    host._bridge_restart_fault = False
+    host._bridge_watchdog_generation = 0
+    host._watchdog_shutdown_bridge_factory = lambda: standby
+    host._engine_proc = process
+    host._engine_external = False
+    host._replay_source = None
+    host._engine_instance_id = "a" * 32
+    host._engine_shutdown_capability = "b" * 64
+    host._engine_shutdown_request_id = None
+    host._engine_shutdown_transport_identity = None
+    host._engine_shutdown_receipt = None
+    host._engine_unsettled_incarnation = None
+    host._engine_shutdown_worker = None
+    host._engine_shutdown_wait_deadline = None
+    host._close_engine_stderr_stream = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
 
     with (
-        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+        patch("cryodaq.launcher.settle_registered_gui_command_workers", return_value=True),
         patch.object(LauncherWindow, "_announce_soak_bridge_turnover"),
         patch.object(LauncherWindow, "_publish_replay_ui_authority"),
+        patch("cryodaq.launcher.set_bridge") as register_bridge,
     ):
         replaced = LauncherWindow._replace_bridge_from_watchdog(host, reason="heartbeat")
 
@@ -392,7 +463,27 @@ def test_shutdown_latched_during_watchdog_retirement_blocks_replacement_start() 
     assert bridge.shutdown_calls == 1
     assert bridge.running is False
     assert bridge.start_calls == 0
-    finish_shutdown.assert_called_once_with(host)
+    assert bridge.close_calls == 1
+    assert standby.start_calls == 1
+    assert standby.command_calls == 1
+    assert standby.shutdown_calls == 1
+    assert standby.close_calls == 1
+    assert process.alive is False
+    assert host._engine_proc is None
+    assert host._bridge is None
+    assert register_bridge.call_args_list == [call(standby), call(None)]
+
+
+def test_shutdown_settles_the_retired_watchdog_bridge_after_engine_stop() -> None:
+    host = _host()
+    retired_bridge = MagicMock()
+    host._watchdog_retired_bridge = retired_bridge
+
+    assert LauncherWindow._do_shutdown(host) is True
+
+    retired_bridge.close.assert_called_once_with()
+    assert host._watchdog_retired_bridge is None
+    assert host.events.index("engine.stop") < host.events.index("app.quit")
 
 
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:
