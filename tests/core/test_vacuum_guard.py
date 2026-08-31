@@ -235,8 +235,8 @@ async def test_unusable_pressure_does_not_reset_sustained_fire_window():
 
 
 @pytest.mark.asyncio
-async def test_unusable_reference_temperature_is_stale_not_quiet_disarmed_state():
-    """NaN T_ref is exposed as stale while the guard declines to arm on unknown data."""
+async def test_fresh_unusable_reference_temperature_keeps_guard_disarmed():
+    """A delivered NaN is faulted, not stale, and cannot arm the guard."""
     guard, _, _, _ = _make_vg()
     tracker = ChannelStateTracker()
     guard._state_tracker = tracker
@@ -246,7 +246,9 @@ async def test_unusable_reference_temperature_is_stale_not_quiet_disarmed_state(
     await guard.tick()
 
     ref_state = tracker.get("Т12")
-    assert ref_state is not None and ref_state.is_stale
+    assert ref_state is not None
+    assert not ref_state.is_usable
+    assert not ref_state.is_stale
     assert guard.state == VacuumState.DISARMED
 
 

@@ -579,8 +579,9 @@ class AlarmEvaluator:
             if state is None:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
-            if not state.is_usable or (now - state.timestamp) > timeout:
-                # The channel is stale/unusable — there is no current value.
+            if (now - state.timestamp) > timeout:
+                # The channel has missed its delivery deadline.  A delivered
+                # invalid/faulted reading is handled by validity alarms instead.
                 # Rendering 0.0 here told the operator the sensor read zero.
                 msg = self._format_message(message_tmpl, channel=ch, value=UNKNOWN_VALUE)
                 return AlarmEvent(
