@@ -788,6 +788,43 @@ def _parse_experiment_time(raw: Any) -> datetime | None:
     return _parse_log_time(raw)
 
 
+def _json_wire_safe(value: Any) -> Any:
+    """Coerce an analytics payload into the types the reply contract allows.
+
+    Three distinct things break ``dataclasses.asdict`` output on this wire:
+
+    1. ``datetime`` — the validator accepts only dict/list/str/bool/int/float/
+       None and rejects anything else as "command JSON contains an unsupported
+       value". ``ChannelDiagnostics.updated_at`` is a ``datetime``, so
+       get_sensor_diagnostics could NEVER serialize: every reply was discarded,
+       several times a second, for the entire life of the process. Emitted as
+       an ISO-8601 string, which is what every other timestamp on this wire uses.
+    2. ``tuple`` — ``asdict`` preserves tuples, and the validator's type check is
+       exact (``type(current) is list``), so a tuple would be rejected the same
+       way. Normalised to list.
+    3. Non-finite floats — the encoder is deliberately finite-clean
+       (``allow_nan=False``), yet NaN is legitimate here: the driver sets
+       ``value=nan`` for OVERRANGE / SENSOR_ERROR channels. JSON has no NaN
+       literal and ``null`` is its "no value", so unknown quantities map to it.
+
+    Discarding a whole reply is strictly worse for the operator than reporting
+    one field as unknown — it hides every other field in the same payload and
+    leaves the panel retrying forever.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_wire_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_wire_safe(item) for item in value]
+    return value
+
+
 def _load_experiment_metadata_sync(meta_path: Path) -> dict:
     """H2: sync helper for F31 metadata read — wrap in asyncio.to_thread
     at the call site to avoid blocking the engine event loop."""
@@ -6207,11 +6244,13 @@ async def _handle_gui_command(
 
             diag = sensor_diag.get_diagnostics()
             summary = sensor_diag.get_summary()
-            return {
-                "ok": True,
-                "channels": {k: asdict(v) for k, v in diag.items()},
-                "summary": asdict(summary),
-            }
+            return _json_wire_safe(
+                {
+                    "ok": True,
+                    "channels": {k: asdict(v) for k, v in diag.items()},
+                    "summary": asdict(summary),
+                }
+            )
         if action == "get_vacuum_trend":
             if vacuum_trend is None:
                 return {"ok": False, "error": "VacuumTrendPredictor отключён"}
@@ -6220,7 +6259,7 @@ async def _handle_gui_command(
             pred = vacuum_trend.get_prediction()
             if pred is None:
                 return {"ok": True, "status": "no_data"}
-            return {"ok": True, **asdict(pred)}
+            return _json_wire_safe({"ok": True, **asdict(pred)})
         if action == "shift_handover_summary":
             shift_duration_h = cmd.get("shift_duration_h", 8)
             if (

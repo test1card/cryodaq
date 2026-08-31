@@ -118,6 +118,11 @@ class SensorCell(QFrame):
         self._source_identity = IdentityStatus.LEGACY_ABSENT
         self._data_stale = True
         self._read_only = False
+        # Hiding is a persisted configuration change and stays gated on full
+        # mutation authority; renaming (a display label) does not. Kept
+        # separate from _read_only so the Скрыть entry can be withheld
+        # without also disabling rename.
+        self._hide_enabled = True
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
         self._display_value: float | None = None
@@ -443,10 +448,11 @@ class SensorCell(QFrame):
             )
             rename_action.triggered.connect(self._enter_rename_mode)
 
-            hide_action = menu.addAction(
-                "\u0421\u043a\u0440\u044b\u0442\u044c"  # Скрыть
-            )
-            hide_action.triggered.connect(lambda: self.hide_requested.emit(self._channel_id))
+            if self._hide_enabled:
+                hide_action = menu.addAction(
+                    "\u0421\u043a\u0440\u044b\u0442\u044c"  # Скрыть
+                )
+                hide_action.triggered.connect(lambda: self.hide_requested.emit(self._channel_id))
 
             menu.addSeparator()
 
@@ -466,6 +472,16 @@ class SensorCell(QFrame):
         menu = self._build_context_menu()
 
         menu.exec(event.globalPos())
+
+    def set_hide_enabled(self, enabled: bool) -> None:
+        """Offer the Скрыть entry only where the handler will honour it.
+
+        Hiding stays gated on full mutation authority; renaming does not.
+        Withholding the entry keeps the menu truthful instead of presenting
+        an action that silently does nothing.
+        """
+
+        self._hide_enabled = bool(enabled)
 
     def set_read_only(self, read_only: bool) -> None:
         """Keep sensor evidence inspectable while removing config writes."""

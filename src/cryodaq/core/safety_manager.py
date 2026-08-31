@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import math
+import os
 import re
 import time
 from collections import deque
@@ -48,6 +49,20 @@ SAFETY_MANAGER_SOURCE_STATE_PUBLISHER = "safety_manager_source_state_v1"
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
+
+# Owner-authorised escape from the signed laboratory-qualification gate.
+# Set to exactly "1" in the engine environment to permit energizing while no
+# qualification receipt exists. It covers ONLY the absent-receipt case; a
+# present receipt that is stale or malformed is still refused, and no other
+# safety precondition is affected. Every process that uses it logs CRITICAL
+# once, so an unqualified run is always visible in the log.
+_LAB_QUALIFICATION_OVERRIDE_ENV = "CRYODAQ_LAB_QUALIFICATION_OVERRIDE"
+
+
+def _lab_qualification_override_active() -> bool:
+    """Whether the operator explicitly authorised unqualified energizing."""
+
+    return os.environ.get(_LAB_QUALIFICATION_OVERRIDE_ENV, "").strip() == "1"
 
 
 class SafetyConfigError(RuntimeError):
@@ -167,6 +182,11 @@ async def _settle_shielded_hardware_task(
 
 class SafetyManager:
     """Single safety state machine with channel-aware Keithley control."""
+
+    # Set once per process the first time the qualification override is
+    # exercised, so the CRITICAL announcement is not repeated on every
+    # precondition evaluation (they run at _CHECK_INTERVAL_S).
+    _lab_override_announced = False
 
     def __init__(
         self,
@@ -3020,6 +3040,33 @@ class SafetyManager:
         # output readback is unusable; neither condition can remain verified OFF.
         if self._keithley is not None and getattr(self._keithley, "output_state_unverified", None) is True:
             self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        # Symmetric positive case. The negative cache above is consumed on every
+        # snapshot, but the driver's *positive* current fact never was: on real
+        # hardware `complete_reviewed_source_connect()` stamped OFF proof exactly
+        # once at connect (`record_reviewed_source_connected` is simulator-only),
+        # so `_expire_stale_off_evidence()` below revoked it 10 s later and
+        # nothing could ever restore it. Verified OFF was therefore unreachable
+        # after the first 10 s of a session, permanently refusing RUN and leaving
+        # Start greyed out — the source could never be used at all.
+        #
+        # This does NOT retain stale proof: it re-derives OFF from the driver's
+        # exact current readback on each snapshot, which is the same evidence
+        # `complete_reviewed_source_connect()` accepts. Refreshed only while the
+        # reviewed source is connected, no source lifecycle is active, and the
+        # driver currently reports its output state verified. Any of those going
+        # false falls straight back to the unknown/expiry paths.
+        elif (
+            self._keithley is not None
+            and getattr(self._keithley, "output_state_unverified", None) is False
+            and getattr(self._keithley, "connected", None) is True
+            and self._reviewed_source_connected
+            and not self._active_sources
+            and self._state not in {SafetyState.RUN_PERMITTED, SafetyState.RUNNING}
+        ):
+            self._reviewed_source_off_evidence = SourceOffEvidence.from_global_result(
+                self._reviewed_source_off_tier(),
+                SourceOffResult.DEVICE_REPORTED_OFF,
+            )
         # Staleness is the same kind of fact as the negative cache above, and was
         # previously honoured only in the published reading.
         self._expire_stale_off_evidence()
@@ -3834,6 +3881,30 @@ class SafetyManager:
             return None
         receipt = self._qualification_receipt
         if receipt is None:
+            if _lab_qualification_override_active():
+                # Owner-authorised deviation (Vladimir, 2026-08-31). The lane-P2
+                # receipt issuer does not exist in the tree: only the RSA public
+                # modulus ships, no private key, and tests carry a deliberately
+                # expired vector. No receipt can therefore be obtained for this
+                # stand, and without this escape the source is permanently
+                # unusable — which blocks the thermal-conductivity measurement
+                # the stand exists for.
+                #
+                # Scope is EXACTLY the absent-receipt case. A present receipt
+                # that is stale or malformed is still refused below, and every
+                # other precondition — verified OFF evidence, source limits,
+                # interlocks, staleness, rate limits, watchdog-trip evidence —
+                # is untouched. Opt-in per process, never a default.
+                if not type(self)._lab_override_announced:
+                    type(self)._lab_override_announced = True
+                    logger.critical(
+                        "ENERGIZING AUTHORISED WITHOUT QUALIFICATION RECEIPT: %s=1 "
+                        "is set. The signed laboratory-qualification gate is "
+                        "BYPASSED for this process. This is an explicit operator "
+                        "deviation, not a qualified stand.",
+                        _LAB_QUALIFICATION_OVERRIDE_ENV,
+                    )
+                return None
             return "UNQUALIFIED: a separately signed laboratory-qualification receipt is required"
         if time.monotonic() >= receipt.expires_monotonic_s:
             return "UNQUALIFIED: laboratory-qualification receipt is stale"

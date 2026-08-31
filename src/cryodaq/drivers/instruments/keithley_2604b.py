@@ -920,7 +920,67 @@ class Keithley2604B(InstrumentDriver):
                         self._compliance_count[smu_channel] = 0
 
                     # --- P=const voltage regulation with slew rate limit ---
-                    if abs(current) > _I_MIN_A:
+                    #
+                    # Below the measurable-current floor the resistance cannot
+                    # be computed, so the loop below has nothing to solve. That
+                    # is exactly the state every start begins in: start_source()
+                    # sets `levelv = 0`, and at 0 V a cold heater draws only
+                    # leakage (~80 nA measured on this stand, under the 100 nA
+                    # _I_MIN_A floor). With no branch here the source stayed at
+                    # 0 V forever, current never rose above the floor, and the
+                    # requested power was unreachable for the whole run — the
+                    # SMU reported ~2 pW while SafetyManager sat in RUNNING.
+                    #
+                    # Bootstrap out of it by stepping the level up until the
+                    # current becomes measurable and the solver below can take
+                    # over. This grants no new authority: it uses the same
+                    # MAX_DELTA_V_PER_STEP slew limit, is clamped by the same
+                    # v_comp compliance ceiling, runs only while regulation is
+                    # current, and is skipped entirely while in compliance
+                    # (handled above). Into an open circuit it rises to v_comp
+                    # and delivers no power, which is the pre-existing
+                    # open-circuit behaviour.
+                    if abs(current) <= _I_MIN_A and runtime.p_target > 0.0:
+                        current_v = self._last_v[smu_channel]
+                        target_v = min(current_v + MAX_DELTA_V_PER_STEP, runtime.v_comp)
+                        if target_v > current_v and self._regulation_is_current(
+                            smu_channel,
+                            generation=regulation_generation,
+                            command_epoch=regulation_epoch,
+                        ):
+                            log.debug(
+                                "%s: %s bootstrap step %.3f V -> %.3f V (I=%.3g A below %.3g A floor)",
+                                self.name,
+                                smu_channel,
+                                current_v,
+                                target_v,
+                                abs(current),
+                                _I_MIN_A,
+                            )
+                            await self._operational_write(
+                                f"{smu_channel}.source.levelv = {target_v}",
+                                authority_check=lambda: self._require_current_regulation(
+                                    smu_channel,
+                                    generation=regulation_generation,
+                                    command_epoch=regulation_epoch,
+                                ),
+                            )
+                            if self._regulation_is_current(
+                                smu_channel,
+                                generation=regulation_generation,
+                                command_epoch=regulation_epoch,
+                            ):
+                                applied_v = _parse_finite_readback(
+                                    await self._operational_query(f"print({smu_channel}.source.levelv)"),
+                                    field=f"{smu_channel}.source.levelv",
+                                )
+                                self._require_current_regulation(
+                                    smu_channel,
+                                    generation=regulation_generation,
+                                    command_epoch=regulation_epoch,
+                                )
+                                self._last_v[smu_channel] = applied_v
+                    elif abs(current) > _I_MIN_A:
                         resistance = voltage / current
                         if resistance > 0:
                             target_v = math.sqrt(runtime.p_target * resistance)

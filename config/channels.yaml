@@ -1,130 +1,131 @@
-# CryoDAQ channels configuration.
-#
-# Поля:
-#   name          — отображаемое имя канала в GUI
-#   visible       — показывать ли канал на дашборде по умолчанию
-#   is_cold       — относится ли канал к криогенной зоне.
-#                   Холодные каналы участвуют в расчёте T_min/T_max
-#                   в TopWatchBar persistent context strip.
-#                   Корпусные датчики (вакуумный кожух, фланец,
-#                   зеркала, рама) — НЕ холодные, всегда у room temp,
-#                   не должны влиять на индикатор криогенного состояния.
-#   group         — группа для UI organization (криостат, компрессор,
-#                   оптика, резерв)
-#   thermal_zone  — физический контекст канала (F-X v0.55.9). Используется
-#                   для phase-aware alarm bands и channel taxonomy. Один из:
-#                     cold_4k             — детектор и экран 4К ступени
-#                     cold_77k            — экран 77К ступени
-#                     cold_landmark       — GM-cooler ступени (Т11/Т12,
-#                                            see physical_alarms.yaml landmarks)
-#                     intermediate        — общие криостатные точки
-#                     warm_flange         — корпусные датчики (комнатная T)
-#                     warm_reference      — reference block (комнатная T)
-#                     disconnected_reserve — резервные/не подключённые
-#                                            каналы (alarm_band не задаётся)
-#   alarm_band    — phase-aware допустимые границы [min_K, max_K] для
-#                   AlarmEngine v2 (F-X v0.55.9). Ключи:
-#                     cooldown / measurement / warmup — phase-specific
-#                     all_phases — fallback if phase unknown / not matched
-#                   Если alarm_band отсутствует — engine использует
-#                   существующие правила alarms_v3.yaml.
-#
-# Default if is_cold field absent: true (sensible default for
-# a cryogenic system — assume new channels are cryogenic until
-# explicitly marked otherwise).
-
 channels:
   Т1:
-    name: Криостат верх
+    name: 1 Верх образец 2
     visible: true
     is_cold: true
     group: криостат
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т2:
-    name: Криостат низ
+    name: 2 Верх образец 1
     visible: true
     is_cold: true
     group: криостат
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т3:
-    name: Радиатор 1
+    name: 2 Низ образец 2
     visible: true
     is_cold: true
     group: криостат
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т4:
-    name: Радиатор 2
-    visible: true
+    name: '-'
+    visible: false
     is_cold: true
     group: криостат
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т5:
-    name: Экран 77К
-    visible: true
+    name: '-'
+    visible: false
     is_cold: true
     group: криостат
     thermal_zone: cold_77k
     alarm_band:
-      cooldown: [60.0, 320.0]      # transient OK during cooldown
-      measurement: [60.0, 90.0]    # narrow during steady measurement
-      warmup: [60.0, 320.0]        # transient OK during warmup
-      all_phases: [60.0, 320.0]    # fallback when phase unknown
+      cooldown:
+      - 60.0
+      - 320.0
+      measurement:
+      - 60.0
+      - 90.0
+      warmup:
+      - 60.0
+      - 320.0
+      all_phases:
+      - 60.0
+      - 320.0
   Т6:
-    name: Экран 4К
+    name: 1 Низ образец 1
     visible: true
     is_cold: true
     group: криостат
     thermal_zone: cold_4k
     alarm_band:
-      cooldown: [3.5, 320.0]
-      measurement: [3.5, 6.0]
-      warmup: [3.5, 320.0]
-      all_phases: [3.5, 320.0]
+      cooldown:
+      - 3.5
+      - 320.0
+      measurement:
+      - 3.5
+      - 6.0
+      warmup:
+      - 3.5
+      - 320.0
+      all_phases:
+      - 3.5
+      - 320.0
   Т7:
-    name: Детектор
+    name: 2 Низ образец 1
     visible: true
     is_cold: true
     group: криостат
     thermal_zone: cold_4k
     alarm_band:
-      cooldown: [3.5, 320.0]       # transient OK during cooldown
-      measurement: [3.5, 5.0]      # narrow during measurement
-      warmup: [3.5, 320.0]         # transient OK during warmup
-      all_phases: [3.5, 320.0]     # fallback
+      cooldown:
+      - 3.5
+      - 320.0
+      measurement:
+      - 3.5
+      - 5.0
+      warmup:
+      - 3.5
+      - 320.0
+      all_phases:
+      - 3.5
+      - 320.0
   Т8:
-    name: Калибровка
-    visible: true
-    # v0.55.2 A4: calibration reference sits at room temperature; treating
-    # it as cryogenic made SensorDiagnostics flag it КРИТ at every cool-down.
+    name: '-'
+    visible: false
     is_cold: false
     group: криостат
     thermal_zone: warm_reference
     alarm_band:
-      all_phases: [285.0, 310.0]   # reference block stays warm by design
+      all_phases:
+      - 285.0
+      - 310.0
   Т9:
-    name: Компрессор вход
+    name: Термостол
     visible: true
     is_cold: true
     group: компрессор
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т10:
-    name: Компрессор выход
-    visible: true
+    name: '-'
+    visible: false
     is_cold: true
     group: компрессор
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т11:
     name: Плита 1-й ступени
     visible: true
@@ -132,10 +133,18 @@ channels:
     group: компрессор
     thermal_zone: cold_landmark
     alarm_band:
-      cooldown: [30.0, 320.0]
-      measurement: [30.0, 60.0]    # ~40K при работе per landmarks doc
-      warmup: [30.0, 320.0]
-      all_phases: [30.0, 320.0]
+      cooldown:
+      - 30.0
+      - 320.0
+      measurement:
+      - 30.0
+      - 60.0
+      warmup:
+      - 30.0
+      - 320.0
+      all_phases:
+      - 30.0
+      - 320.0
   Т12:
     name: 2-я ступень
     visible: true
@@ -143,42 +152,58 @@ channels:
     group: компрессор
     thermal_zone: cold_landmark
     alarm_band:
-      cooldown: [2.5, 320.0]
-      measurement: [2.5, 5.0]      # ~2.9K при работе per landmarks doc
-      warmup: [2.5, 320.0]
-      all_phases: [2.5, 320.0]
+      cooldown:
+      - 2.5
+      - 320.0
+      measurement:
+      - 2.5
+      - 5.0
+      warmup:
+      - 2.5
+      - 320.0
+      all_phases:
+      - 2.5
+      - 320.0
   Т13:
-    name: Труба подачи
+    name: 2 Низ образец 2
     visible: true
     is_cold: true
     group: компрессор
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т14:
-    name: Труба возврата
+    name: 2 Верх образец 2
     visible: true
     is_cold: true
     group: компрессор
     thermal_zone: intermediate
     alarm_band:
-      all_phases: [2.0, 320.0]
+      all_phases:
+      - 2.0
+      - 320.0
   Т15:
-    name: Вакуумный кожух
+    name: 1 Верх образец 1
     visible: true
     is_cold: false
     group: компрессор
     thermal_zone: warm_flange
     alarm_band:
-      all_phases: [270.0, 320.0]
+      all_phases:
+      - 270.0
+      - 320.0
   Т16:
     name: Фланец
-    visible: true
+    visible: false
     is_cold: false
     group: компрессор
     thermal_zone: warm_flange
     alarm_band:
-      all_phases: [270.0, 320.0]
+      all_phases:
+      - 270.0
+      - 320.0
   Т17:
     name: Зеркало 1
     visible: false

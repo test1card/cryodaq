@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 
 import pyqtgraph as pg
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
@@ -29,6 +29,58 @@ from cryodaq.gui.state.time_window import (
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 
 _MAX_POINTS = 2000
+# Opacity applied to a legend entry whose curve the operator has hidden.
+_LEGEND_HIDDEN_OPACITY = 0.35
+
+
+class _ClickableLegendLabel(pg.LabelItem):
+    """Legend text that toggles its curve, like the sample swatch does.
+
+    pyqtgraph's ``ItemSample`` already toggles visibility when the colour
+    swatch is clicked, but the channel NAME beside it is an inert
+    ``LabelItem``. Operators click the name, so the plot appeared to have
+    lost the feature entirely. This restores it on the label and keeps the
+    two in sync, dimming the entry so a hidden channel is visible as hidden
+    rather than silently absent.
+    """
+
+    def __init__(self, text: str, sample: pg.ItemSample, **kwargs: object) -> None:
+        super().__init__(text, **kwargs)
+        self._sample = sample
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+
+    def _sync_opacity(self) -> None:
+        item = getattr(self._sample, "item", None)
+        visible = True if item is None else bool(item.isVisible())
+        self.setOpacity(1.0 if visible else _LEGEND_HIDDEN_OPACITY)
+
+    def mousePressEvent(self, event: object) -> None:
+        item = getattr(self._sample, "item", None)
+        if item is None:
+            super().mousePressEvent(event)
+            return
+        item.setVisible(not item.isVisible())
+        self._sample.update()
+        self._sync_opacity()
+        event.accept()
+
+
+class _ClickableLegend(pg.LegendItem):
+    """LegendItem whose labels are clickable as well as its samples."""
+
+    def addItem(self, item: object, name: str) -> None:  # noqa: D102 — pyqtgraph API
+        sample = item if isinstance(item, self.sampleType) else self.sampleType(item)
+        label = _ClickableLegendLabel(
+            name,
+            sample,
+            color=self.opts["labelTextColor"],
+            justify="left",
+            size=self.opts["labelTextSize"],
+        )
+        self.items.append((sample, label))
+        self._addItemToLayout(sample, label)
+        self.updateSize()
 
 
 class TempPlotWidget(QWidget):
@@ -121,7 +173,11 @@ class TempPlotWidget(QWidget):
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         pi.getAxis("bottom").setStyle(showValues=False)
-        pi.addLegend(offset=(10, 10))
+        # Same wiring as PlotItem.addLegend(), with the clickable subclass so
+        # the channel name toggles its curve and not only the colour swatch.
+        if pi.legend is None:
+            pi.legend = _ClickableLegend(offset=(10, 10))
+            pi.legend.setParentItem(pi.vb)
 
     def _rebuild_curves(self) -> None:
         """Create plot items for all visible Т-channels."""
@@ -169,6 +225,12 @@ class TempPlotWidget(QWidget):
             xs = [t for t, _ in pts]
             ys = [v for _, v in pts]
             item.setData(x=xs, y=ys)
+            if not item.isVisible():
+                # Operator hid this curve from the legend. Keep feeding it so
+                # unhiding is instant, but leave it out of the Y range —
+                # otherwise hiding an out-of-scale channel would not actually
+                # declutter the axis, which is the whole point of hiding it.
+                continue
             for t, v in pts:
                 if not math.isfinite(v):
                     continue

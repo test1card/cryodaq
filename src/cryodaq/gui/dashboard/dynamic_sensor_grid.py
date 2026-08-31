@@ -106,6 +106,7 @@ class DynamicSensorGrid(QWidget):
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
         self._read_only = False
+        self._hide_enabled = True
         self._cells: dict[str, SensorCell] = {}
         self._identity_issues: dict[str, IdentityStatus] = {}
         self._pending_readings: dict[str, _PendingCellCut] = {}
@@ -170,6 +171,7 @@ class DynamicSensorGrid(QWidget):
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
             cell.set_read_only(self._read_only)
+            cell.set_hide_enabled(self._hide_enabled)
             cell.rename_requested.connect(self.rename_requested)
             cell.hide_requested.connect(self.hide_requested)
             cell.show_on_plot_requested.connect(self.show_on_plot_requested)
@@ -293,6 +295,17 @@ class DynamicSensorGrid(QWidget):
         self._read_only = bool(read_only)
         for cell in self._cells.values():
             cell.set_read_only(self._read_only)
+
+    def set_hide_enabled(self, enabled: bool) -> None:
+        """Propagate the hide-authority gate to every sensor cell.
+
+        Separate from ``set_read_only`` because hiding requires full mutation
+        authority while renaming a display label does not.
+        """
+
+        self._hide_enabled = bool(enabled)
+        for cell in self._cells.values():
+            cell.set_hide_enabled(self._hide_enabled)
 
     def refresh_display_precision(self) -> None:
         """Re-render every cell after the operator changes display precision."""

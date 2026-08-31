@@ -359,7 +359,17 @@ class DashboardView(QScrollArea):
                 reason = "Нет текущего подтверждённого разрешения на изменение"
             self._quick_log.set_mutation_enabled(mutable, reason)
         if self._sensor_grid is not None:
-            self._sensor_grid.set_read_only(not mutable)
+            # Sensor-cell read-only gates ONLY rename and hide, both of which
+            # are operator-facing display config in config/channels.yaml with
+            # no instrument, source or safety authority. They must stay usable
+            # while the stand is unqualified, SAFE_OFF, faulted or
+            # disconnected — that is precisely when a channel carrying a wrong
+            # name is most dangerous to read. Phase mutations and the quick log
+            # above remain gated on full mutation authority; only labelling is
+            # released here. Replay is still refused.
+            self._sensor_grid.set_read_only(self._read_only)
+            # Hiding remains an authority-bearing persisted change.
+            self._sensor_grid.set_hide_enabled(mutable)
 
     def set_operator_snapshot(self, snapshot: object) -> None:
         """Derive mutation authority only from a current live coherent cut."""
@@ -415,14 +425,33 @@ class DashboardView(QScrollArea):
     # ------------------------------------------------------------------
 
     def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
-        """Operator renamed a channel via inline rename or context menu."""
-        if self._read_only or not self._connected or not self._authority_valid:
+        """Operator renamed a channel via inline rename or context menu.
+
+        A channel display label is operator-facing presentation held in
+        config/channels.yaml. It carries no instrument, source or safety
+        authority, so it is deliberately NOT gated on engine connection or
+        on the live snapshot's mutation authority: an operator must be able
+        to correct a wrong sensor name while the stand is unqualified,
+        SAFE_OFF, faulted, or disconnected — which is exactly when a
+        mislabelled channel is most dangerous to read.
+
+        Replay remains refused: a historical session must not rewrite the
+        live channel configuration.
+        """
+        if self._read_only:
             return
         self._channel_mgr.set_name(channel_id, new_name)
         self._channel_mgr.save()
 
     def _on_hide_requested(self, channel_id: str) -> None:
-        """Operator wants to hide a channel from the dashboard."""
+        """Operator wants to hide a channel from the dashboard.
+
+        Still gated on full mutation authority, unlike renaming: hiding
+        removes a channel from the operator's view, so it is a persisted
+        configuration change the reviewed contract deliberately refuses
+        without authority. The context-menu entry is withheld in the same
+        condition (see ``set_hide_enabled``) so it is never a silent no-op.
+        """
         if self._read_only or not self._connected or not self._authority_valid:
             return
         self._channel_mgr.set_visible(channel_id, False)
