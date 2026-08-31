@@ -5159,6 +5159,12 @@ records:
         ci_partition: agents
       - node: tests/reporting/test_report_state.py::test_receipt_semantics_are_shared_by_authority_and_report_reader
         ci_partition: agents
+      - node: tests/reporting/test_report_state.py::test_report_and_manager_reject_the_same_mutated_v2_envelope
+        ci_partition: agents
+      - node: tests/reporting/test_report_state.py::test_report_and_manager_reject_invalid_finalized_receipt_identity
+        ci_partition: agents
+      - node: tests/reporting/test_report_state.py::test_report_and_manager_apply_same_state_file_contract
+        ci_partition: agents
       - node: tests/core/test_experiment_commands.py::test_delayed_quick_log_cannot_attach_to_replacement_experiment
         ci_partition: core
       - node: tests/core/test_experiment_commands.py::test_async_quick_log_cas_blocks_replacement_during_durable_await
