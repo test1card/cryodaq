@@ -30,13 +30,14 @@ class ChannelState:
     unit: str
     instrument_id: str
     is_stale: bool = False
+    is_valid: bool = True
     fault_count_window: int = 0  # количество fault readings в окне (заполняется трекером)
 
     @property
     def is_usable(self) -> bool:
         """Whether this state still represents a finite, fresh measurement."""
         try:
-            return not self.is_stale and math.isfinite(self.value)
+            return self.is_valid and not self.is_stale and math.isfinite(self.value)
         except TypeError:
             return False
 
@@ -79,10 +80,9 @@ class ChannelStateTracker:
             timestamp=ts,
             unit=reading.unit,
             instrument_id=reading.instrument_id,
-            # A received error/NaN is evidence that the measurement is unknown,
-            # not a fresh quiet value. Preserve the sample for diagnostics while
-            # exposing it to every consumer through the existing stale contract.
-            is_stale=unusable,
+            # Delivery freshness and measurement validity are independent.  A
+            # received fault remains observable but is not missing data.
+            is_valid=not unusable,
         )
         self._states[reading.channel] = state
 

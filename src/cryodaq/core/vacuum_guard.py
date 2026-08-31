@@ -7,6 +7,7 @@ Arms when T_ref drops below arm_threshold; fires when vacuum degrades sustained.
 State machine: DISARMED → ARMED → FIRED (and back).
 All transitions read fresh state per tick from ChannelStateTracker (LATE BINDING).
 """
+
 from __future__ import annotations
 
 import enum
@@ -73,7 +74,9 @@ class VacuumGuard:
 
         logger.info(
             "VacuumGuard: P-канал=%s, T-опорная=%s, порог арм.=%.0f K",
-            self._pressure_ch, self._ref_temp_ch, self._arm_threshold_K,
+            self._pressure_ch,
+            self._ref_temp_ch,
+            self._arm_threshold_K,
         )
 
     @property
@@ -84,7 +87,7 @@ class VacuumGuard:
         """Evaluate vacuum guard state. Called every eval_interval_s by engine."""
         # Read T_ref fresh per tick (LATE BINDING via ChannelStateTracker)
         t_ref_state = self._state_tracker.get(self._ref_temp_ch)
-        if t_ref_state is None or t_ref_state.is_stale:
+        if t_ref_state is None or t_ref_state.is_usable is not True:
             logger.debug("VacuumGuard: T-опорная %s недоступна — пропуск", self._ref_temp_ch)
             # Do not clear an active FIRED alarm — sensor dropout during hazard keeps alarm.
             if self._state != VacuumState.FIRED:
@@ -95,7 +98,7 @@ class VacuumGuard:
 
         # Read pressure fresh per tick
         p_state = self._state_tracker.get(self._pressure_ch)
-        if p_state is None or p_state.is_stale:
+        if p_state is None or p_state.is_usable is not True:
             logger.debug("VacuumGuard: P-канал %s недоступен — пропуск", self._pressure_ch)
             # Do not clear FIRED alarm on sensor dropout — keep alarm until data returns.
             if self._state != VacuumState.FIRED:
@@ -117,7 +120,8 @@ class VacuumGuard:
             self._state = VacuumState.ARMED
             logger.info(
                 "VacuumGuard: ARMED (T-опорная=%.1f K < %.0f K)",
-                t_ref, self._arm_threshold_K,
+                t_ref,
+                self._arm_threshold_K,
             )
 
         # Step 3: pressure recovery when FIRED (deadband)
@@ -136,7 +140,8 @@ class VacuumGuard:
                     self._state = VacuumState.FIRED
                     logger.warning(
                         "VacuumGuard: FIRED (P=%.2e мбар, T-опорная=%.1f K)",
-                        p_mbar, t_ref,
+                        p_mbar,
+                        t_ref,
                     )
             else:
                 self._sustained_since = None
@@ -163,9 +168,7 @@ class VacuumGuard:
         else:
             event = None
 
-        transition = self._alarm_state_mgr.process(
-            ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
-        )
+        transition = self._alarm_state_mgr.process(ALARM_ID, event, {"sustained_s": None, "hysteresis": None})
 
         # Opt-in escalation: latch a SafetyManager fault on the FIRED edge only.
         # Gated on the transition INTO FIRED so the fault latches once per
@@ -204,6 +207,7 @@ class VacuumGuard:
 
     async def _publish_state_event(self) -> None:
         from cryodaq.core.event_bus import EngineEvent
+
         try:
             await self._event_bus.publish(
                 EngineEvent(

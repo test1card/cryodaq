@@ -550,22 +550,46 @@ def test_stale_not_fires_fresh() -> None:
     assert ev.evaluate("stale", cfg) is None
 
 
-def test_stale_fires_immediately_on_unusable_reading() -> None:
-    """A fresh timestamp cannot hide a NaN/error reading from stale alarms."""
-    ev = _make_evaluator(
-        [
-            Reading(
-                timestamp=datetime.now(UTC),
-                instrument_id="LS218",
-                channel="T1",
-                value=math.nan,
-                unit="K",
-                status=ChannelStatus.SENSOR_ERROR,
-            )
-        ]
+def test_stale_does_not_report_a_delivered_fault_as_data_loss() -> None:
+    """A delivered fault remains unknown data, but it is not missing data."""
+    cases = (
+        (math.inf, ChannelStatus.OVERRANGE),
+        (math.nan, ChannelStatus.SENSOR_ERROR),
+        (math.nan, ChannelStatus.OK),
     )
     cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
-    assert ev.evaluate("data_stale", cfg) is not None
+
+    for value, status in cases:
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218",
+            channel="T1",
+            value=value,
+            unit="K",
+            status=status,
+        )
+        assert not reading.is_usable()
+        assert _make_evaluator([reading]).evaluate("data_stale", cfg) is None
+
+
+def test_each_stale_alarm_uses_its_own_delivery_timeout() -> None:
+    """Warning and total-loss alarms must not collapse onto one timeout."""
+    ev = _make_evaluator([_reading("T1", 4.2, ts=time.time() - 60.0)])
+
+    assert (
+        ev.evaluate(
+            "data_stale_temperature",
+            {"alarm_type": "stale", "channel": "T1", "timeout_s": 30},
+        )
+        is not None
+    )
+    assert (
+        ev.evaluate(
+            "data_loss_temperature",
+            {"alarm_type": "stale", "channel": "T1", "timeout_s": 120},
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

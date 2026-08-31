@@ -102,14 +102,46 @@ def test_normal_value_no_fault() -> None:
     assert tracker.get_fault_count("T1") == 0
 
 
-def test_unusable_reading_is_immediately_stale_and_records_temperature_fault() -> None:
-    """NaN/error readings are visible as stale faults, not fresh measurements."""
+def test_delivered_unusable_readings_are_faulted_without_becoming_stale() -> None:
+    """Validity and delivery freshness remain independent observations."""
     tracker = ChannelStateTracker()
-    tracker.update(_reading("T1", math.nan, status=ChannelStatus.SENSOR_ERROR))
+    cases = (
+        ("T1", math.inf, ChannelStatus.OVERRANGE),
+        ("T2", math.nan, ChannelStatus.SENSOR_ERROR),
+        ("T3", math.nan, ChannelStatus.OK),
+    )
+
+    for channel, value, status in cases:
+        tracker.update(_reading(channel, value, status=status))
+        state = tracker.get(channel)
+
+        assert state is not None
+        assert not state.is_usable
+        assert not state.is_stale
+        assert channel not in tracker.get_stale_channels()
+        assert tracker.get_fault_count(channel) == 1
+
+    tracker.update(_reading("T4", 4.2))
+    valid_state = tracker.get("T4")
+    assert valid_state is not None
+    assert valid_state.is_usable
+    assert not valid_state.is_stale
+
+
+def test_old_unusable_reading_is_both_faulted_and_stale() -> None:
+    tracker = ChannelStateTracker(stale_timeout_s=5.0)
+    tracker.update(
+        _reading(
+            "T1",
+            math.nan,
+            ts=time.time() - 10.0,
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
 
     state = tracker.get("T1")
     assert state is not None
-    assert math.isnan(state.value)
+    assert not state.is_usable
     assert state.is_stale
     assert "T1" in tracker.get_stale_channels()
     assert tracker.get_fault_count("T1") == 1
