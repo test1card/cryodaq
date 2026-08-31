@@ -5409,13 +5409,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Keithley configured identity, serial binding, connect, generation-bound transport-close settlement, recovery, global OFF proof, and per-channel positive unsafe-output observations.
+    applies_to: Keithley configured identity, VISA discovery spelling, serial binding, connect, generation-bound transport-close settlement, recovery, global OFF proof, and per-channel positive unsafe-output observations.
     classification: instrument_authority_escape
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A wrong instrument or incomplete two-channel OFF can acquire measurement authority.
-    invariant: Exact configured identity and serial plus nonce-bound verified two-channel OFF precede Keithley authority; an unmanaged ON or invalid readback is exposed only as a current connection-generation, channel-command-epoch, idle-read observation, while owned OFF/start/connect/disconnect transitions revoke stale observations without granting actuation authority.
+    consequence: A wrong instrument, a device resource that cannot be opened under its canonical configured spelling, or incomplete two-channel OFF can prevent or acquire measurement authority.
+    invariant: Exact configured identity remains canonical and control-free; when VISA reports one otherwise-identical USB resource with exactly one device-supplied trailing NUL in its serial token, only that unique raw spelling is used to open the transport. Exact serial plus nonce-bound verified two-channel OFF precede Keithley authority; an unmanaged ON or invalid readback is exposed only as a current connection-generation, channel-command-epoch, idle-read observation, while owned OFF/start/connect/disconnect transitions revoke stale observations without granting actuation authority.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5432,6 +5432,8 @@ records:
       - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_wrong_generation_late_close_cannot_settle_current_connection
         ci_partition: remaining
       - node: tests/drivers/test_keithley_connect_safety.py::test_incomplete_transport_close_blocks_keithley_disconnect_and_reconnect
+        ci_partition: remaining
+      - node: tests/drivers/test_usbtmc_resource_discovery.py::test_open_discovers_device_resource_with_one_trailing_serial_nul
         ci_partition: remaining
       - node: tests/core/test_safety_operator_snapshot_owner.py::test_scheduler_observation_faults_external_sibling_of_managed_source
         ci_partition: core
