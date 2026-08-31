@@ -421,6 +421,92 @@ def _bind_spawn_test_dependencies(
     return captured_env
 
 
+def test_engine_spawn_boundary_refuses_latch_before_or_after_popen(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    process = _SpawnedStartProcess()
+    host = _engine_start_owner_host(replay=False)
+    host._shutdown_requested = False
+    host._runtime_callbacks_open = True
+    host._runtime_callback_epoch = 1
+    ready_read_fd, ready_write_fd = module.os.pipe()
+    ready_stream = module.os.fdopen(ready_read_fd, "rb", buffering=0)
+    ready_write_owner = module._OwnedFileDescriptor(ready_write_fd)
+    _bind_spawn_test_dependencies(
+        monkeypatch,
+        tmp_path,
+        process=process,
+        ready_stream=ready_stream,
+        ready_write_fd=ready_write_owner,
+    )
+    spawn = MagicMock(side_effect=AssertionError("Popen crossed a latched shutdown boundary"))
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+
+    def acquire_then_latch():
+        host._shutdown_requested = True
+        return ready_stream, ready_write_owner, f"fd:{ready_write_fd}", {"pass_fds": (ready_write_fd,)}
+
+    monkeypatch.setattr(module, "_open_child_ready_pipe", acquire_then_latch)
+
+    with pytest.raises(module._EngineStartCancelledForShutdown):
+        module.LauncherWindow._start_engine(host)
+
+    spawn.assert_not_called()
+    assert host._engine_proc is None
+    assert host._child_ready_stream_owner is None
+    assert host._child_ready_write_fd_owner is None
+
+    # Popen itself is a signal-delivery boundary.  The returned process must
+    # become launcher-owned before the latch is handled, and startup must not
+    # enter the readiness wait after shutdown has won that race.
+    post_process = _SpawnedStartProcess()
+    post_host = _engine_start_owner_host(replay=False)
+    post_host._shutdown_requested = False
+    post_host._runtime_callbacks_open = True
+    post_host._runtime_callback_epoch = 1
+    post_ready_read_fd, post_ready_write_fd = module.os.pipe()
+    post_ready_stream = module.os.fdopen(post_ready_read_fd, "rb", buffering=0)
+    post_ready_write_owner = module._OwnedFileDescriptor(post_ready_write_fd)
+    _bind_spawn_test_dependencies(
+        monkeypatch,
+        tmp_path,
+        process=post_process,
+        ready_stream=post_ready_stream,
+        ready_write_fd=post_ready_write_owner,
+    )
+
+    def spawn_then_latch(_command, **_kwargs):
+        post_host._shutdown_requested = True
+        return post_process
+
+    shutdown_owned_processes: list[object] = []
+
+    def finish_after_spawn(bound_host: SimpleNamespace) -> bool:
+        shutdown_owned_processes.append(bound_host._engine_proc)
+        assert bound_host._engine_proc is post_process
+        assert bound_host._engine_instance_id is not None
+        assert bound_host._engine_shutdown_capability is not None
+        post_process.alive = False
+        module.LauncherWindow._close_engine_stderr_stream(bound_host)
+        return True
+
+    readiness_wait = MagicMock(side_effect=AssertionError("readiness wait crossed a latched shutdown"))
+    post_host._wait_engine_ready = readiness_wait
+    monkeypatch.setattr(module.subprocess, "Popen", spawn_then_latch)
+    monkeypatch.setattr(module.LauncherWindow, "_do_shutdown", finish_after_spawn)
+
+    with pytest.raises(module._EngineStartCancelledForShutdown):
+        module.LauncherWindow._start_engine(post_host)
+
+    assert shutdown_owned_processes == [post_process]
+    readiness_wait.assert_not_called()
+    assert post_host._child_ready_stream_owner is None
+    assert post_host._child_ready_write_fd_owner is None
+
+
 def _settle_spawned_test_engine(host: SimpleNamespace, process: _SpawnedStartProcess) -> None:
     from cryodaq.launcher import LauncherWindow
 

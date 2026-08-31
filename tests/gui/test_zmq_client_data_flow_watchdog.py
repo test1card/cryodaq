@@ -149,12 +149,23 @@ class _StatefulWatchdogBridge:
         self._data_stalled = False
         self._command_stalled = False
 
+    def close(self) -> None:
+        if self._alive:
+            self.shutdown()
+
 
 class _WatchdogWindowDouble:
     def __init__(self, bridge: _StatefulWatchdogBridge) -> None:
         self._bridge = bridge
         self.dispatched: list[DescriptorQualifiedReading] = []
         self.descriptor_invalidations = 0
+        self._watchdog_shutdown_bridge_factory = self._new_shutdown_standby
+
+    @staticmethod
+    def _new_shutdown_standby() -> _StatefulWatchdogBridge:
+        standby = _StatefulWatchdogBridge()
+        standby.shutdown()
+        return standby
 
     def _on_reading_qt(self, item: DescriptorQualifiedReading) -> None:
         self.dispatched.append(item)

@@ -157,6 +157,16 @@ class _TransportRestartBridge:
     def process_pid(self) -> int:
         return 12345 if self._alive else 0
 
+    def close(self) -> None:
+        if self._alive:
+            self.shutdown()
+
+
+def _new_transport_shutdown_standby() -> _TransportRestartBridge:
+    standby = _TransportRestartBridge()
+    standby.shutdown()
+    return standby
+
 
 def _typed_ready_snapshot(
     *,
@@ -1484,6 +1494,7 @@ def test_watchdog_transport_replacement_keeps_source_state_and_start_available()
             _invalidate_descriptor_transport=w.invalidate_descriptor_transport,
             _soak_bridge_handshake=None,
             _replay_source=None,
+            _watchdog_shutdown_bridge_factory=_new_transport_shutdown_standby,
         )
         assert LauncherWindow._replace_bridge_from_watchdog(launcher, reason="heartbeat") is True
 

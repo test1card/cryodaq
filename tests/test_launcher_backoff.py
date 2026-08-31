@@ -629,6 +629,114 @@ def test_stale_restart_generation_cannot_consume_a_new_crash_restart() -> None:
     assert w._restart_pending is False
 
 
+def test_scheduled_restart_shutdown_latch_after_bridge_retirement_blocks_engine_spawn() -> None:
+    """A signal during old-bridge settlement must win over the queued restart."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1)
+    injected = False
+
+    def _retire_bridge_and_latch_shutdown() -> None:
+        nonlocal injected
+        injected = True
+        w._shutdown_requested = True
+
+    w._bridge.shutdown.side_effect = _retire_bridge_and_latch_shutdown
+
+    with (
+        patch("cryodaq.launcher.QTimer") as mock_qtimer,
+        patch("cryodaq.launcher.time") as mock_time,
+        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+    ):
+        mock_time.monotonic.return_value = 0.0
+        LauncherWindow._handle_engine_exit(w)
+        callback = mock_qtimer.singleShot.call_args_list[-1].args[1]
+        callback()
+
+    assert injected is True
+    w._start_engine.assert_not_called()
+    w._bridge.start.assert_not_called()
+    finish_shutdown.assert_called_once_with(w)
+
+
+def test_scheduled_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach() -> None:
+    """A replacement child cannot acquire transport after shutdown latches."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1)
+    injected = False
+
+    def _start_engine_and_latch_shutdown() -> None:
+        nonlocal injected
+        injected = True
+        w._shutdown_requested = True
+
+    w._start_engine.side_effect = _start_engine_and_latch_shutdown
+
+    with (
+        patch("cryodaq.launcher.QTimer") as mock_qtimer,
+        patch("cryodaq.launcher.time") as mock_time,
+        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+    ):
+        mock_time.monotonic.return_value = 0.0
+        LauncherWindow._handle_engine_exit(w)
+        callback = mock_qtimer.singleShot.call_args_list[-1].args[1]
+        callback()
+
+    assert injected is True
+    w._bridge.start.assert_not_called()
+    finish_shutdown.assert_called_once_with(w)
+
+
+def test_manual_restart_shutdown_latch_during_pause_blocks_engine_spawn() -> None:
+    """A signal during the restart pause must win before replacement spawn."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=None)
+    injected = False
+
+    def _pause_and_latch_shutdown(_seconds: float) -> None:
+        nonlocal injected
+        injected = True
+        w._shutdown_requested = True
+
+    with (
+        patch("cryodaq.launcher.time.sleep", side_effect=_pause_and_latch_shutdown),
+        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+    ):
+        LauncherWindow._restart_engine(w)
+
+    assert injected is True
+    w._start_engine.assert_not_called()
+    w._bridge.start.assert_not_called()
+    finish_shutdown.assert_called_once_with(w)
+
+
+def test_manual_restart_shutdown_latch_during_engine_start_settles_without_bridge_attach() -> None:
+    """A manually spawned replacement cannot attach after shutdown latches."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=None)
+    injected = False
+
+    def _start_engine_and_latch_shutdown() -> None:
+        nonlocal injected
+        injected = True
+        w._shutdown_requested = True
+
+    w._start_engine.side_effect = _start_engine_and_latch_shutdown
+
+    with (
+        patch("cryodaq.launcher.time.sleep"),
+        patch.object(LauncherWindow, "_do_shutdown", return_value=True) as finish_shutdown,
+    ):
+        LauncherWindow._restart_engine(w)
+
+    assert injected is True
+    w._bridge.start.assert_not_called()
+    finish_shutdown.assert_called_once_with(w)
+
+
 def test_stale_assistant_restart_generation_cannot_consume_new_slot() -> None:
     """Assistant timer A cannot clear or start the replacement owned by timer B."""
     from cryodaq.launcher import LauncherWindow
