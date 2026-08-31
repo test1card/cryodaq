@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 import cryodaq.engine as engine
+from cryodaq.core.alarm_config import AlarmConfigError
 from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3, load_housekeeping_config
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt
@@ -82,7 +83,14 @@ def _real_merged_patterns() -> set[str]:
     }
 
 
-def _manifest(*, instrument_id: str, emitted_channel: str, channel_id: str) -> dict:
+def _manifest(
+    *,
+    instrument_id: str,
+    emitted_channel: str,
+    channel_id: str,
+    role: str = "primary_measurement",
+    safety_class: str = "observational",
+) -> dict:
     return {
         "schema_version": 1,
         "descriptors": [
@@ -93,8 +101,8 @@ def _manifest(*, instrument_id: str, emitted_channel: str, channel_id: str) -> d
                 "source_key": "input.1.temperature",
                 "quantity": "temperature",
                 "unit": "K",
-                "role": "primary_measurement",
-                "safety_class": "observational",
+                "role": role,
+                "safety_class": safety_class,
                 "display_group": "test",
                 "display_name": "Test channel",
                 "visible_by_default": True,
@@ -125,8 +133,9 @@ def _install_engine_startup_harness(
     monkeypatch: pytest.MonkeyPatch,
     *,
     legacy_patterns: list[str],
-    v3_patterns: set[str],
+    v3_patterns: set[str] | None,
     safety_manager_type: type[SafetyManager] | None = None,
+    safety_critical_local: bool = False,
 ) -> dict[str, object]:
     config_dir = tmp_path / "config"
     data_dir = tmp_path / "data"
@@ -137,13 +146,19 @@ def _install_engine_startup_harness(
     (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
     (config_dir / "safety.yaml").write_text("critical_channels:\n  - 'default'\n", encoding="utf-8")
     (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
+    (config_dir / "alarms_v3.yaml").write_text("global_alarms: {}\n", encoding="utf-8")
     _write_manifest(
         config_dir / "channel_descriptors.yaml",
         _manifest(instrument_id="base", emitted_channel="base emitted", channel_id="base.1"),
     )
     _write_manifest(
         config_dir / "channel_descriptors.local.yaml",
-        _manifest(instrument_id="probe", emitted_channel="local emitted", channel_id="local.1"),
+        _manifest(
+            instrument_id="probe",
+            emitted_channel="local emitted",
+            channel_id="local.1",
+            safety_class="safety_critical_input" if safety_critical_local else "observational",
+        ),
     )
 
     observed: dict[str, object] = {"writer_called": False}
@@ -179,7 +194,13 @@ def _install_engine_startup_harness(
         lambda path: ({}, engine.receipt_for_applied_policy("housekeeping", path, b"")),
     )
     monkeypatch.setattr(engine, "load_protected_channel_patterns", lambda _path, **_kwargs: legacy_patterns)
-    monkeypatch.setattr(engine, "load_critical_channels_from_alarms_v3", lambda _path: v3_patterns)
+    if v3_patterns is not None:
+
+        def _load_v3(path: Path) -> set[str]:
+            observed["critical_alarms_path"] = path
+            return v3_patterns
+
+        monkeypatch.setattr(engine, "load_critical_channels_from_alarms_v3", _load_v3)
     monkeypatch.setattr(engine, "SQLiteWriter", _Writer)
     return observed
 
@@ -452,6 +473,8 @@ async def test_run_engine_uses_local_replacement_and_fails_closed_on_dead_patter
         legacy_patterns=legacy,
         v3_patterns=v3,
     )
+    local_alarms = tmp_path / "config" / "alarms_v3.local.yaml"
+    local_alarms.write_text("global_alarms: {}\n", encoding="utf-8")
 
     def _dead_validator(**kwargs) -> None:
         observed["validator_kwargs"] = kwargs
@@ -467,6 +490,66 @@ async def test_run_engine_uses_local_replacement_and_fails_closed_on_dead_patter
     assert ("base", "base emitted") not in selected_catalog._bindings
     assert set(kwargs["adaptive_throttle_patterns"]) == {"v3-only"}
     assert set(kwargs["adaptive_throttle_raw_patterns"]) == {"legacy-only$"}
+    assert observed["critical_alarms_path"] == local_alarms
+    assert kwargs["alarms_config_path"] == local_alarms
+    assert observed["writer_called"] is False
+
+
+@pytest.mark.parametrize("use_local", [True, False], ids=["local_replacement", "tracked_base"])
+async def test_run_engine_fails_closed_on_malformed_selected_alarm_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_local: bool,
+) -> None:
+    """The selected whole file must pass shape validation before persistence."""
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
+    )
+    config_dir = tmp_path / "config"
+    selected = config_dir / ("alarms_v3.local.yaml" if use_local else "alarms_v3.yaml")
+    selected.write_text("global_alarms: [unterminated\n", encoding="utf-8")
+    monkeypatch.setattr(engine, "validate_safety_pattern_liveness", lambda **_kwargs: [])
+
+    with pytest.raises(AlarmConfigError, match="YAML parse error"):
+        await engine._run_engine(mock=True)
+
+    assert observed["writer_called"] is False
+
+
+async def test_run_engine_rejects_dangling_reference_from_local_alarm_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local replacement cannot bypass the production channel-liveness gate."""
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=None,
+        safety_manager_type=SafetyManager,
+        safety_critical_local=True,
+    )
+    config_dir = tmp_path / "config"
+    (config_dir / "safety.yaml").write_text("critical_channels:\n  - local.1\n", encoding="utf-8")
+    local_alarms = config_dir / "alarms_v3.local.yaml"
+    local_alarms.write_text(
+        "global_alarms:\n"
+        "  local_dead_warning:\n"
+        "    alarm_type: threshold\n"
+        "    check: above\n"
+        "    channel: __DEAD_LOCAL_ALARM_CHANNEL__\n"
+        "    threshold: 1.0\n"
+        "    level: WARNING\n"
+        "    message: local warning\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SafetyPatternLivenessError, match="__DEAD_LOCAL_ALARM_CHANNEL__"):
+        await engine._run_engine(mock=True)
+
     assert observed["writer_called"] is False
 
 

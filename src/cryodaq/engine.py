@@ -2538,6 +2538,12 @@ def _engine_config_path(name: str) -> Path:
     return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
 
 
+def _alarms_config_path() -> Path:
+    """Select the machine-local whole-file alarm authority when present."""
+    local = _CONFIG_DIR / "alarms_v3.local.yaml"
+    return local if os.path.lexists(local) else _CONFIG_DIR / "alarms_v3.yaml"
+
+
 def _log_physical_policy_receipt(policy: str, receipt: PhysicalPolicyReceipt) -> None:
     """Record the exact physical-policy bytes accepted by one loader."""
     log = logger.warning if receipt.origin == "local_override" else logger.info
@@ -7125,7 +7131,8 @@ async def _run_engine(
         snapshots=None if interlocks_snapshot is None else {interlocks_cfg: interlocks_snapshot},
         descriptor_catalog=live_descriptor_catalog,
     )
-    alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
+    alarms_v3_path = _alarms_config_path()
+    _alarm_v2_engine_cfg, _alarm_v2_configs = load_alarm_config(alarms_v3_path)
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
     merged_patterns = list({*legacy_patterns, *v3_patterns})
     logger.info(
@@ -7144,6 +7151,7 @@ async def _run_engine(
         safety_manager=safety_manager,
         adaptive_throttle_patterns=v3_patterns,
         adaptive_throttle_raw_patterns=legacy_patterns,
+        alarms_config_path=alarms_v3_path,
     )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
@@ -7333,8 +7341,6 @@ async def _run_engine(
         logger.warning(_leak_warn)
 
     # --- Alarm Engine v2 ---
-    _alarms_v3_cfg = _CONFIG_DIR / "alarms_v3.yaml"
-    _alarm_v2_engine_cfg, _alarm_v2_configs = load_alarm_config(_alarms_v3_cfg)
     _alarm_v2_state_tracker = ChannelStateTracker(
         stale_timeout_s=30.0,
         fault_window_s=300.0,
