@@ -18,6 +18,8 @@ from typing import Any
 
 import numpy as np
 
+from cryodaq.core.analytics_admission import AnalyticsPrecision
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -269,8 +271,22 @@ class VacuumTrendPredictor:
             return
         self._t_ref = float(timestamp)
 
-    def update(self) -> None:
-        """Recompute prediction from current buffer."""
+    def update(self, *, precision: AnalyticsPrecision = AnalyticsPrecision.FULL) -> None:
+        """Refit the prediction. ``precision`` bounds how much work that may cost.
+
+        Called off the event loop, always. ``REDUCED`` means the five-parameter
+        combined model is not attempted — that is the whole of it, and it is
+        the only knob worth having: measured on a real pump-down, that one
+        model is ~94% of the cost, while cutting the sample count instead saved
+        ~20 ms and moved the fitted exponent in the third decimal.
+
+        Under load this therefore yields a forecast from the cheap models
+        whenever they can produce one, and reports the forecast missing when
+        they cannot — which happens early in a run, before the outgassing tail
+        is established. Missing is honest. An earlier version returned a
+        coarser *different* answer there instead, and a degraded mode that
+        changes character under load is worse than one that declines.
+        """
         with self._buffer_lock:
             samples = list(self._buffer)
         if len(samples) < self.min_points:
@@ -285,6 +301,11 @@ class VacuumTrendPredictor:
             )
             return
 
+        # The sample count is deliberately NOT reduced under load. Measured, it
+        # saves ~20 ms while shifting the exponent in the third decimal and,
+        # early in a run, changing which model wins outright — a degraded mode
+        # that returns a *different* answer is worse than one that returns none.
+        reduced = precision is AnalyticsPrecision.REDUCED
         points = _thin_for_fitting(samples, _MAX_FIT_POINTS)
         t0 = points[0][0]
         t_arr = np.array([t - t0 for t, _ in points])
@@ -305,7 +326,25 @@ class VacuumTrendPredictor:
             outgas_fit = self._fit_outgassing(t_arr, logP_arr, offset=float(t0 - self._t_ref))
             if outgas_fit is not None:
                 fits.append(outgas_fit)
-        if len(samples) >= self.min_points_combined:
+        # The five-parameter model is the expensive one: measured on a real
+        # pump-down it costs ~1300 ms against ~75 ms for the other three, and
+        # once the run settles into a pure outgassing tail it returns a
+        # bit-identical answer to the model that already won.
+        #
+        # It is still always attempted at full precision, and deliberately so.
+        # An earlier version escalated to it only when the cheap models failed
+        # to produce an ETA; on data that genuinely carries both an exponential
+        # and an outgassing term, a cheap model resolved an ETA and the better
+        # fit was never tried — 1.71x the residual, for a saving that no longer
+        # matters. The cost was only ever dangerous because it ran on the event
+        # loop; off it, 1.3 s once every two minutes is ~1% of one core.
+        #
+        # Under load it is skipped, and that is the whole content of the
+        # reduced precision mode: the cheap models still answer whenever they
+        # can, and early in a run — where only this model resolves anything —
+        # the forecast is reported missing rather than replaced by a different
+        # one.
+        if not reduced and len(samples) >= self.min_points_combined:
             comb_fit = self._fit_combined(
                 t_arr,
                 logP_arr,

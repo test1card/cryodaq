@@ -43,7 +43,11 @@ vacuum_trend:
   # while actually at 0.306 and still falling) and reports every target as
   # unreachable. A 6 h window covers enough curvature to identify tau.
   window_s: 21600                          # data window for fitting (s)
-  update_interval_s: 30                    # refit interval (s)
+  # Pressure is still accepted every ~2 s by vacuum_trend_feed; this is only how
+  # often the curve is refitted. A pump-down runs for days and its forecast does
+  # not improve for being recomputed twice a minute, while the fit is the most
+  # expensive analytic in the engine.
+  update_interval_s: 120                   # refit interval (s)
   min_points: 60                           # minimum points for fit
   min_points_combined: 200                 # minimum for 5-param combined model
   # Targets must lie inside the gauge's range. The VSP63D is a Pirani

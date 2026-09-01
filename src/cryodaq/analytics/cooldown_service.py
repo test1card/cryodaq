@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
 from collections import deque
@@ -188,6 +189,25 @@ class CooldownDetector:
 # ============================================================================
 
 
+
+def _rates_from_samples(
+    samples: list[tuple[float, float, float]],
+    window_h: float,
+) -> tuple[float | None, float | None]:
+    """Cold/warm cooling rates from a snapshot of the history buffer.
+
+    Module-level and pure so it can be handed to a worker thread whole: the
+    NumPy conversion and the regression both belong off the event loop.
+    """
+    history = np.array(samples)
+    return compute_rate_from_history(
+        history[:, 0],
+        history[:, 1],
+        history[:, 2],
+        window_h=window_h,
+    )
+
+
 class CooldownService:
     """Асинхронный сервис прогнозирования охлаждения.
 
@@ -229,7 +249,10 @@ class CooldownService:
 
         self._channel_cold: str = config.get("channel_cold", "")
         self._channel_warm: str = config.get("channel_warm", "")
-        self._predict_interval_s: float = float(config.get("predict_interval_s", 30))
+        # Temperatures are still ingested at full rate; this is only how often
+        # the ETA is recomputed. A cooldown is a multi-hour process and the
+        # estimate does not improve for being refitted twice a minute.
+        self._predict_interval_s: float = float(config.get("predict_interval_s", 60))
         self._rate_window_h: float = float(config.get("rate_window_h", 1.5))
         self._auto_ingest: bool = bool(config.get("auto_ingest", True))
         self._min_cooldown_hours: float = float(config.get("min_cooldown_hours", 10.0))
@@ -702,19 +725,23 @@ class CooldownService:
         else:
             t_elapsed = 0.0
 
-        # Compute observed rates from buffer
+        # Observed rates, computed off the event loop.
+        #
+        # This used to run inline: the whole buffer was converted to a NumPy
+        # array and regressed on every predict cycle. The buffer holds up to
+        # 100 000 samples — about 55 h at the 2 s cadence — and at that size the
+        # conversion and fit cost ~25 ms of event loop on every pass, growing
+        # with run length. Small next to the 8 s vacuum stall that cost this
+        # stand a night of data, but the same defect: acquisition waiting on
+        # arithmetic. The samples are snapshotted under no lock because the
+        # deque is only appended to from this loop; the copy is what crosses
+        # into the worker.
         rate_cold: float | None = None
         rate_warm: float | None = None
         if len(self._buffer) >= 20:
-            buf_arr = np.array(list(self._buffer))
-            t_h = buf_arr[:, 0]
-            Tc = buf_arr[:, 1]
-            Tw = buf_arr[:, 2]
-            rate_cold, rate_warm = compute_rate_from_history(
-                t_h,
-                Tc,
-                Tw,
-                window_h=self._rate_window_h,
+            samples = list(self._buffer)
+            rate_cold, rate_warm = await self._run_owned_executor(
+                functools.partial(_rates_from_samples, samples, self._rate_window_h)
             )
 
         # Run predict in executor (scipy is CPU-heavy)

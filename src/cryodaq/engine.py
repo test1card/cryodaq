@@ -65,6 +65,7 @@ from cryodaq.core.alarm_ack_codec import (
 from cryodaq.core.alarm_config import AlarmConfig, AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
+from cryodaq.core.analytics_admission import AnalyticsAdmission, LoopLagMonitor
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
@@ -2610,6 +2611,8 @@ async def _watchdog(
     scheduler: Scheduler,
     writer: SQLiteWriter,
     start_ts: float,
+    lag_monitor: LoopLagMonitor | None = None,
+    admission: AnalyticsAdmission | None = None,
 ) -> None:
     """Периодически логирует heartbeat, статистику и потребление памяти."""
     try:
@@ -2629,9 +2632,30 @@ async def _watchdog(
             total_queued = sum(s.get("queued", 0) for s in broker_stats.values())
             total_dropped = sum(s.get("dropped", 0) for s in broker_stats.values())
 
+            # Event-loop lag is reported as the worst value seen since the
+            # last heartbeat, not the instantaneous one. A stall is by
+            # definition not happening at the moment anything gets to look at
+            # it, so an instantaneous reading of a recovered loop is always
+            # near zero — which is exactly why the 2026-09-01 freeze left no
+            # trace anyone would notice.
+            lag_note = ""
+            if lag_monitor is not None:
+                lag_note = f" | loop_lag_peak={lag_monitor.take_peak() * 1000:.0f} ms"
+            if admission is not None:
+                analytics = admission.snapshot()
+                skipped = sum(
+                    job["skipped_overloaded"] + job["skipped_still_running"]
+                    for job in analytics["jobs"].values()
+                )
+                lag_note += f" | analytics={analytics['precision']}"
+                if analytics["overloaded"]:
+                    lag_note += "/paused"
+                if skipped:
+                    lag_note += f" | analytics_skipped={skipped}"
+
             logger.info(
                 "HEARTBEAT | uptime=%02d:%02d:%02d | mem=%.1f MB | "
-                "queued=%d | dropped=%d | written=%d | instruments=%s",
+                "queued=%d | dropped=%d | written=%d | instruments=%s%s",
                 hours,
                 minutes,
                 secs,
@@ -2640,6 +2664,7 @@ async def _watchdog(
                 total_dropped,
                 writer_stats.get("total_written", 0),
                 {k: v.get("total_reads", 0) for k, v in sched_stats.items()},
+                lag_note,
             )
     except asyncio.CancelledError:
         return
@@ -7594,6 +7619,12 @@ async def _run_engine(
     else:
         logger.info("SensorDiagnostics: отключён (plugins.yaml не найден или enabled=false)")
 
+    # --- Analytics admission: acquisition always runs, analytics only when
+    # the event loop can spare it. Fed by the loop-lag probe spawned below. ---
+    loop_lag_monitor = LoopLagMonitor()
+    analytics_admission = AnalyticsAdmission()
+    loop_lag_monitor.subscribe(analytics_admission.observe_lag)
+
     # --- Vacuum Trend Predictor ---
     _vt_cfg = _plugins_raw.get("vacuum_trend", {})
     _vt_enabled = _vt_cfg.get("enabled", False)
@@ -8223,7 +8254,7 @@ async def _run_engine(
             functools.partial(
                 supervisor.spawn,
                 "vacuum_trend_tick",
-                functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg),
+                functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg, analytics_admission),
             )
         )
     leak_rate_feed_task = await startup.call(
@@ -8272,7 +8303,19 @@ async def _run_engine(
         functools.partial(
             supervisor.spawn,
             "engine_watchdog",
-            functools.partial(_watchdog, broker, scheduler, writer, start_ts),
+            functools.partial(
+                _watchdog, broker, scheduler, writer, start_ts, loop_lag_monitor, analytics_admission
+            ),
+        )
+    )
+    # The probe that makes the rule enforceable: acquisition always runs,
+    # analytics runs only when the loop can spare it. One timer, measuring how
+    # late its own wakeup was — that overshoot IS the lag.
+    await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "loop_lag_monitor",
+            loop_lag_monitor.run,
         )
     )
 

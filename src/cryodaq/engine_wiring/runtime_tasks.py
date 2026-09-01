@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections import deque
 from datetime import UTC, datetime
@@ -409,23 +410,39 @@ async def vacuum_trend_feed(vacuum_trend: Any, vt_cfg: dict[str, Any], broker: A
         return
 
 
-async def vacuum_trend_tick(vacuum_trend: Any, vt_cfg: dict[str, Any]) -> None:
+async def vacuum_trend_tick(
+    vacuum_trend: Any,
+    vt_cfg: dict[str, Any],
+    admission: Any | None = None,
+) -> None:
     """Periodically recompute vacuum trend prediction."""
     if vacuum_trend is None:
         return
-    interval = vt_cfg.get("update_interval_s", 30)
+    # Pressure keeps arriving at full rate through vacuum_trend_feed; this is
+    # only how often the curve is refitted. A pump-down is a multi-day process
+    # and its forecast does not improve for being recomputed twice a minute.
+    interval = vt_cfg.get("update_interval_s", 120)
+    job = None if admission is None else admission.job("vacuum_fit", min_interval_s=0.0)
     while True:
         await asyncio.sleep(interval)
         try:
-            # Off the event loop. update() runs several scipy curve fits, and a
-            # non-converging one burns its whole evaluation budget: measured on
-            # this stand it blocked the loop for 2.8 s with an hour of data and
-            # 33 s with six hours. While the loop is blocked nothing is polled,
-            # nothing is persisted and no timer fires — a 2026-09-01 02:39
-            # freeze of ~8 s timed out a bus-scoped instrument read, quarantined
-            # a GPIB session that never recovered, and cost the run its
-            # temperature data for the rest of the night.
-            await asyncio.to_thread(vacuum_trend.update)
+            # Never on the event loop. update() runs several scipy curve fits,
+            # and a non-converging one burns its whole evaluation budget:
+            # measured on this stand it blocked the loop for 2.8 s with an hour
+            # of data and 33 s with six hours. While the loop is blocked nothing
+            # is polled, nothing is persisted and no timer fires — a 2026-09-01
+            # 02:39 freeze of ~8 s timed out a bus-scoped instrument read,
+            # quarantined a GPIB session that never recovered, and cost the run
+            # its temperature data for the rest of the night.
+            if job is None:
+                await asyncio.to_thread(vacuum_trend.update)
+                continue
+            # Under load this asks for the cheap fit rather than the exact one,
+            # and is refused outright only when even that cannot be afforded.
+            # A refusal is an ordinary outcome: the previous prediction stands
+            # and its staleness is reported.
+            precision = admission.precision
+            await job.run(functools.partial(vacuum_trend.update, precision=precision))
         except Exception as exc:
             logger.error("VacuumTrendPredictor tick error: %s", exc)
 
