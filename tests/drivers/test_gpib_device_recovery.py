@@ -145,12 +145,25 @@ async def test_a_failed_clear_preserves_the_quarantine():
 
 
 @pytest.mark.asyncio
-async def test_an_indeterminate_drain_preserves_the_quarantine():
-    """A device that never goes quiet is not recovered."""
+async def test_a_device_that_keeps_talking_is_not_a_transport_failure():
+    """Silence is not achievable on this hardware, so it is not the criterion.
+
+    Measured against a real LS218 on GPIB0 (2026-09-02): after a
+    mid-transaction timeout the instrument returned its last response again on
+    every read -- 4,096 bytes of the identical 65-byte reply across 64 reads --
+    and never went quiet, even after a successful SDC. It re-sends whenever
+    addressed to talk with no new command pending.
+
+    What the quarantine protects against is a stale reply being attributed to
+    the NEXT query, and the sound proof of that is CORRESPONDENCE. On the same
+    instrument, `*IDN?` after SDC returned the identity on the first read. So
+    the transport clears and discards, and the caller -- which knows what a
+    valid reply looks like -- proves correspondence and re-quarantines if it
+    fails. See test_lakeshore_quarantine_recovery.py.
+    """
     transport = _quarantined_transport(_FakeResource(babbles=True))
-    with pytest.raises(Exception):
-        await transport.recover_device()
-    assert transport.query_desynchronized is True
+    await transport.recover_device()
+    assert transport.query_desynchronized is False
 
 
 @pytest.mark.asyncio
@@ -264,41 +277,21 @@ def test_the_serial_pressure_transport_is_a_different_class():
 
 
 @pytest.mark.asyncio
-async def test_a_non_timeout_read_failure_does_not_prove_quiet():
-    """"We failed to ask" is not "the device has nothing to say".
-
-    A closed handle or an adapter fault ends the read without reaching a
-    conclusion, so a pending response may still be buffered and would be read
-    as the answer to the NEXT query. Treating that as silence is exactly how a
-    stale reply becomes someone's reading.
-    """
+async def test_a_read_error_during_the_discard_ends_it_without_failing_recovery():
+    """There is nothing more to take; correspondence is proven upstream."""
     transport = _quarantined_transport(_FakeResource(read_error=_NotATimeout("libgpib: invalid descriptor")))
-    with pytest.raises(RuntimeError, match="without reaching a timeout"):
-        await transport.recover_device()
-    assert transport.query_desynchronized is True
+    await transport.recover_device()
+    assert transport.query_desynchronized is False
 
 
 @pytest.mark.asyncio
-async def test_a_visa_timeout_is_accepted_as_quiet():
+async def test_a_visa_timeout_also_ends_the_discard():
     from pyvisa import constants
     from pyvisa.errors import VisaIOError
 
     transport = _quarantined_transport(_FakeResource(read_error=VisaIOError(constants.StatusCode.error_timeout)))
     await transport.recover_device()
     assert transport.query_desynchronized is False
-
-
-@pytest.mark.asyncio
-async def test_a_non_timeout_visa_error_is_not_quiet():
-    from pyvisa import constants
-    from pyvisa.errors import VisaIOError
-
-    transport = _quarantined_transport(
-        _FakeResource(read_error=VisaIOError(constants.StatusCode.error_connection_lost))
-    )
-    with pytest.raises(RuntimeError, match="without reaching a timeout"):
-        await transport.recover_device()
-    assert transport.query_desynchronized is True
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +317,7 @@ async def test_a_failed_timeout_restoration_fails_the_recovery():
 @pytest.mark.asyncio
 async def test_a_failed_recovery_closes_the_session_for_a_clean_reopen():
     """open() refuses while a resource is held, so a failure must release it."""
-    transport = _quarantined_transport(_FakeResource(babbles=True))
+    transport = _quarantined_transport(_FakeResource(clear_fails=True))
     closed: list[str] = []
 
     async def _close():

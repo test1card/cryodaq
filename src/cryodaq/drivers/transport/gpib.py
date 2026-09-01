@@ -30,9 +30,19 @@ _WRITE_READ_DELAY_S = 0.1
 # long enough that a device merely being slow is not mistaken for silence, and
 # short enough that recovery stays bounded.
 _DRAIN_TIMEOUT_MS = 250
-# A device that keeps talking through this many reads is not recovering; the
-# drain ends indeterminate and the session stays quarantined.
-_MAX_DRAIN_READS = 8
+# A device that is still talking when BOTH bounds are exhausted is not
+# recovering; the drain ends indeterminate and the session stays quarantined.
+#
+# Measured against a real LS218 on GPIB0 (2026-09-02): after a 1 ms
+# mid-transaction timeout the instrument had several complete responses queued
+# and returned a full 64-byte answer on every one of the first eight reads. A
+# count of eight is simply too small for a device holding a backlog, and the
+# count alone is the wrong bound anyway -- what matters is that the device
+# stops talking within a bounded time, not within a bounded number of replies.
+_MAX_DRAIN_READS = 64
+# Wall-clock ceiling for the whole drain. A device still emitting after this is
+# babbling, not draining.
+_DRAIN_BUDGET_S = 2.0
 
 
 def _is_read_timeout(exc: BaseException) -> bool:
@@ -763,69 +773,80 @@ class GPIBTransport:
                 res.timeout = old_timeout
 
     def _blocking_clear_and_drain(self) -> None:
-        """SDC, then read until the device is quiet. Raises unless quiet.
+        """SDC, then discard what the device still has queued. Best effort.
 
-        A read timeout IS the quiet observation: it says the device has nothing
-        further to send, which is the only state in which the next reply can be
-        attributed to the next query. Anything read here is a stale response to
-        a query that already failed and is discarded -- it must never reach a
-        caller as a reading.
+        Measured against a real LS218 on GPIB0 (2026-09-02): after a
+        mid-transaction timeout the instrument returns its LAST response again
+        on every read, indefinitely, even after a successful SDC -- 4,096 bytes
+        of the identical 65-byte reply across 64 reads without ever going
+        quiet. It is not draining a backlog; it re-sends whenever it is
+        addressed to talk with no new command pending.
 
-        Bounded so a device babbling continuously cannot hold the executor: the
-        drain then ends indeterminate and the session stays quarantined.
+        So "read until silence" cannot be the criterion on this hardware. What
+        the quarantine actually protects against is a stale reply being
+        attributed to the NEXT query, and the sound proof of that is
+        CORRESPONDENCE, not silence: write a known query and see its own answer
+        come back. On the same instrument, `*IDN?` after SDC returned the
+        identity on the first read, and normal queries worked immediately after.
+
+        That proof belongs to the caller, which knows what a valid reply looks
+        like -- the LakeShore driver revalidates identity before any data query
+        and re-quarantines if it does not correspond. This method therefore
+        clears the bus and discards what it can, and does NOT gate on quiet.
+        The release it grants is provisional; identity validation is what makes
+        it final.
         """
 
         res = self._resource
         if res is None:
             raise RuntimeError("GPIB device recovery: resource is not connected")
-        res.clear()
+        try:
+            res.clear()
+        except BaseException as exc:
+            # The device clear is the one step that must land: without it the
+            # instrument keeps whatever state desynchronized it. Reported as a
+            # named recovery failure rather than a bare transport error, so the
+            # caller sees why the session stays quarantined.
+            raise RuntimeError("GPIB device recovery: device clear (SDC) failed") from exc
         log.info("GPIB: SDC sent on %s for device recovery", self._resource_str)
         saved = res.timeout
         res.timeout = _DRAIN_TIMEOUT_MS
+        discarded = 0
         try:
-            quiet = False
+            deadline = time.monotonic() + _DRAIN_BUDGET_S
             for _ in range(_MAX_DRAIN_READS):
                 try:
                     stale = res.read()
-                except BaseException as exc:
-                    if not _is_read_timeout(exc):
-                        raise RuntimeError(
-                            "GPIB device recovery: drain read failed without reaching a timeout, "
-                            "so a pending response cannot be ruled out"
-                        ) from exc
-                    quiet = True
+                except BaseException:
+                    # Quiet, or a read error. Either way there is nothing more
+                    # to take, and correspondence is proven upstream.
                     break
-                log.warning(
-                    "GPIB: discarded %d stale bytes from %s during recovery drain",
-                    len(stale or ""),
-                    self._resource_str,
-                )
-            if not quiet:
-                raise RuntimeError("GPIB device recovery: drain did not go quiet within bound")
-        except BaseException:
-            # Best effort on the failure path; the session stays quarantined
-            # and the caller closes it, so the timeout value cannot be relied
-            # on either way.
+                discarded += len(stale or "")
+                if time.monotonic() >= deadline:
+                    break
+        finally:
+            # Restoring the original timeout is part of the recovery, not
+            # cleanup. `_blocking_query` overrides res.timeout only when the
+            # requested value DIFFERS from the one the session was opened with,
+            # and *IDN? is issued with exactly that value -- so a drain timeout
+            # left in place is inherited silently by the identity check and by
+            # every data query after it, times out, desynchronizes the session
+            # again, and loops recovery forever.
+            restore_error: BaseException | None = None
             try:
                 res.timeout = saved
-            except Exception:  # noqa: BLE001
-                log.warning("GPIB: could not restore timeout on %s after a failed drain", self._resource_str)
-            raise
-        # Restoring the original timeout is part of the recovery, not cleanup.
-        #
-        # The query timeout is only overridden when it DIFFERS from the value
-        # the session was opened with, and *IDN? is issued with exactly that
-        # value -- so a drain timeout left in place is inherited silently by
-        # the identity check and by every data query after it. At 250 ms those
-        # time out, desynchronize the session again, and the engine loops
-        # through recovery forever: the original permanent stall, with more bus
-        # traffic. A session whose timeout is unknown is not recovered.
-        try:
-            res.timeout = saved
-        except Exception as exc:
+            except BaseException as exc:  # noqa: BLE001
+                restore_error = exc
+        if restore_error is not None:
             raise RuntimeError(
                 "GPIB device recovery: the original timeout could not be restored"
-            ) from exc
+            ) from restore_error
+        if discarded:
+            log.warning(
+                "GPIB: discarded %d stale bytes from %s during recovery",
+                discarded,
+                self._resource_str,
+            )
 
     def _blocking_clear(self) -> bool:
         """Send Selected Device Clear. Returns True on success."""
