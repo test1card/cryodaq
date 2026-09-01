@@ -24,17 +24,42 @@ import pytest
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 
+class _NotATimeout(OSError):
+    """An adapter/session failure. Proves nothing about a pending response."""
+
+
 class _FakeResource:
     """A VISA resource that can hold a stale reply and refuse to go quiet."""
 
-    def __init__(self, *, stale: list[str] | None = None, clear_fails: bool = False, babbles: bool = False):
-        self.timeout = 3000
+    def __init__(
+        self,
+        *,
+        stale: list[str] | None = None,
+        clear_fails: bool = False,
+        babbles: bool = False,
+        read_error: BaseException | None = None,
+        restore_fails: bool = False,
+    ):
+        self._timeout = 3000
         self._stale = list(stale or [])
         self._clear_fails = clear_fails
         self._babbles = babbles
+        self._read_error = read_error
+        self._restore_fails = restore_fails
         self.clears = 0
         self.reads: list[str] = []
         self.written: list[str] = []
+
+    @property
+    def timeout(self):
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        # Restoring the original value is what a broken adapter refuses.
+        if self._restore_fails and value == 3000 and self._timeout != 3000:
+            raise OSError("cannot restore timeout")
+        self._timeout = value
 
     def clear(self):
         self.clears += 1
@@ -42,6 +67,8 @@ class _FakeResource:
             raise OSError("SDC refused")
 
     def read(self):
+        if self._read_error is not None:
+            raise self._read_error
         if self._babbles:
             return "noise"
         if self._stale:
@@ -229,3 +256,92 @@ def test_the_serial_pressure_transport_is_a_different_class():
     assert "gpib" not in open(source, encoding="utf-8").read().lower(), (
         "the serial pressure driver must not depend on the GPIB transport"
     )
+
+
+# ---------------------------------------------------------------------------
+# Only a genuine timeout proves the device is quiet
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_non_timeout_read_failure_does_not_prove_quiet():
+    """"We failed to ask" is not "the device has nothing to say".
+
+    A closed handle or an adapter fault ends the read without reaching a
+    conclusion, so a pending response may still be buffered and would be read
+    as the answer to the NEXT query. Treating that as silence is exactly how a
+    stale reply becomes someone's reading.
+    """
+    transport = _quarantined_transport(_FakeResource(read_error=_NotATimeout("libgpib: invalid descriptor")))
+    with pytest.raises(RuntimeError, match="without reaching a timeout"):
+        await transport.recover_device()
+    assert transport.query_desynchronized is True
+
+
+@pytest.mark.asyncio
+async def test_a_visa_timeout_is_accepted_as_quiet():
+    from pyvisa import constants
+    from pyvisa.errors import VisaIOError
+
+    transport = _quarantined_transport(_FakeResource(read_error=VisaIOError(constants.StatusCode.error_timeout)))
+    await transport.recover_device()
+    assert transport.query_desynchronized is False
+
+
+@pytest.mark.asyncio
+async def test_a_non_timeout_visa_error_is_not_quiet():
+    from pyvisa import constants
+    from pyvisa.errors import VisaIOError
+
+    transport = _quarantined_transport(
+        _FakeResource(read_error=VisaIOError(constants.StatusCode.error_connection_lost))
+    )
+    with pytest.raises(RuntimeError, match="without reaching a timeout"):
+        await transport.recover_device()
+    assert transport.query_desynchronized is True
+
+
+# ---------------------------------------------------------------------------
+# A session whose timeout is unknown is not recovered
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_timeout_restoration_fails_the_recovery():
+    """The drain timeout must never be inherited by *IDN? or a data query.
+
+    A query only overrides res.timeout when it differs from the value the
+    session was opened with, and *IDN? is issued with exactly that value. A
+    250 ms drain timeout left in place is therefore inherited silently, times
+    out, desynchronizes the session again, and loops recovery forever.
+    """
+    transport = _quarantined_transport(_FakeResource(restore_fails=True))
+    with pytest.raises(RuntimeError, match="timeout could not be restored"):
+        await transport.recover_device()
+    assert transport.query_desynchronized is True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_recovery_closes_the_session_for_a_clean_reopen():
+    """open() refuses while a resource is held, so a failure must release it."""
+    transport = _quarantined_transport(_FakeResource(babbles=True))
+    closed: list[str] = []
+
+    async def _close():
+        closed.append("closed")
+        transport._resource = None
+        transport._session_open = False
+
+    transport.close = _close  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await transport.recover_device()
+    assert closed == ["closed"], "a failed recovery left the session open and unopenable"
+    assert transport.query_desynchronized is True
+
+
+@pytest.mark.asyncio
+async def test_a_successful_recovery_restores_the_original_timeout():
+    resource = _FakeResource(stale=["stale"])
+    transport = _quarantined_transport(resource)
+    await transport.recover_device()
+    assert resource.timeout == 3000, "the drain timeout was inherited by later queries"

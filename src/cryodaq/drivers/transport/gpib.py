@@ -33,6 +33,35 @@ _DRAIN_TIMEOUT_MS = 250
 # A device that keeps talking through this many reads is not recovering; the
 # drain ends indeterminate and the session stays quarantined.
 _MAX_DRAIN_READS = 8
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    """True only for a genuine read timeout.
+
+    The drain's whole purpose is to establish that the device has NOTHING left
+    to send, because only then can the next reply be attributed to the next
+    query. A timeout proves that. Any other error -- a closed handle, an
+    adapter fault, ``libgpib: invalid descriptor`` -- proves the opposite: the
+    read never reached a conclusion, so a pending response may still be
+    sitting in the device's output buffer and would be read as the answer to
+    the next query.
+
+    Treating every exception as silence is the difference between "the device
+    is quiet" and "we failed to ask", and only the first permits recovery.
+
+    This stand runs pyvisa-py over linux-gpib, where a read timeout surfaces as
+    VisaIOError with StatusCode.error_timeout. VisaIOError is NOT a subclass of
+    the builtin TimeoutError, so both are checked explicitly.
+    """
+
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        from pyvisa import constants  # noqa: PLC0415
+        from pyvisa.errors import VisaIOError  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - without pyvisa nothing here can be trusted
+        return False
+    return isinstance(exc, VisaIOError) and exc.error_code == constants.StatusCode.error_timeout
 _CLOSE_TIMEOUT_S = 1.0
 
 
@@ -416,7 +445,19 @@ class GPIBTransport:
         # SDC + drain. `_run_executor_operation` re-checks settlement itself and
         # raises rather than overlapping; a cancellation there marks the
         # generation terminally unsettled, so the flag below is never cleared.
-        await self._run_executor_operation(self._blocking_clear_and_drain)
+        #
+        # Any failure closes the session. `open()` refuses while a resource is
+        # still held, so leaving it open after a failed recovery would make the
+        # next reconnect impossible -- trading one permanent stall for another.
+        # A clean open also restores a known timeout.
+        try:
+            await self._run_executor_operation(self._blocking_clear_and_drain)
+        except BaseException:
+            try:
+                await asyncio.shield(self.close())
+            except BaseException:  # noqa: BLE001 - the recovery failure is the news
+                log.warning("GPIB: close after failed recovery also failed on %s", self._resource_str)
+            raise
 
         with self._state_lock:
             if (
@@ -719,22 +760,49 @@ class GPIBTransport:
         saved = res.timeout
         res.timeout = _DRAIN_TIMEOUT_MS
         try:
+            quiet = False
             for _ in range(_MAX_DRAIN_READS):
                 try:
                     stale = res.read()
-                except Exception:
-                    return  # quiet: the only successful outcome
+                except BaseException as exc:
+                    if not _is_read_timeout(exc):
+                        raise RuntimeError(
+                            "GPIB device recovery: drain read failed without reaching a timeout, "
+                            "so a pending response cannot be ruled out"
+                        ) from exc
+                    quiet = True
+                    break
                 log.warning(
                     "GPIB: discarded %d stale bytes from %s during recovery drain",
                     len(stale or ""),
                     self._resource_str,
                 )
-            raise RuntimeError("GPIB device recovery: drain did not go quiet within bound")
-        finally:
+            if not quiet:
+                raise RuntimeError("GPIB device recovery: drain did not go quiet within bound")
+        except BaseException:
+            # Best effort on the failure path; the session stays quarantined
+            # and the caller closes it, so the timeout value cannot be relied
+            # on either way.
             try:
                 res.timeout = saved
-            except Exception:  # noqa: BLE001 - restoring the timeout must not mask the outcome
-                log.warning("GPIB: could not restore timeout on %s after drain", self._resource_str)
+            except Exception:  # noqa: BLE001
+                log.warning("GPIB: could not restore timeout on %s after a failed drain", self._resource_str)
+            raise
+        # Restoring the original timeout is part of the recovery, not cleanup.
+        #
+        # The query timeout is only overridden when it DIFFERS from the value
+        # the session was opened with, and *IDN? is issued with exactly that
+        # value -- so a drain timeout left in place is inherited silently by
+        # the identity check and by every data query after it. At 250 ms those
+        # time out, desynchronize the session again, and the engine loops
+        # through recovery forever: the original permanent stall, with more bus
+        # traffic. A session whose timeout is unknown is not recovered.
+        try:
+            res.timeout = saved
+        except Exception as exc:
+            raise RuntimeError(
+                "GPIB device recovery: the original timeout could not be restored"
+            ) from exc
 
     def _blocking_clear(self) -> bool:
         """Send Selected Device Clear. Returns True on success."""
