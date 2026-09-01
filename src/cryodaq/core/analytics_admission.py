@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypeVar
@@ -46,6 +48,7 @@ from typing import Any, TypeVar
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
 
 class AnalyticsPrecision(StrEnum):
     """How much work a calculation may spend, given what the loop can spare.
@@ -79,6 +82,12 @@ DEFAULT_RECOVERY_S = 30.0
 # How often the lag probe wakes. Small enough to notice a stall while it is
 # still happening; one timer, no measurable cost.
 DEFAULT_PROBE_INTERVAL_S = 0.5
+# Analytics runs on its own small pool, never the loop's default executor.
+# The default one is shared with everything else that offloads work, so a
+# saturated pool would let best-effort calculations queue in front of, and
+# delay, operations that are not best-effort at all — while loop lag stays
+# low and the admission controller sees nothing wrong.
+DEFAULT_ANALYTICS_WORKERS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,7 @@ class AnalyticsJobStatus:
     skipped_overloaded: int
     skipped_still_running: int
     skipped_too_soon: int
+    skipped_saturated: int
     failures: int
 
     def staleness_s(self, *, now: float | None = None) -> float | None:
@@ -112,7 +122,9 @@ class _JobState:
     skipped_overloaded: int = 0
     skipped_still_running: int = 0
     skipped_too_soon: int = 0
+    skipped_saturated: int = 0
     failures: int = 0
+    inflight: Future | None = None
 
 
 class LoopLagMonitor:
@@ -173,6 +185,15 @@ class LoopLagMonitor:
             self.observe(time.monotonic() - started - self._interval_s)
 
 
+def _wait_for(future: Future, timeout_s: float) -> bool:
+    try:
+        future.result(timeout=timeout_s)
+    except Exception:
+        # Any completion settles ownership; the outcome itself is the job's.
+        return True
+    return True
+
+
 class AnalyticsAdmission:
     """Decides whether a recompute may start, and remembers what it refused.
 
@@ -188,6 +209,7 @@ class AnalyticsAdmission:
         leave_overload_s: float = DEFAULT_OVERLOAD_LEAVE_S,
         reduce_at_s: float = DEFAULT_REDUCE_AT_S,
         recovery_s: float = DEFAULT_RECOVERY_S,
+        max_workers: int = DEFAULT_ANALYTICS_WORKERS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not enter_overload_s > leave_overload_s > 0.0:
@@ -205,6 +227,25 @@ class AnalyticsAdmission:
         self._precision = AnalyticsPrecision.FULL
         self._precision_calm_since: float | None = None
         self._jobs: dict[str, _JobState] = {}
+        if max_workers < 1:
+            raise ValueError("analytics needs at least one worker")
+        self._max_workers = int(max_workers)
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="cryodaq-analytics")
+        # Admission is what bounds concurrency, not the pool's own queue: a
+        # submission that would have to wait for a worker is refused instead,
+        # so analytics never forms a backlog anywhere.
+        self._inflight = 0
+        self._lock = threading.Lock()
+
+    @property
+    def executor(self) -> ThreadPoolExecutor:
+        """The analytics pool. Never the loop's default executor.
+
+        Offered so paths that already own their offload shape (the cooldown
+        service runs several separate calls per prediction) can still be bounded
+        by the same pool instead of competing for the shared default one.
+        """
+        return self._executor
 
     # -- overload state ---------------------------------------------------
 
@@ -310,6 +351,7 @@ class AnalyticsAdmission:
             skipped_overloaded=state.skipped_overloaded,
             skipped_still_running=state.skipped_still_running,
             skipped_too_soon=state.skipped_too_soon,
+            skipped_saturated=state.skipped_saturated,
             failures=state.failures,
         )
 
@@ -324,12 +366,11 @@ class AnalyticsAdmission:
                 name: {
                     "running": state.running,
                     "last_duration_s": state.last_duration_s,
-                    "stale_s": (
-                        None if state.last_result_monotonic is None else now - state.last_result_monotonic
-                    ),
+                    "stale_s": (None if state.last_result_monotonic is None else now - state.last_result_monotonic),
                     "skipped_overloaded": state.skipped_overloaded,
                     "skipped_still_running": state.skipped_still_running,
                     "skipped_too_soon": state.skipped_too_soon,
+                    "skipped_saturated": state.skipped_saturated,
                     "failures": state.failures,
                 }
                 for name, state in self._jobs.items()
@@ -339,6 +380,10 @@ class AnalyticsAdmission:
     # -- admission, used by AnalyticsJob ----------------------------------
 
     def _admit(self, name: str) -> bool:
+        with self._lock:
+            return self._admit_locked(name)
+
+    def _admit_locked(self, name: str) -> bool:
         state = self._jobs[name]
         now = self._clock()
         if state.running:
@@ -357,18 +402,55 @@ class AnalyticsAdmission:
         ):
             state.skipped_too_soon += 1
             return False
+        if self._inflight >= self._max_workers:
+            # Every worker is busy. Refusing here is what keeps "analytics never
+            # queues" true ACROSS jobs and not merely within one: submitting
+            # anyway would park this calculation in the pool's queue behind
+            # another, which is a backlog by a different name.
+            state.skipped_saturated += 1
+            return False
         state.running = True
         state.last_attempt_monotonic = now
+        self._inflight += 1
         return True
 
     def _finish(self, name: str, *, started: float, ok: bool) -> None:
-        state = self._jobs[name]
-        state.running = False
-        state.last_duration_s = self._clock() - started
-        if ok:
-            state.last_result_monotonic = self._clock()
-        else:
-            state.failures += 1
+        """Release ownership. Called when the WORKER finishes, never earlier."""
+        with self._lock:
+            state = self._jobs[name]
+            if not state.running:
+                return
+            state.running = False
+            state.inflight = None
+            self._inflight = max(0, self._inflight - 1)
+            state.last_duration_s = self._clock() - started
+            if ok:
+                state.last_result_monotonic = self._clock()
+            else:
+                state.failures += 1
+
+    def inflight_futures(self) -> list[Future]:
+        with self._lock:
+            return [state.inflight for state in self._jobs.values() if state.inflight is not None]
+
+    async def settle(self, *, timeout_s: float = 30.0) -> bool:
+        """Wait for in-flight calculations to finish, for orderly shutdown.
+
+        A cancelled await does not stop a worker thread — the thread runs to
+        completion whatever happens to the coroutine that started it. Shutdown
+        therefore has to settle them explicitly, or the loop closes while a fit
+        is still running and the process hangs on a non-daemon pool thread.
+        """
+        futures = self.inflight_futures()
+        if not futures:
+            return True
+        done = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: all(_wait_for(future, timeout_s) for future in futures)
+        )
+        return bool(done)
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        self._executor.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class AnalyticsJob:
@@ -392,20 +474,49 @@ class AnalyticsJob:
     def status(self) -> AnalyticsJobStatus:
         return self._admission.status(self._name)
 
+    def try_begin(self) -> bool:
+        """Claim the job for async-shaped work; pair with ``end``.
+
+        ``run`` is the safe path and should be preferred: it ties ownership to
+        the worker, so a cancelled caller cannot re-admit. This exists for work
+        that is not one synchronous callable — a prediction that offloads twice
+        and publishes to the broker between. The caller owns the pairing, and
+        must release in a ``finally``.
+        """
+        return self._admission._admit(self._name)
+
+    def end(self, *, ok: bool, started: float) -> None:
+        self._admission._finish(self._name, started=started, ok=ok)
+
     async def run(self, work: Callable[[], T]) -> T | None:
-        """Run ``work`` in a worker thread if admitted; otherwise skip it."""
-        if not self._admission._admit(self._name):
+        """Run ``work`` on the analytics pool if admitted; otherwise skip it.
+
+        Ownership is released when the WORKER finishes, not when this coroutine
+        stops awaiting. Cancelling the caller does not stop a thread that has
+        already started, so clearing the flag in a ``finally`` re-admitted the
+        job while its previous worker was still running — two concurrent
+        workers for a job whose entire contract is single-flight.
+        """
+        admission = self._admission
+        if not admission._admit(self._name):
             return None
         started = time.monotonic()
-        ok = False
+        loop = asyncio.get_running_loop()
+        future = admission._executor.submit(work)
+        with admission._lock:
+            admission._jobs[self._name].inflight = future
+
+        def _release(completed: Future) -> None:
+            failed = completed.cancelled() or completed.exception() is not None
+            admission._finish(self._name, started=started, ok=not failed)
+
+        future.add_done_callback(_release)
         try:
-            result = await asyncio.to_thread(work)
-            ok = True
-            return result
+            return await asyncio.wrap_future(future, loop=loop)
         except asyncio.CancelledError:
+            # The worker keeps running and still releases ownership through the
+            # done callback; shutdown settles it via AnalyticsAdmission.settle().
             raise
         except Exception:
             logger.warning("Аналитика %s: расчёт завершился ошибкой", self._name, exc_info=True)
             return None
-        finally:
-            self._admission._finish(self._name, started=started, ok=ok)

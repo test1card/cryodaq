@@ -2644,8 +2644,7 @@ async def _watchdog(
             if admission is not None:
                 analytics = admission.snapshot()
                 skipped = sum(
-                    job["skipped_overloaded"] + job["skipped_still_running"]
-                    for job in analytics["jobs"].values()
+                    job["skipped_overloaded"] + job["skipped_still_running"] for job in analytics["jobs"].values()
                 )
                 lag_note += f" | analytics={analytics['precision']}"
                 if analytics["overloaded"]:
@@ -3207,6 +3206,7 @@ class EngineCommandContext:
     escalation_service: Any = None
     cooldown_service: Any = None
     zmq_publisher: ZMQPublisher | None = None
+    analytics_admission: Any = None
     recording_lifecycle_feed: RecordingLifecycleFeed | None = None
     annunciation_registry: AnnunciationRegistry | None = None
     experiment_command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -5706,6 +5706,7 @@ async def _handle_gui_command(
     drivers_by_name = context.drivers_by_name
     sensor_diag = context.sensor_diag
     vacuum_trend = context.vacuum_trend
+    analytics_admission = context.analytics_admission
     _alarm_v2_state_tracker = context.alarm_v2_state_tracker
     _multiline_burst_auto_stop_meta = context.multiline_burst_auto_stop_meta
     _multiline_burst_auto_stop_tasks = context.multiline_burst_auto_stop_tasks
@@ -6364,6 +6365,14 @@ async def _handle_gui_command(
                     "summary": asdict(summary),
                 }
             )
+        if action == "analytics_health":
+            if analytics_admission is None:
+                return {"ok": False, "error": "analytics admission is not wired"}
+            # Typed health for every best-effort calculation: how old each
+            # result is, whether analytics is degraded or paused, and what has
+            # been skipped. Without this a consumer cannot tell a current
+            # forecast from one computed before an overload.
+            return _json_wire_safe({"ok": True, **analytics_admission.snapshot()})
         if action == "get_vacuum_trend":
             if vacuum_trend is None:
                 return {"ok": False, "error": "VacuumTrendPredictor отключён"}
@@ -6372,7 +6381,30 @@ async def _handle_gui_command(
             pred = vacuum_trend.get_prediction()
             if pred is None:
                 return {"ok": True, "status": "no_data"}
-            return _json_wire_safe({"ok": True, **asdict(pred)})
+            # The forecast travels with its own age and the state of the tier
+            # that produced it, so a stale number cannot be displayed as a
+            # current one by a consumer that never thought to ask.
+            health = (
+                analytics_admission.snapshot()
+                if analytics_admission is not None
+                else {"jobs": {}, "precision": "full", "overloaded": False}
+            )
+            job = health["jobs"].get("vacuum_fit", {})
+            return _json_wire_safe(
+                {
+                    "ok": True,
+                    **asdict(pred),
+                    "analytics_stale_s": job.get("stale_s"),
+                    "analytics_degraded": health["precision"] != "full",
+                    "analytics_paused": health["overloaded"],
+                    "analytics_skipped": (
+                        job.get("skipped_overloaded", 0)
+                        + job.get("skipped_still_running", 0)
+                        + job.get("skipped_saturated", 0)
+                    ),
+                    "analytics_failures": job.get("failures", 0),
+                }
+            )
         if action == "shift_handover_summary":
             shift_duration_h = cmd.get("shift_duration_h", 8)
             if (
@@ -7715,6 +7747,7 @@ async def _run_engine(
         drivers_by_name=drivers_by_name,
         sensor_diag=sensor_diag,
         vacuum_trend=vacuum_trend,
+        analytics_admission=analytics_admission,
         alarm_v2_state_tracker=_alarm_v2_state_tracker,
         multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
         multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
@@ -7795,6 +7828,10 @@ async def _run_engine(
                     # silently reporting available.
                     safety_manager=safety_manager,
                 )
+                # Best-effort, like every other pure calculation: bounded by the
+                # analytics pool and shed under load, so a prediction can never
+                # delay an instrument read or a SQLite commit.
+                cooldown_service.set_analytics_admission(analytics_admission)
                 logger.info("CooldownService создан")
                 # v0.55.4 A2: hand the cooldown_service-owned
                 # SteadyStatePredictor to CooldownAlarm so its WATCHING
@@ -8228,6 +8265,7 @@ async def _run_engine(
                     sensor_diag_tick,
                     sensor_diag=sensor_diag,
                     sd_cfg=_sd_cfg,
+                    admission=analytics_admission,
                     telegram_bot=telegram_alarm_bot,
                     alarm_dispatch_tasks=_alarm_dispatch_tasks,
                     event_bus=event_bus,
@@ -8303,9 +8341,7 @@ async def _run_engine(
         functools.partial(
             supervisor.spawn,
             "engine_watchdog",
-            functools.partial(
-                _watchdog, broker, scheduler, writer, start_ts, loop_lag_monitor, analytics_admission
-            ),
+            functools.partial(_watchdog, broker, scheduler, writer, start_ts, loop_lag_monitor, analytics_admission),
         )
     )
     # The probe that makes the rule enforceable: acquisition always runs,

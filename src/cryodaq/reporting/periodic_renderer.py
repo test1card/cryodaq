@@ -150,6 +150,30 @@ def render_periodic_png(
     return RenderedPeriodicPng(png_path, caption, width, height)
 
 
+# Statuses that carry a measurement. Anything else is an instrument telling us
+# it could not measure, and its value field carries a sentinel (-8.888e+88) that
+# is perfectly finite — plotted as a number it rescales the axis to 1e88, and
+# joined to its neighbours it reads as a reading that was taken.
+_MEASUREMENT_STATUSES = frozenset({"ok", ""})
+
+
+def _usable(row: PeriodicReadingSnapshot, unit: str) -> bool:
+    """Whether this reading may be drawn as a point, rather than as a gap."""
+    if str(row.status or "").lower() not in _MEASUREMENT_STATUSES:
+        return False
+    value = row.value
+    if value is None:
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(number):
+        return False
+    # A log axis cannot show a non-positive pressure.
+    return not (unit == "mbar" and number <= 0.0)
+
+
 def _series(snapshot: ValidatedPeriodicInput) -> list[_Series]:
     labels = dict(snapshot.render.channel_labels)
     grouped: dict[str, list[PeriodicReadingSnapshot]] = defaultdict(list)
@@ -158,9 +182,17 @@ def _series(snapshot: ValidatedPeriodicInput) -> list[_Series]:
     result: list[_Series] = []
     for channel, rows in grouped.items():
         selected_unit = rows[-1].unit
-        eligible = [row for row in rows if row.unit == selected_unit and row.value is not None]
-        if selected_unit == "mbar":
-            eligible = [row for row in eligible if row.value is not None and row.value > 0]
+        # Unusable readings are KEPT, not filtered. Dropping them silently
+        # joined the samples either side, so an instrument that stopped
+        # measuring was drawn as a continuous line through the period it was
+        # not measuring — the same lie as a chart with no gap across an outage.
+        # _drawable turns them into breaks.
+        eligible = [row for row in rows if row.unit == selected_unit]
+        # A channel whose readings are ALL unusable is still returned, carrying
+        # its rows. Dropping it here would take its axis with it: the reviewed
+        # contract is that a pressure channel reporting nothing usable keeps its
+        # panel and shows "Нет данных", rather than the panel disappearing.
+        # _plot_axes draws no line for it and _build_caption lists no value.
         result.append(_Series(channel, selected_unit, tuple(eligible), labels.get(channel)))
     return result
 
@@ -189,7 +221,7 @@ def _cold_focus_limits(series: list[_Series]) -> tuple[float, float] | None:
     """
     latest: list[tuple[float, _Series]] = []
     for item in series:
-        values = [row.value for row in item.rows if row.value is not None]
+        values = [float(row.value) for row in item.rows if _usable(row, item.unit)]
         if values:
             latest.append((float(values[-1]), item))
     if len(latest) < 2:
@@ -203,10 +235,7 @@ def _cold_focus_limits(series: list[_Series]) -> tuple[float, float] | None:
     if widest_gap < max(span * _COLD_FOCUS_MIN_GAP_FRACTION, _COLD_FOCUS_MIN_GAP_K):
         return None
     cold_values = [
-        float(row.value)
-        for _value, item in latest[: split_index + 1]
-        for row in item.rows
-        if row.value is not None
+        float(row.value) for _value, item in latest[: split_index + 1] for row in item.rows if _usable(row, item.unit)
     ]
     if not cold_values:
         return None
@@ -219,9 +248,17 @@ def _cold_focus_limits(series: list[_Series]) -> tuple[float, float] | None:
 # wider than a channel's own cadence is an outage, not a measurement interval.
 _GAP_FACTOR = 8.0
 _MIN_GAP_S = 120.0
+# Intervals needed before the cadence may be inferred from the data at all.
+# With one or two intervals the outage IS the sample, so a six-hour hole becomes
+# the "typical" spacing and no break is drawn — the failure hides itself.
+_MIN_INTERVALS_FOR_CADENCE = 6
+# The cadence is taken from the lower cluster of intervals, not the median. A
+# channel that spent half the window down has a median sitting inside its own
+# outage; the quartile below still reflects how fast it samples when it works.
+_CADENCE_QUANTILE = 0.25
 
 
-def _drawable(rows: tuple[PeriodicReadingSnapshot, ...]) -> tuple[list[datetime], list[float]]:
+def _drawable(rows: tuple[PeriodicReadingSnapshot, ...], unit: str = "K") -> tuple[list[datetime], list[float]]:
     """Timestamps and values for one series, with breaks where data is absent.
 
     Two things are deliberately NOT smoothed over:
@@ -238,15 +275,28 @@ def _drawable(rows: tuple[PeriodicReadingSnapshot, ...]) -> tuple[list[datetime]
     channel was rendered as an unbroken curve, and the report looked healthy.
     A chart of a run that lost data must show that it lost data.
     """
+    # Leading and trailing unusable readings are dropped rather than drawn as
+    # breaks: a break exists to sever two points that would otherwise be joined,
+    # and at the ends of a series there is nothing on one side to join. This is
+    # also what keeps a pressure channel's plotted values exactly the usable
+    # ones, which the legacy log-axis contract pins.
+    usable_positions = [index for index, row in enumerate(rows) if _usable(row, unit)]
+    if not usable_positions:
+        return [], []
+    rows = rows[usable_positions[0] : usable_positions[-1] + 1]
+
     intervals = sorted(
         later.timestamp - earlier.timestamp
         for earlier, later in zip(rows, rows[1:], strict=False)
         if later.timestamp > earlier.timestamp
     )
-    if intervals:
-        typical = intervals[len(intervals) // 2]
-        gap_threshold = max(typical * _GAP_FACTOR, _MIN_GAP_S)
+    if len(intervals) >= _MIN_INTERVALS_FOR_CADENCE:
+        cadence = intervals[int(len(intervals) * _CADENCE_QUANTILE)]
+        gap_threshold = max(cadence * _GAP_FACTOR, _MIN_GAP_S)
     else:
+        # Not enough evidence to infer a cadence. Fall back to the absolute
+        # floor rather than to whatever the few available intervals happen to
+        # be — otherwise two samples six hours apart define six hours as normal.
         gap_threshold = _MIN_GAP_S
 
     timestamps: list[datetime] = []
@@ -259,8 +309,10 @@ def _drawable(rows: tuple[PeriodicReadingSnapshot, ...]) -> tuple[list[datetime]
             timestamps.append(datetime.fromtimestamp((previous + row.timestamp) / 2.0))
             values.append(float("nan"))
         timestamps.append(datetime.fromtimestamp(row.timestamp))
-        value = row.value
-        values.append(float("nan") if value is None or not math.isfinite(float(value)) else float(value))
+        # An unusable reading is drawn as a break, never as a number: its value
+        # field carries a finite instrument sentinel that would rescale the axis
+        # and read as a measurement that was taken.
+        values.append(float(row.value) if _usable(row, unit) else float("nan"))
         previous = row.timestamp
     return timestamps, values
 
@@ -285,7 +337,7 @@ def _plot_axes(
         # fixed offset that made every report look hours stale to the
         # operator: a 19:00 report whose x-axis ended at 16:00 in MSK. The
         # data was current the whole time.
-        timestamps, values = _drawable(item.rows)
+        timestamps, values = _drawable(item.rows, item.unit)
         finite = [value for value in values if math.isfinite(value)]
         if not finite:
             continue
@@ -365,8 +417,10 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
                 continue
             if unit != "other" and item.unit != unit:
                 continue
-            row = item.rows[-1]
-            assert row.value is not None
+            usable = [candidate for candidate in item.rows if _usable(candidate, item.unit)]
+            if not usable:
+                continue
+            row = usable[-1]
             suffix = rendered_unit if rendered_unit is not None else item.unit
             line_prefix = "  "
             # Pressure spans decades and is read as an order of magnitude, so

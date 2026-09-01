@@ -345,6 +345,7 @@ async def sensor_diag_tick(
     alarm_dispatch_tasks: set[asyncio.Task[Any]],
     event_bus: Any,
     experiment_manager: Any,
+    admission: Any | None = None,
 ) -> None:
     """Periodically recompute sensor diagnostics and dispatch alarm notifications."""
     if sensor_diag is None:
@@ -353,10 +354,23 @@ async def sensor_diag_tick(
     # v0.55.5: default False — sensor-health alarms route to GUI only
     # by policy; the hourly periodic_report carries a digest section.
     _notify_telegram = sd_cfg.get("notify_telegram", False)
+    job = None if admission is None else admission.job("sensor_diagnostics", min_interval_s=0.0)
     while True:
         await asyncio.sleep(interval)
         try:
-            new_events = sensor_diag.update()
+            # Never inline. update() recomputes per-channel statistics and a
+            # pairwise correlation across every buffered channel; a 250 ms call
+            # here cost acquisition an entire observation window and delayed
+            # safety monitoring and alarm evaluation with it. Best-effort work
+            # does not get to do that.
+            if job is None:
+                new_events = await asyncio.to_thread(sensor_diag.update)
+            else:
+                new_events = await job.run(sensor_diag.update)
+                if new_events is None:
+                    # Refused: overloaded, saturated, or still running. The
+                    # previous diagnostics stand and their age is reported.
+                    continue
             if _notify_telegram and telegram_bot is not None and new_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
                 # F20 aggregation handled by _format_diag_telegram_messages.

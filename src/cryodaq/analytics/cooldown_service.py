@@ -12,6 +12,7 @@ import asyncio
 import functools
 import logging
 import math
+import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -189,7 +190,6 @@ class CooldownDetector:
 # ============================================================================
 
 
-
 def _rates_from_samples(
     samples: list[tuple[float, float, float]],
     window_h: float,
@@ -253,6 +253,11 @@ class CooldownService:
         # the ETA is recomputed. A cooldown is a multi-hour process and the
         # estimate does not improve for being refitted twice a minute.
         self._predict_interval_s: float = float(config.get("predict_interval_s", 60))
+        # Set by the engine. Without it the service keeps its previous
+        # behaviour, so tests and tools construct it unchanged.
+        self._admission = None
+        self._predict_job = None
+        self._analytics_executor = None
         self._rate_window_h: float = float(config.get("rate_window_h", 1.5))
         self._auto_ingest: bool = bool(config.get("auto_ingest", True))
         self._min_cooldown_hours: float = float(config.get("min_cooldown_hours", 10.0))
@@ -627,7 +632,11 @@ class CooldownService:
         if not self._executor_admission_open:
             raise RuntimeError("cooldown service is stopping; new executor work is rejected")
         loop = asyncio.get_running_loop()
-        operation = loop.run_in_executor(None, function, *args)
+        # The analytics pool when one was supplied, never the loop's default
+        # executor: that one is shared with other engine work, so best-effort
+        # predictions could queue in front of operations that are not
+        # best-effort while event-loop lag stayed low and nothing looked wrong.
+        operation = loop.run_in_executor(self._analytics_executor, function, *args)
         owner = asyncio.create_task(
             settle_executor_operation(operation),
             name="cooldown-executor-owner",
@@ -689,12 +698,32 @@ class CooldownService:
         except asyncio.CancelledError:
             return
 
+    def set_analytics_admission(self, admission: Any) -> None:
+        """Route predictions through the shared analytics budget."""
+        self._admission = admission
+        self._analytics_executor = admission.executor
+        self._predict_job = admission.job("cooldown_eta", min_interval_s=0.0)
+
     async def _predict_loop(self) -> None:
         """Периодически вызывать predict() и публиковать DerivedMetric."""
         try:
             while self._running:
                 await asyncio.sleep(self._predict_interval_s)
-                await self._do_predict()
+                if self._predict_job is None:
+                    await self._do_predict()
+                    continue
+                # Best-effort: under load the previous ETA stands and its age is
+                # reported, rather than the prediction competing with
+                # acquisition for the same resource.
+                if not self._predict_job.try_begin():
+                    continue
+                started = time.monotonic()
+                ok = False
+                try:
+                    await self._do_predict()
+                    ok = True
+                finally:
+                    self._predict_job.end(ok=ok, started=started)
         except asyncio.CancelledError:
             return
 

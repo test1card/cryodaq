@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -240,6 +241,10 @@ class SensorDiagnosticsEngine:
 
         # channel_id → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
+        # push() is called from the event loop; update() from an analytics
+        # worker. The lock covers only the mapping and the copy, never the
+        # diagnostics computation itself.
+        self._buffer_lock = threading.Lock()
         # Max buffer size: drift window at 10 Hz + margin
         self._maxlen: int = max(500, int(max(self.drift_window_s, self.corr_window_s) * 10) + 200)
 
@@ -343,8 +348,19 @@ class SensorDiagnosticsEngine:
             self._buffers.pop(channel_id, None)
             self._diagnostics.pop(channel_id, None)
             return
-        buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
+        with self._buffer_lock:
+            buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))
+
+    def snapshot_buffers(self) -> dict[str, list[tuple[float, float]]]:
+        """Copy the sample buffers for a worker thread to compute over.
+
+        ``push`` runs on the event loop and ``update`` now runs off it, so the
+        buffers are genuinely shared. Copying under the lock is what crosses the
+        boundary; the diagnostics themselves are computed from the copy.
+        """
+        with self._buffer_lock:
+            return {channel: list(buffer) for channel, buffer in self._buffers.items()}
 
     def update(self) -> list:
         """Recompute diagnostics for all channels with data.
@@ -354,7 +370,9 @@ class SensorDiagnosticsEngine:
         Empty list when alarm_publisher is None or no new events triggered.
         """
         now = datetime.now(UTC)
-        for channel_id, buf in self._buffers.items():
+        # Snapshot first: iterating the live mapping while the event loop
+        # appends to it raises "dictionary changed size during iteration".
+        for channel_id, buf in self.snapshot_buffers().items():
             if not buf:
                 # Remove stale cached result so _update_anomaly_tracking
                 # correctly classifies this channel as no_data.

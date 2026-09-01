@@ -6,8 +6,14 @@ running cryostat 6 h 46 min of temperature data.
 """
 
 import asyncio
+import threading
 import time
 
+# Imported before anything that reaches cryodaq.storage: on this conda
+# environment the system libstdc++ is loaded first otherwise, and the sqlite3
+# extension then fails with a missing CXXABI. numpy pulls conda's own C++
+# runtime in first, which is enough to fix the order.
+import numpy  # noqa: F401
 import pytest
 
 from cryodaq.core.analytics_admission import (
@@ -146,7 +152,7 @@ async def test_the_run_after_a_skip_sees_the_latest_data():
     first = asyncio.create_task(job.run(fit))
     await asyncio.sleep(0.05)
 
-    samples.extend(range(90))          # input continues at full rate
+    samples.extend(range(90))  # input continues at full rate
     assert await job.run(fit) is None  # refused while the first is in flight
     release.set()
     await first
@@ -170,12 +176,12 @@ async def test_precision_degrades_before_runs_are_refused():
     assert admission.precision is AnalyticsPrecision.FULL
     assert await job.run(lambda: "full") == "full"
 
-    admission.observe_lag(0.25)   # slipping: cheaper, still runs
+    admission.observe_lag(0.25)  # slipping: cheaper, still runs
     assert admission.precision is AnalyticsPrecision.REDUCED
     assert admission.overloaded is False
     assert await job.run(lambda: "cheap") == "cheap"
 
-    admission.observe_lag(0.9)    # overloaded: refuse outright
+    admission.observe_lag(0.9)  # overloaded: refuse outright
     assert admission.overloaded is True
     assert await job.run(lambda: "never") is None
 
@@ -199,7 +205,7 @@ def test_lag_between_the_thresholds_does_not_flap():
     admission.observe_lag(0.9)
     assert admission.overloaded
     for _ in range(20):
-        admission.observe_lag(0.3)   # below enter, above leave
+        admission.observe_lag(0.3)  # below enter, above leave
         assert admission.overloaded, "hysteresis gap must hold the state"
 
 
@@ -258,7 +264,9 @@ async def test_the_probe_measures_a_real_stall():
     try:
         await asyncio.sleep(0.1)
         assert monitor.lag_s < 0.2, "an idle loop must not look stalled"
-        time.sleep(0.6)            # block the loop exactly as a bad analytic would
+        # Blocking the loop on purpose: this is the failure being measured,
+        # not an accident. ASYNC251 is exactly the rule the probe exists to catch.
+        time.sleep(0.6)  # noqa: ASYNC251
         await asyncio.sleep(0.05)
         assert monitor.peak_lag_s > 0.4, "the probe must see the stall it slept through"
         assert admission.overloaded, "and the stall must pause analytics"
@@ -274,3 +282,173 @@ def test_peak_is_reported_then_reset():
     monitor.observe(0.01)
     assert monitor.take_peak() == pytest.approx(1.5)
     assert monitor.take_peak() == pytest.approx(0.01), "peak resets to the current value"
+
+
+# ---------------------------------------------------------------------------
+# The production tick paths, not just the primitive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slow_sensor_diagnostics_does_not_cost_acquisition_cycles():
+    """A 250 ms diagnostics call must not shrink the acquisition window.
+
+    Reported against the first version of this work: sensor_diag_tick called
+    update() inline, so a 250 ms diagnostics pass reduced the same observation
+    window to a single scheduler read and a single SQLite write, and delayed
+    safety monitoring and alarm evaluation with it.
+    """
+    from cryodaq.engine_wiring.runtime_tasks import sensor_diag_tick
+
+    admission = AnalyticsAdmission(max_workers=2)
+    reads: list[int] = []
+    writes: list[int] = []
+    calls = 0
+
+    class _SlowDiagnostics:
+        def update(self):
+            nonlocal calls
+            calls += 1
+            time.sleep(0.25)  # noqa: ASYNC251 - deliberately slow, in a worker
+            return []
+
+    async def acquisition() -> None:
+        while True:
+            reads.append(1)
+            writes.append(1)
+            await asyncio.sleep(0.01)
+
+    poller = asyncio.create_task(acquisition())
+    tick = asyncio.create_task(
+        sensor_diag_tick(
+            sensor_diag=_SlowDiagnostics(),
+            sd_cfg={"update_interval_s": 0.05, "notify_telegram": False},
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=None,
+            experiment_manager=None,
+            admission=admission,
+        )
+    )
+    try:
+        await asyncio.sleep(1.0)
+        # ~100 cycles at 10 ms. Asserted generously; the failure being guarded
+        # against produced ONE.
+        assert len(reads) > 40, f"acquisition starved: {len(reads)} reads in 1 s"
+        assert len(writes) == len(reads)
+        assert calls >= 1, "diagnostics should still have run"
+    finally:
+        tick.cancel()
+        poller.cancel()
+        for task in (tick, poller):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        admission.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_analytic_keeps_its_slot_until_the_worker_stops():
+    """Cancelling the caller does not stop the thread, so it must not re-admit.
+
+    Reported: the finally block cleared `running` on cancellation while the
+    worker kept going, and a readmitted job then ran a second worker for a
+    calculation whose whole contract is single-flight.
+    """
+    admission = AnalyticsAdmission(max_workers=4)
+    job = admission.job("fit", min_interval_s=0.0)
+    release = threading.Event()
+    peak = 0
+    live = 0
+    guard = threading.Lock()
+
+    def work() -> str:
+        nonlocal peak, live
+        with guard:
+            live += 1
+            peak = max(peak, live)
+        while not release.is_set():
+            time.sleep(0.005)
+        with guard:
+            live -= 1
+        return "done"
+
+    first = asyncio.create_task(job.run(work))
+    await asyncio.sleep(0.1)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    await asyncio.sleep(0.05)
+    assert admission.status("fit").running, "ownership must follow the worker, not the await"
+    assert await job.run(work) is None, "must not re-admit while the worker runs"
+
+    release.set()
+    await asyncio.sleep(0.2)
+    assert peak == 1, f"single-flight violated: {peak} concurrent workers"
+    assert not admission.status("fit").running
+    admission.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_analytics_never_queues_in_a_shared_executor():
+    """Concurrency is bounded by admission, not by a pool queue.
+
+    Reported: jobs were single-flight only against themselves, and different
+    analytics could all be admitted into the loop's default executor — shared
+    with other engine work — and queue there once it saturated, while loop lag
+    stayed low and nothing looked wrong.
+    """
+    admission = AnalyticsAdmission(max_workers=2)
+    jobs = [admission.job(f"job{index}", min_interval_s=0.0) for index in range(5)]
+    release = threading.Event()
+    peak = 0
+    live = 0
+    guard = threading.Lock()
+
+    def work() -> str:
+        nonlocal peak, live
+        with guard:
+            live += 1
+            peak = max(peak, live)
+        while not release.is_set():
+            time.sleep(0.005)
+        with guard:
+            live -= 1
+        return "done"
+
+    tasks = [asyncio.create_task(job.run(work)) for job in jobs]
+    try:
+        await asyncio.sleep(0.3)
+        admitted = sum(1 for job in jobs if admission.status(job.name).running)
+        refused = sum(admission.status(job.name).skipped_saturated for job in jobs)
+        assert admitted == 2, f"admitted {admitted}, pool holds 2"
+        assert refused == 3, "the rest must be refused, not queued"
+        assert peak <= 2
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+        admission.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_settle_waits_for_workers_so_shutdown_does_not_hang():
+    admission = AnalyticsAdmission(max_workers=2)
+    job = admission.job("fit", min_interval_s=0.0)
+    release = threading.Event()
+
+    def work() -> str:
+        while not release.is_set():
+            time.sleep(0.005)
+        return "done"
+
+    task = asyncio.create_task(job.run(work))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert admission.inflight_futures(), "the worker is still owned"
+    release.set()
+    assert await admission.settle(timeout_s=5.0) is True
+    assert not admission.inflight_futures()
+    admission.shutdown(wait=False)
