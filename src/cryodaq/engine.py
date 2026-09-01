@@ -145,6 +145,12 @@ from cryodaq.core.zmq_bridge import (
     _bounded_action_label,
     encode_periodic_command_reply,
 )
+from cryodaq.diagnostics.memory_profile import (
+    memory_profile_loop,
+)
+from cryodaq.diagnostics.memory_profile import (
+    profiling_requested as memory_profiling_requested,
+)
 from cryodaq.drivers.base import InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
     ControlledSource,
@@ -8344,6 +8350,22 @@ async def _run_engine(
             functools.partial(_watchdog, broker, scheduler, writer, start_ts, loop_lag_monitor, analytics_admission),
         )
     )
+    # Opt-in memory profiling. Off unless CRYODAQ_MEMORY_PROFILE is set, so a
+    # normal run pays nothing; enabled to attribute the measured growth that
+    # would end a week-long run on its own.
+    if memory_profiling_requested():
+        await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "memory_profile",
+                functools.partial(
+                    memory_profile_loop,
+                    _DATA_DIR / "diagnostics" / "memprofile",
+                    process_label="engine",
+                ),
+            )
+        )
+
     # The probe that makes the rule enforceable: acquisition always runs,
     # analytics runs only when the loop can spare it. One timer, measuring how
     # late its own wakeup was — that overshoot IS the lag.
