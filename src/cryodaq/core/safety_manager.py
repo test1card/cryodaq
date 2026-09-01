@@ -282,6 +282,20 @@ class SafetyManager:
         observed = time.monotonic()
         self._reviewed_source_connected = False
         self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        # Whether a real OFF proof was ever obtained for the current output
+        # state: a successful OFF command, or device readback on a current
+        # reviewed-connection generation.
+        #
+        # The periodic refresh may RENEW such a proof while its preconditions
+        # still hold (that is what stops evidence going stale and locking the
+        # operator out of the source panel). It must never MANUFACTURE one:
+        # "the driver says its output state is known" plus "we believe no
+        # source is active" is an inference, not a readback, and asserting
+        # device_readback_off from it would report a source as verified-off
+        # that nobody ever turned off — including one whose OFF command just
+        # failed, since a driver goes on reporting its own last write as
+        # verified. Cleared by an OFF failure and by starting a source.
+        self._reviewed_source_off_proven = False
         self._safety_monitor_active = False
         self._persistence_fault_active = False
         # Canonical interlock channels whose failed-sample windows have
@@ -1132,6 +1146,9 @@ class SafetyManager:
             )
             if verified_off:
                 self._active_sources.clear()
+            # Device readback on a current connection generation is independent
+            # proof, so it supersedes a previously failed OFF attempt.
+            self._reviewed_source_off_proven = verified_off
             self._refresh_operator_safety_snapshot()
             return self._reviewed_source_off_evidence
 
@@ -1790,6 +1807,9 @@ class SafetyManager:
 
             expected_active_sources = frozenset(self._active_sources | {smu_channel})
             self._active_sources.add(smu_channel)
+            # Whatever proved the output OFF before this run says nothing about
+            # its state after it.
+            self._reviewed_source_off_proven = False
             if self._state != SafetyState.RUNNING:
                 self._transition(
                     SafetyState.RUNNING,
@@ -3057,6 +3077,7 @@ class SafetyManager:
         # false falls straight back to the unknown/expiry paths.
         elif (
             self._keithley is not None
+            and self._reviewed_source_off_proven
             and getattr(self._keithley, "output_state_unverified", None) is False
             and getattr(self._keithley, "connected", None) is True
             and self._reviewed_source_connected
@@ -3770,6 +3791,8 @@ class SafetyManager:
             confirmed = False
         evidence = self._global_off_evidence_for_result(confirmed)
         exact_confirmed = error is None and evidence.verified_off
+        # Fail closed: only a proven OFF is proof.
+        self._reviewed_source_off_proven = exact_confirmed
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
         if channel is None:
