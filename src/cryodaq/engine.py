@@ -5640,7 +5640,25 @@ def _request_teardown_after_shutdown_receipt(
         and reply == expected_wire_receipt
         and reply.get("engine_instance_id") == context.engine_instance_id
         and parse_global_off_evidence(reply.get("off_evidence")) is not None
-        and parse_global_off_evidence(reply.get("off_evidence")).verified_off
+        # Teardown is released by device-verified OFF, or by the operator's
+        # declaration on THIS request that the source is physically
+        # disconnected from mains.
+        #
+        # The two are never conflated. `off_evidence` still reports
+        # verified_off=False in the declared case, because the device did not
+        # report anything -- it is unplugged. The handler that produced this
+        # receipt only committed it when one of the two held, and it refuses
+        # the declaration outright when the device IS answering, so this cannot
+        # become a general bypass.
+        #
+        # Without this the engine issued an `ok` receipt and then kept running:
+        # the launcher burned its exit-wait budget, force-reaped, and latched
+        # a permanent HOLD. One contract, several enforcement points -- this is
+        # the one that was missed.
+        and (
+            parse_global_off_evidence(reply.get("off_evidence")).verified_off
+            or cmd.get(_OPERATOR_PHYSICAL_DISCONNECT_KEY) is True
+        )
         and reply.get("teardown_requested") is True
         and context.shutdown_event is not None
     ):
@@ -5855,19 +5873,22 @@ async def _handle_gui_command(
                         "retry_safe": True,
                     }
                 if asserted and not off_unverified:
-                    # The device can answer, so the operator's statement is not
-                    # the authority here. Accepting it anyway would make this a
-                    # general bypass rather than a last resort.
-                    return {
-                        "ok": False,
-                        "error_code": "launcher_shutdown_assertion_not_applicable",
-                        "error": (
-                            "physical-disconnect assertion refused: global OFF is verifiable from the device"
-                        ),
-                        "delivery_state": "dispatched",
-                        "commit_state": "not_committed",
-                        "retry_safe": True,
-                    }
+                    # The device answered, so it -- not the declaration -- is
+                    # the authority, and shutdown proceeds on that evidence.
+                    #
+                    # Refusing here would be worse than useless: the operator
+                    # plugs the source back in for a measurement and a stale
+                    # note in the profile becomes an outage, on a path whose
+                    # refusals the launcher cannot even retry. Verified OFF
+                    # strictly dominates a declaration, so the declaration is
+                    # ignored and said out loud, and the flag is reported for
+                    # clearing rather than acted on.
+                    asserted = False
+                    logger.critical(
+                        "STALE OPERATOR DECLARATION IGNORED: the reviewed source reported verified OFF, "
+                        "so shutdown proceeds on device evidence. Clear physically_disconnected in the "
+                        "instruments profile -- the source is evidently connected."
+                    )
                 if asserted:
                     # The independent artifact. The receipt proves what the
                     # launcher was told; this proves what the operator stated,

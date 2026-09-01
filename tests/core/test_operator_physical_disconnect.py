@@ -203,3 +203,121 @@ def test_the_launcher_flag_dies_with_the_request_identity():
     assert flag_resets == request_resets, (
         f"{flag_resets} flag resets for {request_resets} request-identity resets"
     )
+
+
+# ---------------------------------------------------------------------------
+# The standing declaration: read from the profile, never inferred
+# ---------------------------------------------------------------------------
+
+
+def _profile(tmp_path, entry_extra: dict) -> None:
+    import yaml
+
+    (tmp_path / "instruments.local.yaml").write_text(
+        yaml.safe_dump(
+            {"instruments": [{"type": "keithley_2604b", "name": "Keithley_1", **entry_extra}]},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def profile_dir(tmp_path, monkeypatch):
+    import cryodaq.paths
+
+    monkeypatch.setattr(cryodaq.paths, "get_config_dir", lambda: tmp_path)
+    return tmp_path
+
+
+def test_a_complete_declaration_is_honoured(profile_dir):
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    _profile(profile_dir, {
+        "physically_disconnected": True,
+        "physically_disconnected_note": "2026-08-31 unplugged by V.F.",
+    })
+    assert _reviewed_source_declared_physically_disconnected() is True
+
+
+def test_a_declaration_without_a_note_is_ignored(profile_dir):
+    """A statement that cannot say who made it or when is a leftover."""
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    _profile(profile_dir, {"physically_disconnected": True})
+    assert _reviewed_source_declared_physically_disconnected() is False
+
+
+def test_an_empty_note_is_ignored(profile_dir):
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    _profile(profile_dir, {"physically_disconnected": True, "physically_disconnected_note": "   "})
+    assert _reviewed_source_declared_physically_disconnected() is False
+
+
+def test_no_declaration_means_not_declared(profile_dir):
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    _profile(profile_dir, {})
+    assert _reviewed_source_declared_physically_disconnected() is False
+
+
+def test_a_missing_profile_fails_closed(profile_dir):
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    assert _reviewed_source_declared_physically_disconnected() is False
+
+
+def test_an_unreadable_profile_fails_closed(profile_dir):
+    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+
+    (profile_dir / "instruments.local.yaml").write_text("{[not yaml", encoding="utf-8")
+    assert _reviewed_source_declared_physically_disconnected() is False
+
+
+# ---------------------------------------------------------------------------
+# Teardown is released, and nothing else is
+# ---------------------------------------------------------------------------
+
+
+def _teardown_released(*, verified_off: bool, declared: bool) -> bool:
+    """Drive the real release gate, not a copy of its condition."""
+    from types import SimpleNamespace
+
+    from cryodaq.drivers.contracts import SourceOffEvidence, SourceOffResult, SourceOffTier
+    from cryodaq.engine import PROTOCOL_VERSION, _request_teardown_after_shutdown_receipt
+
+    evidence = (
+        SourceOffEvidence.from_global_result(SourceOffTier.VERIFIED_OFF, SourceOffResult.DEVICE_REPORTED_OFF)
+        if verified_off
+        else SourceOffEvidence.from_global_result(SourceOffTier.COMMAND_ONLY, SourceOffResult.COMMAND_ACCEPTED)
+    )
+    receipt = {
+        "ok": True,
+        "engine_instance_id": INSTANCE,
+        "request_id": REQUEST,
+        "off_evidence": evidence.receipt_payload(),
+        "teardown_requested": True,
+    }
+    released: list[bool] = []
+    context = SimpleNamespace(
+        shutdown_receipt=receipt,
+        engine_instance_id=INSTANCE,
+        shutdown_event=SimpleNamespace(set=lambda: released.append(True)),
+    )
+    cmd = _envelope(**({"operator_physical_disconnect": True} if declared else {}))
+    _request_teardown_after_shutdown_receipt(context, cmd, {**receipt, "proto": PROTOCOL_VERSION})
+    return bool(released)
+
+
+def test_verified_off_releases_teardown():
+    assert _teardown_released(verified_off=True, declared=False) is True
+
+
+def test_the_declaration_releases_teardown_without_device_evidence():
+    """The gap that made the committed assertion inert."""
+    assert _teardown_released(verified_off=False, declared=True) is True
+
+
+def test_neither_leaves_the_engine_running():
+    assert _teardown_released(verified_off=False, declared=False) is False
