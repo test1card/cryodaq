@@ -1126,6 +1126,17 @@ class _RemoteAssistantQueryProxy:
         return str(reply.get("error", "Ассистент вернул ошибку."))
 
 
+def _record_loop_lag_receipt(receipt: dict[str, Any]) -> None:
+    """Log one event-loop degradation receipt.
+
+    The receipt itself is retained by AnalyticsAdmission and surfaced through
+    `analytics_health`; this only writes the operator-visible line. Called from
+    `observe_lag` on the event loop, never from a worker.
+    """
+
+    logger.warning("EVENT_LOOP_LAG %s", json.dumps(receipt, ensure_ascii=False, default=str))
+
+
 def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
     """Boot-time config check for leak-rate estimation.
 
@@ -1163,6 +1174,24 @@ async def _handle_leak_rate_command(
     if action == "leak_rate_start":
         if not leak_cfg.get("enabled", True):
             return {"ok": False, "error": "leak rate measurement disabled in config"}
+        # Refuse at the button, not at finalize.
+        #
+        # finalize() requires a positive chamber volume, so starting without
+        # one produces a measurement that can only ever fail -- after running
+        # for the whole window and collecting samples the operator believes
+        # are being used. instruments.local.yaml REPLACES instruments.yaml
+        # rather than merging with it, so a stand whose local profile carries
+        # no `chamber` block reaches here with an empty config and a default
+        # volume of zero. Say so now.
+        if leak_rate_estimator.chamber_volume_l <= 0.0:
+            return {
+                "ok": False,
+                "error_code": "leak_rate_volume_unconfigured",
+                "error": (
+                    "chamber.volume_l is not configured, so a leak rate cannot be computed. "
+                    "Set it in config/instruments.local.yaml before measuring."
+                ),
+            }
         _raw_dur = cmd.get("duration_s")
         window_s: float | None = None
         if _raw_dur is not None:
@@ -7679,7 +7708,13 @@ async def _run_engine(
     # --- Analytics admission: acquisition always runs, analytics only when
     # the event loop can spare it. Fed by the loop-lag probe spawned below. ---
     loop_lag_monitor = LoopLagMonitor()
-    analytics_admission = AnalyticsAdmission()
+    # Loop-lag degradation receipts. Narrow by design: a bounded ring inside
+    # the admission object plus one structured log line. Degraded analytics is
+    # NOT a fault, so this raises no alarm and latches nothing, and it touches
+    # neither the EventBus nor the alarm state -- the cross-thread mutation
+    # those paths would invite is the bug this tier exists to avoid. Operators
+    # read it through `analytics_health`.
+    analytics_admission = AnalyticsAdmission(receipt_sink=_record_loop_lag_receipt)
     loop_lag_monitor.subscribe(analytics_admission.observe_lag)
 
     # --- Vacuum Trend Predictor ---

@@ -39,6 +39,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -88,6 +89,10 @@ DEFAULT_PROBE_INTERVAL_S = 0.5
 # delay, operations that are not best-effort at all — while loop lag stays
 # low and the admission controller sees nothing wrong.
 DEFAULT_ANALYTICS_WORKERS = 2
+
+# Degradation receipts kept for the operator view. Bounded: this is a symptom
+# record, not a journal, and it must not grow during a week-long run.
+LAG_RECEIPT_HISTORY = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +215,7 @@ class AnalyticsAdmission:
         reduce_at_s: float = DEFAULT_REDUCE_AT_S,
         recovery_s: float = DEFAULT_RECOVERY_S,
         max_workers: int = DEFAULT_ANALYTICS_WORKERS,
+        receipt_sink: Callable[[dict[str, Any]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not enter_overload_s > leave_overload_s > 0.0:
@@ -221,6 +227,20 @@ class AnalyticsAdmission:
         self._recovery_s = float(recovery_s)
         self._clock = clock
         self._reduce_at_s = float(reduce_at_s)
+        # Structured degradation receipts, emitted on transitions only.
+        #
+        # The log lines are the narrative; this is the record an operator view
+        # and the periodic report can read. Both transitions are raised from
+        # `observe_lag`, which the loop's own probe task drives, so a sink may
+        # touch loop-owned state -- there is deliberately no path that emits a
+        # receipt from a worker thread.
+        self._receipt_sink = receipt_sink
+        # Retained here rather than in the engine so `snapshot()` -- which the
+        # analytics_health command already returns verbatim -- carries them to
+        # the operator with no extra plumbing.
+        self._receipts: deque[dict[str, Any]] = deque(maxlen=LAG_RECEIPT_HISTORY)
+        self._lag_exceedances = 0
+        self._overload_peak_lag_s = 0.0
         self._overloaded = False
         self._calm_since: float | None = None
         self._overloaded_since: float | None = None
@@ -262,6 +282,33 @@ class AnalyticsAdmission:
     def overloaded_since(self) -> float | None:
         return self._overloaded_since
 
+    def _emit_receipt(self, receipt: dict[str, Any]) -> None:
+        """Hand one degradation receipt to the sink. Never raises into the probe."""
+        self._receipts.append(receipt)
+        if self._receipt_sink is None:
+            return
+        try:
+            self._receipt_sink(receipt)
+        except Exception:  # noqa: BLE001 - visibility must not break the loop it observes
+            logger.warning("event-loop lag receipt sink failed", exc_info=True)
+
+    @staticmethod
+    def _periodic_owner_snapshot() -> dict[str, list[str]]:
+        """What was scheduled when the loop went late.
+
+        A lag number alone does not say where to look. The declared owners do:
+        a stall with best-effort analytics registered is a different
+        investigation from one with only safety loops running.
+        """
+        try:
+            from cryodaq.engine_wiring.periodic_owners import PERIODIC_OWNERS  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - diagnostics must degrade, not fail
+            return {}
+        grouped: dict[str, list[str]] = {}
+        for spec in PERIODIC_OWNERS:
+            grouped.setdefault(spec.owner_class.value, []).append(spec.name)
+        return grouped
+
     def observe_lag(self, lag_s: float) -> None:
         """Feed one loop-lag measurement and apply the hysteresis."""
         now = self._clock()
@@ -272,13 +319,27 @@ class AnalyticsAdmission:
                 self._overloaded = True
                 self._overloaded_since = now
                 self._calm_since = None
+                self._lag_exceedances += 1
+                self._overload_peak_lag_s = lag
                 logger.warning(
                     "Аналитика приостановлена: задержка event loop %.2f с (порог %.2f с). "
                     "Приём данных и запись продолжаются.",
                     lag,
                     self._enter_s,
                 )
+                self._emit_receipt(
+                    {
+                        "event": "event_loop_lag",
+                        "state": "degraded",
+                        "lag_s": lag,
+                        "enter_threshold_s": self._enter_s,
+                        "leave_threshold_s": self._leave_s,
+                        "exceedances": self._lag_exceedances,
+                        "periodic_owners": self._periodic_owner_snapshot(),
+                    }
+                )
             return
+        self._overload_peak_lag_s = max(self._overload_peak_lag_s, lag)
         if lag > self._leave_s:
             # Any excursion back above the low mark restarts the calm window,
             # so recovery means "quiet for a while", not "quiet for an instant".
@@ -288,6 +349,8 @@ class AnalyticsAdmission:
             self._calm_since = now
         elif now - self._calm_since >= self._recovery_s:
             held_for = now - (self._overloaded_since or now)
+            peak = self._overload_peak_lag_s
+            self._overload_peak_lag_s = 0.0
             self._overloaded = False
             self._overloaded_since = None
             self._calm_since = None
@@ -297,6 +360,16 @@ class AnalyticsAdmission:
                 self._leave_s,
                 self._recovery_s,
                 held_for,
+            )
+            self._emit_receipt(
+                {
+                    "event": "event_loop_lag",
+                    "state": "recovered",
+                    "held_s": held_for,
+                    "peak_lag_s": peak,
+                    "leave_threshold_s": self._leave_s,
+                    "exceedances": self._lag_exceedances,
+                }
             )
 
     def _update_precision(self, lag: float, now: float) -> None:
@@ -362,6 +435,9 @@ class AnalyticsAdmission:
             "overloaded": self._overloaded,
             "precision": str(self._precision),
             "overloaded_for_s": (None if self._overloaded_since is None else now - self._overloaded_since),
+            "lag_exceedances": self._lag_exceedances,
+            "loop_lag_receipts": list(self._receipts),
+            "overload_peak_lag_s": self._overload_peak_lag_s,
             "jobs": {
                 name: {
                     "running": state.running,

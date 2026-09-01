@@ -81,6 +81,11 @@ class LeakRateEstimator:
     def is_active(self) -> bool:
         return self._active
 
+    @property
+    def chamber_volume_l(self) -> float:
+        """Configured chamber volume; finalize() cannot produce a rate at <= 0."""
+        return self._volume
+
     def start_measurement(
         self,
         t0: datetime | None = None,

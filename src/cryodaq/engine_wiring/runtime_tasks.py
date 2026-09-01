@@ -497,7 +497,23 @@ async def leak_rate_feed(
                         f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
                     )
                 except (ValueError, Exception) as exc:  # noqa: BLE001
-                    logger.error("Leak rate auto-finalize failed: %s", exc)
+                    # Abandon the measurement instead of retrying it forever.
+                    #
+                    # finalize() raises its precondition failures BEFORE it
+                    # clears `_active` and drains `_samples`. A precondition
+                    # that cannot be satisfied at runtime -- an unconfigured
+                    # chamber volume, which is this stand's state -- therefore
+                    # left the measurement active with should_finalize() still
+                    # true, so every subsequent pressure reading called
+                    # finalize() again, raised again, and appended another
+                    # sample that nothing would ever drain. One operator button
+                    # press was an unbounded buffer plus an exception every two
+                    # seconds, for the rest of the run.
+                    logger.error("Leak rate auto-finalize failed, measurement cancelled: %s", exc)
+                    try:
+                        leak_rate_estimator.cancel()
+                    except Exception:  # noqa: BLE001 - cleanup must not kill the feed
+                        logger.exception("Leak rate cancel after failed finalize also failed")
     except asyncio.CancelledError:
         return
 
