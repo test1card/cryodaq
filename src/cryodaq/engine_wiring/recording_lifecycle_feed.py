@@ -48,6 +48,7 @@ class RecordingLifecycleFeed:
         "__loop",
         "__owner",
         "__pid",
+        "__persistence_acquisition_epoch",
         "__persistence_active",
         "__persistence_authority",
         "__persistence_epoch",
@@ -99,6 +100,12 @@ class RecordingLifecycleFeed:
         self.__persistence_outcome_revision = 0
         self.__persistence_source_revision = 0
         self.__persistence_epoch: str | None = None
+        # The acquisition epoch this segment is bound to, kept apart from the
+        # segment's own id. They start equal, but a recovery segment continues
+        # the SAME acquisition under a NEW persistence id -- the authority
+        # owner refuses to reuse an epoch id it has already seen -- so the two
+        # cannot remain one field.
+        self.__persistence_acquisition_epoch: str | None = None
         self.__persistence_active = False
         self.__persistence_latched = False
         self.__persistence_last_commit_at: float | None = None
@@ -165,6 +172,7 @@ class RecordingLifecycleFeed:
             self.__terminalize_persistence(PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS)
             raise
         self.__persistence_epoch = epoch_id
+        self.__persistence_acquisition_epoch = epoch_id
         self.__persistence_active = True
         self.__persistence_latched = False
         self.__persistence_last_commit_at = None
@@ -173,8 +181,8 @@ class RecordingLifecycleFeed:
     def persistence_committed(self, receipt: CommittedBatchReceipt) -> PersistenceAuthoritySnapshot:
         self.__ensure_loop()
         authority, owner, writer = self.__require_persistence()
-        if not self.__persistence_active or self.__persistence_epoch is None:
-            raise ValueError("direct persistence commit requires an active epoch")
+        # Provenance FIRST, so a forged or foreign receipt can never reach the
+        # recovery branch below.
         if type(receipt) is not CommittedBatchReceipt or not writer.owns_commit(receipt):
             raise ValueError("direct persistence commit lacks exact SQLiteWriter provenance")
         entries = writer.entries_from_commit(receipt)
@@ -183,7 +191,29 @@ class RecordingLifecycleFeed:
             raise ValueError("direct persistence source revision regression")
         if source_revision == self.__persistence_source_revision:
             return owner.snapshot()
-        if self.__owner.snapshot().acquisition_epoch_id != self.__persistence_epoch:
+        if not self.__persistence_active or self.__persistence_epoch is None:
+            # A proven commit arrived while the segment is closed.
+            #
+            # This used to raise forever. SQLite had already committed -- the
+            # scheduler only observes after a receipt exists -- so the data was
+            # on disk while the bookkeeping that tells the operator whether the
+            # record is continuous stayed permanently wedged. On 2026-09-01
+            # that logged "Direct persistence observation failed after a proven
+            # SQLite commit" on repeat.
+            #
+            # The receipt is the verification: it can only be minted by this
+            # writer after a real commit, `owns_commit` proves it is intact and
+            # ours, and a strictly greater commit revision proves the database
+            # accepted a new transaction after the interruption. No query is
+            # added to the commit path; a SELECT would prove strictly less.
+            #
+            # The interrupted interval is not hidden. The old epoch keeps its
+            # terminal receipt, the new segment's id NAMES the recovery, and
+            # relatching LOSSLESS under a different persistence epoch ends the
+            # recording session and mints a new one -- so the discontinuity is
+            # permanent in the identities the operator sees.
+            self.__open_recovery_segment(authority, owner)
+        if self.__owner.snapshot().acquisition_epoch_id != self.__persistence_acquisition_epoch:
             self.__terminalize_persistence(PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS)
             raise ValueError("acquisition epoch does not match direct persistence epoch")
         self.__persistence_outcome_revision += 1
@@ -208,6 +238,39 @@ class RecordingLifecycleFeed:
             )
             self.__owner.begin_recording_epoch()
         return owner.snapshot()
+
+    def __open_recovery_segment(
+        self,
+        authority: PersistenceOutcomeAuthority,
+        owner: PersistenceAuthorityOwner,
+    ) -> None:
+        """Begin a NEW persistence segment that names itself a recovery.
+
+        Bound to the acquisition epoch that is running now, because a segment
+        with nothing to belong to would be a fiction. Refusing until
+        acquisition is running also heals the startup window: commits landing
+        between `scheduler.start()` and `acquisition_running(...)` are refused
+        here and recovered on the next one, instead of wedging the feed for the
+        life of the process.
+        """
+
+        acquisition_epoch = self.__owner.snapshot().acquisition_epoch_id
+        if acquisition_epoch is None:
+            raise ValueError("direct persistence recovery requires a running acquisition epoch")
+        self.__persistence_outcome_revision += 1
+        segment_epoch = f"{acquisition_epoch}:recovery-{self.__persistence_outcome_revision}"
+        owner.feed(
+            authority.lifecycle(
+                self.__persistence_outcome_revision,
+                segment_epoch,
+                PersistenceOwnerLifecycle.STARTED,
+            )
+        )
+        self.__persistence_epoch = segment_epoch
+        self.__persistence_acquisition_epoch = acquisition_epoch
+        self.__persistence_active = True
+        self.__persistence_latched = False
+        self.__persistence_last_commit_at = None
 
     def persistence_rejected(self, record_count: int, reason: str) -> PersistenceAuthoritySnapshot:
         self.__ensure_loop()
@@ -254,6 +317,7 @@ class RecordingLifecycleFeed:
         self.__persistence_active = False
         self.__persistence_latched = True
         self.__persistence_epoch = None
+        self.__persistence_acquisition_epoch = None
         self.__persistence_last_commit_at = None
         if self.__owner.snapshot().persistence_epoch_id is not None:
             self.__persistence_outcome_revision += 1

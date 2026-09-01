@@ -120,11 +120,21 @@ async def test_freshness_expiry_is_ambiguous_without_invented_loss(tmp_path: Pat
     assert persistence.storage is AvailabilityTruth.UNAVAILABLE
     assert persistence.dropped_or_rejected_count == 0
     assert persistence.reason == "cancellation_ambiguous"
+    interrupted_session = feed.snapshot().recording_session_id
 
+    # A later PROVEN commit starts a NEW segment rather than wedging forever.
+    # SQLite had already committed; only the bookkeeping was stuck.
     later = await writer.write_committed([_reading(2.0)])
     assert later is not None
-    with pytest.raises(ValueError, match="active epoch"):
-        feed.persistence_committed(later)
+    feed.persistence_committed(later)
+
+    resumed = feed.persistence_snapshot()
+    assert resumed.storage is AvailabilityTruth.AVAILABLE
+    assert feed.snapshot().recording is RecordingTruth.RECORDING
+    # The interrupted interval is not hidden: the segment is renamed and the
+    # recording session is retired, so the gap is permanent in the identities.
+    assert ":recovery-" in (resumed.recording_epoch_id or "")
+    assert feed.snapshot().recording_session_id != interrupted_session
     await writer.stop()
 
 
@@ -160,8 +170,14 @@ async def test_genuine_commit_cannot_join_different_acquisition_and_persistence_
     assert feed.snapshot().recording is RecordingTruth.NOT_RECORDING
     assert feed.snapshot().persistence_epoch_id is None
     assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
-    with pytest.raises(ValueError, match="active epoch"):
-        feed.persistence_committed(receipt)
+
+    # The mismatch closed the old segment; the same proven receipt then opens a
+    # recovery segment bound to the acquisition epoch that is ACTUALLY running.
+    # That is honest: the data committed, and the record says where it belongs.
+    feed.persistence_committed(receipt)
+    resumed = feed.persistence_snapshot()
+    assert resumed.storage is AvailabilityTruth.AVAILABLE
+    assert (resumed.recording_epoch_id or "").startswith("new-acquisition-epoch:recovery-")
     await writer.stop()
 
 
@@ -180,8 +196,57 @@ async def test_failed_replacement_start_terminalizes_old_persistence_epoch(tmp_p
     feed.acquisition_running(3, "new-epoch")
     stale = await writer.write_committed([_reading(2.0)])
     assert stale is not None and writer.owns_commit(stale)
-    with pytest.raises(ValueError, match="active epoch"):
-        feed.persistence_committed(stale)
-    assert feed.snapshot().recording is RecordingTruth.NOT_RECORDING
-    assert feed.snapshot().persistence_epoch_id is None
+
+    # The failed replacement left the old segment terminal. A proven commit
+    # under the new acquisition epoch resumes into a recovery segment instead
+    # of wedging the feed for the life of the process.
+    feed.persistence_committed(stale)
+    assert feed.snapshot().recording is RecordingTruth.RECORDING
+    assert (feed.persistence_snapshot().recording_epoch_id or "").startswith("new-epoch:recovery-")
     await writer.stop()
+
+
+async def test_recovery_requires_a_running_acquisition_epoch(tmp_path: Path) -> None:
+    """A segment with nothing to belong to would be a fiction.
+
+    Also the startup window: commits landing before acquisition_running is fed
+    are refused here and recovered on the next one, instead of wedging the feed
+    for the life of the process.
+    """
+    writer = _writer(tmp_path)
+    now = [10.0]
+    feed = RecordingLifecycleFeed(writer, persistence_freshness_s=1.0, clock=lambda: now[0])
+    await _ready(feed, "epoch-a")
+    first = await writer.write_committed([_reading(1.0)])
+    assert first is not None
+    feed.persistence_committed(first)
+
+    # Close the segment through freshness expiry, then remove the acquisition.
+    now[0] = 11.1
+    assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
+    feed.acquisition_stopped(2)
+
+    orphan = await writer.write_committed([_reading(2.0)])
+    assert orphan is not None
+    with pytest.raises(ValueError, match="running acquisition epoch"):
+        feed.persistence_committed(orphan)
+    assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
+    await writer.stop()
+
+
+async def test_a_foreign_receipt_can_never_open_a_recovery_segment(tmp_path: Path) -> None:
+    """Provenance is checked before recovery is even considered."""
+    writer = _writer(tmp_path / "owner")
+    foreign = _writer(tmp_path / "foreign")
+    feed = RecordingLifecycleFeed(writer)
+    await _ready(feed, "epoch-a")
+    feed.acquisition_stopped(2)
+    feed.acquisition_running(3, "epoch-b")
+
+    receipt = await foreign.write_committed([_reading(1.0)])
+    assert receipt is not None
+    with pytest.raises(ValueError, match="exact SQLiteWriter provenance"):
+        feed.persistence_committed(receipt)
+    assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
+    await writer.stop()
+    await foreign.stop()
