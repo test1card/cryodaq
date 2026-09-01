@@ -8080,9 +8080,29 @@ class SQLiteWriter:
         canonical_authorities: list[tuple[str, str] | None] = []
         preflight_paths: set[str] = set()
         preflight_proofs: set[tuple[str, int, str, int, str]] = set()
+        from cryodaq.storage.archive_reader import operator_log_declared_absent  # noqa: PLC0415
+
         for indexed in entries:
             if type(indexed) is not dict:
                 raise OperatorLogIdempotencyUnavailableError("cold operator-log index entry is invalid")
+            # A day that archived no operator entries says so explicitly: a null
+            # path with a zero row count and no sidecar metadata.
+            #
+            # This authority is older than that declaration and accepted only
+            # the TOTAL absence of every operator field. ArchiveReader cannot
+            # accept that form -- an omitted key is indistinguishable from an
+            # index written before the field existed -- so the 2026-09-01 repair
+            # made absence explicit. Two of five fields then read here as a
+            # partial proof, and this raised "cold operator-log proof is
+            # incomplete" for fifteen migrated days, which fails engine startup
+            # before acquisition and took the stand down for twelve minutes.
+            #
+            # The declaration carries no sidecar to verify, so there is nothing
+            # to prove: it is recognised exactly as total absence is, and both
+            # readers now agree on one schema.
+            if operator_log_declared_absent(indexed):
+                canonical_authorities.append(None)
+                continue
             operator_field_names = (
                 "operator_log_path",
                 "operator_log_rows",
@@ -8152,6 +8172,12 @@ class SQLiteWriter:
                 raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
             if type(indexed) is not dict:
                 raise OperatorLogIdempotencyUnavailableError("cold operator-log index entry is invalid")
+            # Explicitly declared absence, exactly as the preflight pass above
+            # recognised it. Both passes walk `entries` in the same order and
+            # this one indexes `canonical_authorities` by position, so the two
+            # must skip precisely the same entries.
+            if operator_log_declared_absent(indexed):
+                continue
             operator_field_names = (
                 "operator_log_path",
                 "operator_log_rows",

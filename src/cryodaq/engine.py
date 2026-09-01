@@ -6604,6 +6604,7 @@ class _EngineStartupRollback:
                 return await result
             return result
         except BaseException:
+            self._report_failure()
             await self.rollback()
             raise
 
@@ -6611,8 +6612,26 @@ class _EngineStartupRollback:
         try:
             return await operation
         except BaseException:
+            self._report_failure()
             await self.rollback()
             raise
+
+    def _report_failure(self) -> None:
+        """Log the cause BEFORE rollback, because rollback may never return.
+
+        `rollback()` retries retained cleanup until every owner settles. A
+        rollback owner that cannot settle -- a SafetyManager whose global OFF
+        the driver will not confirm -- holds that loop forever, so the `raise`
+        below it never executes and the exception that actually failed startup
+        is never reported anywhere. On 2026-09-01 that left an engine looping on
+        a shutdown HOLD with acquisition down and no record of what broke.
+        """
+
+        logger.critical(
+            "Engine startup failed; acquired owners: %s",
+            ", ".join(label for label, _ in self._callbacks) or "none",
+            exc_info=True,
+        )
 
     async def rollback(self) -> None:
         if self._settled:

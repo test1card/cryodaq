@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from cryodaq.core.operator_log import OperatorLogIdempotencyUnavailableError
 from cryodaq.storage.archive_reader import ArchiveUnavailableError
 from cryodaq.storage.sqlite_writer import OperatorLogEntry, SQLiteWriter
 
@@ -142,5 +143,53 @@ async def test_an_explicitly_absent_day_is_not_an_error(tmp_path):
         _write_index(tmp_path, entry_extra={"operator_log_path": None, "operator_log_rows": 0})
         entries = await writer.get_operator_log(limit=REQUESTED_LIMIT)
         assert len(entries) == REQUESTED_LIMIT
+    finally:
+        await writer.stop()
+
+
+# ---------------------------------------------------------------------------
+# The index has more than one reader, and they must agree
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_idempotency_accepts_a_declared_absent_day(tmp_path):
+    """The startup registry authority reads the same declaration as the reader.
+
+    One index, two independent readers with different rules. ``ArchiveReader``
+    rejects an omitted key, so the repair made absence explicit; the startup
+    registry accepted only the TOTAL absence of all five operator fields and
+    read a two-of-five declaration as a partial proof.
+
+    The consequence is not a degraded read: ``initialize_operator_log_idempotency``
+    is the first step of command-ingress recovery, so it fails engine startup
+    before acquisition begins. On 2026-09-01 that took the stand down for
+    eighteen minutes, and the cause was invisible because the failed startup's
+    rollback could not settle.
+    """
+    writer = SQLiteWriter(tmp_path)
+    try:
+        # No hot journal: the cold declaration is what is under test here.
+        _write_index(tmp_path, entry_extra={"operator_log_path": None, "operator_log_rows": 0})
+        await writer.initialize_operator_log_idempotency()
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_startup_idempotency_still_refuses_a_genuinely_partial_proof(tmp_path):
+    """Recognising absence must not weaken the proof required of a real sidecar."""
+    writer = SQLiteWriter(tmp_path)
+    try:
+        _write_index(
+            tmp_path,
+            entry_extra={
+                "operator_log_path": "year=2026/month=05/data_2026-05-08.operator_log.parquet",
+                "operator_log_rows": 3,
+            },
+        )
+        with pytest.raises(OperatorLogIdempotencyUnavailableError) as raised:
+            await writer.initialize_operator_log_idempotency()
+        assert "incomplete" in str(raised.value)
     finally:
         await writer.stop()
