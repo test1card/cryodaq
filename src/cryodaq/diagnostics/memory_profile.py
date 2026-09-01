@@ -41,6 +41,18 @@ DEFAULT_INTERVAL_S = 3600.0
 # Enough lines to place an allocation inside its caller, few enough that a
 # snapshot of a leaking process stays a reasonable size on disk.
 TOP_ENTRIES = 40
+# Frames kept per allocation.
+#
+# Measured on this engine: depth 10 took the command-path p95 from 1.2 ms to
+# 660 ms, with 15% of probes over half a second. It captures a stack on every
+# allocation and this engine logs over a million DEBUG lines a day, each one an
+# allocation. At that cost the profiler permanently pauses analytics and the
+# profiled system stops being the system that leaked — the measurement destroys
+# what it is measuring.
+#
+# Depth 2 still attributes an allocation to its file and line plus one caller,
+# which is what a diff needs.
+_FRAME_DEPTH = 2
 
 
 def profiling_requested() -> bool:
@@ -149,10 +161,17 @@ def _write_diff(path: Path, current: tracemalloc.Snapshot, previous_dump: Path, 
 async def memory_profile_loop(output_dir: Path, *, process_label: str = "engine") -> None:
     """Sample Python allocations and process totals until cancelled."""
     if not tracemalloc.is_tracing():
-        logger.warning(
-            "memory profile: tracemalloc is not tracing; start the process with "
-            "PYTHONTRACEMALLOC so allocations before startup are captured too. "
-            "Process totals will still be recorded."
+        # Start tracing here rather than requiring PYTHONTRACEMALLOC. That
+        # variable is inherited by every child the launcher spawns, so the GUI
+        # and the assistant would pay the overhead too — and their RSS is
+        # exactly what has to stay clean for per-process attribution. Starting
+        # here misses allocations made before this point, which does not matter:
+        # the question is what GROWS over the next hours, not what the baseline
+        # was.
+        tracemalloc.start(_FRAME_DEPTH)
+        logger.info(
+            "memory profile: tracemalloc started in-process at depth %d (allocations before this point are not traced)",
+            _FRAME_DEPTH,
         )
     root = Path(output_dir)
     await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
