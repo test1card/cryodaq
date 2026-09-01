@@ -240,6 +240,35 @@ class LakeShore218S(InstrumentDriver):
     ) -> Reading:
         channel_num = reading.metadata.get("raw_channel")
         metadata = dict(reading.metadata)
+
+        # 0 K is not a temperature.
+        #
+        # Checked FIRST, and independently of RDGST, because the instrument's
+        # own status bitmap is not a reliable source of validity here. Measured
+        # on lab53 2026-09-01: Т8 and Т16 sat at exactly +00.000 with
+        # RDGST=000 -- "no fault" -- and were persisted as status=ok into the
+        # archive for the whole run. The rail is real: Т10 sits on the matching
+        # +380.00 rail and the SAME instrument family does set bit 032 for it,
+        # which this function correctly translates to OVERRANGE. Same hardware,
+        # same rail, opposite verdict, so the bitmap cannot be the only gate.
+        #
+        # This is a physical floor, not a plausibility heuristic. A rule like
+        # "constant for N minutes is invalid" was considered and rejected: a
+        # real stationary plateau is constant too, and rejecting it would break
+        # the conductivity measurement this stand exists to make.
+        #
+        # The raw value is retained in metadata rather than discarded, so the
+        # forensic evidence survives into the archive.
+        if reading.unit == "K" and reading.value == 0.0:
+            metadata["rejected_value"] = reading.value
+            metadata["rejected_reason"] = "physically_invalid_zero_kelvin"
+            return replace(
+                reading,
+                value=float("nan"),
+                status=ChannelStatus.SENSOR_ERROR,
+                metadata=metadata,
+            )
+
         if type(channel_num) is not int:
             return reading
         bitmap = status_by_channel.get(channel_num)
