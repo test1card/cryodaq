@@ -215,6 +215,56 @@ def _cold_focus_limits(series: list[_Series]) -> tuple[float, float] | None:
     return (low - pad, high + pad)
 
 
+# A run is charted from samples that arrive every couple of seconds. A break far
+# wider than a channel's own cadence is an outage, not a measurement interval.
+_GAP_FACTOR = 8.0
+_MIN_GAP_S = 120.0
+
+
+def _drawable(rows: tuple[PeriodicReadingSnapshot, ...]) -> tuple[list[datetime], list[float]]:
+    """Timestamps and values for one series, with breaks where data is absent.
+
+    Two things are deliberately NOT smoothed over:
+
+    A reading with no value is drawn as a break rather than dropped. Dropping it
+    silently joined the samples either side of it, and also desynchronised the
+    two lists, since the timestamps were built from every row while the values
+    skipped the empty ones.
+
+    A gap far wider than the channel's own sampling cadence gets a break too.
+    Without it matplotlib joins the last sample before an outage to the first
+    one after it, and the result is a clean straight line the operator reads as
+    data: on 2026-09-01 a six-hour, forty-six-minute loss of every LakeShore
+    channel was rendered as an unbroken curve, and the report looked healthy.
+    A chart of a run that lost data must show that it lost data.
+    """
+    intervals = sorted(
+        later.timestamp - earlier.timestamp
+        for earlier, later in zip(rows, rows[1:], strict=False)
+        if later.timestamp > earlier.timestamp
+    )
+    if intervals:
+        typical = intervals[len(intervals) // 2]
+        gap_threshold = max(typical * _GAP_FACTOR, _MIN_GAP_S)
+    else:
+        gap_threshold = _MIN_GAP_S
+
+    timestamps: list[datetime] = []
+    values: list[float] = []
+    previous: float | None = None
+    for row in rows:
+        if previous is not None and (row.timestamp - previous) > gap_threshold:
+            # Lift the pen across the outage. The break carries no reading, so
+            # it is placed between the two real samples and drawn as nothing.
+            timestamps.append(datetime.fromtimestamp((previous + row.timestamp) / 2.0))
+            values.append(float("nan"))
+        timestamps.append(datetime.fromtimestamp(row.timestamp))
+        value = row.value
+        values.append(float("nan") if value is None or not math.isfinite(float(value)) else float(value))
+        previous = row.timestamp
+    return timestamps, values
+
+
 def _plot_axes(
     axes,
     series: list[_Series],
@@ -235,9 +285,9 @@ def _plot_axes(
         # fixed offset that made every report look hours stale to the
         # operator: a 19:00 report whose x-axis ended at 16:00 in MSK. The
         # data was current the whole time.
-        timestamps = [datetime.fromtimestamp(row.timestamp) for row in item.rows]
-        values = [float(row.value) for row in item.rows if row.value is not None]
-        if not values:
+        timestamps, values = _drawable(item.rows)
+        finite = [value for value in values if math.isfinite(value)]
+        if not finite:
             continue
         is_alarmed = item.channel in alarmed
         color = "red" if is_alarmed else None
@@ -249,9 +299,10 @@ def _plot_axes(
             zorder=3 if is_alarmed else 2,
             **({"color": color} if color else {}),
         )[0]
+        last = max(index for index, value in enumerate(values) if math.isfinite(value))
         axes.annotate(
-            f"{values[-1]:.4g}",
-            xy=(timestamps[-1], values[-1]),
+            f"{values[last]:.4g}",
+            xy=(timestamps[last], values[last]),
             xytext=(5, 0),
             textcoords="offset points",
             fontsize=7,
@@ -260,7 +311,7 @@ def _plot_axes(
         )
         plotted += 1
         if pressure:
-            pressure_values.extend(values)
+            pressure_values.extend(finite)
     axes.set_ylabel(ylabel)
     axes.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     axes.xaxis.set_major_locator(mdates.AutoDateLocator())
