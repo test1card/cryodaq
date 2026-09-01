@@ -266,7 +266,7 @@ _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
 _ENGINE_READY_WIRE_PREFIX = b"CRYODAQ_ENGINE_READY_V2 "
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v3"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
 _OPERATOR_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
     {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
@@ -5885,9 +5885,6 @@ async def _handle_gui_command(
                     "engine_instance_id": instance_id,
                     "request_id": request_id,
                     "off_evidence": off_evidence.receipt_payload(),
-                    # Reported beside the device evidence, never folded into
-                    # it: off_evidence still says verified_off is False.
-                    _OPERATOR_PHYSICAL_DISCONNECT_KEY: asserted,
                     "teardown_requested": True,
                     "delivery_state": "dispatched",
                     "commit_state": "committed",

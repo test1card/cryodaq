@@ -626,7 +626,7 @@ _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
 _ENGINE_SHUTDOWN_CAPABILITY_ENV = "CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY"
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v3"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
 _SOAK_BRIDGE_FD_ENV = "CRYODAQ_SOAK_BRIDGE_FD"
 _SOAK_BRIDGE_NONCE_ENV = "CRYODAQ_SOAK_BRIDGE_NONCE"
 _SOAK_ARTIFACT_FD_ENV = "CRYODAQ_SOAK_ARTIFACT_FD"
@@ -3022,6 +3022,7 @@ class LauncherWindow(QMainWindow):
             self._engine_instance_id = None
             self._engine_shutdown_capability = None
             self._engine_shutdown_request_id = None
+            self._engine_shutdown_operator_asserted = False
             self._engine_shutdown_transport_identity = None
             self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_receipt = None
@@ -3043,6 +3044,7 @@ class LauncherWindow(QMainWindow):
         self._engine_instance_id = engine_instance_id
         self._engine_shutdown_capability = engine_shutdown_capability
         self._engine_shutdown_request_id = None
+        self._engine_shutdown_operator_asserted = False
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_transport_identity_awaited = None
         self._engine_shutdown_receipt = None
@@ -4184,6 +4186,7 @@ class LauncherWindow(QMainWindow):
         self._engine_instance_id = None
         self._engine_shutdown_capability = None
         self._engine_shutdown_request_id = None
+        self._engine_shutdown_operator_asserted = False
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_transport_identity_awaited = None
         self._engine_shutdown_receipt = None
@@ -4405,7 +4408,6 @@ class LauncherWindow(QMainWindow):
                     "engine_instance_id",
                     "request_id",
                     "off_evidence",
-                    "operator_physical_disconnect",
                     "teardown_requested",
                     "delivery_state",
                     "commit_state",
@@ -4423,13 +4425,19 @@ class LauncherWindow(QMainWindow):
                     and receipt["request_id"] == request_id
                     and parse_global_off_evidence(receipt["off_evidence"]) is not None
                     # Teardown is authorised by device-verified OFF, or by the
-                    # operator's one-shot statement that the source is
-                    # physically disconnected from mains. The two are reported
-                    # separately and never conflated: off_evidence still says
-                    # verified_off is False in the asserted case.
+                    # operator's statement -- for this engine instance and this
+                    # retained request id -- that the source is physically
+                    # disconnected from mains.
+                    #
+                    # The engine's gate refuses unless one of those holds, so a
+                    # SUCCESS receipt carrying unverified evidence can only mean
+                    # it accepted the assertion this launcher sent. Echoing the
+                    # flag back in the receipt would prove nothing further: the
+                    # engine's CRITICAL log already records the human reason,
+                    # and the receipt is bound to instance and request id.
                     and (
                         parse_global_off_evidence(receipt["off_evidence"]).verified_off
-                        or receipt["operator_physical_disconnect"] is True
+                        or getattr(self, "_engine_shutdown_operator_asserted", False) is True
                     )
                     and receipt["teardown_requested"] is True
                     and type(receipt["delivery_state"]) is str
@@ -4503,6 +4511,7 @@ class LauncherWindow(QMainWindow):
             self._engine_instance_id = None
             self._engine_shutdown_capability = None
             self._engine_shutdown_request_id = None
+            self._engine_shutdown_operator_asserted = False
             self._engine_shutdown_transport_identity = None
             self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_receipt = None

@@ -90,11 +90,10 @@ class _Bridge:
         self.receipt_sent = True
         return {
             "ok": True,
-            "schema": "cryodaq.engine_shutdown.v3",
+            "schema": "cryodaq.engine_shutdown.v2",
             "engine_instance_id": command["engine_instance_id"],
             "request_id": command["request_id"],
             "off_evidence": _verified_global_off_result()["off_evidence"],
-            "operator_physical_disconnect": False,
             "teardown_requested": True,
             "delivery_state": "dispatched",
             "commit_state": "committed",
@@ -618,11 +617,10 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
         _engine_shutdown_transport_identity=None,
         _engine_shutdown_receipt={
             "ok": True,
-            "schema": "cryodaq.engine_shutdown.v3",
+            "schema": "cryodaq.engine_shutdown.v2",
             "engine_instance_id": "a" * 32,
             "request_id": request_id,
             "off_evidence": _verified_global_off_result()["off_evidence"],
-            "operator_physical_disconnect": False,
             "teardown_requested": True,
             "delivery_state": "dispatched",
             "commit_state": "committed",

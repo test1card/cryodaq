@@ -7,8 +7,15 @@ eighteen-minute outage.
 
 The operator may state the fact instead. It is carried as one boolean on the
 SAME capability-bound shutdown request that is already being authorised -- no
-command, no retained state, no evidence tier, nothing to clear afterwards --
-and it authorises THIS teardown and nothing else.
+command, no retained state, no evidence tier, no receipt field, no schema
+change, nothing to clear afterwards -- and it authorises THIS teardown and
+nothing else.
+
+The receipt is deliberately unchanged. A SUCCESS receipt carrying unverified
+evidence can only mean the engine accepted the assertion, because its gate
+refuses otherwise; the receipt is already bound to engine instance and request
+id; and the engine's CRITICAL log records the human reason. Echoing the flag
+back would prove nothing the launcher does not already know.
 
 Removing the instrument from configuration does not help and was measured:
 with no reviewed source, emergency_off returns ok=True with active_channels=[]
@@ -129,7 +136,8 @@ def test_energising_policy_is_unchanged():
 # ---------------------------------------------------------------------------
 
 
-def _receipt(*, verified_off: bool, asserted: bool) -> dict:
+def _receipt(*, verified_off: bool) -> dict:
+    """The ORDINARY receipt shape. Unchanged by this work."""
     from cryodaq.drivers.contracts import SourceOffEvidence, SourceOffResult, SourceOffTier
 
     evidence = (
@@ -137,25 +145,61 @@ def _receipt(*, verified_off: bool, asserted: bool) -> dict:
         if verified_off
         else SourceOffEvidence.from_global_result(SourceOffTier.COMMAND_ONLY, SourceOffResult.COMMAND_ACCEPTED)
     )
-    return {"off_evidence": evidence.receipt_payload(), "operator_physical_disconnect": asserted}
+    return {"off_evidence": evidence.receipt_payload()}
 
 
-def _launcher_would_tear_down(receipt: dict) -> bool:
+def _launcher_would_tear_down(receipt: dict, *, launcher_asserted: bool) -> bool:
+    """The launcher's gate: device evidence, or its own asserted request."""
     evidence = parse_global_off_evidence(receipt["off_evidence"])
-    return evidence is not None and (
-        evidence.verified_off or receipt["operator_physical_disconnect"] is True
-    )
+    return evidence is not None and (evidence.verified_off or launcher_asserted is True)
 
 
 def test_verified_off_authorises_teardown():
-    assert _launcher_would_tear_down(_receipt(verified_off=True, asserted=False)) is True
+    assert _launcher_would_tear_down(_receipt(verified_off=True), launcher_asserted=False) is True
 
 
 def test_the_assertion_authorises_teardown_without_claiming_verified_off():
-    receipt = _receipt(verified_off=False, asserted=True)
-    assert _launcher_would_tear_down(receipt) is True
+    receipt = _receipt(verified_off=False)
+    assert _launcher_would_tear_down(receipt, launcher_asserted=True) is True
     assert parse_global_off_evidence(receipt["off_evidence"]).verified_off is False
 
 
 def test_neither_authorisation_holds_the_launcher():
-    assert _launcher_would_tear_down(_receipt(verified_off=False, asserted=False)) is False
+    assert _launcher_would_tear_down(_receipt(verified_off=False), launcher_asserted=False) is False
+
+
+def test_the_ordinary_receipt_shape_is_unchanged():
+    """No new mandatory field, so no schema bump and no ordinary-receipt churn.
+
+    An ordinary shutdown must produce exactly the receipt it always did. The
+    assertion changes what the launcher ACCEPTS, not what the engine reports.
+    """
+    from pathlib import Path
+
+    from cryodaq import engine, launcher
+
+    assert engine._ENGINE_SHUTDOWN_RECEIPT_SCHEMA == "cryodaq.engine_shutdown.v2"
+    assert launcher._ENGINE_SHUTDOWN_RECEIPT_SCHEMA == "cryodaq.engine_shutdown.v2"
+
+    source = (Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "launcher.py").read_text(encoding="utf-8")
+    keys_block = source.split("expected_receipt_keys = {", 1)[1].split("}", 1)[0]
+    assert "operator_physical_disconnect" not in keys_block, (
+        "the assertion must not become a mandatory receipt field"
+    )
+
+
+def test_the_launcher_flag_dies_with_the_request_identity():
+    """It can never outlive the request that carried it.
+
+    Reset at every site that clears `_engine_shutdown_request_id`, and nowhere
+    else, so a later teardown cannot inherit an earlier operator's statement.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "launcher.py").read_text(encoding="utf-8")
+    request_resets = source.count("self._engine_shutdown_request_id = None")
+    flag_resets = source.count("self._engine_shutdown_operator_asserted = False")
+    assert request_resets > 0
+    assert flag_resets == request_resets, (
+        f"{flag_resets} flag resets for {request_resets} request-identity resets"
+    )
