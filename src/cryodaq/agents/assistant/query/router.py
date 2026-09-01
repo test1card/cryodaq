@@ -137,7 +137,10 @@ class QueryRouter:
         return {"cooldown_eta": eta}
 
     async def _fetch_eta_vacuum(self) -> dict[str, Any]:
-        eta = await self._adapters.vacuum.eta_to_target(1e-6)
+        # Target comes from the engine's configuration, which is where the
+        # gauge's range is accounted for. A pressure hardcoded here can
+        # ask for something this stand cannot measure.
+        eta = await self._adapters.vacuum.eta_to_target()
         # Also get current pressure from snapshot
         snapshot = self._adapters.broker_snapshot
         all_ch = await snapshot.latest_all()

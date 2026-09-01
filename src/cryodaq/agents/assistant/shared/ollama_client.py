@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,46 @@ _GENERATE_PATH = "/api/generate"
 # models. /api/embed introduced in Ollama 0.1.36 (2024) is the modern
 # endpoint, accepts batched input, returns embeddings as nested list.
 _EMBEDDINGS_PATH = "/api/embed"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-trace stripping
+# ---------------------------------------------------------------------------
+
+# See embed(): sized to the largest text ever embedded (a 1000-char chunk),
+# not to the server default, so the embedder co-resides with the generator.
+_EMBED_NUM_CTX = 512
+# Ollama keep_alive=0: unload as soon as the call returns.
+_RELEASE_IMMEDIATELY = 0
+
+_REASONING_BLOCK = re.compile(
+    r"<(?:think|thinking|reasoning)\s*>.*?</(?:think|thinking|reasoning)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Drop a thinking-first model's chain of thought, keeping only the answer.
+
+    Reasoning models emit their scratchpad before the reply. LFM2.5 in
+    particular closes the block with ``</think>`` while the *opening* tag is
+    consumed as a control token and never reaches the HTTP response, so a
+    naive paired-tag strip leaves the whole monologue in place — the operator
+    then reads it in Telegram ahead of the two sentences they asked for.
+
+    Everything before the last closing tag is therefore treated as reasoning.
+    An unterminated block means the answer never arrived: the raw text is more
+    useful to a human than an empty bubble, so it is returned unchanged.
+    """
+    if not text:
+        return text
+    cleaned = _REASONING_BLOCK.sub("", text)
+    closes = list(_REASONING_CLOSE.finditer(cleaned))
+    if closes:
+        cleaned = cleaned[closes[-1].end() :]
+    stripped = cleaned.strip()
+    return stripped if stripped else text.strip()
 
 
 def validate_loopback_origin(base_url: str) -> str:
@@ -115,6 +156,7 @@ class OllamaClient:
         temperature: float = 0.3,
         system: str | None = None,
         num_ctx: int | None = None,
+        keep_alive: str | int | None = None,
     ) -> GenerationResult:
         """Call Ollama /api/generate and return a GenerationResult.
 
@@ -140,6 +182,8 @@ class OllamaClient:
         }
         if system is not None:
             payload["system"] = system
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
 
         session = await self._get_session()
         t0 = time.monotonic()
@@ -178,12 +222,19 @@ class OllamaClient:
                 raise OllamaModelMissingError(effective_model)
             raise OllamaUnavailableError(f"Ollama error: {err}")
 
+        # done_reason == "length" means num_predict cut generation off. For a
+        # reasoning model that is not a slightly short answer: the trace ate
+        # the budget and the answer was never written, so the text is raw
+        # scratchpad. Reported as truncated so callers fall back instead of
+        # showing the operator a half-finished thought.
+        hit_token_ceiling = str(data.get("done_reason", "")) == "length"
         return GenerationResult(
-            text=data.get("response", ""),
+            text=strip_reasoning(data.get("response", "")),
             tokens_in=data.get("prompt_eval_count", 0),
             tokens_out=data.get("eval_count", 0),
             latency_s=latency_s,
             model=data.get("model", effective_model),
+            truncated=hit_token_ceiling,
         )
 
     async def embed(
@@ -203,7 +254,26 @@ class OllamaClient:
         url = f"{self._base_url}{_EMBEDDINGS_PATH}"
         # New /api/embed expects "input" (str or list[str]); returns
         # "embeddings": [[float,...]] (always batched, even for one input).
-        payload = {"model": model, "input": text}
+        # Cap the embedder's context. Ollama sizes a model's VRAM reservation
+        # from num_ctx, and the server default (4096) makes qwen3-embedding
+        # claim 2.5 GB — which on a 4 GB card evicts the generation model on
+        # every retrieval, so each documentation question paid a reload of the
+        # embedder AND a reload of the answering model. At 512 the same
+        # embedder occupies 1.0 GB and both stay resident. Nothing is
+        # truncated: index chunks are capped at 1000 chars (~350 tokens) by
+        # rag chunk_max_chars, and a query is shorter still.
+        payload = {
+            "model": model,
+            "input": text,
+            "options": {"num_ctx": _EMBED_NUM_CTX},
+            # Release the embedder the moment the vector is returned. It is
+            # needed only to turn one question into one vector (~0.1s warm),
+            # and this card has no room to keep it alongside the answering
+            # model: three resident models pushed LFM2.5 to 83% CPU and every
+            # answer then blew its stage deadline. Reloading costs ~2.9s and
+            # buys the generator its full GPU residency and context budget.
+            "keep_alive": _RELEASE_IMMEDIATELY,
+        }
         session = await self._get_session()
         t0 = time.monotonic()
         try:

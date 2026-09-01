@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
     from cryodaq.core.channel_manager import ChannelManager
 
+# Ollama keep_alive=0 — unload this model as soon as the call returns.
+# Declared locally: this module keeps ollama_client a TYPE_CHECKING-only
+# import so the GUI process never pays for aiohttp at import time.
+_RELEASE_IMMEDIATELY = 0
+
 logger = logging.getLogger(__name__)
 
 _UNKNOWN_INTENT = QueryIntent(category=QueryCategory.UNKNOWN)
@@ -276,6 +281,11 @@ class IntentClassifier:
                 system=system_prompt,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
+                # Classification is a one-word decision from a small model.
+                # Releasing it immediately keeps the GPU for the model that
+                # writes the operator's answer; the reload costs ~3.8s and is
+                # far cheaper than pushing the generator onto the CPU.
+                keep_alive=_RELEASE_IMMEDIATELY,
             )
             if self._timeout_s is None:
                 result = await generation

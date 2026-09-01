@@ -129,20 +129,30 @@ def test_default_timeout_fires_inside_server_envelope():
     )
 
 
-def test_assistant_query_routed_to_slow_envelope_at_transport_layer():
-    """Cycle-3 fix: ``assistant.query`` is registered as a slow command so
-    the REP server gives the handler the slow envelope instead of the
-    2 s fast default. Without this registration the helper's wait_for
-    is masked by the server returning ``handler timeout (2s)`` first."""
+def test_assistant_query_routed_to_llm_envelope_at_transport_layer():
+    """``assistant.query`` gets the LLM envelope, not the 2 s fast default.
+
+    Originally it shared the slow (hardware/experiment) tier. Local inference
+    outgrew that: on lab hardware a documentation answer costs an intent
+    classification, an embedding round-trip and a reasoning-model answer over
+    retrieved manual pages, which runs past the slow cap and surfaced to the
+    operator as an internal error. It now has its own tier, and the
+    hardware tier is unchanged — asserted here so a future widening of the
+    LLM envelope cannot silently drag instrument commands along with it.
+    """
     from cryodaq.core.zmq_bridge import (
-        _SLOW_COMMANDS,
         HANDLER_TIMEOUT_FAST_S,
+        HANDLER_TIMEOUT_LLM_S,
         HANDLER_TIMEOUT_SLOW_S,
         _timeout_for,
     )
 
-    assert "assistant.query" in _SLOW_COMMANDS
-    assert _timeout_for({"cmd": "assistant.query"}) == HANDLER_TIMEOUT_SLOW_S
+    for command in ("assistant.query", "rag.search", "rag.rebuild"):
+        assert _timeout_for({"cmd": command}) == HANDLER_TIMEOUT_LLM_S
+    assert HANDLER_TIMEOUT_LLM_S > HANDLER_TIMEOUT_SLOW_S > HANDLER_TIMEOUT_FAST_S
+    # Instrument and experiment commands stay on the slow tier.
+    for command in ("keithley_stop", "keithley_emergency_off", "experiment_finalize"):
+        assert _timeout_for({"cmd": command}) == HANDLER_TIMEOUT_SLOW_S
     # Sanity: an unknown command stays on the fast envelope.
     assert _timeout_for({"cmd": "totally_unknown"}) == HANDLER_TIMEOUT_FAST_S
 

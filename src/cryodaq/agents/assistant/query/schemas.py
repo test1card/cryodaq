@@ -93,6 +93,15 @@ class VacuumETA:
     available: bool = True
     stale: bool = False
     reason: str | None = None
+    # Pressure the fitted model expects the system to settle at. Without it a
+    # missing forecast can only be reported as "не определён", when the useful
+    # answer is usually "the target is below the floor this pump-down is
+    # heading for".
+    p_ultimate_mbar: float | None = None
+    # Predicted pressure at fixed horizons, {"1": mbar, ...} keyed by hours.
+    # An ETA is undefined whenever the target is unreachable; this is defined
+    # always, and is what the operator reads to decide whether to wait.
+    horizon_forecast: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         _validate_availability(self.available, self.stale, self.reason)

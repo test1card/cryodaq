@@ -439,6 +439,22 @@ _SERIALIZATION_ERROR_WIRE = encode_command_reply(
 # polls stay on the 2 s envelope; known-slow commands get 30 s.
 HANDLER_TIMEOUT_FAST_S = 2.0
 HANDLER_TIMEOUT_SLOW_S = 55.0  # H7: bumped from 30 — Ollama cold-start
+# LLM tier. Local inference is not "a slow command" — it is a different order
+# of work. Measured on this lab PC (GTX 1050 Ti, 4 GB, Vulkan): a documentation
+# question costs an intent classification, an embedding round-trip and a
+# reasoning-model answer over retrieved context, and a cold model load can be
+# added to any of the three. That lands past the 55 s slow cap, which is why
+# every such question answered "Произошла внутренняя ошибка".
+#
+# These commands touch no instrument: assistant.query and rag.* are read-only
+# and cannot move hardware, so a wider envelope here buys the operator an
+# answer without loosening any bound that guards the apparatus. Hardware and
+# experiment-lifecycle commands keep HANDLER_TIMEOUT_SLOW_S.
+#
+# Sized to not cut off a working answer on hardware that is admittedly
+# unsuited to this (GTX 1050 Ti, 4 GB): the operator would rather wait
+# minutes than read a truncated one. It bounds a hung Ollama, nothing else.
+HANDLER_TIMEOUT_LLM_S = 420.0
 
 _SLOW_COMMANDS: frozenset[str] = frozenset(
     {
@@ -458,12 +474,18 @@ _SLOW_COMMANDS: frozenset[str] = frozenset(
         "keithley_emergency_off",
         "keithley_stop",
         "launcher_shutdown",
-        # F34: GUI chat overlay routes through AssistantQueryAgent (Ollama
-        # round-trip + audit log + adapter fanout). Fast 2 s envelope is
-        # too tight; the helper's own asyncio.wait_for fires at 25 s,
-        # comfortably inside this 30 s server cap and the 35 s subprocess /
-        # GUI socket timeouts.
+    }
+)
+
+# Read-only local-inference commands. ``rag.search`` sat in neither set and so
+# inherited the 2 s fast envelope, although it cannot answer without an
+# embedding round-trip to Ollama — it timed out on every call that had to load
+# the embedder.
+_LLM_COMMANDS: frozenset[str] = frozenset(
+    {
         "assistant.query",
+        "rag.search",
+        "rag.rebuild",
     }
 )
 
@@ -479,6 +501,8 @@ def _timeout_for(cmd: Any) -> float:
     if not isinstance(cmd, dict):
         return HANDLER_TIMEOUT_FAST_S
     action = cmd.get("cmd")
+    if isinstance(action, str) and action in _LLM_COMMANDS:
+        return HANDLER_TIMEOUT_LLM_S
     if isinstance(action, str) and action in _SLOW_COMMANDS:
         return HANDLER_TIMEOUT_SLOW_S
     return HANDLER_TIMEOUT_FAST_S

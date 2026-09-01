@@ -36,7 +36,8 @@ class CompositeAdapter:
         labeled_data, cd_eta, vac_eta, alarm_result, exp_status = await asyncio.gather(
             self._snapshot.latest_with_labels(),
             self._cooldown.eta(),
-            self._vacuum.eta_to_target(1e-6),
+            # Configured target, not a hardcoded pressure — see VacuumAdapter.
+            self._vacuum.eta_to_target(),
             self._alarms.active(),
             self._experiment.status(),
             return_exceptions=True,

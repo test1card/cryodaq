@@ -92,13 +92,13 @@ def test_legacy_gemma_config_loads_with_warning(
         config = AssistantConfig.from_yaml_string(yaml_content)
 
     assert config.enabled is True
-    assert config.brand_name == "Гемма"  # default preserved
+    assert config.brand_name == "РМКПшка"  # default preserved
     assert "legacy" in caplog.text.lower()
 
 
 def test_config_brand_fields_default() -> None:
     config = AssistantConfig()
-    assert config.brand_name == "Гемма"
+    assert config.brand_name == "РМКПшка"
     assert config.brand_emoji == "🤖"
 
 
@@ -111,7 +111,7 @@ def test_config_from_dict_reads_brand_fields() -> None:
 def test_empty_yaml_returns_defaults(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         config = AssistantConfig.from_yaml_string("")
-    assert config.brand_name == "Гемма"
+    assert config.brand_name == "РМКПшка"
     assert config.enabled is True
     assert "legacy" not in caplog.text.lower()
 

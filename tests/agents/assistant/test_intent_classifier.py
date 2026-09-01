@@ -404,7 +404,11 @@ async def test_router_dispatches_eta_vacuum() -> None:
     assert result["vacuum_eta"] is sentinel
     # Router must pass exactly 1e-6 as the target pressure — a wrong/None
     # argument would silently produce a useless ETA for the wrong threshold.
-    adapters.vacuum.eta_to_target.assert_awaited_once_with(1e-6)
+    # No hardcoded pressure: the target comes from the engine's configuration,
+    # which is where the gauge's measurable range is accounted for. A fixed
+    # 1e-6 mbar asked a Pirani specified to 1e-4 for a number it can never
+    # produce, so the answer was always "прогноз не определён".
+    adapters.vacuum.eta_to_target.assert_awaited_once_with()
 
 
 async def test_router_dispatches_current_value() -> None:

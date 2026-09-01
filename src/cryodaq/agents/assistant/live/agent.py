@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 
 
+# Retrieval, adapter fan-out and ZMQ round-trips sit between the two LLM
+# stages; the outer command bound has to cover them as well as the stages.
+_QUERY_RETRIEVAL_BUDGET_S = 30.0
+
 @dataclass
 class AssistantConfig:
     enabled: bool = True
@@ -76,7 +80,7 @@ class AssistantConfig:
     audit_retention_days: int = 90
     num_ctx: int | None = None  # Ollama context window override; None = use model default
     audit_dir: Path = field(default_factory=lambda: Path("data/agents/assistant/audit"))
-    brand_name: str = "Гемма"
+    brand_name: str = "РМКПшка"
     brand_emoji: str = "🤖"
     periodic_report_enabled: bool = True
     periodic_report_interval_minutes: int = 60
@@ -90,6 +94,22 @@ class AssistantConfig:
     query_intent_timeout_s: float = 20.0
     query_format_timeout_s: float = 40.0
     query_max_per_chat_per_hour: int = 60
+    # 0 = derive from the stage budgets below. An explicit value overrides.
+    query_command_timeout_s: float = 0.0
+
+    def get_query_command_timeout_s(self) -> float:
+        """Outer bound for one assistant.query, wide enough for its stages.
+
+        The command wrapper must outlast the work it wraps: intent
+        classification, then retrieval, then Russian formatting. A wrapper
+        shorter than ``intent + format`` cancels a query the inner stages were
+        still entitled to finish, and the operator gets a timeout message for
+        a question the model was answering — which is what a fixed 50s bound
+        did to every documentation query on lab hardware.
+        """
+        if self.query_command_timeout_s > 0.0:
+            return float(self.query_command_timeout_s)
+        return float(self.query_intent_timeout_s + self.query_format_timeout_s + _QUERY_RETRIEVAL_BUDGET_S)
 
     def get_periodic_report_interval_s(self) -> float:
         """Return interval in seconds, or 0 if periodic reports are disabled."""
@@ -163,6 +183,7 @@ class AssistantConfig:
             cfg.query_format_temperature = float(q.get("format_temperature", cfg.query_format_temperature))
             cfg.query_intent_timeout_s = float(q.get("intent_timeout_s", cfg.query_intent_timeout_s))
             cfg.query_format_timeout_s = float(q.get("format_timeout_s", cfg.query_format_timeout_s))
+            cfg.query_command_timeout_s = float(q.get("command_timeout_s", cfg.query_command_timeout_s))
             _rl = q.get("rate_limit", {})
             if isinstance(_rl, dict):
                 cfg.query_max_per_chat_per_hour = int(

@@ -54,12 +54,48 @@ if TYPE_CHECKING:
     )
     from cryodaq.core.channel_manager import ChannelManager
 
+# Reasoning trace + the Russian answer must both fit. A reasoning model
+# routinely spends 2-3k tokens thinking before it writes anything the
+# operator sees, so a budget in that same range truncates the answer
+# itself. Sized against num_ctx (8192) less room for the prompt and the
+# retrieved manual pages.
+_FORMAT_MAX_TOKENS = 6144
+# Prompt + retrieved manual pages + reasoning trace + answer must all fit.
+_FORMAT_NUM_CTX = 12288
+
 logger = logging.getLogger(__name__)
 
 _FALLBACK = "Произошла внутренняя ошибка. Попробуй ещё раз или обратись к оператору."
 _RATE_WINDOW_S = 3600.0
 _RATE_BUCKET_SWEEP_INTERVAL_S = 60.0
 _MAX_RATE_BUCKETS = 4096
+
+
+
+def _format_horizons(forecast: dict[str, float] | None) -> str:
+    """The horizon forecast as a self-contained block, ordered by hours ahead.
+
+    Carries its own heading and its own instruction so the section simply is
+    not there when the engine supplies no forecast. A fixed template that
+    always asks for a column, with "нет данных" where the column should be,
+    gave a small model contradictory instructions and it answered with two
+    bare numbers.
+
+    Dict order is insertion order and a wire round-trip need not preserve the
+    intended sequence, so the ordering is re-established here rather than
+    trusted — a forecast listing 12 h before 3 h reads as an error.
+    """
+    if not forecast:
+        return "Прогноз по горизонтам недоступен."
+
+    def hours_of(item: tuple[str, float]) -> float:
+        try:
+            return float(item[0])
+        except (TypeError, ValueError):
+            return float("inf")
+
+    lines = [f"  +{hours} ч: {pressure:.2e} мбар" for hours, pressure in sorted(forecast.items(), key=hours_of)]
+    return "Прогноз давления по горизонтам (выведи их столбиком, как есть):\n" + "\n".join(lines)
 
 
 class AssistantQueryAgent:
@@ -169,7 +205,15 @@ class AssistantQueryAgent:
                     model=self._format_model,
                     system=system_prompt,
                     temperature=self._format_temperature,
-                    max_tokens=2048,
+                    # A reasoning model spends most of this budget thinking
+                    # before it writes a word the operator sees. At 2048 a
+                    # documentation answer over retrieved manual pages ran out
+                    # mid-trace and never reached its conclusion.
+                    max_tokens=_FORMAT_MAX_TOKENS,
+                    # Must be passed explicitly: without it Ollama applies its
+                    # own 4096 default, which cannot hold the retrieved manual
+                    # pages plus a reasoning trace plus the answer.
+                    num_ctx=_FORMAT_NUM_CTX,
                 ),
                 timeout=self._format_timeout_s,
             )
@@ -371,9 +415,11 @@ class AssistantQueryAgent:
             return FORMAT_ETA_VACUUM_USER.format(
                 query=query,
                 current_mbar=cur_str,
-                target_mbar=1e-6,
+                target_mbar=float("nan"),
                 eta_str="нет прогноза",
                 trend="нет данных",
+                p_ultimate="неизвестен",
+                horizons_block="Прогноз по горизонтам недоступен.",
                 confidence=0.0,
             )
         if not eta.available:
@@ -393,6 +439,10 @@ class AssistantQueryAgent:
             target_mbar=eta.target_mbar,
             eta_str=eta_str,
             trend=eta.trend,
+            p_ultimate=(
+                f"{eta.p_ultimate_mbar:.2e} mbar" if eta.p_ultimate_mbar is not None else "не определён"
+            ),
+            horizons_block=_format_horizons(eta.horizon_forecast),
             confidence=eta.confidence,
         )
 
@@ -547,11 +597,16 @@ class AssistantQueryAgent:
             vac_text = "нет прогноза"
         elif not vac.available:
             vac_text = f"недоступен: {vac.reason}"
-        elif vac.eta_seconds is None:
-            vac_text = "не определено"
         else:
-            h = vac.eta_seconds / 3600
-            vac_text = f"{int(h)}ч {int((h % 1) * 60)}мин"
+            # The target travels with the forecast. It comes from the engine's
+            # configuration and changes with the gauge in use, so naming it
+            # here keeps a summary from implying a threshold nobody set.
+            target = f"{vac.target_mbar:.0e} мбар"
+            if vac.eta_seconds is None:
+                vac_text = f"до {target} — не определено"
+            else:
+                h = vac.eta_seconds / 3600
+                vac_text = f"до {target}: {int(h)}ч {int((h % 1) * 60)}мин"
 
         alarms_text = (
             ", ".join(a.alarm_id for a in cs.active_alarms)

@@ -1,20 +1,35 @@
 agent:
   enabled: true
-  brand_name: "Гемма"
+  brand_name: "РМКПшка"
   brand_emoji: "🤖"
 
   ollama:
     base_url: http://127.0.0.1:11434
-    default_model: gemma4:e4b
-    timeout_s: 120  # gemma4:e4b thinking-first; cold-load ~40s, warm ~10s on RTX 5070 Ti 16GB
+    default_model: hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M
+    timeout_s: 120
     temperature: 0.3
-    num_ctx: 32768  # 32K context; fits 100% on GPU with ~2 GB vRAM headroom on RTX 5070 Ti 16GB
-    # Deployment notes (verified 2026-05-15 on RTX 5070 Ti 16GB lab PC):
-    #   e4b @ num_ctx=32768: 100% GPU, ~11 GB used, ~2 GB headroom, ~39 tok/s.
-    #   26b @ num_ctx=16384: 41% CPU / 59% GPU split (model 17 GB > vRAM budget),
-    #     only ~680 MiB headroom, degraded throughput. Not viable on 16 GB.
-    #   M5 24GB (Mac dev): downgrade default_model к gemma4:e2b — e4b не fits
-    #     alongside engine + GUI on Apple Silicon shared memory.
+    num_ctx: 8192
+    # Deployment notes (measured 2026-08-31 on the lab53 GTX 1050 Ti, 4 GiB):
+    #   Ollama runs on the VULKAN backend here — driver 470.256.02 / CUDA 11.4
+    #   is too old for its CUDA runtime, and Vulkan is the working fallback.
+    #   Reported: total 4.2 GiB, available 3.9 GiB.
+    #
+    #   LFM2.5-2.6B Q4_K_M: 1.8 GB, 100% GPU, 40.3 tok/s.  <- selected
+    #   qwen3.5:4b        : 3.7 GB, 33% CPU / 67% GPU, 12.3 tok/s — spills,
+    #                       and thinking-first verbosity made a one-line
+    #                       question take 5m37s versus 36s.
+    #   gemma4:e2b/e4b    : 7.2 / 9.6 GB — the whole Gemma 4 family is out.
+    #
+    #   LFM2.5 was chosen on the metrics that matter for a read-only RAG
+    #   assistant rather than raw MMLU: IFStruct 85.5 vs 36.3, IFBench 59.2
+    #   vs 48.4, BFCL v4 tool-calling 56.9 vs 50.6 (all versus qwen3.5:4b),
+    #   plus better knowledge calibration on AA-Omniscience. Qwen3.5-4B is
+    #   the stronger general reasoner, but this assistant must answer from
+    #   retrieved sources and refuse otherwise, not from its own weights.
+    #   Russian is among its 16 supported languages.
+    #
+    #   num_ctx 8192, not the previous 32768: that figure was sized for a
+    #   16 GB RTX 5070 Ti and will not fit here.
 
   triggers:
     alarm_fired:
@@ -47,12 +62,26 @@ agent:
 
   query:
     enabled: true
-    intent_model: gemma4:e4b
-    format_model: gemma4:e4b
+    # Intent classification is a one-word decision, so it goes to a small
+    # NON-reasoning model. Measured on this box (GTX 1050 Ti, Vulkan):
+    # LFM2.5 spends 700-1250 reasoning tokens to emit a single category and
+    # takes 33.6s; qwen2.5:1.5b-instruct emits 2 tokens in 0.1s warm.
+    # That one stage was the whole reason documentation questions overran
+    # the 55s command envelope and answered "Произошла внутренняя ошибка".
+    intent_model: qwen2.5:1.5b-instruct
+    # The operator-facing Russian answer stays on LFM2.5 — reasoning is worth
+    # paying for once, at the stage the operator actually reads.
+    format_model: hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 60.0  # 3× e2b default — absorbs e4b cold-load (~40s) + intent generation
-    format_timeout_s: 90.0  # 2.25× e2b default — absorbs e4b cold-load + Russian format generation
+    intent_timeout_s: 30.0  # measured 0.1s warm / 3.8s cold; the rest is headroom
+    # This card is not suited to reasoning-model RAG and that is accepted:
+    # the budget exists to catch a genuinely hung Ollama, not to cut a
+    # working answer short. Measured on lab hardware: status questions
+    # 17-33s, documentation answers over retrieved manual pages 70-80s at
+    # 3k reasoning tokens — and proportionally longer now that the model
+    # may spend up to 6144. A late answer beats a truncated one.
+    format_timeout_s: 300.0
     rate_limit:
       max_queries_per_chat_per_hour: 60
 

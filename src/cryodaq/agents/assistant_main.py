@@ -74,10 +74,15 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.zmq_bridge import (
     DEFAULT_PUB_ADDR,
+    HANDLER_TIMEOUT_LLM_S,
     ZMQCommandServer,
     ZMQEventSubscriber,
 )
 from cryodaq.paths import get_config_dir, get_data_dir
+
+# Headroom between the query handler's own deadline and the REP server's
+# cap, so the handler always wins the race and answers in plain Russian.
+_QUERY_TRANSPORT_MARGIN_S = 5.0
 
 logger = logging.getLogger("cryodaq.assistant")
 
@@ -934,7 +939,15 @@ async def _run_llm_runtime(
         action = str(cmd.get("cmd", ""))
         try:
             if action == "assistant.query":
-                return await _handle_assistant_query_command(query_agent, cmd)
+                # The wrapper must fire *inside* the transport envelope: if the
+                # REP server's own cap expires first the operator gets
+                # "outcome may be unknown" instead of the plain Russian
+                # "took too long, try again" this handler returns.
+                budget = min(
+                    config.get_query_command_timeout_s(),
+                    HANDLER_TIMEOUT_LLM_S - _QUERY_TRANSPORT_MARGIN_S,
+                )
+                return await _handle_assistant_query_command(query_agent, cmd, timeout_s=budget)
             if action == "rag.search":
                 return await _handle_rag_search_command(rag_searcher, cmd)
             return {"ok": False, "error": f"unknown command: {action}"}
