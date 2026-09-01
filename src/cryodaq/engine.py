@@ -1082,7 +1082,11 @@ class _RemoteAssistantQueryProxy:
         self,
         address: str = "tcp://127.0.0.1:5557",
         *,
-        timeout_s: float = 55.0,
+        # Must outlast the assistant REP server's own LLM cap
+        # (HANDLER_TIMEOUT_LLM_S) so the handler's plain-Russian "took too
+        # long" reply reaches Telegram instead of this socket giving up
+        # first and reporting the assistant unreachable.
+        timeout_s: float = 450.0,
     ) -> None:
         self._address = address
         self._timeout_ms = int(timeout_s * 1000)
@@ -1107,7 +1111,7 @@ class _RemoteAssistantQueryProxy:
                 "Assistant query transport failed: exception=%s",
                 type(exc).__name__,
             )
-            return "🤖 Гемма: ассистент недоступен."
+            return f"{_assistant_brand()}: ассистент недоступен."
         finally:
             sock.close(linger=0)
         if reply.get("ok"):
@@ -1269,6 +1273,52 @@ async def _drain_dispatch_tasks(
 # invented), extracted as importable module-level functions so they are
 # unit-testable without bringing up the full engine (same rationale as
 # ``_drain_dispatch_tasks``).
+
+
+def _assistant_brand() -> str:
+    """Operator-facing assistant name, from config/agent.yaml.
+
+    The name was hardcoded here, so renaming the assistant in config left
+    this one transport-failure message still calling it by the old name.
+    Fail-safe: falls back to a neutral label rather than a stale one.
+    """
+    try:
+        import yaml
+
+        raw = yaml.safe_load((_CONFIG_DIR / "agent.yaml").read_text(encoding="utf-8")) or {}
+        agent = raw.get("agent") or {}
+        emoji = str(agent.get("brand_emoji", "🤖")).strip()
+        name = str(agent.get("brand_name", "")).strip()
+        return f"{emoji} {name}".strip() if name else "🤖 Ассистент"
+    except Exception:  # pragma: no cover - never break a failure path
+        return "🤖 Ассистент"
+
+
+def _telegram_alarms_enabled() -> bool:
+    """Whether alarm notifications may be sent to Telegram at all.
+
+    Resolved ONCE at engine startup and applied by withholding the bot from
+    the alarm dispatcher — never consulted inside the dispatch path itself.
+    Reading live operator config inside a library function makes its
+    behaviour depend on the machine it runs on, which broke
+    tests/core/test_engine_audible_faults.py the first time I wrote this.
+
+    Fail-open: an unreadable config keeps notifications on rather than
+    silently muting them.
+    """
+    try:
+        import yaml
+
+        path = _CONFIG_DIR / "notifications.local.yaml"
+        if not path.is_file():
+            return True
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        telegram = raw.get("telegram")
+        if not isinstance(telegram, dict):
+            return True
+        return telegram.get("alarms_enabled", True) is not False
+    except Exception:  # pragma: no cover - notification must never break acquisition
+        return True
 
 
 def _channel_is_visible(channel: str) -> bool:
@@ -7550,6 +7600,27 @@ async def _run_engine(
     vacuum_trend: VacuumTrendPredictor | None = None
     if _vt_enabled:
         vacuum_trend = VacuumTrendPredictor(config=_vt_cfg)
+        # Recover when this pump-down began. The outgassing exponent is defined
+        # against that origin, and an engine started mid-run never witnesses it
+        # — its first reading is already deep in the run, which would date the
+        # pump-down from process start and make the exponent meaningless.
+        try:
+            from cryodaq.analytics.pressure_history import find_pump_start  # noqa: PLC0415
+
+            _pump_start = find_pump_start(
+                _DATA_DIR,
+                threshold_mbar=float(_vt_cfg.get("pump_start_mbar", 900.0)),
+            )
+            if _pump_start is not None:
+                vacuum_trend.set_pump_start(_pump_start)
+                logger.info(
+                    "VacuumTrendPredictor: начало откачки восстановлено из архива — %s",
+                    datetime.fromtimestamp(_pump_start).strftime("%d.%m.%Y %H:%M:%S"),
+                )
+            else:
+                logger.info("VacuumTrendPredictor: начало откачки в архиве не найдено")
+        except Exception as exc:  # noqa: BLE001 - analytics must never block startup
+            logger.warning("VacuumTrendPredictor: не удалось восстановить начало откачки: %s", exc)
         logger.info(
             "VacuumTrendPredictor: enabled, window=%ds, targets=%s",
             _vt_cfg.get("window_s", 3600),
@@ -7708,6 +7779,9 @@ async def _run_engine(
 
     # --- Уведомления (один раз разбираем YAML) ---
     telegram_bot: TelegramCommandBot | None = None
+    # Same object as telegram_bot unless the operator kill-switch is set,
+    # in which case alarm consumers get None while commands keep the bot.
+    telegram_alarm_bot: TelegramCommandBot | None = None
     _photo_handler: CompositionPhotoHandler | None = None
     escalation_service: EscalationService | None = None
     notifications_cfg = _engine_config_path("notifications")
@@ -7752,6 +7826,18 @@ async def _run_engine(
                         "TelegramCommandBot создан (allowed=%d chat ids)",
                         len(allowed_ids),
                     )
+                    telegram_alarm_bot = telegram_bot
+                    if not _telegram_alarms_enabled():
+                        # Operator kill-switch (telegram.alarms_enabled: false).
+                        # The bot stays live for commands and periodic reports;
+                        # only the alarm consumers lose it, so alarms still fire
+                        # everywhere else — event bus, GUI, sound, operator log.
+                        telegram_alarm_bot = None
+                        logger.warning(
+                            "Telegram-уведомления об алармах ОТКЛЮЧЕНЫ "
+                            "(telegram.alarms_enabled: false). Команды и "
+                            "периодические отчёты продолжают работать."
+                        )
 
                     # F27 — composition photo handler
                     _photo_handler = CompositionPhotoHandler(
@@ -7785,7 +7871,13 @@ async def _run_engine(
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
     command_context.escalation_service = escalation_service
-    safety_fault_context.telegram_bot = telegram_bot
+    # The gated bot, like every other alarm consumer. Safety faults are alarms:
+    # this line handed them the ungated bot, so the operator kill-switch
+    # (telegram.alarms_enabled: false) silenced every alarm except these — and
+    # a latched safety fault re-notifies on a timer, so the one path that
+    # escaped the switch was also the one that repeats. The fault still reaches
+    # the event bus, the GUI, the sound annunciator and the operator log.
+    safety_fault_context.telegram_bot = telegram_alarm_bot
 
     # --- B1 (2026-07): Гемма (AssistantLiveAgent), RAG searcher, and
     # AssistantQueryAgent (F30 live chat) all moved to the standalone
@@ -8042,7 +8134,7 @@ async def _run_engine(
                     evaluator=alarm_v2_evaluator,
                     state_mgr=alarm_v2_state_mgr,
                     broker=broker,
-                    telegram_bot=telegram_bot,
+                    telegram_bot=telegram_alarm_bot,
                     alarm_dispatch_tasks=_alarm_dispatch_tasks,
                     event_bus=event_bus,
                     experiment_manager=experiment_manager,
@@ -8062,7 +8154,7 @@ async def _run_engine(
                     cooldown_cfg=_cooldown_cfg,
                     cooldown_alarm=_cooldown_alarm,
                     state_mgr=alarm_v2_state_mgr,
-                    telegram_bot=telegram_bot,
+                    telegram_bot=telegram_alarm_bot,
                     alarm_dispatch_tasks=_alarm_dispatch_tasks,
                     event_bus=event_bus,
                     experiment_manager=experiment_manager,
@@ -8079,7 +8171,7 @@ async def _run_engine(
                     vacuum_cfg=_vacuum_cfg,
                     vacuum_guard=_vacuum_guard,
                     state_mgr=alarm_v2_state_mgr,
-                    telegram_bot=telegram_bot,
+                    telegram_bot=telegram_alarm_bot,
                     alarm_dispatch_tasks=_alarm_dispatch_tasks,
                     event_bus=event_bus,
                     experiment_manager=experiment_manager,
@@ -8105,7 +8197,7 @@ async def _run_engine(
                     sensor_diag_tick,
                     sensor_diag=sensor_diag,
                     sd_cfg=_sd_cfg,
-                    telegram_bot=telegram_bot,
+                    telegram_bot=telegram_alarm_bot,
                     alarm_dispatch_tasks=_alarm_dispatch_tasks,
                     event_bus=event_bus,
                     experiment_manager=experiment_manager,
