@@ -95,6 +95,28 @@ class LakeShore218S(InstrumentDriver):
             timeout_ms=max(1, int(round(self._read_timeout_s * 1000))),
         )
 
+        # Release a sticky query quarantine before anything is asked of the
+        # device.
+        #
+        # A desynchronized query quarantines the session permanently, and
+        # neither close/open nor clear_bus() releases it -- clear_bus sends the
+        # SDC but never touches the flag. Every subsequent query then failed
+        # with "GPIB session is quarantined", so one desynchronized read killed
+        # the instrument until the process restarted. On 2026-09-01 that cost
+        # 6.8 hours of LS218_2 and 2.0 more that afternoon, while the scheduler
+        # wrote timeout rows that kept the row count at 100%.
+        #
+        # recover_device() is SDC-scoped and raises on failure, so a recovery
+        # that cannot be trusted fails the connect and is retried under backoff
+        # rather than being mistaken for success.
+        # `is True` on purpose. The real transport returns a bool; a test
+        # double is often a MagicMock whose every attribute is truthy, and
+        # treating that as a quarantine would drive recovery on transports that
+        # have none. Only an explicit quarantine triggers this path.
+        if getattr(self._transport, "query_desynchronized", False) is True:
+            log.warning("%s: session quarantined; attempting device-local recovery", self.name)
+            await self._transport.recover_device()
+
         if not self.mock or self._mock_instrument_client is not None:
             # Phase 2c F.1: validate IDN with retry-after-clear fallback.
             # The previous fallback (log a warning and proceed) allowed silent
@@ -141,6 +163,14 @@ class LakeShore218S(InstrumentDriver):
                     await asyncio.sleep(0.2)
 
             if not idn_valid:
+                # The identity check is what stands between a recovered bus and
+                # a misattributed reading: a late reply to the query that
+                # failed, or a response from the wrong address, both arrive
+                # here as a non-identity. Re-quarantine before closing so the
+                # session can never be reused on the strength of this attempt.
+                self._transport.mark_desynchronized(
+                    f"identity not validated after recovery (response={idn_raw!r})"
+                )
                 await self._transport.close()
                 raise RuntimeError(
                     f"{self.name}: LakeShore 218S IDN validation failed. "

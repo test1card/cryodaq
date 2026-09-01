@@ -26,6 +26,13 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_MS = 3000
 _WRITE_READ_DELAY_S = 0.1
+# Device-recovery drain. The timeout is the quiet observation, so it must be
+# long enough that a device merely being slow is not mistaken for silence, and
+# short enough that recovery stays bounded.
+_DRAIN_TIMEOUT_MS = 250
+# A device that keeps talking through this many reads is not recovering; the
+# drain ends indeterminate and the session stays quarantined.
+_MAX_DRAIN_READS = 8
 _CLOSE_TIMEOUT_S = 1.0
 
 
@@ -345,6 +352,87 @@ class GPIBTransport:
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
 
+    @property
+    def query_desynchronized(self) -> bool:
+        """Whether this session is quarantined after a failed query."""
+        with self._state_lock:
+            return self._query_desynchronized
+
+    def mark_desynchronized(self, reason: str) -> None:
+        """Re-quarantine this session. Used when a recovery cannot be trusted."""
+        with self._state_lock:
+            self._query_desynchronized = True
+        log.warning("GPIB: %s re-quarantined: %s", self._resource_str, reason)
+
+    async def recover_device(self) -> None:
+        """Device-local recovery from a desynchronized query. SDC only.
+
+        Deliberately NOT ``recover()``. That method sends IFC, which is an
+        INTERFACE-wide operation: on this stand three LakeShore sessions share
+        one physical GPIB0, so recovering one device with IFC would interrupt
+        healthy peers mid-transaction. IFC belongs to an interface-scoped
+        coordinator that first fences every participant, and this path must
+        never reach it.
+
+        The quarantine exists because a failed query leaves the bus in an
+        unknown state: a stale reply still in the device's output buffer would
+        be read as the answer to the NEXT query and published as a reading for
+        the wrong request. Clearing it is therefore only safe under a contract:
+
+        1. the failed query has completely settled;
+        2. the same open generation and resource are still exclusively owned;
+        3. a fresh SDC is followed by a bounded drain until the device is
+           observed quiet;
+        4. cancellation, timeout, a generation change, an indeterminate drain
+           or a failed clear all leave the session quarantined.
+
+        Raises on every failure and returns None on success. It must never
+        report failure by return value: the scheduler treats normal completion
+        as recovery success, so a ``False`` would be read as "recovered" and
+        the caller would go straight to a data query on an unknown bus.
+
+        The caller must still perform a fresh exact identity validation before
+        any data query -- see the LakeShore driver, which does that and
+        re-quarantines if the reply is not a valid identity.
+        """
+
+        if self.mock:
+            with self._state_lock:
+                self._query_desynchronized = False
+            return
+
+        with self._state_lock:
+            if not self._query_desynchronized:
+                return
+            if not self._session_open or self._resource is None:
+                raise RuntimeError("GPIB device recovery refused: session is not open")
+            if not self._open_settled.is_set() or self._terminal_unsettled:
+                # The failed query has not settled; its worker may still be
+                # inside a VISA read and could deliver bytes after the drain.
+                raise RuntimeError("GPIB device recovery refused: previous operation has not settled")
+            generation = self._open_generation
+            resource_identity = id(self._resource)
+
+        # SDC + drain. `_run_executor_operation` re-checks settlement itself and
+        # raises rather than overlapping; a cancellation there marks the
+        # generation terminally unsettled, so the flag below is never cleared.
+        await self._run_executor_operation(self._blocking_clear_and_drain)
+
+        with self._state_lock:
+            if (
+                generation != self._open_generation
+                or not self._session_open
+                or self._terminal_unsettled
+                or self._resource is None
+                or id(self._resource) != resource_identity
+            ):
+                raise RuntimeError("GPIB device recovery refused: session changed during recovery")
+            # A new generation: anything issued against the old one is stale by
+            # construction, exactly as `recover()` does after IFC.
+            self._open_generation += 1
+            self._query_desynchronized = False
+        log.info("GPIB: %s recovered by device clear (SDC, no IFC)", self._resource_str)
+
     async def recover(self) -> bool:
         """Run explicit SDC/IFC recovery before a fresh generation is used."""
         with self._state_lock:
@@ -609,6 +697,44 @@ class GPIBTransport:
         finally:
             if old_timeout is not None:
                 res.timeout = old_timeout
+
+    def _blocking_clear_and_drain(self) -> None:
+        """SDC, then read until the device is quiet. Raises unless quiet.
+
+        A read timeout IS the quiet observation: it says the device has nothing
+        further to send, which is the only state in which the next reply can be
+        attributed to the next query. Anything read here is a stale response to
+        a query that already failed and is discarded -- it must never reach a
+        caller as a reading.
+
+        Bounded so a device babbling continuously cannot hold the executor: the
+        drain then ends indeterminate and the session stays quarantined.
+        """
+
+        res = self._resource
+        if res is None:
+            raise RuntimeError("GPIB device recovery: resource is not connected")
+        res.clear()
+        log.info("GPIB: SDC sent on %s for device recovery", self._resource_str)
+        saved = res.timeout
+        res.timeout = _DRAIN_TIMEOUT_MS
+        try:
+            for _ in range(_MAX_DRAIN_READS):
+                try:
+                    stale = res.read()
+                except Exception:
+                    return  # quiet: the only successful outcome
+                log.warning(
+                    "GPIB: discarded %d stale bytes from %s during recovery drain",
+                    len(stale or ""),
+                    self._resource_str,
+                )
+            raise RuntimeError("GPIB device recovery: drain did not go quiet within bound")
+        finally:
+            try:
+                res.timeout = saved
+            except Exception:  # noqa: BLE001 - restoring the timeout must not mask the outcome
+                log.warning("GPIB: could not restore timeout on %s after drain", self._resource_str)
 
     def _blocking_clear(self) -> bool:
         """Send Selected Device Clear. Returns True on success."""
