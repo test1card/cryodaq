@@ -266,7 +266,7 @@ _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
 _ENGINE_READY_WIRE_PREFIX = b"CRYODAQ_ENGINE_READY_V2 "
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v3"
 _OPERATOR_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
     {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
@@ -5647,13 +5647,33 @@ def _request_teardown_after_shutdown_receipt(
         context.shutdown_event.set()
 
 
+#: One-shot operator assertion carried on the shutdown request itself.
+#:
+#: The operator states a physical fact the software cannot observe: the source
+#: has been unplugged from mains. It authorises THIS teardown and nothing else.
+#: It is never device evidence -- ``SourceOffEvidence`` is untouched and
+#: ``verified_off`` stays False -- so RUN, source control, fault clearing and
+#: energising continue to read the same unverified evidence they always did and
+#: are structurally unable to see this.
+_OPERATOR_PHYSICAL_DISCONNECT_KEY = "operator_physical_disconnect"
+
+
 def _shutdown_command_identity(cmd: dict[str, Any]) -> tuple[str, str, str] | None:
     required = {"cmd", "engine_instance_id", "request_id", "shutdown_capability"}
+    # One optional one-shot assertion, carried by the SAME capability-bound
+    # request that is already being authorised. It is not a command, holds no
+    # state, and cannot arrive by any other route. Two exact shapes are
+    # accepted so an unknown key still fails closed.
+    optional = {_OPERATOR_PHYSICAL_DISCONNECT_KEY}
     instance_id = cmd.get("engine_instance_id")
     request_id = cmd.get("request_id")
     capability = cmd.get("shutdown_capability")
     if not (
-        set(cmd) == required
+        set(cmd) in (required, required | optional)
+        and (
+            _OPERATOR_PHYSICAL_DISCONNECT_KEY not in cmd
+            or cmd[_OPERATOR_PHYSICAL_DISCONNECT_KEY] is True
+        )
         and cmd.get("cmd") == "launcher_shutdown"
         and type(instance_id) is str
         and len(instance_id) == 32
@@ -5818,12 +5838,14 @@ async def _handle_gui_command(
                     "keithley_emergency_off", {"cmd": "keithley_emergency_off"}, safety_manager
                 )
                 off_evidence = parse_global_off_evidence(off_result.get("off_evidence"))
-                if (
+                asserted = cmd.get(_OPERATOR_PHYSICAL_DISCONNECT_KEY) is True
+                off_unverified = (
                     off_result.get("ok") is not True
                     or off_result.get("active_channels") != []
                     or off_evidence is None
                     or not off_evidence.verified_off
-                ):
+                )
+                if off_unverified and not asserted:
                     return {
                         "ok": False,
                         "error_code": "launcher_shutdown_global_off_unverified",
@@ -5832,12 +5854,40 @@ async def _handle_gui_command(
                         "commit_state": "not_committed",
                         "retry_safe": True,
                     }
+                if asserted and not off_unverified:
+                    # The device can answer, so the operator's statement is not
+                    # the authority here. Accepting it anyway would make this a
+                    # general bypass rather than a last resort.
+                    return {
+                        "ok": False,
+                        "error_code": "launcher_shutdown_assertion_not_applicable",
+                        "error": (
+                            "physical-disconnect assertion refused: global OFF is verifiable from the device"
+                        ),
+                        "delivery_state": "dispatched",
+                        "commit_state": "not_committed",
+                        "retry_safe": True,
+                    }
+                if asserted:
+                    # The independent artifact. The receipt proves what the
+                    # launcher was told; this proves what the operator stated,
+                    # and survives in the log whatever happens to the receipt.
+                    logger.critical(
+                        "TEARDOWN ON OPERATOR ASSERTION: reviewed source '%s' was declared physically "
+                        "disconnected from mains by the operator at %s. This is NOT device-reported OFF; "
+                        "global OFF remains unverified and energising stays refused.",
+                        getattr(getattr(safety_manager, "_keithley", None), "name", "Keithley_1"),
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                    )
                 receipt = {
                     "ok": True,
                     "schema": _ENGINE_SHUTDOWN_RECEIPT_SCHEMA,
                     "engine_instance_id": instance_id,
                     "request_id": request_id,
                     "off_evidence": off_evidence.receipt_payload(),
+                    # Reported beside the device evidence, never folded into
+                    # it: off_evidence still says verified_off is False.
+                    _OPERATOR_PHYSICAL_DISCONNECT_KEY: asserted,
                     "teardown_requested": True,
                     "delivery_state": "dispatched",
                     "commit_state": "committed",

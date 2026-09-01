@@ -345,3 +345,41 @@ async def test_a_successful_recovery_restores_the_original_timeout():
     transport = _quarantined_transport(resource)
     await transport.recover_device()
     assert resource.timeout == 3000, "the drain timeout was inherited by later queries"
+
+
+# ---------------------------------------------------------------------------
+# abort_open must invalidate a partial open, not a clean one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aborting_a_clean_transport_does_not_block_reopening():
+    """There is no partial open to invalidate, so there is nothing to abort.
+
+    abort_open() set terminal-close intent unconditionally, and open() refuses
+    while it is set. A clean close followed by abort_open therefore left the
+    transport permanently unopenable -- the same class of defect as the sticky
+    query quarantine, reached by a different route.
+    """
+    transport = GPIBTransport(mock=True)
+    await transport.open("GPIB0::11::INSTR", timeout_ms=3000)
+    await transport.close()
+    await transport.abort_open()
+    await transport.open("GPIB0::11::INSTR", timeout_ms=3000)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_aborting_a_genuinely_open_transport_still_fails_closed():
+    """The real purpose survives: a partial open stays invalidated."""
+    transport = GPIBTransport(mock=True)
+    await transport.open("GPIB0::11::INSTR", timeout_ms=3000)
+    await transport.abort_open()
+    with pytest.raises(RuntimeError, match="has not settled"):
+        await transport.open("GPIB0::11::INSTR", timeout_ms=3000)
+
+
+@pytest.mark.asyncio
+async def test_aborting_a_never_opened_transport_is_a_no_op():
+    transport = GPIBTransport(mock=True)
+    await transport.abort_open()
+    await transport.open("GPIB0::11::INSTR", timeout_ms=3000)  # must not raise

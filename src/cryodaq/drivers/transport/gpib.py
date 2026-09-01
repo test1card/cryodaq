@@ -223,13 +223,36 @@ class GPIBTransport:
         log.info("GPIB: %s opened (persistent session)", resource_str)
 
     async def abort_open(self) -> None:
-        """Invalidate a partial open without abandoning its retained owner.
+        """Invalidate a PARTIAL open without abandoning its retained owner.
 
         Cancellation cleanup only records terminal-close intent.  The public
         :meth:`close` path is the joining owner; it waits for the exact
         executor generation and then observes the worker's terminal result.
+
+        When there is no partial open there is nothing to invalidate, and
+        marking terminal-close intent is simply wrong against this method's own
+        contract. It was unconditional, so aborting an already clean, closed
+        and settled transport left ``_terminal_unsettled`` set -- and ``open()``
+        refuses while it is. Reproduced directly: open, clean close,
+        abort_open, reopen raises "previous GPIB executor generation has not
+        settled" and the transport is unopenable.
+
+        Nothing has failed this way on the stand only because the reconnect
+        loop happens to call ``close()`` first, which clears the flag. That is
+        incidental, not a guarantee, and it is one ordering change away from
+        being a permanent instrument stall -- the same class of defect as the
+        sticky query quarantine this transport already carried.
         """
         with self._state_lock:
+            if (
+                self._resource is None
+                and not self._session_open
+                and not self._terminal_unsettled
+                and self._open_settled.is_set()
+                and self._close_owner is None
+            ):
+                # Atomically clean: no open to abort.
+                return
             self._open_generation += 1
             self._terminal_unsettled = True
 

@@ -626,7 +626,7 @@ _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
 _ENGINE_SHUTDOWN_CAPABILITY_ENV = "CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY"
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v3"
 _SOAK_BRIDGE_FD_ENV = "CRYODAQ_SOAK_BRIDGE_FD"
 _SOAK_BRIDGE_NONCE_ENV = "CRYODAQ_SOAK_BRIDGE_NONCE"
 _SOAK_ARTIFACT_FD_ENV = "CRYODAQ_SOAK_ARTIFACT_FD"
@@ -4405,6 +4405,7 @@ class LauncherWindow(QMainWindow):
                     "engine_instance_id",
                     "request_id",
                     "off_evidence",
+                    "operator_physical_disconnect",
                     "teardown_requested",
                     "delivery_state",
                     "commit_state",
@@ -4421,7 +4422,15 @@ class LauncherWindow(QMainWindow):
                     and type(receipt["request_id"]) is str
                     and receipt["request_id"] == request_id
                     and parse_global_off_evidence(receipt["off_evidence"]) is not None
-                    and parse_global_off_evidence(receipt["off_evidence"]).verified_off
+                    # Teardown is authorised by device-verified OFF, or by the
+                    # operator's one-shot statement that the source is
+                    # physically disconnected from mains. The two are reported
+                    # separately and never conflated: off_evidence still says
+                    # verified_off is False in the asserted case.
+                    and (
+                        parse_global_off_evidence(receipt["off_evidence"]).verified_off
+                        or receipt["operator_physical_disconnect"] is True
+                    )
                     and receipt["teardown_requested"] is True
                     and type(receipt["delivery_state"]) is str
                     and receipt["delivery_state"] == "dispatched"

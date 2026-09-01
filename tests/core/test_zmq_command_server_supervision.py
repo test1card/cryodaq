@@ -1972,7 +1972,7 @@ async def test_launcher_shutdown_requires_exact_capability_and_verified_global_o
     receipt = await _handle_gui_command(command, context=context)
     assert receipt == {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v2",
+        "schema": "cryodaq.engine_shutdown.v3",
         "engine_instance_id": "a" * 32,
         "request_id": "c" * 32,
         "off_evidence": {
@@ -1980,6 +1980,7 @@ async def test_launcher_shutdown_requires_exact_capability_and_verified_global_o
             "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
             "verified_off": True,
         },
+        "operator_physical_disconnect": False,
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",
@@ -2056,7 +2057,7 @@ async def test_real_server_shutdown_latch_rejects_queued_output_mutation() -> No
         shutdown_reply = await asyncio.wait_for(shutdown_task, timeout=3)
         mutation_reply = await asyncio.wait_for(mutation_task, timeout=3)
 
-        assert shutdown_reply["schema"] == "cryodaq.engine_shutdown.v2"
+        assert shutdown_reply["schema"] == "cryodaq.engine_shutdown.v3"
         assert shutdown_reply["off_evidence"]["verified_off"] is True
         assert mutation_reply == {
             "ok": False,
@@ -2117,7 +2118,7 @@ async def test_launcher_shutdown_global_off_failure_never_creates_receipt() -> N
     assert global_off["active_channels"] == []
 
     retry = await _handle_gui_command(command, context=context)
-    assert retry["schema"] == "cryodaq.engine_shutdown.v2"
+    assert retry["schema"] == "cryodaq.engine_shutdown.v3"
     assert retry["off_evidence"]["verified_off"] is True
     assert context.shutdown_receipt == retry
     assert context.safety_manager.emergency_off.await_count == 3
@@ -2218,7 +2219,7 @@ async def test_serialization_fallback_never_releases_teardown_for_unsent_receipt
     command = _launcher_shutdown_command()
     unsent_receipt: dict[str, object] = {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v2",
+        "schema": "cryodaq.engine_shutdown.v3",
         "engine_instance_id": "a" * 32,
         "request_id": "c" * 32,
         "off_evidence": {
@@ -2226,6 +2227,7 @@ async def test_serialization_fallback_never_releases_teardown_for_unsent_receipt
             "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
             "verified_off": True,
         },
+        "operator_physical_disconnect": False,
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",

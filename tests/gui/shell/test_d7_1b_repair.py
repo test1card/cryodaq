@@ -2195,7 +2195,7 @@ def _exact_shutdown_receipt(request_id: str) -> dict[str, object]:
 
     return {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v2",
+        "schema": "cryodaq.engine_shutdown.v3",
         "engine_instance_id": "a" * 32,
         "request_id": request_id,
         "off_evidence": {
@@ -2203,6 +2203,7 @@ def _exact_shutdown_receipt(request_id: str) -> dict[str, object]:
             "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
             "verified_off": True,
         },
+        "operator_physical_disconnect": False,
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",
