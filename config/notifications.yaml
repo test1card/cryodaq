@@ -11,7 +11,7 @@ telegram:
 periodic_report:
   enabled: false
   report_interval_s: 1800
-  chart_hours: 2.0
+  chart_hours: 1.0  # last hour; the whole run is a separate companion chart
   include_channels: null
 
 commands:

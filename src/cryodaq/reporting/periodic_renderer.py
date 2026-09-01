@@ -5,13 +5,14 @@ from __future__ import annotations
 import html
 import math
 import os
+import re
 import stat
 import struct
 import time
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -46,10 +47,33 @@ class _Series:
     channel: str
     unit: str
     rows: tuple[PeriodicReadingSnapshot, ...]
+    supplied_label: str | None = None
 
     @property
     def label(self) -> str:
-        return self.channel.rsplit("/", 1)[-1]
+        # The producer may supply an operator-facing name in the input file
+        # (render.channel_labels). Falling back to the short channel keeps
+        # every existing report identical when it does not.
+        return self.supplied_label or self.channel.rsplit("/", 1)[-1]
+
+
+def _series_sort_key(item: _Series) -> tuple[int, int, str]:
+    """Natural operator order: Т1, Т2, … Т10, Т11, then everything else.
+
+    Presentation only. Readings keep their authority-supplied time ordering;
+    this orders the SERIES for display, because a report listing Т3, Т6, Т9,
+    Т11 … Т1, Т2 (first-appearance order) is hard to read at a glance.
+
+    Reads the operator-facing label, never the channel identifier. Ordering
+    rows by the text the operator is looking at is a display rule; deriving it
+    from how an identifier is spelled would be a claim about what the channel
+    physically is, which is Seal C2's concern.
+    """
+    caption = item.label
+    match = re.match(r"^[\u0422T](\d+)", caption)
+    if match:
+        return (0, int(match.group(1)), caption)
+    return (1, 0, caption)
 
 
 def render_periodic_png(
@@ -85,7 +109,13 @@ def render_periodic_png(
         pressure_axes = None
     try:
         figure.suptitle(f"CryoDAQ | {snapshot.render.display_time}", fontsize=13, fontweight="bold")
-        _plot_axes(temp_axes, temperatures, "Температура, К", alarmed=alarmed)
+        _plot_axes(
+            temp_axes,
+            temperatures,
+            "Температура, К",
+            alarmed=alarmed,
+            focus_cold=snapshot.render.focus_cold,
+        )
         if pressure_axes is not None:
             _plot_axes(
                 pressure_axes,
@@ -121,6 +151,7 @@ def render_periodic_png(
 
 
 def _series(snapshot: ValidatedPeriodicInput) -> list[_Series]:
+    labels = dict(snapshot.render.channel_labels)
     grouped: dict[str, list[PeriodicReadingSnapshot]] = defaultdict(list)
     for row in snapshot.readings:
         grouped[row.channel].append(row)
@@ -130,17 +161,81 @@ def _series(snapshot: ValidatedPeriodicInput) -> list[_Series]:
         eligible = [row for row in rows if row.unit == selected_unit and row.value is not None]
         if selected_unit == "mbar":
             eligible = [row for row in eligible if row.value is not None and row.value > 0]
-        result.append(_Series(channel, selected_unit, tuple(eligible)))
+        result.append(_Series(channel, selected_unit, tuple(eligible), labels.get(channel)))
     return result
 
 
-def _plot_axes(axes, series: list[_Series], ylabel: str, *, alarmed: set[str], pressure: bool = False) -> None:
+# A "cold cluster" is separated from the rest by the widest gap in the latest
+# readings. Requiring that gap to be a real fraction of the full span keeps a
+# smoothly-spread set of channels on one honest full-scale axis.
+_COLD_FOCUS_MIN_GAP_FRACTION = 0.30
+# ...and be a real separation, not a fraction of a narrow span: sensors all
+# sitting within a degree of each other still have a "widest gap", and
+# zooming to one side of it would drop the others off the frame for no
+# reason. A cooldown separates groups by tens of kelvin.
+_COLD_FOCUS_MIN_GAP_K = 20.0
+_COLD_FOCUS_PAD_FRACTION = 0.08
+_COLD_FOCUS_MIN_PAD_K = 0.5
+
+
+def _cold_focus_limits(series: list[_Series]) -> tuple[float, float] | None:
+    """Y-limits covering only the coldest cluster, or None to keep full scale.
+
+    During a cooldown some sensors are down at their target while others sit
+    near room temperature. On one axis spanning both, every cold trace is
+    squashed into the bottom pixels and the operator cannot read the part of
+    the run they care about. Warm channels stay plotted and simply fall off
+    the top of the frame.
+    """
+    latest: list[tuple[float, _Series]] = []
+    for item in series:
+        values = [row.value for row in item.rows if row.value is not None]
+        if values:
+            latest.append((float(values[-1]), item))
+    if len(latest) < 2:
+        return None
+    latest.sort(key=lambda entry: entry[0])
+    span = latest[-1][0] - latest[0][0]
+    if span <= 0:
+        return None
+    split_index = max(range(len(latest) - 1), key=lambda index: latest[index + 1][0] - latest[index][0])
+    widest_gap = latest[split_index + 1][0] - latest[split_index][0]
+    if widest_gap < max(span * _COLD_FOCUS_MIN_GAP_FRACTION, _COLD_FOCUS_MIN_GAP_K):
+        return None
+    cold_values = [
+        float(row.value)
+        for _value, item in latest[: split_index + 1]
+        for row in item.rows
+        if row.value is not None
+    ]
+    if not cold_values:
+        return None
+    low, high = min(cold_values), max(cold_values)
+    pad = max((high - low) * _COLD_FOCUS_PAD_FRACTION, _COLD_FOCUS_MIN_PAD_K)
+    return (low - pad, high + pad)
+
+
+def _plot_axes(
+    axes,
+    series: list[_Series],
+    ylabel: str,
+    *,
+    alarmed: set[str],
+    pressure: bool = False,
+    focus_cold: bool = False,
+) -> None:
     plotted = 0
     pressure_values: list[float] = []
     for item in series:
         if not item.rows:
             continue
-        timestamps = [datetime.fromtimestamp(row.timestamp, UTC) for row in item.rows]
+        # Local time, matching the title. The title comes from
+        # PeriodicPngClock.display_time(), which is local
+        # (datetime.fromtimestamp without a tz), while this axis was UTC — a
+        # fixed offset that made every report look hours stale to the
+        # operator: a 19:00 report whose x-axis ended at 16:00 in MSK. The
+        # data was current the whole time.
+        timestamps = [datetime.fromtimestamp(row.timestamp) for row in item.rows]
         values = [float(row.value) for row in item.rows if row.value is not None]
         if not values:
             continue
@@ -179,6 +274,10 @@ def _plot_axes(axes, series: list[_Series], ylabel: str, *, alarmed: set[str], p
         )
     else:
         axes.text(0.5, 0.5, "Нет данных", transform=axes.transAxes, ha="center", va="center")
+    if focus_cold and not pressure and plotted:
+        limits = _cold_focus_limits([item for item in series if item.rows])
+        if limits is not None:
+            axes.set_ylim(*limits)
     if pressure and pressure_values:
         axes.set_yscale("log")
         p5, p95 = np.percentile(pressure_values, [5, 95])
@@ -193,10 +292,15 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
     ]
     if not snapshot.render.history_complete:
         prefix.append("⚠ История данных неполна")
-    if snapshot.render.dropped_points:
-        prefix.append(f"⚠ Пропущено точек: {snapshot.render.dropped_points}")
-    if snapshot.render.bad_points:
-        prefix.append(f"⚠ Некорректных точек: {snapshot.render.bad_points}")
+    # dropped_points / bad_points are deliberately NOT shown. They count the
+    # chart buffer's own housekeeping — points evicted once they aged out of
+    # the chart window, and readings whose value was unusable and so drawn as
+    # a gap — not measurements missing from the archive. A typical hourly
+    # report evicts ~50 000 points perfectly normally, and showing that under
+    # a ⚠ told the operator they had lost fifty thousand measurements. The
+    # counters remain in the input contract for diagnostics; the operator
+    # caption keeps only the two signals that mean something is actually
+    # wrong: incomplete history and unavailable alarm state.
 
     groups: list[tuple[str, list[tuple[str, str, str, str]]]] = []
     for unit, heading, rendered_unit in (
@@ -214,8 +318,28 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             assert row.value is not None
             suffix = rendered_unit if rendered_unit is not None else item.unit
             line_prefix = "  "
-            line_suffix = f": {row.value:.4g} {_escape(suffix)}"
-            lines.append((line_prefix + _escape(item.label) + line_suffix, item.label, line_prefix, line_suffix))
+            # Pressure spans decades and is read as an order of magnitude, so
+            # it is written in scientific notation: 3.16e-01, not 0.3161.
+            # Two decimals matches the /pressure command's existing style.
+            # Temperatures stay in plain decimal, where 294.1 reads better
+            # than 2.941e+02.
+            rendered_value = f"{row.value:.2e}" if item.unit == "mbar" else f"{row.value:.4g}"
+            line_suffix = f": {rendered_value} {_escape(suffix)}"
+            lines.append(
+                (
+                    line_prefix + _escape(item.label) + line_suffix,
+                    item.label,
+                    line_prefix,
+                    line_suffix,
+                    _series_sort_key(item),
+                )
+            )
+        # Text only. The CHART keeps its authority-supplied series order —
+        # tests/reporting pins that a rename must not move a series — but the
+        # caption is a plain list an operator reads top to bottom, and
+        # first-appearance order gave Т3, Т6, Т9, Т11 … Т1, Т2.
+        lines.sort(key=lambda entry: entry[4])
+        lines = [entry[:4] for entry in lines]
         if lines:
             groups.append((heading, lines))
 

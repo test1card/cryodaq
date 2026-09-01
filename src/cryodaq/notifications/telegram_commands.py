@@ -1,7 +1,7 @@
 """Интерактивный Telegram-бот: команды для удалённого мониторинга.
 
 Опрашивает getUpdates в async-цикле и отвечает на команды:
-/status, /temps, /pressure, /keithley, /alarms, /help.
+/status, /temps, /pressure, /keithley, /alarms, /report, /help.
 Работает только с chat_id из списка allowed_chat_ids.
 """
 
@@ -44,6 +44,7 @@ _HELP_TEXT = (
     "/pressure — уровень вакуума\n"
     "/keithley — показания Keithley (V, I, R, P)\n"
     "/alarms — активные тревоги\n"
+    "/report — отчёт с графиком и значениями сейчас\n"
     "/help — список команд"
 )
 
@@ -118,6 +119,7 @@ class TelegramCommandBot:
         query_agent: Any | None = None,
         photo_handler: Any | None = None,
         channel_descriptor_catalog: LiveChannelDescriptorCatalog | None = None,
+        alarm_chat_id: int | str | None = None,
         verify_ssl: bool = True,
     ) -> None:
         # Phase 2b K.1: default-deny — empty allowlist with commands
@@ -135,6 +137,14 @@ class TelegramCommandBot:
         self._alarm_engine = alarm_engine
         self._query_agent = query_agent
         self._photo_handler = photo_handler
+        # Who receives ALARMS. Deliberately separate from _allowed_ids, which
+        # is a COMMAND-PERMISSION list: being trusted to run /status is not
+        # consent to be paged for every safety fault. Alarms previously went
+        # through _send_to_all(), so every permitted chat was woken by every
+        # CRITICAL — including colleagues the operator had explicitly removed
+        # from the escalation chain. None keeps the old broadcast so a
+        # deployment without telegram.chat_id is not silently muted.
+        self._alarm_chat_id = alarm_chat_id
         self._channel_descriptor_catalog = channel_descriptor_catalog
         # Phase 2b K.1: SecretStr wrapper.
         self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
@@ -382,6 +392,8 @@ class TelegramCommandBot:
             await self._send(chat_id, self._cmd_pressure())
         elif command == "/keithley":
             await self._send(chat_id, self._cmd_keithley())
+        elif command == "/report":
+            await self._cmd_report(chat_id)
         elif command == "/alarms":
             await self._send(chat_id, self._cmd_alarms())
         elif command in ("/help", "/start"):
@@ -867,6 +879,68 @@ class TelegramCommandBot:
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)
 
+    async def send_alarm(self, text: str) -> None:
+        """Deliver one alarm to the configured recipient only.
+
+        Falls back to the broadcast when no alarm recipient is configured, so
+        an installation that never set telegram.chat_id keeps its previous
+        behaviour rather than losing alarms silently.
+        """
+        if self._alarm_chat_id in (None, 0, ""):
+            await self._send_to_all(text)
+            return
+        await self._send(self._alarm_chat_id, text)
+
+    async def _cmd_report(self, chat_id: int) -> None:
+        """Render and send one periodic report now, to the requesting chat.
+
+        Uses the same renderer and caption format as the scheduled hourly
+        report, so /report and the :00 delivery are the same artifact. The
+        render is CPU-bound matplotlib work, so it runs in a thread rather
+        than blocking the poll loop.
+        """
+        await self._send(chat_id, "Готовлю отчёт…")
+        try:
+            from cryodaq.notifications.on_demand_report import (
+                OnDemandReportError,
+                build_on_demand_png,
+            )
+            from cryodaq.paths import get_data_dir
+
+            png, caption = await asyncio.to_thread(build_on_demand_png, get_data_dir())
+        except OnDemandReportError as exc:
+            await self._send(chat_id, f"Отчёт не сформирован: {exc}")
+            return
+        except Exception as exc:
+            logger.error("Ошибка построения отчёта по запросу: %s", exc, exc_info=True)
+            await self._send(chat_id, "Отчёт не сформирован: внутренняя ошибка.")
+            return
+        await self.send_photo(chat_id, png, caption)
+        await self._send_run_overview(chat_id)
+
+    async def _send_run_overview(self, chat_id: int | str) -> None:
+        """Follow the window chart with the whole-run view, as the hourly does.
+
+        Best-effort: the operator already has the report they asked for, so a
+        companion chart that cannot be built is reported quietly and never
+        turns a successful /report into a failure.
+        """
+        try:
+            from cryodaq.paths import get_data_dir
+            from cryodaq.reporting.run_overview import (
+                RunOverviewError,
+                build_run_overview_png,
+            )
+
+            png, caption = await asyncio.to_thread(build_run_overview_png, get_data_dir())
+        except RunOverviewError as exc:
+            logger.info("Обзор прогона не построен: %s", exc)
+            return
+        except Exception as exc:
+            logger.warning("Ошибка построения обзора прогона: %s", exc, exc_info=True)
+            return
+        await self.send_photo(chat_id, png, caption)
+
     async def _send_to_all(self, text: str) -> None:
         """Отправить текст всем разрешённым chat_id (или только первому если список пуст)."""
         if self._allowed_ids:
@@ -891,6 +965,11 @@ class TelegramCommandBot:
             form.add_field("photo", photo, filename="chart.png", content_type="image/png")
             if caption:
                 form.add_field("caption", caption)
+                # The caption is HTML (the periodic renderer emits <b> …
+                # </b>). Without parse_mode Telegram shows the raw tags, as
+                # /report did on its first outing. The scheduled delivery in
+                # agents/assistant/periodic_telegram.py already sets this.
+                form.add_field("parse_mode", "HTML")
             async with session.post(f"{self._api}/sendPhoto", data=form) as resp:
                 if resp.status != 200:
                     body = await resp.text()

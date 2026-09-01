@@ -490,6 +490,11 @@ class PeriodicPngCoordinator:
         generation_factory: Callable[[], str] | None = None,
         owner_factory: Callable[[], str] | None = None,
         run_blocking: RunBlocking | None = None,
+        # Optional listener, called with the slot_end of each report that
+        # reached the operator. The wiring layer uses it to follow the report
+        # with a whole-run companion chart. Optional so the coordinator stays
+        # runnable — and testable — with no listener at all.
+        on_report_delivered: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         if not isinstance(config, PeriodicPngConfig) or not config.enabled:
             raise ValueError("config must be a runnable PeriodicPngConfig")
@@ -524,6 +529,7 @@ class PeriodicPngCoordinator:
         self._generation_factory = generation_factory or (lambda: secrets.token_hex(16))
         self._owner_factory = owner_factory or (lambda: secrets.token_hex(16))
         self._run_blocking: RunBlocking = run_blocking or _to_thread
+        self._on_report_delivered = on_report_delivered
 
         self._started = False
         self._stopping = False
@@ -541,6 +547,10 @@ class PeriodicPngCoordinator:
         self._hydration_seal: LiveSourceCut | None = None
         self._last_seal: LiveSourceCut | None = None
         self._last_alarm_complete = False
+        # Slot already announced as delivered. One announcement per report:
+        # the companion chart is an extra view of data the operator already
+        # has, never a reason to retry.
+        self._run_overview_slot_end: int | None = None
         self._retry_deadlines: dict[tuple[str, str, float], float] = {}
         self._next_callback_wake = 0.0
         self._next_health_heartbeat = 0.0
@@ -563,6 +573,11 @@ class PeriodicPngCoordinator:
         self._delivery_settlement_lock = asyncio.Lock()
         self._readings = BoundedReadingProjection(self._config)
         self._alarms = AlarmProjection()
+        # Adopt the slot already delivered before this process started. The
+        # announcement memory lives in this object, so without adopting it a
+        # restart would re-announce the last delivered report and the operator
+        # would receive a duplicate companion chart on every restart.
+        await self._adopt_announced_slot()
         try:
             await self._live.start(self._on_reading, self._on_event)
             self._startup_cut = await self._live.ready()
@@ -885,9 +900,69 @@ class PeriodicPngCoordinator:
                 if self._stopping:
                     return
                 if not await self._reconcile_step():
+                    await self._announce_delivered_slot()
                     return
             if self._wake is not None:
                 self._wake.set()
+        await self._announce_delivered_slot()
+
+    async def _adopt_announced_slot(self) -> None:
+        """Treat an already-delivered slot as announced, without announcing it."""
+        if self._on_report_delivered is None:
+            return
+        try:
+            state = await self._load_state()
+            terminal = state.payload.get("last_terminal")
+            if not isinstance(terminal, Mapping):
+                return
+            if str(terminal.get("status")) != PeriodicStatus.SUCCEEDED.value:
+                return
+            slot_end = terminal.get("slot_end")
+            if type(slot_end) is int:
+                self._run_overview_slot_end = slot_end
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Worst case the operator gets one duplicate companion chart. That
+            # must never be a reason to fail startup of the report machine.
+            return
+
+    async def _announce_delivered_slot(self) -> None:
+        """Tell the wiring layer that a slot's report reached the operator.
+
+        The listener adds the whole-run companion photo. It is announced from
+        here rather than built here because this module injects every external
+        authority and holds no archive or Telegram implementation of its own.
+
+        Deliberately outside the fenced state machine: that machine owns
+        exactly one artifact per slot, with a receipt and a retry ladder, and
+        the operator's report must not become less reliable because a
+        supplementary chart failed. Announced once per successfully delivered
+        slot; the listener owns its own failures.
+        """
+        listener = self._on_report_delivered
+        if listener is None or self._stopping:
+            return
+        try:
+            state = await self._load_state()
+            terminal = state.payload.get("last_terminal")
+            if not isinstance(terminal, Mapping):
+                return
+            if str(terminal.get("status")) != PeriodicStatus.SUCCEEDED.value:
+                return
+            slot_end = terminal.get("slot_end")
+            if type(slot_end) is not int or self._run_overview_slot_end == slot_end:
+                return
+            # Claimed before the call, so a listener failure cannot re-fire on
+            # the next reconcile pass and resend the same chart repeatedly.
+            self._run_overview_slot_end = slot_end
+            await listener(slot_end)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The listener reports its own failures; anything escaping it is a
+            # supplementary concern and must not disturb the report machine.
+            return
 
     async def _load_state(self) -> PeriodicStateDocument:
         return await self._run_blocking(load_periodic_state, self._data_dir)
@@ -1345,6 +1420,7 @@ class PeriodicPngCoordinator:
                 "include_channels": (
                     None if self._config.include_channels is None else list(self._config.include_channels)
                 ),
+                "channel_labels": _channel_labels_for(_reportable_readings(snapshot.readings)),
                 "max_points_per_channel": self._config.max_points_per_channel,
                 "max_total_points": self._config.max_total_points,
                 "max_input_bytes": self._config.max_input_bytes,
@@ -1353,6 +1429,11 @@ class PeriodicPngCoordinator:
                 "dropped_points": snapshot.dropped_points,
                 "bad_points": snapshot.bad_points,
                 "source_errors": list(snapshot.source_errors),
+                # This is the short-window chart. Scale it to the coldest
+                # cluster so sensors that have come down stay readable while
+                # others sit near room temperature; the whole-run companion
+                # photo carries the full-scale view.
+                "focus_cold": True,
             },
             "readings": [
                 {
@@ -1363,7 +1444,7 @@ class PeriodicPngCoordinator:
                     "u": row.unit,
                     "st": row.status,
                 }
-                for row in snapshot.readings
+                for row in _reportable_readings(snapshot.readings)
             ],
             "alarms": [
                 {
@@ -1667,6 +1748,75 @@ class PeriodicPngCoordinator:
 
 CoordinatorFactory = Callable[[PeriodicPngConfig], PeriodicPngCoordinator]
 ConfigLoader = Callable[[Path], PeriodicPngConfigLoad]
+
+
+# Statuses whose value is a real measurement. Anything else carries the
+# instrument's error sentinel (LakeShore reports -8.888e+88), which is finite
+# and therefore passes every numeric guard — plotted, it rescales the whole
+# temperature axis to 1e88 and flattens every real curve into a straight line.
+_MEASUREMENT_STATUSES = frozenset({"ok", ""})
+
+
+def _is_measurement(row: Any) -> bool:
+    status = getattr(row, "status", "")
+    return isinstance(status, str) and status.lower() in _MEASUREMENT_STATUSES
+
+
+def _reportable_readings(readings: Any) -> list[Any]:
+    """Drop channels the operator switched off in Настройки.
+
+    Applied HERE, in the producer, for the same reason labels are resolved
+    here: the renderer's contract is to draw exactly the channel set its
+    input file supplies, and the projection is pinned by characterization
+    tests. This is also why the report needs no hand-maintained channel list
+    — visibility is read live from channels.yaml on every report, so toggling
+    a sensor in Настройки is the only action required.
+
+    Fail-open: any lookup problem keeps every reading rather than silently
+    emptying the report.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        manager = get_channel_manager()
+        return [
+            row
+            for row in readings
+            if manager.is_visible(getattr(row, "channel", "")) and _is_measurement(row)
+        ]
+    except Exception:  # pragma: no cover - reporting must never crash
+        return list(readings)
+
+
+def _channel_labels_for(readings: Any) -> list[list[str]]:
+    """Operator-facing names for the channels in this report.
+
+    Resolved HERE, in the producer, so the label travels inside the input
+    file. The renderer then draws exactly what its input says and stays
+    deterministic — it must never consult live operator config, or its
+    output would change with the stand's channels.yaml and its parity tests
+    would depend on the machine they run on.
+
+    Only channels with a real operator name contribute an entry; anything
+    else keeps the renderer's existing short form. Fail-open: a lookup
+    problem yields no labels rather than breaking the report.
+    """
+    try:
+        from cryodaq.core.channel_manager import get_channel_manager
+
+        manager = get_channel_manager()
+        labels: dict[str, str] = {}
+        for row in readings:
+            channel = getattr(row, "channel", None)
+            if not isinstance(channel, str) or channel in labels:
+                continue
+            short = channel.split(" ", 1)[0] if " " in channel else channel
+            name = manager.get_name(short)
+            if name and name.strip() and name.strip() != "-":
+                labels[channel] = manager.get_display_name(short)
+        return [[channel, label] for channel, label in list(labels.items())[:64]]
+    except Exception:  # pragma: no cover - reporting must never crash
+        return []
 
 
 class PeriodicPngSupervisor:

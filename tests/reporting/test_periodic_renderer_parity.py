@@ -205,7 +205,9 @@ def test_ordinary_report_keeps_every_authority_supplied_channel(
     assert pressure_labels == ["pressure"]
     assert "reference: 1 К" in result.caption
     assert "Т10: 2 К" in result.caption
-    assert "pressure: 1e-05 мбар" in result.caption
+    # Pressure is written in scientific notation: it spans decades and is
+    # read as an order of magnitude, not as a decimal fraction.
+    assert "pressure: 1.00e-05 мбар" in result.caption
     assert "power: 4 W" in result.caption
 
 
@@ -233,7 +235,7 @@ def test_caption_short_exact_contract(tmp_path: Path) -> None:
         "<b>CryoDAQ | Периодический отчёт</b>\n"
         "Время: 10.07.2026 04:05\n\n"
         "<b>Температуры:</b>\n  Т1: 4 К\n\n"
-        "<b>Давление:</b>\n  P: 1e-05 мбар\n\n"
+        "<b>Давление:</b>\n  P: 1.00e-05 мбар\n\n"
         "<b>Прочие каналы:</b>\n  voltage: 0.01235 V\n\n"
         "<b>Активные тревоги (1):</b>\n  ⚠ T1_LOW"
     )
@@ -244,11 +246,14 @@ def test_caption_completeness_truth_is_mandatory(tmp_path: Path) -> None:
     result = render_periodic_png(snapshot, tmp_path, deadline_monotonic=__import__("time").monotonic() + 10)
     for line in (
         "⚠ История данных неполна",
-        "⚠ Пропущено точек: 4",
-        "⚠ Некорректных точек: 2",
         "⚠ Состояние тревог недоступно",
     ):
         assert line in result.caption
+    # Buffer housekeeping is not an operator warning: evicted and unusable
+    # point counts are diagnostics, and a normal hourly report evicts tens of
+    # thousands of points. They must never reach the caption.
+    assert "Пропущено точек" not in result.caption
+    assert "Некорректных точек" not in result.caption
     assert "Тревог нет ✓" not in result.caption
     assert "deadline:" not in result.caption
 
