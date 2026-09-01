@@ -1377,7 +1377,15 @@ class ColdRotationService:
             entry["source_md5"] = source_md5
             if source_md5_kind is not None:
                 entry["source_md5_kind"] = source_md5_kind
-        if operator_log_rel is not None:
+        if operator_log_rel is None:
+            # A day with no operator entries says so, explicitly. Omitting the
+            # key instead is indistinguishable from an index written before the
+            # field existed, and ArchiveReader must reject that — which on
+            # 2026-09-01 made every operator-log read fail after fifteen such
+            # days were archived.
+            entry["operator_log_path"] = None
+            entry["operator_log_rows"] = 0
+        else:
             if operator_log_checksum is None or operator_log_size_bytes is None:
                 raise RuntimeError("operator_log sidecar index metadata is incomplete")
             entry["operator_log_path"] = operator_log_rel
@@ -1492,7 +1500,14 @@ class ColdRotationService:
         ):
             raise RuntimeError("indexed readings artifact integrity mismatch")
         if operator_log_rel is None:
-            if any(key.startswith("operator_log_") for key in entry):
+            # Absence is now declared, so verify the declaration rather than
+            # the absence of any mention: exactly a null path and a zero count,
+            # and no sidecar metadata claiming an artifact that was not written.
+            if entry.get("operator_log_path") is not None or entry.get("operator_log_rows") != 0:
+                raise RuntimeError("indexed operator_log absence is not declared correctly")
+            if any(
+                key in entry for key in ("operator_log_checksum_md5", "operator_log_size_bytes", "operator_log_schema")
+            ):
                 raise RuntimeError("indexed operator_log metadata is unexpected")
         else:
             operator_log_path = self._archive_dir / operator_log_rel

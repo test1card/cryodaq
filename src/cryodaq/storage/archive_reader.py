@@ -97,6 +97,32 @@ def _validate_partitioned_artifact(relative: object, day: date, basenames: set[s
     return relative
 
 
+def operator_log_declared_absent(entry: dict[str, object]) -> bool:
+    """Whether this entry states, explicitly, that its day has no operator log.
+
+    A day that recorded no operator entries is a normal outcome, and it must be
+    written down rather than left to the absence of a key. Omission cannot be
+    told apart from an index produced by a writer that did not know about
+    operator logs at all, so the reader is right to reject it — but then a
+    perfectly healthy archive is unreadable, which is what happened on
+    2026-09-01: rotation archived fifteen days with no operator entries, wrote
+    no key, and every operator-log read failed from then on.
+
+    The explicit form is a null path with a zero row count and no sidecar
+    metadata. Anything else carrying operator fields is a real sidecar and is
+    validated as one.
+    """
+    if "operator_log_path" not in entry:
+        return False
+    if entry.get("operator_log_path") is not None:
+        return False
+    if entry.get("operator_log_rows", 0) != 0:
+        return False
+    return not any(
+        field in entry for field in ("operator_log_size_bytes", "operator_log_checksum_md5", "operator_log_schema")
+    )
+
+
 def validate_archive_index_authority(document: object) -> dict[str, object]:
     """Bind every indexed artifact path to one declared database day."""
     if not isinstance(document, dict) or set(document) != {"files"}:
@@ -137,7 +163,11 @@ def validate_archive_index_authority(document: object) -> dict[str, object]:
             "operator_log_checksum_md5",
             "operator_log_schema",
         }
-        if any(field in entry for field in operator_fields):
+        if operator_log_declared_absent(entry):
+            # Explicitly no operator log for this day: valid, and no artifact to
+            # bind. Distinct from a missing key, which stays invalid.
+            pass
+        elif any(field in entry for field in operator_fields):
             schema = entry.get("operator_log_schema")
             if schema not in {"operator_log_v1", "operator_log_v2"}:
                 raise ValueError("invalid operator_log authority")
@@ -2424,8 +2454,15 @@ class ArchiveReader:
                 continue
             if to_day is not None and day_value > to_day:
                 continue
+            if operator_log_declared_absent(entry):
+                # Nothing archived for this day, said so explicitly. Skip it.
+                continue
             ol_rel = entry.get("operator_log_path")
             if not ol_rel:
+                # A missing key is NOT read as an empty archive: it means this
+                # index was written by something that did not record the field,
+                # and silently treating that as "no entries" would hide real
+                # archived history from the operator journal.
                 raise ArchiveUnavailableError(
                     BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
                     f"{day}:operator_log",

@@ -9104,7 +9104,15 @@ class SQLiteWriter:
                     query += " AND timestamp <= ?"
                     params.append(end_time.timestamp())
                 query += " ORDER BY timestamp DESC"
-                for row in conn.execute(query, params).fetchall():
+                # Bound in SQL, before any Python object exists. The limit used
+                # to be applied after every row of every database had been
+                # turned into an OperatorLogEntry, so a caller asking for two
+                # entries still materialised the whole journal. Per database is
+                # the correct bound: the newest N overall are a subset of the
+                # union of each database's newest N.
+                query += " LIMIT ?"
+                bounded_params = [*params, max(1, int(limit))]
+                for row in conn.execute(query, bounded_params).fetchmany(max(1, int(limit))):
                     tags = tuple(json.loads(row["tags"] or "[]"))
                     rows.append(
                         OperatorLogEntry(
@@ -9128,37 +9136,73 @@ class SQLiteWriter:
         # entirely so hot-only deployments stay byte-identical.
         archive_index = get_archive_dir(self._data_dir) / "index.json"
         if archive_index.exists():
-            from cryodaq.storage.archive_reader import ArchiveReader
+            from cryodaq.storage.archive_reader import ArchiveUnavailableError
 
-            # query_operator_log unions hot+cold; a hot day is scanned above, so
-            # keep only cold-archived days (no hot .db) to avoid double-counting.
-            hot_days = {p.stem.removeprefix("data_") for p in self._data_dir.glob("data_????-??-??.db")}
-            reader = ArchiveReader(self._data_dir, archive_index.parent)
-            for raw_ts, raw_exp, author, source, message, raw_tags in reader.query_operator_log(start_time, end_time):
-                entry_ts = _parse_timestamp(raw_ts)
-                utc_day = (
-                    (entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=UTC)).astimezone(UTC).date().isoformat()
-                )
-                if utc_day in hot_days:
-                    continue
-                if experiment_id is not None and raw_exp != experiment_id:
-                    continue
-                rows.append(
-                    OperatorLogEntry(
-                        # Archived rows carry no rowid; the GUI panel keys on
-                        # timestamp, not id (see operator_log_panel._sort_entries).
-                        id=0,
-                        timestamp=entry_ts,
-                        experiment_id=raw_exp,
-                        author=str(author or ""),
-                        source=str(source or ""),
-                        message=str(message or ""),
-                        tags=tuple(json.loads(raw_tags or "[]")),
-                    )
-                )
+            try:
+                self._union_cold_operator_log(rows, start_time, end_time, experiment_id)
+            except ArchiveUnavailableError as exc:
+                # Re-raise WITHOUT the hot rows attached.
+                #
+                # This runs in an executor, so the exception is delivered on a
+                # Future the caller keeps. Its traceback holds every frame it
+                # passed through, and this frame holds `rows` — one entry per
+                # journal row. With the GUI polling log_get every ten seconds
+                # against a malformed index, that retained about 128 000
+                # OperatorLogEntry objects an hour, roughly 67 MB/h and 78% of
+                # all traced Python memory on 2026-09-01.
+                #
+                # The list is emptied and unbound before a fresh, small error is
+                # raised with `from None`, so neither the frame nor a chained
+                # cause can carry the result set across the boundary.
+                issue = exc.issue
+                rows.clear()
+                del rows
+                raise ArchiveUnavailableError(issue.code, issue.source) from None
+            rows.sort(key=lambda item: item.timestamp, reverse=True)
+            return rows[: max(limit, 0)]
 
         rows.sort(key=lambda item: item.timestamp, reverse=True)
         return rows[: max(limit, 0)]
+
+    def _union_cold_operator_log(
+        self,
+        rows: list[OperatorLogEntry],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        experiment_id: str | None,
+    ) -> None:
+        """Append archived operator-log rows for days with no hot database.
+
+        Separated from the hot read so a failure here has a small frame to
+        propagate through — the caller empties and unbinds the hot rows before
+        re-raising, and this frame holds nothing large of its own.
+        """
+        from cryodaq.storage.archive_reader import ArchiveReader
+
+        # query_operator_log unions hot+cold; a hot day is scanned above, so
+        # keep only cold-archived days (no hot .db) to avoid double-counting.
+        hot_days = {p.stem.removeprefix("data_") for p in self._data_dir.glob("data_????-??-??.db")}
+        reader = ArchiveReader(self._data_dir, get_archive_dir(self._data_dir))
+        for raw_ts, raw_exp, author, source, message, raw_tags in reader.query_operator_log(start_time, end_time):
+            entry_ts = _parse_timestamp(raw_ts)
+            utc_day = (entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=UTC)).astimezone(UTC).date().isoformat()
+            if utc_day in hot_days:
+                continue
+            if experiment_id is not None and raw_exp != experiment_id:
+                continue
+            rows.append(
+                OperatorLogEntry(
+                    # Archived rows carry no rowid; the GUI panel keys on
+                    # timestamp, not id (see operator_log_panel._sort_entries).
+                    id=0,
+                    timestamp=entry_ts,
+                    experiment_id=raw_exp,
+                    author=str(author or ""),
+                    source=str(source or ""),
+                    message=str(message or ""),
+                    tags=tuple(json.loads(raw_tags or "[]")),
+                )
+            )
 
     async def _consume_loop(self, queue: asyncio.Queue[Reading]) -> None:
         """Основной цикл: собирает батч из очереди, пишет в БД."""
