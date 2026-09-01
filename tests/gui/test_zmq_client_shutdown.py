@@ -1681,7 +1681,14 @@ def test_application_close_settles_all_real_qthreads(
         assert entered_ids == {"root", "nested-1", "nested-2"}
         assert exited_ids == entered_ids
         assert callbacks == []
-        assert all(worker.isFinished() and not worker.isRunning() for worker in workers)
+        # Asked through the guard, not the wrapper. A settled worker is now
+        # DESTROYED once its disposition is recorded and its thread is
+        # terminal -- which is what the `not isValid(...)` assertion below
+        # already required of this same close -- so touching isFinished()
+        # directly raises "Internal C++ object already deleted". The guard is
+        # the form production uses for exactly this reason, and "destroyed"
+        # is strictly stronger than "finished and not running".
+        assert not any(zmq_client.gui_worker_poll_in_flight(worker) for worker in workers)
         assert all(worker._cancellation_requested.is_set() for worker in workers)
         assert not any(thread.isRunning() for thread in window.findChildren(QThread))
         window.deleteLater()

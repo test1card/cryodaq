@@ -30,7 +30,7 @@ from cryodaq.gui.shell.operator_components._visuals import (
     safe_plain_text,
 )
 from cryodaq.gui.utils.plural import ru_plural
-from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, gui_worker_poll_in_flight
 
 logger = logging.getLogger(__name__)
 
@@ -1121,7 +1121,7 @@ class TopWatchBar(QWidget):
 
     def _poll_fast(self) -> None:
         """Poll experiment status (zone 2). Skips if previous still in flight."""
-        if self._experiment_worker is not None and not self._experiment_worker.isFinished():
+        if gui_worker_poll_in_flight(self._experiment_worker):
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -1446,7 +1446,7 @@ class TopWatchBar(QWidget):
         if self._app_mode not in ("experiment", "debug"):
             logger.warning("Mode badge clicked but app_mode unknown: %s", self._app_mode)
             return
-        if self._mode_switch_worker is not None and not self._mode_switch_worker.isFinished():
+        if gui_worker_poll_in_flight(self._mode_switch_worker):
             return  # command in flight
 
         from PySide6.QtWidgets import QMessageBox

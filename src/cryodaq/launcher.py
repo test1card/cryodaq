@@ -68,6 +68,7 @@ from cryodaq.gui.zmq_client import (
     revoke_gui_command_worker_admission,
     set_bridge,
     settle_registered_gui_command_workers,
+    gui_worker_poll_in_flight,
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 from cryodaq.operator_snapshot import SnapshotMode
@@ -4885,7 +4886,7 @@ class LauncherWindow(QMainWindow):
             if retained_worker is not None:
                 retained_result = getattr(retained_worker, "result", None)
                 try:
-                    retained_worker_finished = retained_worker.isFinished() is True
+                    retained_worker_finished = not gui_worker_poll_in_flight(retained_worker)
                 except Exception:
                     retained_worker_finished = False
             if (retained_worker is None or retained_worker_finished) and (
@@ -5090,7 +5091,9 @@ class LauncherWindow(QMainWindow):
             ):
                 captured_worker = captured_owner[0]
                 try:
-                    captured_worker_finished = captured_worker is not None and captured_worker.isFinished() is True
+                    captured_worker_finished = captured_worker is not None and not gui_worker_poll_in_flight(
+                        captured_worker
+                    )
                 except Exception:
                     captured_worker_finished = False
                 live_transport_identity = live_owner[4]
@@ -8344,7 +8347,7 @@ class LauncherWindow(QMainWindow):
             # Do not delete workers centrally at registry release: registry
             # callers may still hold terminal wrappers, and deleteLater()
             # would invalidate those wrappers before their owners clear them.
-            if self._safety_worker is None or self._safety_worker.isFinished():
+            if not gui_worker_poll_in_flight(self._safety_worker):
                 self._safety_status_generation += 1
                 authority = self._capture_launcher_status_authority(
                     request_generation=self._safety_status_generation,
@@ -8356,7 +8359,7 @@ class LauncherWindow(QMainWindow):
                     worker.finished.connect(lambda result, expected=authority: self._on_safety_result(result, expected))
                     self._safety_worker = worker
                     worker.start()
-            if self._annunciation_worker is None or self._annunciation_worker.isFinished():
+            if not gui_worker_poll_in_flight(self._annunciation_worker):
                 self._annunciation_status_generation += 1
                 authority = self._capture_launcher_status_authority(
                     request_generation=self._annunciation_status_generation,

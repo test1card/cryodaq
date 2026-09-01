@@ -2362,14 +2362,70 @@ def _release_disposed_terminal_workers_locked() -> None:
         _GUI_WORKER_OWNERS.pop(identity, None)
 
 
+def gui_worker_poll_in_flight(worker: QThread | None) -> bool:
+    """Whether a RETAINED worker wrapper still has work in flight.
+
+    Call sites keep the current worker on an attribute and ask "may I start
+    another?". Once the registry has destroyed a settled worker its C++ object
+    is gone, and touching the surviving Python wrapper raises RuntimeError --
+    so that question has to be asked here, never directly.
+
+    A destroyed worker is not in flight. That is the whole rule: absent,
+    finished and deleted all mean the same thing to a caller deciding whether
+    to poll again.
+    """
+
+    if worker is None:
+        return False
+    try:
+        return not worker.isFinished()
+    except RuntimeError:
+        # The C++ object was destroyed after it settled; nothing is running.
+        return False
+
+
 def _release_gui_worker_when_terminal(identity: int) -> None:
+    settled: QThread | None = None
     with _GUI_WORKER_REGISTRY_LOCK:
         ownership = _GUI_WORKER_OWNERS.get(identity)
         if ownership is None or not ownership.disposition_recorded:
             return
         if _worker_is_terminal(ownership.worker):
             _GUI_WORKER_OWNERS.pop(identity, None)
-            return
+            settled = ownership.worker
+        else:
+            settled = None
+    if settled is not None and getattr(settled, "_release_destroys_worker", False) is True:
+        # Destroy the settled worker.
+        #
+        # Reaching here means BOTH that the result was delivered or suppressed
+        # (`disposition_recorded`) AND that the native thread is terminal, so
+        # this cannot destroy a running QThread and cannot lose a queued
+        # delivery -- including one posted to a receiver on another thread,
+        # which is already ahead of this deferred delete in the event queue.
+        #
+        # Without this, every GUI poller's `parent=self` kept one finished
+        # QThread per poll for the life of the window: ~5,880 an hour across
+        # experiment_status (1 Hz), alarm_v2_status (3 s), cooldown (5 s) and
+        # log_get (10 s), which is most of a measured 45 MB/h in the GUI
+        # process. launcher.py:8339 already documented the hazard for the
+        # launcher's own workers; the GUI widgets never adopted it.
+        #
+        # Deleting here was previously rejected because "registry callers may
+        # still hold terminal wrappers". That is now safe: every such caller
+        # asks `gui_worker_poll_in_flight()`, which treats a destroyed worker
+        # as not in flight rather than raising.
+        settled.deleteLater()
+        return
+    if settled is not None:
+        # Released from the registry but NOT destroyed: this class did not opt
+        # in. Destruction requires every caller that keeps a wrapper to ask
+        # `gui_worker_poll_in_flight()` first, so it is opt-in per class rather
+        # than applied to everything the registry happens to own. The
+        # conductivity autosweep and archive workers keep their existing
+        # lifetime; they are operator-initiated and infrequent, and they are not
+        # where the leak is.
+        return
     QTimer.singleShot(1, lambda: _release_gui_worker_when_terminal(identity))
 
 
@@ -2424,6 +2480,14 @@ def settle_registered_gui_command_workers(*, timeout_ms: int = 1_500) -> bool:
 
 class ZmqCommandWorker(QThread):
     """Background thread for non-blocking ZMQ commands (unchanged API)."""
+
+    #: Destroy this worker once the registry sees it settled.
+    #:
+    #: Opt-in, because destruction is only safe when every caller that keeps a
+    #: wrapper asks `gui_worker_poll_in_flight()` rather than touching it. The
+    #: four repeating pollers built with `parent=self` are what leak -- about
+    #: 5,880 finished QThreads an hour -- and their call sites are guarded.
+    _release_destroys_worker = True
 
     finished = Signal(dict)
     _result_ready = Signal(int, dict)
