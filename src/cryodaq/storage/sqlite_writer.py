@@ -6825,6 +6825,14 @@ class SQLiteWriter:
         self._persistence_failure_callback = callback
 
     def _remember_owned_task(self, task: asyncio.Task[Any], collection: set[asyncio.Task[Any]]) -> asyncio.Task[Any]:
+        """Own a task until its outcome no longer has to be proven.
+
+        A terminal failure stays owned here. Whether it may be released is not
+        a property of the task's kind -- it is whether a caller actually took
+        the outcome -- so the release happens in `_await_owned_task`, at the
+        point of delivery.
+        """
+
         collection.add(task)
 
         def release_terminal_success(owner: asyncio.Task[Any]) -> None:
@@ -6950,12 +6958,31 @@ class SQLiteWriter:
         )
         return self._remember_owned_task(task, collection)
 
-    @staticmethod
-    async def _await_owned_task(owner: asyncio.Task[Any]) -> Any:
-        """Wait without cancellation propagating or creating an abandoned shield."""
+    async def _await_owned_task(self, owner: asyncio.Task[Any]) -> Any:
+        """Wait without cancellation propagating or creating an abandoned shield.
+
+        Ownership ends when the outcome is handed to this caller. A failed read
+        used to stay in `_owned_read_tasks` forever: one completed task per
+        failed read, cleared only by stop(), which never happens during a
+        week-long run. Measured on lab53 at b153487f, 1, 5, 10 and 25 failed
+        reads left exactly 1, 5, 10 and 25 retained tasks with no pending
+        futures.
+
+        The release belongs HERE and not at creation. A caller cancelled while
+        waiting never reaches `result()`, so its task keeps its terminal
+        failure owned for stop() to consume and redact -- which is what an
+        abandoned operator-log publication owner depends on. Releasing by task
+        KIND instead broke exactly that.
+        """
 
         await asyncio.wait((owner,), return_when=asyncio.ALL_COMPLETED)
-        return owner.result()
+        try:
+            return owner.result()
+        finally:
+            # Reached only when this caller took the outcome, exception
+            # included; `exception()` in the done-callback already marked it
+            # retrieved, so nothing can report it as detached.
+            self._owned_read_tasks.discard(owner)
 
     async def _settle_owned_tasks(self, collection: set[asyncio.Task[Any]]) -> None:
         while True:

@@ -241,9 +241,9 @@ class SensorDiagnosticsEngine:
 
         # channel_id → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
-        # push() is called from the event loop; update() from an analytics
-        # worker. The lock covers only the mapping and the copy, never the
-        # diagnostics computation itself.
+        # push() is called from the event loop; compute() from an analytics
+        # worker. The lock covers the mapping, the appends and the copy --
+        # never the diagnostics computation itself, which works on a snapshot.
         self._buffer_lock = threading.Lock()
         # Max buffer size: drift window at 10 Hz + margin
         self._maxlen: int = max(500, int(max(self.drift_window_s, self.corr_window_s) * 10) + 200)
@@ -348,9 +348,14 @@ class SensorDiagnosticsEngine:
             self._buffers.pop(channel_id, None)
             self._diagnostics.pop(channel_id, None)
             return
+        # Append under the SAME lock the snapshot copies under. Holding it only
+        # for setdefault left the append racing `list(buffer)` in the worker,
+        # which raises "deque mutated during iteration" -- reproducibly, since
+        # push runs on the event loop at the acquisition rate while the worker
+        # copies. The lock must cover the mutation, not just the lookup.
         with self._buffer_lock:
             buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
-        buf.append((timestamp, value))
+            buf.append((timestamp, value))
 
     def snapshot_buffers(self) -> dict[str, list[tuple[float, float]]]:
         """Copy the sample buffers for a worker thread to compute over.
@@ -362,27 +367,60 @@ class SensorDiagnosticsEngine:
         with self._buffer_lock:
             return {channel: list(buffer) for channel, buffer in self._buffers.items()}
 
-    def update(self) -> list:
-        """Recompute diagnostics for all channels with data.
+    def compute(self) -> dict[str, ChannelDiagnostics | None]:
+        """Pure recomputation, safe to run in a worker thread.
 
-        Returns list of newly published AlarmEvent objects so the engine's
-        sensor_diag_tick can dispatch Telegram notifications (F10 Cycle 3).
-        Empty list when alarm_publisher is None or no new events triggered.
+        Reads one snapshot of the buffers and returns what was computed from
+        it. Touches no shared state: no ``self._diagnostics`` write, no alarm
+        publisher, no anomaly timers. ``None`` for a channel means it had no
+        samples, which the apply step turns into a dropped cache entry.
+
+        Split out from ``update`` because the alarm side of that method
+        mutated ``AlarmStateManager`` from the worker thread -- alarm
+        transitions, anomaly timers and escalation cooldowns all reached
+        off-loop. Every one of those belongs to the event loop; only the
+        arithmetic belongs here.
         """
+
         now = datetime.now(UTC)
-        # Snapshot first: iterating the live mapping while the event loop
-        # appends to it raises "dictionary changed size during iteration".
-        for channel_id, buf in self.snapshot_buffers().items():
+        buffers = self.snapshot_buffers()
+        computed: dict[str, ChannelDiagnostics | None] = {}
+        for channel_id, buf in buffers.items():
             if not buf:
-                # Remove stale cached result so _update_anomaly_tracking
+                computed[channel_id] = None
+                continue
+            computed[channel_id] = self._compute_channel(channel_id, buf, now, buffers)
+        return computed
+
+    def apply(self, computed: dict[str, ChannelDiagnostics | None]) -> list:
+        """Publish a worker's results. EVENT LOOP ONLY.
+
+        Everything that mutates shared state happens here: the diagnostics
+        cache, the anomaly timers, and every alarm transition.
+        """
+
+        if not isinstance(computed, dict):
+            return []
+        for channel_id, diag in computed.items():
+            if diag is None:
+                # Drop the stale cached result so _update_anomaly_tracking
                 # correctly classifies this channel as no_data.
                 self._diagnostics.pop(channel_id, None)
                 continue
-            diag = self._compute_channel(channel_id, buf, now)
             self._diagnostics[channel_id] = diag
         if self._alarm_publisher is not None:
             return self._update_anomaly_tracking()
         return []
+
+    def update(self) -> list:
+        """Recompute and publish in one call. EVENT LOOP ONLY.
+
+        Retained for callers that are already on the loop and for tests. The
+        engine's periodic tick must NOT use this: it runs the computation in a
+        worker, so it calls ``compute`` there and ``apply`` back on the loop.
+        """
+
+        return self.apply(self.compute())
 
     def _update_anomaly_tracking(self) -> list:
         """Update per-channel anomaly duration and publish alarms when sustained.
@@ -501,6 +539,7 @@ class SensorDiagnosticsEngine:
         channel_id: str,
         buf: deque[tuple[float, float]],
         now: datetime,
+        buffers: dict[str, list[tuple[float, float]]] | None = None,
     ) -> ChannelDiagnostics:
         current_T = buf[-1][1]
         name = self._channel_names.get(channel_id, channel_id)
@@ -546,7 +585,7 @@ class SensorDiagnosticsEngine:
         outlier_count = self._count_outliers(outlier_points)
 
         # Correlation
-        correlation = self._compute_correlation(channel_id)
+        correlation = self._compute_correlation(channel_id, buffers if buffers is not None else {})
 
         # Fault flags
         fault_flags = self._compute_fault_flags(
@@ -619,8 +658,18 @@ class SensorDiagnosticsEngine:
                 return full_id
         return short_id
 
-    def _compute_correlation(self, channel_id: str) -> float | None:
-        """Pearson r with best-correlated neighbour in the same group."""
+    def _compute_correlation(
+        self,
+        channel_id: str,
+        buffers: dict[str, list[tuple[float, float]]],
+    ) -> float | None:
+        """Pearson r with best-correlated neighbour in the same group.
+
+        Reads neighbours from the caller's snapshot, never from
+        ``self._buffers``: this runs in a worker thread while the event loop is
+        appending, and touching the live deques here was a second unguarded
+        race alongside the one in ``push``.
+        """
         # Resolve full channel_id → short ID for group lookup
         short_id = channel_id.split(" ", 1)[0] if " " in channel_id else channel_id
         group_name = self._channel_to_group.get(short_id)
@@ -633,12 +682,14 @@ class SensorDiagnosticsEngine:
         neighbours = []
         for ch in group_channels:
             full = self._resolve_channel(ch)
-            if full != channel_id and full in self._buffers:
+            if full != channel_id and full in buffers:
                 neighbours.append(full)
         if not neighbours:
             return None
 
-        my_buf = self._buffers[channel_id]
+        my_buf = buffers.get(channel_id)
+        if not my_buf:
+            return None
         my_points = self._window_points(my_buf, self.corr_window_s)
         if len(my_points) < self.min_points:
             return None
@@ -650,7 +701,9 @@ class SensorDiagnosticsEngine:
         my_ts_map = {round(t, _TS_ROUND): v for t, v in my_points}
         best_r: float | None = None
         for neighbour_id in neighbours:
-            n_buf = self._buffers[neighbour_id]
+            n_buf = buffers.get(neighbour_id)
+            if not n_buf:
+                continue
             n_points = self._window_points(n_buf, self.corr_window_s)
             if len(n_points) < self.min_points:
                 continue

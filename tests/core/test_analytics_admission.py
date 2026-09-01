@@ -304,12 +304,24 @@ async def test_slow_sensor_diagnostics_does_not_cost_acquisition_cycles():
     reads: list[int] = []
     writes: list[int] = []
     calls = 0
+    applied_on: list[int] = []
 
     class _SlowDiagnostics:
-        def update(self):
+        """The worker/loop split the tick actually drives.
+
+        `compute` is the slow, pure half and runs in a worker. `apply` is the
+        half that mutates alarm state and must run on the event loop, so it
+        records the thread it was called from.
+        """
+
+        def compute(self):
             nonlocal calls
             calls += 1
             time.sleep(0.25)  # noqa: ASYNC251 - deliberately slow, in a worker
+            return {}
+
+        def apply(self, computed):
+            applied_on.append(threading.get_ident())
             return []
 
     async def acquisition() -> None:
@@ -337,6 +349,10 @@ async def test_slow_sensor_diagnostics_does_not_cost_acquisition_cycles():
         assert len(reads) > 40, f"acquisition starved: {len(reads)} reads in 1 s"
         assert len(writes) == len(reads)
         assert calls >= 1, "diagnostics should still have run"
+        assert applied_on, "the loop never applied what the worker computed"
+        assert set(applied_on) == {threading.get_ident()}, (
+            "alarm-bearing apply() ran off the event loop"
+        )
     finally:
         tick.cancel()
         poller.cancel()

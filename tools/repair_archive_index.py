@@ -32,7 +32,11 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-OPERATOR_METADATA_KEYS = (
+# Every operator-log field. An entry is repairable only when ALL of them are
+# absent: that is the exact shape rotation used to write for a day with no
+# operator entries, and the only shape whose meaning is unambiguous.
+OPERATOR_LOG_FIELDS = (
+    "operator_log_path",
     "operator_log_rows",
     "operator_log_size_bytes",
     "operator_log_checksum_md5",
@@ -68,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no archive index at {index_path}: nothing to repair")
         return 0
 
+    # The reader's own predicate decides what a complete declaration is, so
+    # this tool cannot drift from the contract it is migrating towards.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from cryodaq.storage.archive_reader import operator_log_declared_absent
+
     document = json.loads(index_path.read_text(encoding="utf-8"))
     files = document.get("files")
     if not isinstance(files, list):
@@ -76,12 +85,26 @@ def main(argv: list[str] | None = None) -> int:
 
     repairable: list[dict] = []
     conflicted: list[tuple[dict, Path]] = []
+    partial: list[tuple[dict, tuple[str, ...]]] = []
     healthy = 0
     for entry in files:
         if not isinstance(entry, dict):
             continue
-        if "operator_log_path" in entry:
+        present = tuple(name for name in OPERATOR_LOG_FIELDS if name in entry)
+        # Two complete, meaningful shapes: a full sidecar proof, or an explicit
+        # declaration of absence. Everything else carrying operator fields is
+        # incomplete.
+        if len(present) == len(OPERATOR_LOG_FIELDS) or operator_log_declared_absent(entry):
             healthy += 1
+            continue
+        if present:
+            # Some operator fields were written and others were not. What that
+            # day held is UNKNOWN, and this tool must not resolve an unknown by
+            # deleting the evidence: erasing the partial fields to synthesise a
+            # clean "empty" declaration would convert unknown history into
+            # proven absence, permanently and silently. It stays unavailable
+            # until a human decides.
+            partial.append((entry, present))
             continue
         found = next((p for p in _sidecar_candidates(archive_dir, entry) if p.exists()), None)
         if found is not None:
@@ -91,16 +114,23 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"index entries:        {len(files)}")
     print(f"  already explicit:   {healthy}")
-    print(f"  repairable (no sidecar on disk): {len(repairable)}")
+    print(f"  repairable (all five fields absent, no sidecar on disk): {len(repairable)}")
+    print(f"  PARTIAL (some fields written, some not): {len(partial)}")
+    for entry, present in partial:
+        print(f"    {entry.get('original_name')} has {', '.join(present)}")
     print(f"  CONFLICTED (sidecar exists but is unindexed): {len(conflicted)}")
     for entry, found in conflicted:
         print(f"    {entry.get('original_name')} -> {found.name}")
     if conflicted:
         print("\nRefusing to declare absence for conflicted entries: an unindexed sidecar")
         print("holds real archived entries, and declaring absence would hide them.")
+    if partial:
+        print("\nRefusing to touch partial entries: what that day held is unknown, and")
+        print("removing the written fields would record the unknown as proven absence.")
+        print("These need a human to inspect the day before anything is claimed.")
 
     if not repairable:
-        return 1 if conflicted else 0
+        return 1 if (conflicted or partial) else 0
     if not args.apply:
         print("\nreport only; re-run with --apply to write")
         for entry in repairable[:10]:
@@ -108,14 +138,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for entry in repairable:
+        # Only entries that carried no operator field at all reach here, so
+        # this adds a complete declaration and deletes nothing.
         entry["operator_log_path"] = None
         entry["operator_log_rows"] = 0
-        for key in OPERATOR_METADATA_KEYS[1:]:
-            entry.pop(key, None)
 
     # Validate against the same authority the reader uses, before replacing a
     # file that both rotation and every read depend on.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from cryodaq.storage.archive_reader import validate_archive_index_authority
 
     validate_archive_index_authority(document)

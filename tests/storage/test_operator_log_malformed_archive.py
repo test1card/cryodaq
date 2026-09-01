@@ -193,3 +193,92 @@ async def test_startup_idempotency_still_refuses_a_genuinely_partial_proof(tmp_p
         assert "incomplete" in str(raised.value)
     finally:
         await writer.stop()
+
+
+# ---------------------------------------------------------------------------
+# A failed read must not be retained after its caller has consumed it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failed_reads", [1, 5, 10, 25])
+@pytest.mark.asyncio
+async def test_failed_reads_do_not_accumulate_owned_tasks(tmp_path, failed_reads):
+    """Ownership must end when the outcome no longer has to be proven.
+
+    A write task's failure is persistence evidence and stays owned until stop()
+    consumes it. A read owes nothing: the caller awaiting it holds its own
+    reference. Retaining failed reads left one completed task per failed read
+    with no pending future, cleared only by stop() -- which never happens
+    during a week-long run.
+    """
+    writer = SQLiteWriter(tmp_path)
+    try:
+        await _fill_hot_log(writer)
+        _write_index(tmp_path, entry_extra={})
+        for _ in range(failed_reads):
+            with pytest.raises(ArchiveUnavailableError):
+                await writer.get_operator_log(limit=REQUESTED_LIMIT)
+        retained = len(writer._owned_read_tasks)
+        assert retained == 0, f"{retained} completed read tasks retained after {failed_reads} failed reads"
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_successful_reads_still_settle(tmp_path):
+    writer = SQLiteWriter(tmp_path)
+    try:
+        await _fill_hot_log(writer)
+        _write_index(tmp_path, entry_extra={"operator_log_path": None, "operator_log_rows": 0})
+        for _ in range(10):
+            assert await writer.get_operator_log(limit=REQUESTED_LIMIT)
+        assert len(writer._owned_read_tasks) == 0
+    finally:
+        await writer.stop()
+
+
+# ---------------------------------------------------------------------------
+# An incomplete declaration is not a declaration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_null_path_without_a_row_count_is_not_proven_empty(tmp_path):
+    """Defaulting the missing count to zero would invent proof of absence.
+
+    A half-written entry cannot be told apart from one whose count was lost, so
+    accepting it as empty hides an unknown journal permanently. The read must
+    stay unavailable and say so.
+    """
+    writer = SQLiteWriter(tmp_path)
+    try:
+        await _fill_hot_log(writer)
+        _write_index(tmp_path, entry_extra={"operator_log_path": None})
+        with pytest.raises(ArchiveUnavailableError):
+            await writer.get_operator_log(limit=REQUESTED_LIMIT)
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_null_path_with_a_nonzero_row_count_is_refused(tmp_path):
+    writer = SQLiteWriter(tmp_path)
+    try:
+        await _fill_hot_log(writer)
+        _write_index(tmp_path, entry_extra={"operator_log_path": None, "operator_log_rows": 7})
+        with pytest.raises(ArchiveUnavailableError):
+            await writer.get_operator_log(limit=REQUESTED_LIMIT)
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_startup_idempotency_refuses_an_incomplete_declaration(tmp_path):
+    """The startup authority applies the same rule as the reader."""
+    writer = SQLiteWriter(tmp_path)
+    try:
+        _write_index(tmp_path, entry_extra={"operator_log_path": None})
+        with pytest.raises(OperatorLogIdempotencyUnavailableError):
+            await writer.initialize_operator_log_idempotency()
+    finally:
+        await writer.stop()

@@ -358,19 +358,27 @@ async def sensor_diag_tick(
     while True:
         await asyncio.sleep(interval)
         try:
-            # Never inline. update() recomputes per-channel statistics and a
-            # pairwise correlation across every buffered channel; a 250 ms call
-            # here cost acquisition an entire observation window and delayed
-            # safety monitoring and alarm evaluation with it. Best-effort work
-            # does not get to do that.
+            # Never inline the computation. compute() recomputes per-channel
+            # statistics and a pairwise correlation across every buffered
+            # channel; a 250 ms call here cost acquisition an entire
+            # observation window and delayed safety monitoring and alarm
+            # evaluation with it. Best-effort work does not get to do that.
+            #
+            # Only the ARITHMETIC crosses into the worker. Sending update()
+            # there also carried the alarm publisher with it, so alarm
+            # transitions, anomaly timers and escalation cooldowns were all
+            # mutated off the event loop. compute() is pure and reads one
+            # snapshot; apply() runs here, on the loop, and owns every
+            # mutation.
             if job is None:
-                new_events = await asyncio.to_thread(sensor_diag.update)
+                computed = await asyncio.to_thread(sensor_diag.compute)
             else:
-                new_events = await job.run(sensor_diag.update)
-                if new_events is None:
+                computed = await job.run(sensor_diag.compute)
+                if computed is None:
                     # Refused: overloaded, saturated, or still running. The
                     # previous diagnostics stand and their age is reported.
                     continue
+            new_events = sensor_diag.apply(computed)
             if _notify_telegram and telegram_bot is not None and new_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
                 # F20 aggregation handled by _format_diag_telegram_messages.

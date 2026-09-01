@@ -97,6 +97,9 @@ def _validate_partitioned_artifact(relative: object, day: date, basenames: set[s
     return relative
 
 
+_MISSING = object()
+
+
 def operator_log_declared_absent(entry: dict[str, object]) -> bool:
     """Whether this entry states, explicitly, that its day has no operator log.
 
@@ -116,7 +119,16 @@ def operator_log_declared_absent(entry: dict[str, object]) -> bool:
         return False
     if entry.get("operator_log_path") is not None:
         return False
-    if entry.get("operator_log_rows", 0) != 0:
+    # The row count must be WRITTEN, not defaulted.
+    #
+    # Treating an absent count as zero accepts a half-written entry -- a null
+    # path and nothing else -- as proof that the day held no entries. That is
+    # the one thing this predicate must never do: it is indistinguishable from
+    # an entry whose count was lost, and declaring it empty hides an unknown
+    # journal permanently. An incomplete declaration is not a declaration, and
+    # the reader is right to refuse it.
+    rows = entry.get("operator_log_rows", _MISSING)
+    if type(rows) is not int or rows != 0:
         return False
     return not any(
         field in entry for field in ("operator_log_size_bytes", "operator_log_checksum_md5", "operator_log_schema")
