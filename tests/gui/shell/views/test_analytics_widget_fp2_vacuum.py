@@ -82,11 +82,39 @@ def test_construction_no_crash(app) -> None:
 
 def test_set_pressure_reading_accumulates(app) -> None:
     w = VacuumPredictionWidget()
+    step = w._RAW_MIN_INTERVAL_S
     w.set_pressure_reading(_make_reading(1e-4, ts=1_000_000.0))
-    w.set_pressure_reading(_make_reading(5e-5, ts=1_000_001.0))
+    w.set_pressure_reading(_make_reading(5e-5, ts=1_000_000.0 + step))
     assert len(w._raw_buffer) == 2
     assert w._raw_buffer[0] == pytest.approx((1_000_000.0, 1e-4), rel=1e-6)
-    assert w._raw_buffer[1] == pytest.approx((1_000_001.0, 5e-5), rel=1e-6)
+    assert w._raw_buffer[1] == pytest.approx((1_000_000.0 + step, 5e-5), rel=1e-6)
+
+
+def test_readings_are_thinned_to_the_minimum_interval(app) -> None:
+    """Points closer together than the thinning interval are not stored.
+
+    The pressure channel arrives about every 2 s. Keeping every sample spent
+    the whole buffer on the last few hours of a pump-down that runs for days,
+    so the view spanned hours where the run spans days. The curve is read for
+    its shape, and thinning costs no shape at this timescale.
+    """
+    w = VacuumPredictionWidget()
+    base = 1_000_000.0
+    for i in range(0, 300):  # 300 s of 2 s samples
+        w.set_pressure_reading(_make_reading(1e-4, ts=base + i * 2.0))
+    stored = w._raw_buffer
+    assert len(stored) == 300 * 2 // int(w._RAW_MIN_INTERVAL_S)
+    gaps = [b[0] - a[0] for a, b in zip(stored[:-1], stored[1:], strict=True)]
+    assert all(gap >= w._RAW_MIN_INTERVAL_S for gap in gaps)
+
+
+def test_history_older_than_the_span_is_dropped(app) -> None:
+    w = VacuumPredictionWidget()
+    base = 1_000_000.0
+    w.set_pressure_reading(_make_reading(1e-2, ts=base))
+    w.set_pressure_reading(_make_reading(1e-4, ts=base + w._RAW_HISTORY_S + 1.0))
+    assert len(w._raw_buffer) == 1
+    assert w._raw_buffer[0] == pytest.approx((base + w._RAW_HISTORY_S + 1.0, 1e-4), rel=1e-6)
 
 
 def test_set_pressure_reading_updates_inner_history(app) -> None:
@@ -251,16 +279,40 @@ def test_nan_logP_skipped(app) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_raw_buffer_capped(app) -> None:
+def test_raw_buffer_stays_bounded(app) -> None:
+    """History is bounded by span first, with the point count as a backstop.
+
+    Thinned to one point per _RAW_MIN_INTERVAL_S, a full _RAW_HISTORY_S of
+    history is fewer points than _MAX_RAW_PTS, so in normal operation the span
+    is what trims and the count cap only guards against a pathological feed.
+    Both bounds are asserted; neither may be exceeded.
+    """
     w = VacuumPredictionWidget()
-    cap = w._MAX_RAW_PTS
-    total = cap + 100
+    step = w._RAW_MIN_INTERVAL_S
+    total = w._MAX_RAW_PTS + 100
     for i in range(total):
-        w.set_pressure_reading(_make_reading(1e-4, ts=float(i)))
-    assert len(w._raw_buffer) == cap
-    # Oldest 100 dropped; retained window is [100, total-1]
-    assert w._raw_buffer[0] == pytest.approx((100.0, 1e-4), rel=1e-6)
-    assert w._raw_buffer[-1] == pytest.approx((float(total - 1), 1e-4), rel=1e-6)
+        w.set_pressure_reading(_make_reading(1e-4, ts=float(i) * step))
+
+    assert len(w._raw_buffer) <= w._MAX_RAW_PTS
+    span_s = w._raw_buffer[-1][0] - w._raw_buffer[0][0]
+    assert span_s <= w._RAW_HISTORY_S
+    # The newest reading is always kept.
+    assert w._raw_buffer[-1] == pytest.approx((float(total - 1) * step, 1e-4), rel=1e-6)
+
+
+def test_buffer_spans_the_whole_pump_down(app) -> None:
+    """The bounded buffer must cover days, not hours.
+
+    This is the property the operator asked for: a vacuum view that spans the
+    run rather than its last few hours.
+    """
+    w = VacuumPredictionWidget()
+    base = 1_000_000.0
+    for i in range(0, int(48 * 3600), 2):  # 48 h of 2 s samples
+        w.set_pressure_reading(_make_reading(1e-4, ts=base + i))
+    span_s = w._raw_buffer[-1][0] - w._raw_buffer[0][0]
+    assert span_s >= 47 * 3600
+    assert len(w._raw_buffer) <= w._MAX_RAW_PTS
 
 
 # ---------------------------------------------------------------------------

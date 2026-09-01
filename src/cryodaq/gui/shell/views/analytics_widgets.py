@@ -631,7 +631,15 @@ class VacuumPredictionWidget(QWidget):
     units), converted to mbar.
     """
 
-    _MAX_RAW_PTS: int = 5000
+    # History span, not point count. The pressure channel arrives about every
+    # 2 s, so a plain 5000-point cap held barely three hours — the operator
+    # asked why the vacuum view spanned 3-6 h when the pump-down it describes
+    # runs for two days. Points are thinned to _RAW_MIN_INTERVAL_S before they
+    # are stored, so the same bounded number of points covers the whole run
+    # instead of the last few hours of it.
+    _RAW_HISTORY_S: float = 48 * 3600.0
+    _RAW_MIN_INTERVAL_S: float = 30.0
+    _MAX_RAW_PTS: int = 6000
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -658,7 +666,15 @@ class VacuumPredictionWidget(QWidget):
         if reading is None:
             return
         ts = reading.timestamp.timestamp()
+        # Thin on the way in: a pump-down is read for its shape over hours, and
+        # storing every 2 s sample only buys resolution the plot cannot show
+        # while costing the span that actually matters.
+        if self._raw_buffer and ts - self._raw_buffer[-1][0] < self._RAW_MIN_INTERVAL_S:
+            return
         self._raw_buffer.append((ts, float(reading.value)))
+        cutoff = ts - self._RAW_HISTORY_S
+        if self._raw_buffer[0][0] < cutoff:
+            self._raw_buffer = [point for point in self._raw_buffer if point[0] >= cutoff]
         if len(self._raw_buffer) > self._MAX_RAW_PTS:
             del self._raw_buffer[: len(self._raw_buffer) - self._MAX_RAW_PTS]
         self._inner.set_history(list(self._raw_buffer))

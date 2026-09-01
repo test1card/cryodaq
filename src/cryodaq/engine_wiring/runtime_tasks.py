@@ -417,7 +417,15 @@ async def vacuum_trend_tick(vacuum_trend: Any, vt_cfg: dict[str, Any]) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            vacuum_trend.update()
+            # Off the event loop. update() runs several scipy curve fits, and a
+            # non-converging one burns its whole evaluation budget: measured on
+            # this stand it blocked the loop for 2.8 s with an hour of data and
+            # 33 s with six hours. While the loop is blocked nothing is polled,
+            # nothing is persisted and no timer fires — a 2026-09-01 02:39
+            # freeze of ~8 s timed out a bus-scoped instrument read, quarantined
+            # a GPIB session that never recovered, and cost the run its
+            # temperature data for the rest of the night.
+            await asyncio.to_thread(vacuum_trend.update)
         except Exception as exc:
             logger.error("VacuumTrendPredictor tick error: %s", exc)
 

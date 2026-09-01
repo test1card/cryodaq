@@ -37,18 +37,40 @@ sensor_diagnostics:
 
 vacuum_trend:
   enabled: true
-  window_s: 3600                           # data window for fitting (s)
+  # 6 h, not 1 h. A cryostat pump-down runs for days and decelerates the whole
+  # way, so an hour of it looks almost flat: fitted over 1 h the model puts the
+  # asymptote at essentially the current pressure (measured: p_ult = 0.267 mbar
+  # while actually at 0.306 and still falling) and reports every target as
+  # unreachable. A 6 h window covers enough curvature to identify tau.
+  window_s: 21600                          # data window for fitting (s)
   update_interval_s: 30                    # refit interval (s)
   min_points: 60                           # minimum points for fit
   min_points_combined: 200                 # minimum for 5-param combined model
+  # Targets must lie inside the gauge's range. The VSP63D is a Pirani
+  # specified 1000 … 1e-4 mbar, so 1e-5 and 1e-6 were not merely far off —
+  # they are below anything this sensor can report, and their ETA could never
+  # be anything but "unreachable". The low-range gauge on this stand is not
+  # connected to CryoDAQ, so nothing below the Pirani floor is predictable
+  # here at all. 1e-4 itself is dropped too: it is the gauge's last decade,
+  # where a Pirani reads its own offsets rather than the chamber. These three
+  # targets sit where the reading is trustworthy and where the operator is
+  # actually deciding whether the pump-down is on schedule.
   targets_mbar:
-    - 1.0e-4
-    - 1.0e-5
-    - 1.0e-6
+    - 1.0e-1
+    - 5.0e-2
+    - 1.0e-2
+  # Horizons the forecast is reported at, in hours. An ETA answers "when do we
+  # reach X" and goes undefined the moment X is unreachable; these answer
+  # "where will we be", which is always defined.
+  forecast_horizons_h: [1, 3, 6, 12, 24, 48]
+  pump_start_mbar: 900.0                   # below this the chamber is being pumped
+  eta_horizon_s: 1209600                   # search ETA up to 14 days ahead
   anomaly_threshold_sigma: 3.0
   rising_sustained_s: 60                   # sustained rise before "rising" flag
   trend_threshold_log10_per_s: 1.0e-4     # d(log₁₀P)/dt threshold
-  extrapolation_horizon_factor: 2.0       # extrapolate 2× window ahead
+  # 8 × 6 h = 48 h of forecast. The operator is deciding whether a pump-down is
+  # on track for a run that takes days; a 2 h projection cannot answer that.
+  extrapolation_horizon_factor: 8.0       # extrapolate 8× window ahead (48 h)
   pressure_channel: ""                     # auto-detect any mbar-unit reading
 
 cooldown_baseline:

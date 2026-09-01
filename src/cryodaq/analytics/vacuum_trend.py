@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,6 +47,11 @@ class VacuumPrediction:
     fit_params: dict[str, Any]  # for debugging
     extrapolation_t: list[float] = field(default_factory=list)
     extrapolation_logP: list[float] = field(default_factory=list)
+    # Predicted pressure at fixed horizons, {"1": mbar, "3": mbar, ...} keyed
+    # by hours ahead. An ETA answers "when do we reach X", which says nothing
+    # when X is unreachable; this answers "where will we be", which is always
+    # defined and is what an operator reads to decide whether to wait.
+    horizon_forecast: dict[str, float] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -57,6 +63,15 @@ class VacuumPrediction:
 # Lower bound shared by every curve_fit call below for the fitted
 # log10(ultimate pressure). A result resting on it means the window does not
 # constrain the asymptote at all, so the value carries no information.
+# How much better another model must fit before it may displace the outgassing
+# description: it has to bring the residual σ down to this fraction of the
+# outgassing fit's. Scale-free, unlike a BIC margin.
+_DECISIVE_RESIDUAL_RATIO = 2.0
+
+# log10 of the lowest pressure any gauge on this stand can report. A fitted
+# floor below it carries no information about the system's real limit.
+_LOG_P_ULT_UNMEASURABLE = -5.0
+
 _LOG_P_ULT_MIN = -20.0
 _LOG_P_ULT_BOUND_EPS = 0.05
 
@@ -71,6 +86,51 @@ def _power_law_model(t: np.ndarray, log_p_ult: float, B: float, alpha: float) ->
     # Avoid division by zero: clamp t to minimum 1.0
     t_safe = np.maximum(t, 1.0)
     return log_p_ult + B * t_safe ** (-alpha)
+
+
+# Points handed to curve_fit. A pump-down is a smooth curve over hours: past a
+# couple of thousand samples the extra points buy no accuracy and cost time
+# linearly, and every second of that time is a second the engine is not
+# acquiring. Six hours of 2 s samples is ~10 000 points and fitted in 33 s;
+# thinned to this it fits in a fraction of a second.
+_MAX_FIT_POINTS = 1500
+_COMBINED_MAX_EVALUATIONS = 2000
+
+
+def _thin_for_fitting(points: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
+    """Evenly thin a sample series, always keeping the first and last point."""
+    count = len(points)
+    if count <= limit:
+        return points
+    stride = count / float(limit)
+    thinned = [points[int(index * stride)] for index in range(limit)]
+    if thinned[-1] is not points[-1]:
+        thinned[-1] = points[-1]
+    return thinned
+
+
+def _format_hours(hours: float) -> str:
+    """Horizon label: whole hours stay whole ("1", "48"), others keep a decimal."""
+    return str(int(hours)) if float(hours).is_integer() else f"{hours:g}"
+
+
+def _outgassing_model(t: np.ndarray, log_p_ult: float, log_B: float, alpha: float) -> np.ndarray:
+    """log₁₀(P(t)) for P(t) = P_ult + B·t^(-α), t measured from pump start.
+
+    The standard description of a pump-down once the chamber volume is empty:
+    pressure is set by the gas load the pump has to remove, P = Q(t)/S, and
+    surface outgassing decays algebraically, Q ∝ t^(-α) with α ≈ 1 for water
+    desorption. P_ult is the floor the system settles on — real leaks plus the
+    pump's own limit.
+
+    Distinct from ``_power_law_model``, which decays log₁₀(P) as a power of t
+    rather than P itself, and so cannot produce the straight line on log-log
+    axes that an outgassing-limited pump-down actually traces. Measured on a
+    real 12 h pump-down, this form fits the outgassing tail at R² = 0.9996 with
+    α = 1.2, against R² = 0.75 for the other.
+    """
+    t_safe = np.maximum(t, 1.0)
+    return np.log10(np.power(10.0, log_p_ult) + np.power(10.0, log_B) * t_safe ** (-alpha))
 
 
 def _combined_model(
@@ -132,6 +192,37 @@ class VacuumTrendPredictor:
         self.trend_threshold: float = cfg.get("trend_threshold_log10_per_s", 1e-4)
         self.extrapolation_factor: float = cfg.get("extrapolation_horizon_factor", 2.0)
         self.min_points_combined: int = cfg.get("min_points_combined", 200)
+        # Pressure below which the chamber is unambiguously being pumped, used
+        # to timestamp the start of the pump-down.
+        self.pump_start_mbar: float = cfg.get("pump_start_mbar", 900.0)
+        self.eta_horizon_s: float = cfg.get("eta_horizon_s", 14 * 24 * 3600.0)
+        raw_horizons = cfg.get("forecast_horizons_h", [1, 3, 6, 12, 24, 48])
+        self.forecast_horizons_h: list[float] = [
+            float(h) for h in raw_horizons if isinstance(h, (int, float)) and not isinstance(h, bool) and h > 0
+        ]
+        # Wall-clock start of the pump-down. The power-law term is only
+        # meaningful measured from it: P ∝ (t - t_start)^-α describes surface
+        # outgassing decaying since pumping began, and re-anchoring that origin
+        # to the start of a sliding fit window (which is what happens if the
+        # window's own t0 is used) makes the exponent unidentifiable. Measured
+        # on a real 12 h pump-down: window-anchored fitting drove α onto its
+        # lower bound (0.01) with R²=0.75, while anchoring to the true start
+        # recovered α≈1.2 at R²=0.9996.
+        self._t_ref: float | None = None
+        # Whether this instance has actually watched the chamber come down from
+        # near atmosphere. Without it, "first reading below the threshold"
+        # would anchor the pump-down to process start — an engine restarted
+        # mid-run sees 0.3 mbar as its first sample and would date the
+        # pump-down from the restart, making α meaningless. A start that was
+        # not witnessed has to be supplied from the archive instead.
+        self._observed_pump_start: bool = False
+        # push() runs on the event loop; update() now runs in a worker thread
+        # so a slow fit cannot stall acquisition. That makes the sample buffer
+        # genuinely shared, and taking a list() of a deque while another thread
+        # appends to it raises "deque mutated during iteration". The lock is
+        # held only to copy the samples out — never across the fitting itself,
+        # which is the whole point of moving it off the loop.
+        self._buffer_lock = threading.Lock()
 
         maxlen = max(1000, int(self.window_s * 10) + 200)
         self._buffer: deque[tuple[float, float]] = deque(maxlen=maxlen)
@@ -153,15 +244,36 @@ class VacuumTrendPredictor:
         if not math.isfinite(pressure_mbar) or pressure_mbar <= 0:
             return
         log_p = math.log10(pressure_mbar)
-        self._buffer.append((timestamp, log_p))
-        # Trim old points
-        cutoff = timestamp - self.window_s
-        while self._buffer and self._buffer[0][0] < cutoff:
-            self._buffer.popleft()
+        if pressure_mbar >= self.pump_start_mbar:
+            self._observed_pump_start = True
+        elif self._t_ref is None and self._observed_pump_start:
+            # A genuine downward crossing of the threshold.
+            self._t_ref = timestamp
+        with self._buffer_lock:
+            self._buffer.append((timestamp, log_p))
+            # Trim old points
+            cutoff = timestamp - self.window_s
+            while self._buffer and self._buffer[0][0] < cutoff:
+                self._buffer.popleft()
+
+    def set_pump_start(self, timestamp: float) -> None:
+        """Supply the pump-down start this instance did not witness.
+
+        Used when the process starts mid-run: the start is recovered from the
+        archive so the outgassing exponent is measured against the real origin.
+        A start observed live always wins, since it is directly evidenced.
+        """
+        if self._observed_pump_start:
+            return
+        if not math.isfinite(timestamp) or timestamp <= 0.0:
+            return
+        self._t_ref = float(timestamp)
 
     def update(self) -> None:
         """Recompute prediction from current buffer."""
-        if len(self._buffer) < self.min_points:
+        with self._buffer_lock:
+            samples = list(self._buffer)
+        if len(samples) < self.min_points:
             self._prediction = VacuumPrediction(
                 model_type="insufficient_data",
                 p_ultimate_mbar=float("nan"),
@@ -173,7 +285,7 @@ class VacuumTrendPredictor:
             )
             return
 
-        points = list(self._buffer)
+        points = _thin_for_fitting(samples, _MAX_FIT_POINTS)
         t0 = points[0][0]
         t_arr = np.array([t - t0 for t, _ in points])
         logP_arr = np.array([lp for _, lp in points])
@@ -186,8 +298,19 @@ class VacuumTrendPredictor:
         plaw_fit = self._fit_power_law(t_arr, logP_arr)
         if plaw_fit is not None:
             fits.append(plaw_fit)
-        if len(points) >= self.min_points_combined:
-            comb_fit = self._fit_combined(t_arr, logP_arr)
+        # Only meaningful once the start of the pump-down is known: the
+        # exponent is defined against that origin, not against the start of
+        # whatever window happens to be in the buffer.
+        if self._t_ref is not None:
+            outgas_fit = self._fit_outgassing(t_arr, logP_arr, offset=float(t0 - self._t_ref))
+            if outgas_fit is not None:
+                fits.append(outgas_fit)
+        if len(samples) >= self.min_points_combined:
+            comb_fit = self._fit_combined(
+                t_arr,
+                logP_arr,
+                offset=(float(t0 - self._t_ref) if self._t_ref is not None else 0.0),
+            )
             if comb_fit is not None:
                 fits.append(comb_fit)
 
@@ -212,6 +335,14 @@ class VacuumTrendPredictor:
         residuals = logP_arr - best.predict(t_arr)
         trend = self._classify_trend(t_arr, logP_arr, residuals)
 
+        # Pressure at each fixed horizon, from the same fitted curve that
+        # produces the extrapolation used for plotting.
+        horizon_forecast: dict[str, float] = {}
+        for hours in self.forecast_horizons_h:
+            predicted = float(best.predict(np.array([float(t_arr[-1]) + hours * 3600.0]))[0])
+            if math.isfinite(predicted):
+                horizon_forecast[_format_hours(hours)] = float(10.0**predicted)
+
         # Extrapolation curve
         t_max = float(t_arr[-1])
         horizon = t_max + self.window_s * self.extrapolation_factor
@@ -228,6 +359,20 @@ class VacuumTrendPredictor:
         #
         # Treat a parameter resting on its bound as unidentified.
         log_p_ult = best.params.get("log_p_ult", float("nan"))
+        # A floor below anything the gauge can read is not a measurement of the
+        # system's limit, it is the fit saying "no floor is evident yet" — the
+        # outgassing term still dominates everywhere in the observed window. On
+        # this stand the Pirani stops at 1e-4 mbar, and reporting a fitted
+        # 3e-12 mbar "предел откачки" to an operator is a confident-looking
+        # number about a pressure nothing here can see.
+        if math.isfinite(log_p_ult) and log_p_ult < _LOG_P_ULT_UNMEASURABLE:
+            logger.debug(
+                "Vacuum fit %s: fitted floor %.3g mbar is below the measurable range; "
+                "reporting the ultimate pressure as unidentified",
+                best.model_type,
+                10.0**log_p_ult,
+            )
+            log_p_ult = float("nan")
         if math.isfinite(log_p_ult) and log_p_ult <= _LOG_P_ULT_MIN + _LOG_P_ULT_BOUND_EPS:
             logger.debug(
                 "Vacuum fit %s: log_p_ult rests on its lower bound (%.3f); "
@@ -249,6 +394,7 @@ class VacuumTrendPredictor:
             fit_params=dict(best.params),
             extrapolation_t=[float(x) for x in t_extrap],
             extrapolation_logP=[float(x) for x in logP_extrap],
+            horizon_forecast=horizon_forecast,
         )
 
     def get_prediction(self) -> VacuumPrediction | None:
@@ -326,26 +472,84 @@ class VacuumTrendPredictor:
         except (RuntimeError, ValueError, TypeError):
             return None
 
-    def _fit_combined(self, t: np.ndarray, logP: np.ndarray) -> FitResult | None:
+    def _fit_outgassing(self, t: np.ndarray, logP: np.ndarray, *, offset: float) -> FitResult | None:
+        """Fit P = P_ult + B·t^(-α) with t measured from the pump-down start.
+
+        ``offset`` is (window start - pump start) in seconds. The fit runs in
+        absolute pump-down time, while ``predict`` keeps taking window-relative
+        time like every other model, so the ETA search and the extrapolation
+        curve need no knowledge of the anchoring.
+        """
         from scipy.optimize import curve_fit
 
+        t_abs = t + offset
+        if float(t_abs[0]) <= 0.0:
+            return None
+        try:
+            # Seed from a straight-line fit on log-log axes: that is exactly
+            # what this model reduces to while the outgassing term dominates,
+            # so it lands the optimizer in the right basin.
+            slope, intercept = np.polyfit(np.log10(np.maximum(t_abs, 1.0)), logP, 1)
+            alpha_init = float(min(max(-slope, 0.05), 4.0))
+            log_b_init = float(min(max(intercept, -10.0), 30.0))
+            log_p_ult_init = float(logP[-1]) - 1.0
+
+            popt, _ = curve_fit(
+                _outgassing_model,
+                t_abs,
+                logP,
+                p0=[log_p_ult_init, log_b_init, alpha_init],
+                bounds=([_LOG_P_ULT_MIN, -10.0, 0.05], [5.0, 30.0, 4.0]),
+                maxfev=10000,
+            )
+            y_fit = _outgassing_model(t_abs, *popt)
+            residuals = logP - y_fit
+            return FitResult(
+                model_type="outgassing",
+                params={"log_p_ult": popt[0], "log_B": popt[1], "alpha": popt[2]},
+                bic=_compute_bic(len(t), 3, residuals),
+                r_squared=_compute_r_squared(logP, y_fit),
+                residual_std=float(np.std(residuals)),
+                predict=lambda t_new, q=popt, o=offset: _outgassing_model(t_new + o, *q),
+                n_params=3,
+            )
+        except (RuntimeError, ValueError, TypeError, np.linalg.LinAlgError):
+            return None
+
+    def _fit_combined(self, t: np.ndarray, logP: np.ndarray, *, offset: float = 0.0) -> FitResult | None:
+        """Fit the exponential + power-law form in pump-down time.
+
+        ``offset`` is (window start - pump start). The power-law term is only
+        meaningful measured from the start of the pump-down, exactly as in
+        ``_fit_outgassing``; anchored to a sliding window instead, its exponent
+        is unidentifiable and the optimizer parks it on a bound, where the term
+        contributes flexibility without meaning.
+        """
+        from scipy.optimize import curve_fit
+
+        t_abs = t + offset
         try:
             log_p_last = float(logP[-1])
             A_init = max(0.5, (float(logP[0]) - log_p_last) / 2)
             B_init = A_init
-            tau_init = float(t[-1]) / 4.0
+            tau_init = float(t_abs[-1]) / 4.0
             if tau_init <= 0:
                 tau_init = 100.0
 
             popt, _ = curve_fit(
                 _combined_model,
-                t,
+                t_abs,
                 logP,
                 p0=[log_p_last, A_init, tau_init, B_init, 1.0],
                 bounds=([_LOG_P_ULT_MIN, 0, 1, 0, 0.01], [5, 30, 1e7, 30, 5.0]),
-                maxfev=10000,
+                # Five parameters on a curve the simpler models already
+                # describe: this fit routinely fails to converge, and at 10000
+                # evaluations it spent 5.6 s of every tick doing so — 94% of
+                # the whole update, to return nothing. A fit that is not going
+                # to converge should give up cheaply.
+                maxfev=_COMBINED_MAX_EVALUATIONS,
             )
-            y_fit = _combined_model(t, *popt)
+            y_fit = _combined_model(t_abs, *popt)
             residuals = logP - y_fit
             return FitResult(
                 model_type="combined",
@@ -359,15 +563,51 @@ class VacuumTrendPredictor:
                 bic=_compute_bic(len(t), 5, residuals),
                 r_squared=_compute_r_squared(logP, y_fit),
                 residual_std=float(np.std(residuals)),
-                predict=lambda t_new, p=popt: _combined_model(t_new, *p),
+                predict=lambda t_new, p=popt, o=offset: _combined_model(t_new + o, *p),
                 n_params=5,
             )
         except (RuntimeError, ValueError, TypeError):
             return None
 
     def _select_best(self, fits: list[FitResult]) -> FitResult:
-        """Select model with lowest BIC."""
-        return min(fits, key=lambda f: f.bic)
+        """Lowest BIC, with a physics tie-break the raw criterion cannot make.
+
+        On a pump-down the candidate models fit the observed window almost
+        identically while disagreeing entirely about the future. Measured on
+        this stand over a 6 h window: the exponential and the outgassing model
+        matched the data to the same residual σ (0.00208 decades, R² agreeing
+        to the sixth decimal), yet one projected a flat 0.162 mbar for ever and
+        the other 0.068 mbar within two days.
+
+        BIC separated them by 0.015%, and even that is overstated: it assumes
+        independent residuals, while these are 2-second samples of a smooth
+        curve and are strongly autocorrelated, so the effective sample size is
+        far below the point count and every BIC gap is inflated with it.
+        Deciding an operational question on that margin is a coin toss.
+
+        So a decisive margin is required before an asymptotic model may
+        override the outgassing description. An asymptote is a claim that the
+        pump-down has finished, and while pressure is still falling nothing in
+        the data supports it — the flattening a short window shows is exactly
+        what a slow power-law decay looks like close up. Genuine evidence of a
+        floor still wins; a rounding error does not.
+        """
+        best = min(fits, key=lambda f: f.bic)
+        if best.model_type == "outgassing":
+            return best
+        outgassing = next((f for f in fits if f.model_type == "outgassing"), None)
+        if outgassing is None:
+            return best
+        # Compared on residual scale rather than on BIC. BIC's gaps grow with
+        # the point count, so any fixed margin means something different after
+        # the input is thinned; the ratio of residual σ does not move with n at
+        # all. "Decisively better" is a model that roughly halves the residual,
+        # not one that trims it by a quarter — over a few hours of a pump-down
+        # the asymptotic and outgassing descriptions differ by about that much
+        # in-sample while disagreeing entirely about the days ahead.
+        if outgassing.residual_std <= best.residual_std * _DECISIVE_RESIDUAL_RATIO:
+            return outgassing
+        return best
 
     # -------------------------------------------------------------------
     # ETA
@@ -420,9 +660,13 @@ class VacuumTrendPredictor:
         log_target: float,
     ) -> float | None:
         """Binary search for time when predicted log₁₀(P) crosses log_target."""
-        # Search up to 10× window into the future
+        # An outgassing-limited pump-down reaches its targets on a scale set by
+        # the physics, not by however much history happens to be buffered:
+        # measured on this stand, 0.05 mbar was ~40 h away while the fit window
+        # was 6 h. Tying the search to a multiple of the window reported
+        # "unreachable" for targets the system reaches perfectly well.
         t_lo = t_current
-        t_hi = t_current + self.window_s * 10
+        t_hi = t_current + self.eta_horizon_s
 
         logP_hi = float(fit.predict(np.array([t_hi]))[0])
         if logP_hi > log_target:
