@@ -712,3 +712,59 @@ def test_bic_perfect_fit_is_finite_and_penalises_complexity() -> None:
     # Complexity penalty intact: the 5-param perfect fit must cost MORE than
     # the 3-param perfect fit, so the simpler model wins on a tie.
     assert bic_5 > bic_3
+
+
+def test_an_eta_far_beyond_the_data_is_refused() -> None:
+    """Owner: "vacuum ETA does not work ... predictions did not align".
+
+    Replaying this stand's 31.08 pump-down, a six-hour window holding two days
+    of history produced "0.01 mbar by 14.09" -- twelve days out, from a fit
+    whose asymptote had rested on the optimiser's lower bound while the same
+    code reported the ultimate pressure as unidentified. An answer that reaches
+    that far past the data is not a forecast; it is the fitted curve continued
+    into a region nothing observed.
+    """
+    pred = VacuumTrendPredictor(
+        config={
+            "window_s": 600.0,
+            "extrapolation_horizon_factor": 2.0,
+            "min_points": 10,
+            "min_points_combined": 300,
+            # Far below where this decaying curve is going, so any answer must
+            # come from deep extrapolation.
+            "targets_mbar": [1e-12],
+        }
+    )
+    for index in range(60):
+        t = 10.0 + index * 10.0
+        pred.push(t, 10.0 ** (-2.0 + 1.0 * max(t, 1.0) ** (-0.2)))
+    pred.update()
+    p = pred.get_prediction()
+    assert p is not None
+    assert p.eta_targets.get("1e-12") is None, (
+        "an ETA beyond the extrapolation horizon must be refused, not reported"
+    )
+
+
+def test_the_eta_limit_matches_the_plotted_extrapolation() -> None:
+    """The text and the curve must stop in the same place."""
+    pred = VacuumTrendPredictor(config={"window_s": 3600.0, "extrapolation_horizon_factor": 2.0})
+    assert pred._eta_extrapolation_limit_s() == 7200.0
+
+
+def test_an_already_reached_target_is_reported_as_reached() -> None:
+    """Not as unreachable, and not as a future date.
+
+    Whether a target is already met is an observation about where the pressure
+    IS, so it is answered before anything about the asymptote or the horizon.
+    """
+    pred = VacuumTrendPredictor(
+        config={"window_s": 600.0, "min_points": 10, "min_points_combined": 300, "targets_mbar": [1.0]}
+    )
+    for index in range(60):
+        t = 10.0 + index * 10.0
+        pred.push(t, 10.0 ** (-3.0 + 1.0 * max(t, 1.0) ** (-0.2)))
+    pred.update()
+    p = pred.get_prediction()
+    assert p is not None
+    assert p.eta_targets.get("1.0") == 0.0

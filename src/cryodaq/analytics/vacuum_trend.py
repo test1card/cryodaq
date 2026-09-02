@@ -367,9 +367,6 @@ class VacuumTrendPredictor:
 
         best = self._select_best(fits)
 
-        # ETA computation
-        eta_targets = self._compute_eta(best, t_arr[-1])
-
         # Trend classification
         residuals = logP_arr - best.predict(t_arr)
         trend = self._classify_trend(t_arr, logP_arr, residuals)
@@ -404,6 +401,7 @@ class VacuumTrendPredictor:
         # this stand the Pirani stops at 1e-4 mbar, and reporting a fitted
         # 3e-12 mbar "предел откачки" to an operator is a confident-looking
         # number about a pressure nothing here can see.
+        log_p_ult_for_eta = log_p_ult
         if math.isfinite(log_p_ult) and log_p_ult < _LOG_P_ULT_UNMEASURABLE:
             logger.debug(
                 "Vacuum fit %s: fitted floor %.3g mbar is below the measurable range; "
@@ -422,6 +420,20 @@ class VacuumTrendPredictor:
             p_ult = float("nan")
         else:
             p_ult = 10.0**log_p_ult
+
+        # ETAs come AFTER the asymptote has been judged, and are computed from
+        # the judged value. They used to be computed twelve lines earlier, from
+        # the raw fitted parameter -- so the two checks above would reject a
+        # floor as "not a prediction but the floor of the search space" and
+        # report the ultimate pressure as unidentified, while the ETAs derived
+        # from that same rejected floor were published anyway.
+        #
+        # Replaying this stand's 31.08 pump-down showed the result: at 24 h the
+        # panel reported an unidentified base pressure beside "0.01 mbar by
+        # 14.09" -- a date extrapolated to an asymptote the code had just
+        # declared unmeasurable. An ETA is a statement about reaching a floor;
+        # it cannot outlive the floor it rests on.
+        eta_targets = self._compute_eta(best, t_arr[-1], log_p_ult=log_p_ult_for_eta)
 
         self._prediction = VacuumPrediction(
             model_type=best.model_type,
@@ -656,18 +668,21 @@ class VacuumTrendPredictor:
         self,
         fit: FitResult,
         t_current: float,
+        *,
+        log_p_ult: float | None = None,
     ) -> dict[str, float | None]:
         """Compute ETA to each target pressure.
 
         Returns dict with target as string key → ETA in seconds from now,
         or None if unreachable, or 0.0 if already reached.
+
+        ``log_p_ult`` is the asymptote AFTER the caller has judged it. Passing
+        the raw fitted parameter instead lets an ETA rest on a floor the caller
+        has already rejected as unmeasurable.
         """
         result: dict[str, float | None] = {}
-        log_p_ult = fit.params.get("log_p_ult", float("nan"))
-        if not math.isfinite(log_p_ult):
-            for target in self.targets:
-                result[str(target)] = None
-            return result
+        if log_p_ult is None:
+            log_p_ult = fit.params.get("log_p_ult", float("nan"))
 
         # Current predicted pressure
         logP_now = float(fit.predict(np.array([t_current]))[0])
@@ -676,9 +691,19 @@ class VacuumTrendPredictor:
             log_target = math.log10(target)
             key = str(target)
 
-            # Already reached?
+            # Already reached. This is an OBSERVATION about where the pressure
+            # is now, not an extrapolation, so it is answered before anything
+            # about the asymptote. Putting it after the unidentified-floor
+            # guard made the panel report a pressure the chamber had been
+            # holding for ten hours as "unreachable".
             if logP_now <= log_target:
                 result[key] = 0.0
+                continue
+
+            # Everything below extrapolates toward the floor, so an
+            # unidentified floor means no answer rather than a wrong one.
+            if not math.isfinite(log_p_ult):
+                result[key] = None
                 continue
 
             # Unreachable: ultimate pressure > target
@@ -688,9 +713,29 @@ class VacuumTrendPredictor:
 
             # Binary search for ETA
             eta = self._binary_search_eta(fit, t_current, log_target)
+            if eta is not None and eta > self._eta_extrapolation_limit_s():
+                # An answer that reaches far past the data is not a forecast,
+                # it is the fitted curve continued into a region nothing
+                # observed. Replaying this stand's 31.08 pump-down, a window
+                # holding two days of data produced "0.01 mbar by 14.09" --
+                # twelve days out, from a fit whose asymptote had rested on the
+                # optimiser's bound. The horizon_forecast field still answers
+                # "where will the pressure be", which stays defined when "when
+                # do we reach X" does not.
+                result[key] = None
+                continue
             result[key] = eta
 
         return result
+
+    def _eta_extrapolation_limit_s(self) -> float:
+        """How far past the data an ETA may reach and still be a forecast.
+
+        The same bound the plotted extrapolation already uses, so the number in
+        the ETA and the curve on the screen stop at the same place instead of
+        the text claiming a date the graph does not draw.
+        """
+        return float(self.window_s) * float(self.extrapolation_factor)
 
     def _binary_search_eta(
         self,
