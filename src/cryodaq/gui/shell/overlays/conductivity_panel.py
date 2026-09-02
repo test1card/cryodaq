@@ -867,6 +867,34 @@ class ConductivityPanel(QWidget):
         _style_input(self._min_wait_spin)
         grid.addWidget(self._min_wait_spin, 2, 3)
 
+        # Compliance limits live HERE, not only in the Keithley panel. The
+        # sweep starts the source itself, so it must state the limits it
+        # starts under; borrowing them from another tab would put the operator
+        # back in the split-control situation this panel exists to avoid.
+        # Same ranges and defaults as the Keithley panel, so a start from
+        # either place means the same thing.
+        grid.addWidget(self._caption("V-предел:"), 3, 0)
+        self._v_comp_spin = QDoubleSpinBox()
+        self._v_comp_spin.setRange(0.0, 200.0)
+        self._v_comp_spin.setValue(40.0)
+        self._v_comp_spin.setDecimals(2)
+        self._v_comp_spin.setSingleStep(1.0)
+        self._v_comp_spin.setSuffix(" В")
+        self._v_comp_spin.setToolTip("Предел напряжения источника на время автоизмерения.")
+        _style_input(self._v_comp_spin)
+        grid.addWidget(self._v_comp_spin, 3, 1)
+
+        grid.addWidget(self._caption("I-предел:"), 3, 2)
+        self._i_comp_spin = QDoubleSpinBox()
+        self._i_comp_spin.setRange(0.0, 3.0)
+        self._i_comp_spin.setValue(1.0)
+        self._i_comp_spin.setDecimals(3)
+        self._i_comp_spin.setSingleStep(0.1)
+        self._i_comp_spin.setSuffix(" А")
+        self._i_comp_spin.setToolTip("Предел тока источника на время автоизмерения.")
+        _style_input(self._i_comp_spin)
+        grid.addWidget(self._i_comp_spin, 3, 3)
+
         layout.addLayout(grid)
 
         action_row = QHBoxLayout()
@@ -2147,11 +2175,21 @@ class ConductivityPanel(QWidget):
         self._auto_step_power_channel = power_channel
         self._auto_step_temperature_channels = temperature_channels
         self._auto_power_target_dispatched = True
+        # The first step STARTS the source. It used to send keithley_set_target,
+        # which the SafetyManager refuses for a channel that is not running
+        # ("Channel smub not active"), so a sweep begun from an idle source died
+        # on its first command and the operator had to go to the Keithley tab,
+        # start the channel by hand, and come back. Splitting one action across
+        # two tabs is how an operator ends up energizing a source they did not
+        # mean to. Later steps stay keithley_set_target -- the source is running
+        # by then, and re-starting it is what would be wrong.
         if not self._send_auto_cmd(
             {
-                "cmd": "keithley_set_target",
+                "cmd": "keithley_start",
                 "channel": self._smu_channel_for(power_channel),
                 "p_target": self._auto_power_list[0],
+                "v_comp": float(self._v_comp_spin.value()),
+                "i_comp": float(self._i_comp_spin.value()),
             },
             evidence_power_channel=power_channel,
             evidence_temperature_channels=temperature_channels,
@@ -2696,6 +2734,34 @@ class ConductivityPanel(QWidget):
                 if isinstance(result, dict)
                 else "некорректный ответ Engine"
             )
+            # The operator may have started this channel by hand before pressing
+            # Старт. The SafetyManager then refuses the start as "already
+            # active" -- which is not a failure of the sweep: the source is at a
+            # known power under a live run, exactly the state the start was
+            # asking for. Set the first target instead of latching. Only this
+            # one refusal is recovered, and only for the first step, so a start
+            # that failed for any other reason still stops the sweep.
+            if (
+                command.get("cmd") == "keithley_start"
+                and isinstance(result, dict)
+                and "already active" in str(result.get("error", ""))
+                and evidence_power_channel is not None
+                and evidence_temperature_channels is not None
+            ):
+                logger.info(
+                    "Автоизмерение: канал уже запущен оператором, устанавливается первая мощность вместо запуска"
+                )
+                if self._send_auto_cmd(
+                    {
+                        "cmd": "keithley_set_target",
+                        "channel": command.get("channel"),
+                        "p_target": command.get("p_target"),
+                    },
+                    evidence_power_channel=evidence_power_channel,
+                    evidence_temperature_channels=evidence_temperature_channels,
+                ):
+                    return
+                error = f"{error}; переход на установку мощности не отправлен"
             logger.warning("Авто-команда Keithley не подтверждена: %s", error)
             self._auto_pending_stop_intent = None
             self._latch_auto_outcome_unknown(f"Engine не подтвердил {command.get('cmd', 'команду')}: {error[:120]}")
@@ -2719,7 +2785,9 @@ class ConductivityPanel(QWidget):
                 self._commit_auto_stop()
             return
 
-        if command.get("cmd") == "keithley_set_target":
+        if command.get("cmd") in ("keithley_set_target", "keithley_start"):
+            # A start and a target both put the source at a new power, so both
+            # open an evidence epoch for the step that follows.
             if evidence_power_channel is None or evidence_temperature_channels is None:
                 self._latch_auto_outcome_unknown("В ответе команды нет идентичности измерительного шага.")
                 return

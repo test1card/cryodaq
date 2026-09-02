@@ -906,8 +906,10 @@ def test_auto_start_generates_power_list(app, monkeypatch):
 
     assert panel._auto_state == "stabilizing"
     assert panel._auto_power_list == [0.001, 0.006, 0.011, 0.016, 0.021]
-    # First keithley_set_target sent with start power.
-    assert started == [{"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.001}]
+    # The sweep STARTS the source at its first power, under its own limits.
+    assert started == [
+        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.001, "v_comp": 40.0, "i_comp": 1.0}
+    ]
     # Auto timer must be running after start.
     assert panel._auto_timer.isActive(), "Auto-sweep timer must be active after Start"
     # Signal emitted.
@@ -1732,7 +1734,9 @@ def test_real_fsync_failure_keeps_point_unaccepted_and_stops_before_failed_attac
     panel.set_connected(True)
 
     panel._on_auto_start()
-    assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.instances)
+    # The sweep opens by STARTING the source at its first power; the rest of
+    # this test is about what happens when the run file's fsync then fails.
+    assert _DeferredWorker.instances[-1].cmd["cmd"] == "keithley_start"
     _DeferredWorker.instances[-1].finish({"ok": True})
     _handle_descriptor_reading(panel, _temp_reading("Т1", 110.0))
     _handle_descriptor_reading(panel, _temp_reading("Т2", 100.0))
@@ -1849,7 +1853,7 @@ def test_auto_start_waits_for_current_generation_descriptors_and_resumes(app, mo
         app.processEvents()
 
     target = _DeferredWorker.instances[-1]
-    assert target.cmd["cmd"] == "keithley_set_target"
+    assert target.cmd["cmd"] == "keithley_start"
     assert panel.get_auto_state() == "stabilizing"
     assert panel.is_auto_sweep_active() is True
     assert panel._auto_bound_power_channel == "Keithley_1/smua/power"
@@ -2403,22 +2407,33 @@ def _start_bound_autosweep(monkeypatch) -> tuple[ConductivityPanel, _DeferredWor
     panel.set_connected(True)
     panel._on_auto_start()
     target_worker = _DeferredWorker.instances[-1]
-    assert target_worker.cmd["cmd"] == "keithley_set_target"
+    assert target_worker.cmd["cmd"] == "keithley_start"
     return panel, target_worker
 
 
-def test_running_attachment_and_binding_precede_first_target_without_source_start(app, monkeypatch) -> None:
+def test_running_attachment_and_binding_precede_the_source_start(app, monkeypatch) -> None:
+    """The run is durably bound BEFORE the source is energized.
+
+    This test used to assert the panel never sent keithley_start at all: the
+    sweep required the operator to start the channel from the Keithley tab.
+    That split one action across two tabs, and the operator overruled it --
+    "you cant stplit control on 2 tabs". The sweep now starts the source
+    itself, so what matters here is the ORDER: both attachments land, and the
+    run file is bound, before anything is energized.
+    """
     panel, _target_worker = _start_bound_autosweep(monkeypatch)
 
     commands = [worker.cmd for worker in _DeferredWorker.all_instances]
     assert [command["cmd"] for command in commands] == [
         "experiment_attach_run_record",
         "experiment_attach_run_record",
-        "keithley_set_target",
+        "keithley_start",
     ]
     assert commands[0]["result_summary"]["reservation_state"] == "reserved"
     assert commands[1]["result_summary"]["reservation_state"] == "artifact_ready"
-    assert all(command["cmd"] != "keithley_start" for command in commands)
+    # The start is last, and it carries the limits it starts under.
+    assert commands[-1]["v_comp"] == 40.0
+    assert commands[-1]["i_comp"] == 1.0
     assert panel._auto_run_path is not None
     snapshot = read_conductivity_run(panel._auto_run_path)
     assert snapshot.binding_recorded is True
@@ -2565,7 +2580,7 @@ def test_finalize_that_wins_before_reservation_continues_with_durable_unbound_sw
     assert snapshot.binding_recorded is True
     assert snapshot.bound_experiment_id is None
     assert len(pending_workers) == 2
-    assert pending_workers[-1].cmd["cmd"] == "keithley_set_target"
+    assert pending_workers[-1].cmd["cmd"] == "keithley_start"
     assert "автономным файлом данных" in panel._banner_label.text()
     panel._auto_timer.stop()
 
@@ -2592,7 +2607,10 @@ def test_outcome_unknown_blocks_binding_completion_after_quick_reconnect(app, mo
 
     assert panel.get_auto_state() == "stabilizing"
     assert panel._auto_outcome_unknown is True
-    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    assert all(
+        worker.cmd.get("cmd") not in ("keithley_set_target", "keithley_start")
+        for worker in _DeferredWorker.all_instances
+    )
 
 
 def test_start_freezes_one_channel_selection_through_prearm_work(app, monkeypatch) -> None:
@@ -2614,7 +2632,13 @@ def test_start_freezes_one_channel_selection_through_prearm_work(app, monkeypatc
     binding_worker.finish()
 
     target = _DeferredWorker.instances[-1]
-    assert target.cmd == {"cmd": "keithley_set_target", "channel": "smua", "p_target": first_power}
+    assert target.cmd == {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": first_power,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
     assert panel._auto_run_writer is not None
     assert panel._auto_run_writer.parameters["temperature_channels"] == ["Т1", "Т2"]
     assert panel._auto_run_writer.parameters["power_channel"] == "Keithley_1/smua/power"
@@ -3043,7 +3067,10 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
         "keithley_stop",
         "experiment_attach_run_record",
     ]
-    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    assert all(
+        worker.cmd.get("cmd") not in ("keithley_set_target", "keithley_start")
+        for worker in _DeferredWorker.all_instances
+    )
 
 
 def test_reconnect_retires_stale_running_attachment_before_fresh_stop(app, monkeypatch) -> None:
@@ -3093,7 +3120,10 @@ def test_reconnect_retires_stale_running_attachment_before_fresh_stop(app, monke
     assert panel.get_auto_state() == "idle"
     assert panel._auto_pending_stop_intent is None
     assert panel._auto_outcome_unknown is False
-    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    assert all(
+        worker.cmd.get("cmd") not in ("keithley_set_target", "keithley_start")
+        for worker in _DeferredWorker.all_instances
+    )
 
 
 def test_stop_reconciles_superseded_running_attachment_before_terminal(app, monkeypatch) -> None:
@@ -3262,7 +3292,10 @@ def test_failed_running_attachment_never_changes_source_target(app, monkeypatch)
     assert attachment.cmd["cmd"] == "experiment_attach_run_record"
     attachment.finish({"ok": False, "error": "attachment failed"})
 
-    assert all(worker.cmd["cmd"] != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    assert all(
+        worker.cmd["cmd"] not in ("keithley_set_target", "keithley_start")
+        for worker in _DeferredWorker.all_instances
+    )
     assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.all_instances)
     assert panel._auto_outcome_unknown is True
     assert panel._auto_run_path is not None
@@ -3323,7 +3356,7 @@ def test_point_effect_order_is_row_checkpoint_ui_accept_then_next_target(app, mo
     original_send = panel._send_auto_cmd
 
     def _traced_send(command, **kwargs):
-        if command.get("cmd") == "keithley_set_target":
+        if command.get("cmd") in ("keithley_set_target", "keithley_start"):
             events.append(f"next_target_at_step_{panel._auto_step}")
         return original_send(command, **kwargs)
 
@@ -3399,7 +3432,7 @@ def test_run_started_without_experiment_persists_unbound_before_first_target(app
     assert snapshot.bound_experiment_id is None
     assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == [
         "experiment_attach_run_record",
-        "keithley_set_target",
+        "keithley_start",
     ]
     assert _DeferredWorker.instances[-1].cmd["p_target"] == panel._generate_power_list()[0]
     assert panel._banner_label.text() == (
