@@ -543,21 +543,6 @@ _COMMON_FIELDS: Final[dict[str, ConfigField]] = {
     "poll_interval_s": ConfigField(ValueKind.NUMBER, default=1.0, minimum=0.01, maximum=86_400.0),
     "connect_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
     "read_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
-    # Operator declaration: this instrument is physically unplugged from mains.
-    #
-    # A source that is de-energized can never report a verified OFF, and
-    # without a way to say so the shutdown holds forever -- 2,224 HOLD lines on
-    # 2026-09-01, and the only escape was SIGKILL. This declares a physical
-    # fact the software cannot observe; it never claims instrument evidence,
-    # and energising stays refused by require_keithley_for_run.
-    #
-    # Accepted on EVERY instrument type rather than the source alone: the
-    # registry validates entries strictly, so a key it does not know makes the
-    # whole profile unloadable and the engine refuses to start. That is how
-    # this was caught -- by the engine failing to construct, not by the feature
-    # failing to work.
-    "physically_disconnected": ConfigField(ValueKind.BOOLEAN, default=False, setup_visible=False),
-    "physically_disconnected_note": ConfigField(ValueKind.STRING, default=None, setup_visible=False),
 }
 
 _ASC_REFERENCE_IDENTIFIER: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")

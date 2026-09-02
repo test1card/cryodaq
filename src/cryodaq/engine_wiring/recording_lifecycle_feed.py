@@ -50,6 +50,8 @@ class RecordingLifecycleFeed:
         "__pid",
         "__persistence_acquisition_epoch",
         "__persistence_active",
+        "__persistence_recoverable",
+        "__persistence_recovery_floor",
         "__persistence_authority",
         "__persistence_epoch",
         "__persistence_freshness_s",
@@ -106,6 +108,18 @@ class RecordingLifecycleFeed:
         # owner refuses to reuse an epoch id it has already seen -- so the two
         # cannot remain one field.
         self.__persistence_acquisition_epoch: str | None = None
+        # Recovery is not a general re-open. Two conditions gate it:
+        #
+        # `__persistence_recoverable` -- only an AMBIGUOUS close may be
+        # resumed. A normal STOPPED close was intended, and resuming it would
+        # invent a segment nobody asked for.
+        #
+        # `__persistence_recovery_floor` -- the revision that must be exceeded.
+        # Without it the very receipt that CAUSED the close could be replayed
+        # to open the recovery segment, which proves nothing: it is the failed
+        # commit, not a new one landing after the interruption.
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
         self.__persistence_active = False
         self.__persistence_latched = False
         self.__persistence_last_commit_at: float | None = None
@@ -173,6 +187,8 @@ class RecordingLifecycleFeed:
             raise
         self.__persistence_epoch = epoch_id
         self.__persistence_acquisition_epoch = epoch_id
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
         self.__persistence_active = True
         self.__persistence_latched = False
         self.__persistence_last_commit_at = None
@@ -212,9 +228,12 @@ class RecordingLifecycleFeed:
             # relatching LOSSLESS under a different persistence epoch ends the
             # recording session and mints a new one -- so the discontinuity is
             # permanent in the identities the operator sees.
-            self.__open_recovery_segment(authority, owner)
+            self.__open_recovery_segment(authority, owner, source_revision)
         if self.__owner.snapshot().acquisition_epoch_id != self.__persistence_acquisition_epoch:
             self.__terminalize_persistence(PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS)
+            # This receipt is the one that failed. Replaying it must not be
+            # mistaken for a new commit landing after the interruption.
+            self.__persistence_recovery_floor = max(self.__persistence_recovery_floor, source_revision)
             raise ValueError("acquisition epoch does not match direct persistence epoch")
         self.__persistence_outcome_revision += 1
         owner.feed(
@@ -243,6 +262,7 @@ class RecordingLifecycleFeed:
         self,
         authority: PersistenceOutcomeAuthority,
         owner: PersistenceAuthorityOwner,
+        source_revision: int,
     ) -> None:
         """Begin a NEW persistence segment that names itself a recovery.
 
@@ -254,6 +274,10 @@ class RecordingLifecycleFeed:
         life of the process.
         """
 
+        if not self.__persistence_recoverable:
+            raise ValueError("direct persistence recovery requires an ambiguous interruption")
+        if source_revision <= self.__persistence_recovery_floor:
+            raise ValueError("direct persistence recovery requires a commit after the interruption")
         acquisition_epoch = self.__owner.snapshot().acquisition_epoch_id
         if acquisition_epoch is None:
             raise ValueError("direct persistence recovery requires a running acquisition epoch")
@@ -268,6 +292,8 @@ class RecordingLifecycleFeed:
         )
         self.__persistence_epoch = segment_epoch
         self.__persistence_acquisition_epoch = acquisition_epoch
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
         self.__persistence_active = True
         self.__persistence_latched = False
         self.__persistence_last_commit_at = None
@@ -309,6 +335,8 @@ class RecordingLifecycleFeed:
         self,
         lifecycle: PersistenceOwnerLifecycle,
     ) -> PersistenceAuthoritySnapshot:
+        # Only an ambiguous close leaves the door open. STOPPED was deliberate.
+        self.__persistence_recoverable = lifecycle is PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS
         authority, owner, _writer = self.__require_persistence()
         epoch = self.__persistence_epoch
         if self.__persistence_active and epoch is not None:

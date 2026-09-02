@@ -937,7 +937,9 @@ class DashboardView(QScrollArea):
             "log_scope": "all",
             "experiment_id": None,
         }
-        worker = ZmqCommandWorker({"cmd": "log_get", "limit": 2, "log_scope": "all"}, parent=self)
+        worker = ZmqCommandWorker(
+            {"cmd": "log_get", "limit": 2, "log_scope": "all"}, parent=self, release_on_settle=True
+        )
         worker.finished.connect(
             lambda result, expected=context, completed_worker=worker: self._on_log_entries_received(
                 result, expected, completed_worker

@@ -1162,7 +1162,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             return
         self._v2_poll_in_flight = True
         generation = self._connection_generation
-        worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
+        worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self, release_on_settle=True)
         self._register_worker(
             worker,
             lambda result, generation=generation: self._on_poll_v2_result(
@@ -1190,7 +1190,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             return
         self._cooldown_poll_in_flight = True
         generation = self._connection_generation
-        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self)
+        worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self, release_on_settle=True)
         self._register_worker(
             worker,
             lambda result, generation=generation: self._on_cooldown_status(

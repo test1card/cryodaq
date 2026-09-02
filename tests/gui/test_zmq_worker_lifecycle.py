@@ -81,8 +81,8 @@ class _Worker(ZmqCommandWorker):
         self._result_ready.emit(self._epoch_for_test, {"ok": True, "probe": True})
 
 
-def _spawn(parent: QObject, epoch: int) -> _Worker:
-    worker = _Worker({"cmd": "experiment_status"}, parent=parent)
+def _spawn(parent: QObject, epoch: int, *, release: bool = True) -> _Worker:
+    worker = _Worker({"cmd": "experiment_status"}, parent=parent, release_on_settle=release)
     worker._epoch_for_test = epoch
     return worker
 
@@ -179,7 +179,9 @@ def test_a_queued_receiver_still_receives(qapp, session_epoch):
 def test_closing_the_window_destroys_workers_that_never_settled(qapp, session_epoch):
     """The property the naive setParent(None) fix broke."""
     window = QWidget()
-    unsettled = [_Worker({"cmd": "experiment_status"}, parent=window) for _ in range(3)]
+    unsettled = [
+        _Worker({"cmd": "experiment_status"}, parent=window, release_on_settle=True) for _ in range(3)
+    ]
     for worker in unsettled:
         worker._epoch_for_test = session_epoch
 
@@ -192,3 +194,40 @@ def test_closing_the_window_destroys_workers_that_never_settled(qapp, session_ep
     assert not any(isValid(worker) for worker in unsettled), (
         "closing the window left real QThread objects alive"
     )
+
+
+# ---------------------------------------------------------------------------
+# Destruction is per instance, and off unless the owner was audited
+# ---------------------------------------------------------------------------
+
+
+def test_a_worker_that_did_not_opt_in_is_never_destroyed(qapp, session_epoch):
+    """Overlay panels keep lists of workers and filter them with isRunning().
+
+    `_base_panel` documents `self._workers = [w for w in self._workers if
+    w.isRunning()]` as the line "every panel repeats", and calibration_panel
+    alone has six. Those owners were NOT audited, so their workers must survive
+    settling -- a class-wide opt-in would make every one of them raise
+    "Internal C++ object already deleted".
+    """
+    parent = QWidget()
+    worker = _spawn(parent, session_epoch, release=False)
+    start_gui_worker_with_ownership(worker, session_epoch)
+    _pump()
+
+    assert isValid(worker), "a worker whose owner was not audited must not be destroyed"
+    assert worker.isRunning() is False, "the panels' own filter must keep working"
+    assert worker in parent.children()
+
+
+def test_opting_in_is_per_instance_not_per_class(qapp, session_epoch):
+    """Two workers of the same class, different lifetimes."""
+    parent = QWidget()
+    released = _spawn(parent, session_epoch, release=True)
+    retained = _spawn(parent, session_epoch, release=False)
+    for worker in (released, retained):
+        start_gui_worker_with_ownership(worker, session_epoch)
+    _pump()
+
+    assert not isValid(released)
+    assert isValid(retained)

@@ -171,10 +171,16 @@ async def test_genuine_commit_cannot_join_different_acquisition_and_persistence_
     assert feed.snapshot().persistence_epoch_id is None
     assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
 
-    # The mismatch closed the old segment; the same proven receipt then opens a
-    # recovery segment bound to the acquisition epoch that is ACTUALLY running.
-    # That is honest: the data committed, and the record says where it belongs.
-    feed.persistence_committed(receipt)
+    # Replaying the SAME receipt must not open a recovery segment: it is the
+    # commit that FAILED, not a new one landing after the interruption.
+    with pytest.raises(ValueError, match="commit after the interruption"):
+        feed.persistence_committed(receipt)
+    assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
+
+    # A genuinely later commit does resume, bound to the running acquisition.
+    later = await writer.write_committed([_reading(2.0)])
+    assert later is not None
+    feed.persistence_committed(later)
     resumed = feed.persistence_snapshot()
     assert resumed.storage is AvailabilityTruth.AVAILABLE
     assert (resumed.recording_epoch_id or "").startswith("new-acquisition-epoch:recovery-")
@@ -250,3 +256,21 @@ async def test_a_foreign_receipt_can_never_open_a_recovery_segment(tmp_path: Pat
     assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
     await writer.stop()
     await foreign.stop()
+
+
+async def test_a_deliberate_stop_is_not_recoverable(tmp_path: Path) -> None:
+    """A STOPPED close was intended; resuming it would invent a segment."""
+    writer = _writer(tmp_path)
+    feed = RecordingLifecycleFeed(writer)
+    await _ready(feed, "epoch-a")
+    first = await writer.write_committed([_reading(1.0)])
+    assert first is not None
+    feed.persistence_committed(first)
+
+    feed.persistence_stopped()
+    later = await writer.write_committed([_reading(2.0)])
+    assert later is not None
+    with pytest.raises(ValueError, match="ambiguous interruption"):
+        feed.persistence_committed(later)
+    assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
+    await writer.stop()

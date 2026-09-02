@@ -470,58 +470,6 @@ class _LauncherStatusAuthority:
     request_generation: int
 
 
-def _reviewed_source_declared_physically_disconnected() -> bool:
-    """Whether the stand declares its reviewed source unplugged from mains.
-
-    Read from the instruments profile at shutdown time rather than cached, so
-    it reflects the file as it stands when the stop is attempted. A missing
-    file, an unreadable file or an absent flag all mean "not declared" -- this
-    fails closed, because it substitutes for evidence the software cannot
-    obtain.
-
-    A non-empty note is required beside the flag. A declaration that cannot say
-    who made it or when is not an operator statement, it is a leftover.
-    """
-
-    from cryodaq.paths import get_config_dir  # noqa: PLC0415
-
-    config_dir = get_config_dir()
-    for name in ("instruments.local.yaml", "instruments.yaml"):
-        path = config_dir / name
-        if not path.exists():
-            continue
-        try:
-            import yaml  # noqa: PLC0415
-
-            document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - an unreadable profile declares nothing
-            logger.warning("Could not read %s while checking the source declaration", name)
-            return False
-        if type(document) is not dict:
-            return False
-        for entry in document.get("instruments") or ():
-            if type(entry) is not dict or entry.get("physically_disconnected") is not True:
-                continue
-            note = entry.get("physically_disconnected_note")
-            if type(note) is not str or not note.strip():
-                logger.critical(
-                    "Instrument '%s' declares physically_disconnected without a note; ignored",
-                    entry.get("name"),
-                )
-                return False
-            logger.critical(
-                "OPERATOR DECLARATION: '%s' is declared physically disconnected from mains (%s). "
-                "Shutdown proceeds without device-reported OFF. This is NOT instrument-verified "
-                "OFF; energising remains refused.",
-                entry.get("name"),
-                note.strip(),
-            )
-            return True
-        # instruments.local.yaml REPLACES instruments.yaml; do not fall through.
-        return False
-    return False
-
-
 def _decode_launcher_safety_status(
     payload: object,
     *,
@@ -3098,18 +3046,17 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_capability = engine_shutdown_capability
         self._engine_shutdown_request_id = None
         self._engine_shutdown_operator_asserted = False
-        # Read once per engine incarnation, not per shutdown attempt.
+        # One-shot, in memory, for a single shutdown attempt.
         #
-        # Scoped here on purpose: the declaration is a standing fact about the
-        # stand, its natural lifetime is the incarnation it will be used to
-        # stop, and reading the operator's real profile lazily at shutdown made
-        # every test that constructs a LauncherWindow depend on the machine's
-        # own config. A declaration edited mid-run takes effect at the next
-        # start, and a stale one is caught anyway: the engine ignores it when
-        # the device actually reports verified OFF.
-        self._reviewed_source_declared_disconnected = (
-            _reviewed_source_declared_physically_disconnected()
-        )
+        # Deliberately NOT read from configuration. A persistent profile flag
+        # survives reconnection and restart, and would release a shutdown in
+        # the one case that matters most: the source is CONNECTED but OFF
+        # cannot be verified because communication failed. "Unverified" and
+        # "unplugged" are then indistinguishable to the software, and only a
+        # human standing at the instrument can tell them apart. So the
+        # confirmation must be an explicit act, scoped to one source and one
+        # attempt, and it is consumed when it is used.
+        self._source_disconnect_confirmation: str | None = None
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_transport_identity_awaited = None
         self._engine_shutdown_receipt = None
@@ -4281,6 +4228,29 @@ class LauncherWindow(QMainWindow):
         with self._replay_ready_lock:
             self._replay_ready_state = {"receipt": None, "error": None}
 
+    def confirm_source_physically_disconnected(self, source_name: str) -> None:
+        """Record, for ONE shutdown attempt, that the operator unplugged the source.
+
+        This is the only way the assertion can be raised. It is never read from
+        configuration and never cached across attempts: a persistent flag would
+        survive the source being reconnected, and would then release a shutdown
+        precisely when OFF is unverifiable because communication failed rather
+        than because the instrument is de-energized.
+
+        Scoped to a named source so the record says what was confirmed, and
+        spent by the next shutdown attempt whether or not that attempt
+        succeeds.
+        """
+
+        if type(source_name) is not str or not source_name.strip():
+            raise ValueError("a physical-disconnect confirmation must name its source")
+        self._source_disconnect_confirmation = source_name.strip()
+        logger.critical(
+            "OPERATOR CONFIRMATION: '%s' declared physically disconnected from mains. "
+            "Valid for the next shutdown attempt only.",
+            source_name.strip(),
+        )
+
     def _stop_engine(self) -> None:
         """Остановить engine подпроцесс."""
         if getattr(self, "_replay_source", None) is not None:
@@ -4424,9 +4394,18 @@ class LauncherWindow(QMainWindow):
                     # evidence. The receipt still carries verified_off=False,
                     # and the engine refuses the declaration outright if the
                     # device is in fact answering.
-                    if getattr(self, "_reviewed_source_declared_disconnected", False) is True:
+                    confirmed_source = getattr(self, "_source_disconnect_confirmation", None)
+                    if type(confirmed_source) is str and confirmed_source:
                         shutdown_command["operator_physical_disconnect"] = True
                         self._engine_shutdown_operator_asserted = True
+                        # Consumed: one confirmation authorises one attempt.
+                        self._source_disconnect_confirmation = None
+                        logger.critical(
+                            "Shutdown proceeding on the operator's confirmation that '%s' is "
+                            "physically disconnected from mains. This is NOT instrument-verified "
+                            "OFF; the confirmation is now spent.",
+                            confirmed_source,
+                        )
                     worker = _EngineShutdownWorker(
                         shutdown_command,
                         self._bridge,

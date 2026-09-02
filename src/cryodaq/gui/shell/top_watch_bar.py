@@ -1126,7 +1126,9 @@ class TopWatchBar(QWidget):
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
-        self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+        self._experiment_worker = ZmqCommandWorker(
+            {"cmd": "experiment_status"}, parent=self, release_on_settle=True
+        )
         self._experiment_worker.finished.connect(
             lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
         )

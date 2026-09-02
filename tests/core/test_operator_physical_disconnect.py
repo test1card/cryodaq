@@ -23,6 +23,7 @@ but off_tier=command_only and verified_off=False, so the gate still refuses.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -206,73 +207,58 @@ def test_the_launcher_flag_dies_with_the_request_identity():
 
 
 # ---------------------------------------------------------------------------
-# The standing declaration: read from the profile, never inferred
+# The confirmation is explicit, one-shot, and never comes from configuration
 # ---------------------------------------------------------------------------
 
 
-def _profile(tmp_path, entry_extra: dict) -> None:
-    import yaml
+class _Recorder:
+    """Just enough LauncherWindow to exercise the confirmation slot."""
 
-    (tmp_path / "instruments.local.yaml").write_text(
-        yaml.safe_dump(
-            {"instruments": [{"type": "keithley_2604b", "name": "Keithley_1", **entry_extra}]},
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
+    def __init__(self) -> None:
+        self._source_disconnect_confirmation = None
 
 
-@pytest.fixture
-def profile_dir(tmp_path, monkeypatch):
-    import cryodaq.paths
+def test_a_confirmation_must_name_its_source():
+    from cryodaq.launcher import LauncherWindow
 
-    monkeypatch.setattr(cryodaq.paths, "get_config_dir", lambda: tmp_path)
-    return tmp_path
-
-
-def test_a_complete_declaration_is_honoured(profile_dir):
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
-
-    _profile(profile_dir, {
-        "physically_disconnected": True,
-        "physically_disconnected_note": "2026-08-31 unplugged by V.F.",
-    })
-    assert _reviewed_source_declared_physically_disconnected() is True
+    recorder = _Recorder()
+    for bad in ("", "   ", None, 7):
+        with pytest.raises(ValueError, match="name its source"):
+            LauncherWindow.confirm_source_physically_disconnected(recorder, bad)
+    assert recorder._source_disconnect_confirmation is None
 
 
-def test_a_declaration_without_a_note_is_ignored(profile_dir):
-    """A statement that cannot say who made it or when is a leftover."""
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+def test_a_confirmation_is_recorded_against_the_named_source():
+    from cryodaq.launcher import LauncherWindow
 
-    _profile(profile_dir, {"physically_disconnected": True})
-    assert _reviewed_source_declared_physically_disconnected() is False
-
-
-def test_an_empty_note_is_ignored(profile_dir):
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
-
-    _profile(profile_dir, {"physically_disconnected": True, "physically_disconnected_note": "   "})
-    assert _reviewed_source_declared_physically_disconnected() is False
+    recorder = _Recorder()
+    LauncherWindow.confirm_source_physically_disconnected(recorder, " Keithley_1 ")
+    assert recorder._source_disconnect_confirmation == "Keithley_1"
 
 
-def test_no_declaration_means_not_declared(profile_dir):
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+def test_configuration_can_never_raise_the_confirmation():
+    """A persistent flag would survive reconnection and release a shutdown on a
+    source that is CONNECTED but whose OFF cannot be verified because
+    communication failed. Only an explicit act may raise it.
+    """
+    import cryodaq.launcher as launcher_module
 
-    _profile(profile_dir, {})
-    assert _reviewed_source_declared_physically_disconnected() is False
+    assert not hasattr(launcher_module, "_reviewed_source_declared_physically_disconnected")
+    source = Path(launcher_module.__file__).read_text(encoding="utf-8")
+    raising = [
+        line
+        for line in source.splitlines()
+        if "_source_disconnect_confirmation =" in line and "None" not in line
+    ]
+    assert len(raising) == 1, f"the confirmation is raised in {len(raising)} places: {raising}"
+    assert "confirm_source_physically_disconnected" in source
 
 
-def test_a_missing_profile_fails_closed(profile_dir):
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
+def test_the_instruments_schema_carries_no_disconnect_declaration():
+    """Removed with the automatic path, so no profile can imply the authority."""
+    from cryodaq.drivers import registry
 
-    assert _reviewed_source_declared_physically_disconnected() is False
-
-
-def test_an_unreadable_profile_fails_closed(profile_dir):
-    from cryodaq.launcher import _reviewed_source_declared_physically_disconnected
-
-    (profile_dir / "instruments.local.yaml").write_text("{[not yaml", encoding="utf-8")
-    assert _reviewed_source_declared_physically_disconnected() is False
+    assert "physically_disconnected" not in Path(registry.__file__).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

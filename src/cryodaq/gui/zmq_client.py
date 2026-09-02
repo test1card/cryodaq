@@ -2481,20 +2481,27 @@ def settle_registered_gui_command_workers(*, timeout_ms: int = 1_500) -> bool:
 class ZmqCommandWorker(QThread):
     """Background thread for non-blocking ZMQ commands (unchanged API)."""
 
-    #: Destroy this worker once the registry sees it settled.
+    #: Class default: NEVER destroy. Opt in per instance, never per class.
     #:
-    #: Opt-in, because destruction is only safe when every caller that keeps a
-    #: wrapper asks `gui_worker_poll_in_flight()` rather than touching it. The
-    #: four repeating pollers built with `parent=self` are what leak -- about
-    #: 5,880 finished QThreads an hour -- and their call sites are guarded.
-    _release_destroys_worker = True
+    #: Destruction is safe only where the owner is known to clear the exact
+    #: completed worker and to touch a retained wrapper solely through
+    #: `gui_worker_poll_in_flight()`. That is true of the four repeating
+    #: pollers and demonstrably NOT true of the overlay panels: `_base_panel`
+    #: documents `self._workers = [w for w in self._workers if w.isRunning()]`
+    #: as the line "every panel repeats", and calibration_panel alone has six.
+    #: A class-wide opt-in would make every one of those raise
+    #: "Internal C++ object already deleted" the moment a worker settled.
+    _release_destroys_worker = False
 
     finished = Signal(dict)
     _result_ready = Signal(int, dict)
 
-    def __init__(self, cmd: dict, parent=None) -> None:
+    def __init__(self, cmd: dict, parent=None, *, release_on_settle: bool = False) -> None:
         super().__init__(parent)
         self._cmd = cmd
+        # Per-instance, audited at the call site. See the class comment.
+        if release_on_settle:
+            self._release_destroys_worker = True
         self._cancellation_requested = threading.Event()
         self._session_epoch: int | None = None
         self._result_ready.connect(
