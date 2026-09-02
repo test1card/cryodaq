@@ -93,7 +93,7 @@ _WINDOWS = sys.platform == "win32"
 _SRC_ROOT = Path(cryodaq.__file__).resolve().parents[1]
 _SIMULANT_PATH = Path(__file__).resolve().parent / "_fd2_engine_simulant.py"
 _PUMP_LOGGER_NAME = "cryodaq.launcher.engine_stderr"
-_PUMP_STDERR_RECORD_PREFIX = "engine child stderr record received"
+_PUMP_STDERR_RECORD_PREFIX = "engine child stderr; phase=runtime: "
 _MARKER_TIMEOUT_S = 30.0
 _EOF_BUDGET_S = 2.0
 _SETTLEMENT_TIMEOUT_S = 8.0

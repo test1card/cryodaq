@@ -1890,7 +1890,26 @@ def _pump_engine_stderr(
                 stderr_logger.error("engine stderr line exceeded the forwarding bound")
                 continue
             if raw_line.strip():
-                stderr_logger.error("engine child stderr record received; phase=runtime")
+                # Log what the child actually said. This used to record only
+                # that a line HAD arrived, which made a native crash
+                # undiagnosable: the engine died with SIGBUS six times on
+                # 2026-09-02 and PYTHONFAULTHANDLER's traceback -- written to
+                # exactly this stream -- reached the log as
+                # "engine child stderr record received; phase=runtime" and
+                # nothing else. A record that proves a message existed while
+                # withholding it is not evidence of anything.
+                #
+                # The content was withheld because engine stderr can carry a
+                # Telegram bot token in a traceback URL. That is handled where
+                # it should be: passing the text as an ARG runs it through the
+                # _TokenRedactFilter already installed on these handlers, which
+                # rewrites botNNN:xxx in record.args. Undecodable bytes are
+                # replaced rather than raising inside the pump, and the line is
+                # already bounded by _MAX_ENGINE_STDERR_LINE_BYTES above.
+                stderr_logger.error(
+                    "engine child stderr; phase=runtime: %s",
+                    raw_line.decode("utf-8", errors="replace").rstrip("\n"),
+                )
     except BaseException as exc:
         owner.pump_failure = exc
     finally:
