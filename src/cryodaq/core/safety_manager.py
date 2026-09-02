@@ -2418,6 +2418,31 @@ class SafetyManager:
                     and getattr(driver, "connected", None) is False
                     and getattr(driver, "unreachable_idle", None) is True
                 )
+                if not released and proof_error is None:
+                    # The driver demotes itself on a transport loss and KEEPS the
+                    # handle "only for OFF recovery" -- which, when the cable is
+                    # out, recovers nothing and blocks the reconnect that is the
+                    # only route back to the instrument. Give it the chance to
+                    # bury a handle whose device did not answer, then ask the
+                    # same question again. settle_unreachable refuses whenever
+                    # the device answered, so a reachable instrument that will
+                    # not go off keeps its handle and falls through to the latch.
+                    settle = getattr(driver, "settle_unreachable", None)
+                    if callable(settle):
+                        settle_task = asyncio.create_task(settle())
+                        settled, settle_error, settle_cancelled = await _settle_shielded_hardware_task(settle_task)
+                        cancelled = cancelled or settle_cancelled
+                        if settle_error is not None and not isinstance(settle_error, asyncio.CancelledError):
+                            logger.exception(
+                                "Burying the unreachable reviewed-source handle failed (%s)",
+                                context,
+                                exc_info=settle_error,
+                            )
+                        elif settled is True:
+                            released = (
+                                getattr(driver, "connected", None) is False
+                                and getattr(driver, "unreachable_idle", None) is True
+                            )
                 if released:
                     logger.critical(
                         "Reviewed source is unreachable and idle (%s); releasing the connect attempt "

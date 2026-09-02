@@ -412,6 +412,12 @@ class Keithley2604B(InstrumentDriver):
         self._teardown_incomplete = False
         self._teardown_can_settle = False
         self._recovery_transport_open = False
+        # True once an OFF readback over a RETAINED recovery handle raised
+        # instead of answering: nothing is on the far side. Cleared by any
+        # answered readback. This is what separates "the cable is out" from
+        # "the instrument is there and refusing to go off", and only the first
+        # of those may have its handle buried.
+        self._recovery_off_transport_dead = False
         self._connect_in_progress = False
         self._disconnect_in_progress = False
         self._ordinary_io_lock = asyncio.Lock()
@@ -1372,8 +1378,17 @@ class Keithley2604B(InstrumentDriver):
         for smu_channel in channels:
             try:
                 readback_confirmed = await self._verify_output_off(smu_channel)
+                # It ANSWERED. Whatever it said -- off, or still on -- there is
+                # a device on the end of this handle, so the handle is not
+                # buriable and a refusal to go off is a real hardware fault.
+                self._recovery_off_transport_dead = False
             except Exception as exc:
                 self._enter_recovery_after_transport_loss(f"{context} query")
+                # The readback raised rather than answering: nothing on the far
+                # side of this handle is talking. Distinguishing that from a
+                # device that ANSWERS (even to say "still on") is what decides
+                # whether the handle may be buried -- see settle_unreachable.
+                self._recovery_off_transport_dead = True
                 log.critical(
                     "%s: SAFETY: %s OFF readback failed on %s: %s",
                     self.name,
@@ -1755,6 +1770,74 @@ class Keithley2604B(InstrumentDriver):
         if not self.mock and not (self._connected or self._recovery_transport_open):
             return True
         return self._unsafe_output_state
+
+    async def settle_unreachable(self) -> bool:
+        """Bury a recovery handle whose device is physically gone.
+
+        ``_enter_recovery_after_transport_loss`` deliberately keeps the handle
+        "only for OFF recovery and close". When the device was unplugged that
+        handle can recover nothing: it is bound to the pre-replug USB
+        enumeration, so re-plugging the instrument is invisible to it, every
+        OFF attempt writes into a corpse, and because the handle is still held
+        the source never becomes ``unreachable_idle`` -- so the scheduler never
+        retries and the operator must relaunch. Observed on lab53 2026-09-02:
+
+            14:24:32  query lost transport authority; retaining the existing
+                      handle only for OFF recovery and close
+
+        and the Keithley never came back while the other four instruments did.
+
+        Refuses unless the device demonstrably did NOT answer. A device that
+        answers -- even to say its output is still ON -- is reachable, and a
+        reachable instrument that will not go off is a real hardware fault that
+        must keep its handle and its latch.
+
+        Mints no evidence: ``_unsafe_output_state`` stays true and the OFF
+        evidence stays revoked, so this buys the right to TRY again and nothing
+        else. Returns True when the handle is settled and the driver is now
+        idle; on a close failure the teardown is recorded incomplete exactly as
+        a failed connect does.
+        """
+        if self.mock:
+            return False
+        if not self._recovery_transport_open or self._connected:
+            return False
+        if self._connect_in_progress or self._disconnect_in_progress or self._teardown_incomplete:
+            return False
+        if any(token is not None for token in self._source_start_token.values()) or any(
+            depth != 0 for depth in self._source_off_depth.values()
+        ):
+            return False
+        if not self._recovery_off_transport_dead:
+            return False
+
+        log.critical(
+            "%s: SAFETY: the recovery handle's device did not answer; closing it so a "
+            "reconnect can be attempted. Output state remains UNKNOWN.",
+            self.name,
+        )
+        try:
+            await self._transport.close()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            settlement_error: BaseException = exc
+            if isinstance(exc, asyncio.CancelledError) and isinstance(exc.__cause__, USBTMCIncompleteCloseError):
+                settlement_error = exc.__cause__
+            self._teardown_incomplete = True
+            self._teardown_can_settle = (
+                isinstance(settlement_error, USBTMCIncompleteCloseError) and not settlement_error.settled
+            )
+            log.critical("%s: burying the unreachable handle failed: %s", self.name, settlement_error)
+            return False
+
+        self._recovery_transport_open = False
+        self._recovery_off_transport_dead = False
+        self._instrument_id = ""
+        # The output state is not made known by closing a handle.
+        self._unsafe_output_state = True
+        self._revoke_off_evidence()
+        return True
 
     @property
     def unreachable_idle(self) -> bool:
