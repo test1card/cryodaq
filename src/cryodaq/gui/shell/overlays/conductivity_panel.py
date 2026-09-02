@@ -405,6 +405,17 @@ class ConductivityPanel(QWidget):
         self._auto_step_temperature_values: dict[str, float] = {}
         self._auto_step_temperature_received_at: dict[str, float] = {}
         self._auto_step_power_value: float | None = None
+        # Points recorded with a non-physical temperature difference.
+        #
+        # G = P/dT is a conductance only when the chain's first channel is
+        # genuinely hotter than its last. If dT is zero or negative under
+        # power, either the chain is ordered the wrong way round or the heater
+        # is not where the chain assumes -- and G then comes out negative or
+        # enormous while still looking like a number. The point is still
+        # recorded (data is never dropped), but the operator is told, and the
+        # count stays on screen for the rest of the sweep rather than flashing
+        # past in a single status update.
+        self._auto_nonphysical_points = 0
         self._auto_step_power_received_at: float | None = None
 
         # F81 finding: per-channel observed acquisition cadence (monotonic gap
@@ -3027,7 +3038,9 @@ class ConductivityPanel(QWidget):
         settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
         power_text = format_display_value(P, quantity=ChannelQuantity.POWER)
         self._auto_status_label.setText(
-            f"Шаг {step_idx + 1}/{step_total} — P = {power_text} Вт — {elapsed:.0f} с — стабил.: {settled_str}"
+            f"Шаг {step_idx + 1}/{step_total} — P = {power_text} Вт — {elapsed:.0f} с — "
+            f"стабил.: {settled_str}"
+            + (f"   ⚠ точек с dT ≤ 0: {self._auto_nonphysical_points}" if self._auto_nonphysical_points else "")
         )
 
         if is_stable:
@@ -3046,6 +3059,20 @@ class ConductivityPanel(QWidget):
         dT = T_hot - T_cold
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
+        if math.isfinite(dT) and math.isfinite(P) and P > 0.0 and dT <= 0.0:
+            self._auto_nonphysical_points += 1
+            logger.warning(
+                "Conductivity point with a non-physical temperature difference: dT = %.4f K "
+                "(hot %s = %.4f K, cold %s = %.4f K) at P = %.4f W. G = P/dT is not a "
+                "conductance here -- check the chain order and where the heater actually sits. "
+                "The point is kept, not discarded.",
+                dT,
+                hot_ch,
+                T_hot,
+                cold_ch,
+                T_cold,
+                P,
+            )
         settled_values = []
         for ch in temperature_channels:
             pred = self._predictor.get_prediction(ch)
