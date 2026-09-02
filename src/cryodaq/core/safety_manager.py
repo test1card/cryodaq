@@ -119,6 +119,29 @@ class _RunAuthorityRevocation:
     fault_required: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _AdmittedIntent:
+    """The last source command this engine ACCEPTED for one channel.
+
+    Intent, not observation: it says what was asked for and allowed, never what
+    the instrument is doing. The instrument's own state is tracked separately
+    and only ever established by readback.
+
+    ``admitted_monotonic_s`` exists so an intent can go stale. A setpoint
+    admitted long ago is not evidence that it is still intended now -- the same
+    reasoning as ``_expire_stale_off_evidence`` applies, for the same reason.
+    ``abort_generation`` ties the intent to the abort epoch it was admitted
+    under, so an abort that could not be delivered to the instrument still
+    invalidates it.
+    """
+
+    p_target: float
+    v_comp: float
+    i_comp: float
+    admitted_monotonic_s: float
+    abort_generation: int
+
+
 @dataclass
 class SafetyConfig:
     critical_channels: list[re.Pattern[str]] = field(default_factory=list)
@@ -239,6 +262,23 @@ class SafetyManager:
         # Presentation identity only; no recovery or output authority.
         self._fault_revision = 0
         self._recovery_reason = ""
+        # What this engine last ADMITTED as the source's intended state, per
+        # channel: the last command that passed policy validation, not what the
+        # instrument is believed to be doing.
+        #
+        # It exists because nothing durable held it. The driver's
+        # _channels[ch].p_target is the instrument-side mirror and connect()
+        # zeroes it (runtime.p_target = 0.0) before anything else, so the
+        # reconnect after a cable trip destroys the very value needed to resume;
+        # _active_sources is a bare set with no magnitude; and the sweep's plan
+        # lives in a GUI process that can close, which the engine must never
+        # command hardware from.
+        #
+        # Written only where a command is ACCEPTED, cleared by any stop --
+        # including one recorded while the instrument is unreachable, which is
+        # what makes "Stop while unplugged" mean "off the moment we can reach
+        # it" instead of being refused.
+        self._admitted_intent: dict[SmuChannel, _AdmittedIntent] = {}
         # Why the stand will not arm. _check_preconditions has always
         # returned a reason and every caller discarded it, so a refusal
         # to leave SAFE_OFF reached the operator as buttons that simply
@@ -1864,6 +1904,15 @@ class SafetyManager:
 
             expected_active_sources = frozenset(self._active_sources | {smu_channel})
             self._active_sources.add(smu_channel)
+            # The command passed every gate and reached the instrument, so this
+            # is now the intended state of that channel.
+            self._admitted_intent[smu_channel] = _AdmittedIntent(
+                p_target=p_target,
+                v_comp=v_comp,
+                i_comp=i_comp,
+                admitted_monotonic_s=time.monotonic(),
+                abort_generation=self._abort_generation,
+            )
             # Whatever proved the output OFF before this run says nothing about
             # its state after it.
             self._reviewed_source_off_proven = False
@@ -2294,7 +2343,9 @@ class SafetyManager:
 
     async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
         """Own stop intent and the complete lock-to-publication settlement."""
-        stop_abort_generation = self._register_abort_intent(full=channel is None)
+        stop_abort_generation = self._register_abort_intent(
+            full=channel is None, revoke=self._resolve_channels(channel)
+        )
         operation = asyncio.create_task(
             self._request_stop_owned(
                 channel=channel,
@@ -2393,7 +2444,7 @@ class SafetyManager:
         # one round-trip, tens of ms). It does NOT preempt a write already on
         # the wire. Later runs capture the settled generation, while any run
         # already in flight must observe the change and abort.
-        self._register_abort_intent(full=channel is None)
+        self._register_abort_intent(full=channel is None, revoke=self._resolve_channels(channel))
         operation = asyncio.create_task(
             self._emergency_off_with_lock(channel),
             name="safety_emergency_off",
@@ -2546,11 +2597,29 @@ class SafetyManager:
                 raise cancelled
             return True
 
-    def _register_abort_intent(self, *, full: bool) -> int:
-        """Register cancellation-proof abort scope for competing starts."""
+    def _register_abort_intent(self, *, full: bool, revoke: set[SmuChannel] | None = None) -> int:
+        """Register cancellation-proof abort scope for competing starts.
+
+        Also the one place an operator's intent to stop is RECORDED, which is
+        deliberately separated from DELIVERING that stop to the instrument.
+
+        Delivery needs the link; recording does not. Until now they were the
+        same act, so with the cable out a stop could not be expressed at all:
+        the panel refused to send one ("Останов нельзя отправить без живой
+        связи") and stop_source against an absent device latched fail-closed.
+        The operator was left with a running heater, no way to tell the system
+        they wanted it off, and -- once reconnect works -- a system that would
+        faithfully restore the power they had been trying to stop.
+
+        Revoking here, synchronously and before any lock or I/O, makes "Stop
+        while unplugged" mean "off the moment we can reach it". It runs even
+        when the hardware call that follows fails, which is the entire point.
+        """
         self._abort_generation += 1
         if full:
             self._full_abort_generation = self._abort_generation
+        for smu_channel in self._resolve_channels(None) if revoke is None and full else (revoke or set()):
+            self._admitted_intent.pop(smu_channel, None)
         return self._abort_generation
 
     async def _emergency_off_locked(self, channel: str | None) -> dict[str, Any]:
@@ -3977,6 +4046,7 @@ class SafetyManager:
                     return frozenset(applied_off), True
                 applied_off.add(smu_channel)
                 self._active_sources.discard(smu_channel)
+                self._admitted_intent.pop(smu_channel, None)
                 self._refresh_operator_safety_snapshot()
                 self._observe_terminal_safety_children()
                 if self._state == SafetyState.FAULT_LATCHED:
@@ -3988,6 +4058,8 @@ class SafetyManager:
         else:
             applied_off.update(channels)
             self._active_sources.difference_update(channels)
+            for smu_channel in channels:
+                self._admitted_intent.pop(smu_channel, None)
 
         if interrupted:
             self._refresh_operator_safety_snapshot()
