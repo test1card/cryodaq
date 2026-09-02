@@ -1757,6 +1757,36 @@ class Keithley2604B(InstrumentDriver):
         return self._unsafe_output_state
 
     @property
+    def unreachable_idle(self) -> bool:
+        """This driver instance holds nothing and has nothing unresolved.
+
+        Scope is the INSTANCE's whole history, not one connection generation.
+        Source commands require ``_require_operational_connection``; any
+        ambiguous transport loss after one sets ``_recovery_transport_open``;
+        ``disconnect()`` refuses to close a handle without readback OFF proof
+        and an ambiguous close sets ``_teardown_incomplete``. So when all of
+        these are false, nothing this instance did can still be unresolved and
+        no orphan handle can deliver a stale write.
+
+        It says NOTHING about the physical output state, which remains UNKNOWN:
+        the instrument keeps its output across a disconnection of the
+        controller, and could have been left energized by a previous process or
+        from the front panel. It is only the ground for releasing a failed
+        connect attempt so the next one can happen -- which is the engine's ONLY
+        route back to a source that becomes reachable again, and therefore its
+        only route to commanding that source OFF.
+        """
+        return (
+            not self._connected
+            and not self._recovery_transport_open
+            and not self._teardown_incomplete
+            and not self._connect_in_progress
+            and not self._disconnect_in_progress
+            and all(token is None for token in self._source_start_token.values())
+            and all(depth == 0 for depth in self._source_off_depth.values())
+        )
+
+    @property
     def unsafe_output_observations(self) -> tuple[UnsafeOutputObservation, ...]:
         """Current positive idle-read observations, never actuation authority."""
 

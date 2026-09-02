@@ -2391,6 +2391,44 @@ class SafetyManager:
                 )
 
             if not confirmed:
+                # An unreachable, idle source cannot be proven OFF, and demanding
+                # that proof anyway is unsatisfiable BY CONSTRUCTION:
+                # emergency_off() never touches a transport it does not hold, so
+                # replugging the instrument is invisible to it. On 2026-09-02
+                # that wedged the Keithley for the life of the process -- the
+                # scheduler re-adjudicated the same dead attempt every backoff
+                # period and never called connect() again, so the operator had to
+                # relaunch and fragment the record.
+                #
+                # Releasing is the fail-CLOSED choice, not the permissive one.
+                # Retry is the engine's only route back to a source that becomes
+                # reachable again, and therefore its only route to commanding it
+                # OFF; a latch that forbids retry forfeits that permanently and
+                # fails inert. RUN authority is unaffected either way, because
+                # nothing here mints OFF evidence: the evidence stays whatever
+                # the failed proof produced (UNKNOWN), and a later real connect
+                # leads with a forced OFF before it grants any authority.
+                #
+                # Only for a driver holding nothing and with nothing unresolved.
+                # A transport retained for recovery, an unsettled teardown, or a
+                # source lifecycle in flight all mean this instance MAY have
+                # energized the output, and all keep the latch below.
+                released = (
+                    proof_error is None
+                    and getattr(driver, "connected", None) is False
+                    and getattr(driver, "unreachable_idle", None) is True
+                )
+                if released:
+                    logger.critical(
+                        "Reviewed source is unreachable and idle (%s); releasing the connect attempt "
+                        "for retry. Output state remains UNKNOWN and energizing stays refused.",
+                        context,
+                    )
+                    self._reviewed_source_generation = None
+                    self._refresh_operator_safety_snapshot()
+                    if cancelled is not None:
+                        raise cancelled
+                    return True
                 self._refresh_operator_safety_snapshot()
                 await self._fault(f"reviewed source disconnect lacked verified OFF ({context})")
                 if cancelled is not None:
