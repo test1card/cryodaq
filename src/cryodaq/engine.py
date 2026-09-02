@@ -5885,9 +5885,9 @@ async def _handle_gui_command(
                     # clearing rather than acted on.
                     asserted = False
                     logger.critical(
-                        "STALE OPERATOR DECLARATION IGNORED: the reviewed source reported verified OFF, "
-                        "so shutdown proceeds on device evidence. Clear physically_disconnected in the "
-                        "instruments profile -- the source is evidently connected."
+                        "STALE OPERATOR CONFIRMATION IGNORED: the reviewed source reported verified "
+                        "OFF, so shutdown proceeds on device evidence. Do not re-arm the tray "
+                        "confirmation -- the source is evidently connected and answering."
                     )
                 if asserted:
                     # The independent artifact. The receipt proves what the

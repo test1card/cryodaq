@@ -1127,7 +1127,6 @@ class TopWatchBar(QWidget):
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
         worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self, release_on_settle=True)
-        self._experiment_worker = worker
         # The completing worker is captured so the handler can prove it is
         # still the current one. Without that, a queued completion from a
         # superseded poll could render stale status over a newer result, and
@@ -1137,7 +1136,13 @@ class TopWatchBar(QWidget):
                 result, expected, completed
             )
         )
+        # Started BEFORE the slot is claimed. `start()` raises when worker
+        # admission is closed, and a QThread that never ran reports
+        # isFinished() False forever -- so claiming the slot first would leave
+        # it occupied permanently and every later tick would skip. Nothing is
+        # lost by failing with the slot still free.
         worker.start()
+        self._experiment_worker = worker
 
     def _on_experiment_result(
         self,

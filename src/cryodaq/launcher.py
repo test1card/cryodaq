@@ -4289,6 +4289,36 @@ class LauncherWindow(QMainWindow):
             return
         self.confirm_source_physically_disconnected(source_name)
 
+    def _invalidate_disconnect_confirmation_on_contrary_evidence(self) -> None:
+        """Drop an armed confirmation the moment the source is seen energised.
+
+        The confirmation states a physical fact: the source is unplugged from
+        mains. An energised output is direct evidence that it is not, and the
+        statement is then stale no matter how truthful it was when made.
+
+        Without this the confirmation had no bound inside one engine
+        incarnation. Arm it truthfully today, do not shut down, re-plug the
+        source next week and run it -- and a communication failure at the
+        eventual shutdown would let a week-old statement release teardown on an
+        energised source. That is the one window this design still had.
+        """
+
+        if self._source_disconnect_confirmation is None:
+            return
+        state = getattr(self, "_last_safety_state", None)
+        active = getattr(state, "active_channels", None) if state is not None else None
+        if not active:
+            return
+        stale = self._source_disconnect_confirmation
+        self._source_disconnect_confirmation = None
+        logger.critical(
+            "OPERATOR CONFIRMATION DISCARDED: '%s' was declared physically disconnected, but the "
+            "source has since reported energised outputs %s. Confirm again only after checking the "
+            "instrument.",
+            stale,
+            sorted(active) if isinstance(active, (list, tuple, set)) else active,
+        )
+
     def confirm_source_physically_disconnected(self, source_name: str) -> None:
         """Record, for ONE shutdown attempt, that the operator unplugged the source.
 
@@ -8534,6 +8564,7 @@ class LauncherWindow(QMainWindow):
             result,
             expected_engine_instance_id=authority.engine_instance_id,
         )
+        self._invalidate_disconnect_confirmation_on_contrary_evidence()
 
     def _on_annunciation_result(self, result: object, authority: object = None) -> None:
         """Accept only exact alarm truth bound to the captured engine cut."""

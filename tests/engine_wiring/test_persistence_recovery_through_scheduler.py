@@ -169,7 +169,23 @@ async def test_a_deliberate_stop_stays_refused_through_the_scheduler(tmp_path: P
     assert later is not None
     scheduler._observe_persistence_commit(later)
 
-    assert len(ambiguity) == 1
-    assert len(ambiguity) == 1
+    assert len(ambiguity) == 1, "a deliberate stop must be refused"
+    assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
+
+    # One observation proves nothing here. The scheduler turns ANY refusal into
+    # persistence_ambiguous(), and that used to mint recoverability from the
+    # refusal itself -- so the SECOND commit resumed a segment that had been
+    # stopped on purpose. The invariant is that it still refuses.
+    later_still = await writer.write_committed([_reading(3.0)])
+    assert later_still is not None
+    scheduler._observe_persistence_commit(later_still)
+    assert len(ambiguity) == 2, "the deliberate stop became recoverable after one refusal"
+    assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
+    assert feed.snapshot().recording is RecordingTruth.NOT_RECORDING
+
+    # And a third, in case the flag merely lagged.
+    third = await writer.write_committed([_reading(4.0)])
+    assert third is not None
+    scheduler._observe_persistence_commit(third)
     assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
     await writer.stop()

@@ -335,8 +335,29 @@ class RecordingLifecycleFeed:
         self,
         lifecycle: PersistenceOwnerLifecycle,
     ) -> PersistenceAuthoritySnapshot:
-        # Only an ambiguous close leaves the door open. STOPPED was deliberate.
-        self.__persistence_recoverable = lifecycle is PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS
+        # Only an ambiguous close of a LIVE segment leaves the door open.
+        #
+        # The second condition is not decoration. `Scheduler._observe_persistence_commit`
+        # turns ANY exception from `persistence_committed` into
+        # `persistence_ambiguous()`, and this feed's deliberate refusals ARE
+        # exceptions -- so refusing a commit after a deliberate STOP fed an
+        # "ambiguity" straight back here and minted recoverability from the
+        # refusal itself. The next observation of the same or a later receipt
+        # then opened a recovery segment on a segment that was stopped on
+        # purpose. Requiring an active segment makes the refusal idempotent:
+        # closing what is already closed grants nothing.
+        #
+        # It also covers a failed `persistence_started`, which terminalizes as
+        # ambiguous for a segment that never validly began.
+        #
+        # The guard leaves the flag ALONE rather than clearing it, in both
+        # directions: a refusal must neither grant recoverability nor revoke
+        # it. Clearing was tried first and broke the legitimate case -- after a
+        # genuine ambiguous close, the refusal of a replayed receipt fed
+        # another "ambiguity" back here and cancelled the recovery that was
+        # rightfully pending.
+        if self.__persistence_active:
+            self.__persistence_recoverable = lifecycle is PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS
         authority, owner, _writer = self.__require_persistence()
         epoch = self.__persistence_epoch
         if self.__persistence_active and epoch is not None:

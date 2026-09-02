@@ -393,3 +393,55 @@ def test_the_ordinary_quit_path_is_fail_closed_without_a_confirmation():
     block = source.split("confirmed_source = getattr")[1].split("worker = _EngineShutdownWorker")[0]
     assert 'shutdown_command["operator_physical_disconnect"] = True' in block
     assert "self._source_disconnect_confirmation = None" in block, "the confirmation is not consumed"
+
+
+# ---------------------------------------------------------------------------
+# Contrary evidence invalidates an armed confirmation
+# ---------------------------------------------------------------------------
+
+
+class _Armed(_Recorder):
+    def __init__(self, active_channels) -> None:
+        super().__init__()
+        self._source_disconnect_confirmation = "Keithley_1"
+        self._last_safety_state = type("S", (), {"active_channels": active_channels})()
+
+
+def _invalidate():
+    from cryodaq.launcher import LauncherWindow
+
+    return LauncherWindow._invalidate_disconnect_confirmation_on_contrary_evidence
+
+
+def test_an_energised_source_discards_the_confirmation():
+    """The statement is "the source is unplugged". An energised output disproves it.
+
+    Without this the confirmation had no bound inside one engine incarnation:
+    armed truthfully today, the source re-plugged and run next week, then a
+    communication failure at the eventual shutdown would let a week-old
+    statement release teardown on an energised source.
+    """
+    window = _Armed(["smua"])
+    _invalidate()(window)
+    assert window._source_disconnect_confirmation is None
+
+
+def test_an_idle_source_leaves_the_confirmation_armed():
+    window = _Armed([])
+    _invalidate()(window)
+    assert window._source_disconnect_confirmation == "Keithley_1"
+
+
+def test_unknown_safety_state_does_not_discard():
+    """Absence of evidence is not contrary evidence."""
+    window = _Armed([])
+    window._last_safety_state = None
+    _invalidate()(window)
+    assert window._source_disconnect_confirmation == "Keithley_1"
+
+
+def test_invalidation_is_a_no_op_when_nothing_is_armed():
+    window = _Armed(["smua"])
+    window._source_disconnect_confirmation = None
+    _invalidate()(window)
+    assert window._source_disconnect_confirmation is None
