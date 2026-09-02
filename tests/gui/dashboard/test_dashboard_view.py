@@ -79,9 +79,12 @@ class _DeferredSignal:
 class _DeferredWorker:
     instances: list[_DeferredWorker] = []
 
-    def __init__(self, payload: dict, parent=None) -> None:  # noqa: ANN001
+    def __init__(self, payload: dict, parent=None, *, release_on_settle: bool = False) -> None:  # noqa: ANN001
+        # Mirrors ZmqCommandWorker's signature. This stub never settles through
+        # the registry, so the flag is accepted and ignored.
         self.payload = dict(payload)
         self.parent = parent
+        self.release_on_settle = release_on_settle
         self.finished = _DeferredSignal()
         self.started = False
         self.done = False
@@ -115,8 +118,21 @@ def _scope_result(entries: list[dict], *, log_scope: str = "all") -> dict:
     }
 
 
+def _drain_history_seed() -> None:
+    """Settle and drop the readings_history read that connecting now issues.
+
+    Connecting asks the engine for the run's earlier history so the plots show
+    the whole experiment instead of restarting at the relaunch. It is a read,
+    unrelated to the log/phase mutations these tests cover.
+    """
+    for seed in [w for w in _DeferredWorker.instances if w.payload.get("cmd") == "readings_history"]:
+        _DeferredWorker.instances.remove(seed)
+        seed.finish({"ok": True, "data": {}})
+
+
 def _settle_connection(view: DashboardView, *, experiment_id: str) -> None:
     view.set_connected(True)
+    _drain_history_seed()
     assert len(_DeferredWorker.instances) == 1
     _DeferredWorker.instances.pop(0).finish(_scope_result([]))
     view.set_operator_snapshot(_operator_snapshot(experiment_id=experiment_id))
@@ -899,6 +915,7 @@ def test_dashboard_quick_log_poll_requires_exact_global_scope_and_retains_last_g
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
     view.set_connected(True)
+    _drain_history_seed()
     first = _DeferredWorker.instances.pop(0)
     first.finish(_scope_result([{"id": 50, "timestamp": "2026-07-19T08:00:00+00:00", "message": "Последнее"}]))
     view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-log"))
@@ -922,6 +939,7 @@ def test_dashboard_no_active_experiment_submits_explicit_unbound_log(app, monkey
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
     view.set_connected(True)
+    _drain_history_seed()
     _DeferredWorker.instances.pop(0).finish(_scope_result([]))
     view.set_operator_snapshot(_operator_snapshot())
 

@@ -43,6 +43,11 @@ from cryodaq.operator_snapshot import (
 
 logger = logging.getLogger(__name__)
 
+# How far back a reconnect tries to refill the plots. 24 h covers a cooldown,
+# which is the run people watch across a relaunch; the buffers bound it anyway.
+_HISTORY_SEED_SPAN_S = 24 * 3600
+_HISTORY_SEED_LIMIT = 20000
+
 _PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
 _LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _LOG_READ_SCOPE_SCHEMA = "operator_log_read_scope_v1"
@@ -132,6 +137,7 @@ class DashboardView(QScrollArea):
         self._settings = QSettings("FIAN", "CryoDAQ")
         self._channel_mgr = channel_manager
         self._buffer_store = ChannelBufferStore()
+        self._history_seed_worker: object | None = None
         self._temp_plot: TempPlotWidget | None = None
         self._pressure_plot: PressurePlotWidget | None = None
         self._sensor_grid: DynamicSensorGrid | None = None
@@ -325,6 +331,8 @@ class DashboardView(QScrollArea):
             return
         self._connected = connected
         self._connection_generation += 1
+        if connected:
+            self._seed_history_from_engine()
         if not connected:
             self._authority_valid = False
             self._authority_experiment_id = None
@@ -623,6 +631,71 @@ class DashboardView(QScrollArea):
             )
             or result.get("ok") is not False
         )
+
+    def _seed_history_from_engine(self) -> None:
+        """Fill the plots back to the start of the run, not the start of the process.
+
+        These buffers only ever held live readings, so a relaunch mid-experiment
+        showed the operator an empty chart while the PNG reports -- which read
+        the database -- showed the whole run. One instrument, two histories, and
+        the misleading one is the one on screen during the work.
+
+        The seed is bounded by what the buffers can hold, and the engine clamps
+        the request itself; a channel already holding live data keeps it,
+        because prefill only fills older than what is there.
+        """
+        import time
+
+        from cryodaq.gui.zmq_client import ZmqCommandWorker
+
+        if self._history_seed_worker is not None:
+            return
+        span_s = _HISTORY_SEED_SPAN_S
+        now = time.time()
+        context = {"connection_generation": self._connection_generation}
+        worker = ZmqCommandWorker(
+            {
+                "cmd": "readings_history",
+                "from_ts": now - span_s,
+                "to_ts": now,
+                "channels": None,
+                "limit_per_channel": _HISTORY_SEED_LIMIT,
+            },
+            parent=self,
+        )
+        self._history_seed_worker = worker
+        worker.finished.connect(
+            lambda result, expected=context, completed=worker: self._on_history_seed(result, expected, completed)
+        )
+        worker.start()
+
+    def _on_history_seed(self, result: dict, expected: dict, completed: object) -> None:
+        if completed is self._history_seed_worker:
+            self._history_seed_worker = None
+        if expected.get("connection_generation") != self._connection_generation:
+            # A reconnect happened while this was in flight; its window is stale.
+            return
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            logger.warning("Не удалось загрузить историю для графиков: %s", (result or {}).get("error"))
+            return
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return
+        seeded = 0
+        for channel, points in data.items():
+            if not isinstance(channel, str) or not points:
+                continue
+            try:
+                samples = [(float(entry[0]), float(entry[1])) for entry in points]
+            except (TypeError, ValueError, IndexError):
+                continue
+            seeded += self._buffer_store.prefill(channel, samples)
+        if seeded:
+            logger.info("Графики дополнены историей: %d точек до перезапуска", seeded)
+            if self._temp_plot is not None:
+                self._temp_plot.refresh()
+            if self._pressure_plot is not None:
+                self._pressure_plot.refresh()
 
     def _on_phase_advance_result(
         self,

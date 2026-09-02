@@ -64,6 +64,58 @@ class ChannelBufferStore:
         self._buffers[channel].append((timestamp_epoch, value, status))
         self._last_value[channel] = (timestamp_epoch, value, status)
 
+    def prefill(
+        self,
+        channel: str,
+        samples: Iterable[tuple[float, float]],
+        status: ChannelStatus = ChannelStatus.OK,
+    ) -> int:
+        """Seed history OLDER than whatever this channel already holds.
+
+        These buffers are filled only by live readings, so every relaunch began
+        the plots again from empty: an experiment restarted three hours in
+        showed three hours of nothing, while the PNG reports -- which read the
+        database -- showed the whole run. The operator sees one instrument and
+        two different histories, and the shorter one is the one they are
+        watching while they work.
+
+        Seeded samples go at the OLD end and never displace live ones. Anything
+        at or after the oldest sample already held is dropped rather than
+        merged: the live buffer is the authority for the period it covers, and
+        interleaving two sources over the same interval is how a plot acquires
+        points that no single record supports. Returns how many were accepted.
+        """
+        ordered = sorted((float(t), float(v)) for t, v in samples)
+        if not ordered:
+            return 0
+        existing = self._buffers.get(channel)
+        if existing:
+            oldest_live = existing[0][0]
+            ordered = [(t, v) for t, v in ordered if t < oldest_live]
+            if not ordered:
+                return 0
+        # Bound the seed so it cannot evict the live tail it is extending.
+        room = self._maxlen - (len(existing) if existing else 0)
+        if room <= 0:
+            return 0
+        if len(ordered) > room:
+            ordered = ordered[-room:]
+        seeded = deque(
+            ((timestamp, value, status) for timestamp, value in ordered),
+            maxlen=self._maxlen,
+        )
+        seeded.extend(existing or ())
+        self._buffers[channel] = seeded
+        if channel not in self._last_value:
+            timestamp, value = ordered[-1]
+            self._last_value[channel] = (timestamp, value, status)
+        return len(ordered)
+
+    def oldest_timestamp(self, channel: str) -> float | None:
+        """When this channel's retained history starts, or None if it holds nothing."""
+        buf = self._buffers.get(channel)
+        return buf[0][0] if buf else None
+
     def get_history(self, channel: str) -> list[tuple[float, float]]:
         """Return usable finite samples for plotting, excluding status failures."""
         buf = self._buffers.get(channel)
