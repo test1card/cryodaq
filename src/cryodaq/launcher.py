@@ -2455,7 +2455,6 @@ class LauncherWindow(QMainWindow):
 
             self._assistant_periodic_data_dir = get_data_dir()
         self._periodic_health_read_failed_logged = False
-        self._periodic_last_health_status: str | None = None
         self._periodic_reporting_fault: bool | None = None if self._assistant_periodic_requested else False
         self._assistant_restart_attempts: int = 0
         self._assistant_last_restart_time: float = 0.0
@@ -6523,9 +6522,6 @@ class LauncherWindow(QMainWindow):
                 )
                 self._periodic_health_read_failed_logged = True
 
-        # Kept so the fault can name the status that caused it rather than
-        # asserting the runtime is unreachable.
-        self._periodic_last_health_status = status
         refreshed = observation.observe(
             status=status,
             updated_at=updated_at,
@@ -6542,17 +6538,7 @@ class LauncherWindow(QMainWindow):
         if self._periodic_reporting_fault is True:
             return
         self._periodic_reporting_fault = True
-        # Say which health status caused this. "Runtime unavailable" was
-        # reported for a runtime that was alive and delivering successfully:
-        # the deadline had expired only because health was stuck at
-        # degraded_delivery_unknown, from ONE ambiguous Telegram send two days
-        # earlier. An operator who reads "unavailable" goes looking for a dead
-        # process and finds a healthy one.
-        logger.error(
-            "Periodic PNG reporting is not healthy: %s (last health status: %s)",
-            _PERIODIC_RUNTIME_UNAVAILABLE_CODE,
-            getattr(self, "_periodic_last_health_status", None) or "unknown",
-        )
+        logger.error("Periodic PNG runtime unavailable: %s", _PERIODIC_RUNTIME_UNAVAILABLE_CODE)
         if self._periodic_status_banner is not None and not getattr(self, "_periodic_status_banner_dismissed", False):
             self._periodic_status_banner.show()
         if hasattr(self, "_tray") and self._tray is not None:

@@ -693,69 +693,6 @@ def supersede_active(state: PeriodicStateDocument, *, newer_slot_end: int, now: 
     return PeriodicStateDocument(payload)
 
 
-def resolve_superseded_unknowns(state: PeriodicStateDocument, *, now: float) -> tuple[PeriodicStateDocument, list[dict[str, Any]]]:
-    """Retire ambiguous deliveries that a later success to the same destination has superseded.
-
-    ``mark_delivery_unknown`` appends and nothing ever removed. An ambiguous
-    delivery -- a Telegram send that timed out with an unknown outcome -- was
-    therefore recorded forever: health stayed ``degraded_delivery_unknown``, the
-    launcher reported the runtime unavailable, and at
-    ``MAX_UNRESOLVED_DELIVERIES`` entries ``_deliver`` stops and periodic
-    reporting ends permanently. The health text said "awaiting reconciliation"
-    while no reconciliation path existed.
-
-    What the ledger is for is the operator's knowledge: "we cannot say whether
-    you received this report". Once a LATER slot has been delivered successfully
-    to the SAME destination, that question is answered for every purpose it
-    served -- the channel demonstrably works, and a periodic report is a
-    snapshot that the newer one replaces. The ambiguity is spent.
-
-    Deliberately narrow, because this removes durable evidence:
-
-    * only entries strictly OLDER than a delivery that actually SUCCEEDED;
-    * only to the same destination fingerprint -- a success to another chat says
-      nothing about this one;
-    * never the entry belonging to the active slot or to the current terminal
-      summary, whose contents those records are validated against.
-
-    A failed or ambiguous later delivery resolves nothing. Returns the new
-    document and the retired entries, so the caller can record what it retired
-    rather than dropping it silently.
-    """
-    payload = _copy_payload(state)
-    ledger = payload["unresolved_delivery"]
-    if not ledger:
-        return PeriodicStateDocument(payload), []
-
-    terminal = payload["last_terminal"]
-    if not isinstance(terminal, dict) or terminal.get("status") != PeriodicStatus.SUCCEEDED.value:
-        return PeriodicStateDocument(payload), []
-    proven_destination = terminal["destination_fingerprint"]
-    proven_slot_end = terminal["slot_end"]
-
-    protected: set[str] = {terminal["slot_id"]}
-    active = payload["active"]
-    if isinstance(active, dict):
-        protected.add(active["slot_id"])
-
-    retained: list[dict[str, Any]] = []
-    retired: list[dict[str, Any]] = []
-    for entry in ledger:
-        superseded = (
-            entry["slot_id"] not in protected
-            and entry["destination_fingerprint"] == proven_destination
-            and entry["slot_end"] < proven_slot_end
-        )
-        (retired if superseded else retained).append(entry)
-
-    if not retired:
-        return PeriodicStateDocument(payload), []
-
-    payload["unresolved_delivery"] = retained
-    payload["updated_at"] = _transition_time(payload, now)
-    return PeriodicStateDocument(payload), retired
-
-
 def rotate_terminal_active(state: PeriodicStateDocument, *, now: float) -> PeriodicStateDocument:
     payload = _copy_payload(state)
     active = payload["active"]

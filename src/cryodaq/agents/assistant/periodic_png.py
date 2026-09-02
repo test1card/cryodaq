@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 import math
 import os
 import re
@@ -59,7 +58,6 @@ from cryodaq.periodic_state import (
     mark_succeeded,
     mark_terminal_failure,
     periodic_input_path,
-    resolve_superseded_unknowns,
     rotate_terminal_active,
     set_periodic_health,
     supersede_active,
@@ -75,8 +73,6 @@ from cryodaq.reporting.periodic_input import (
     PeriodicInputError,
     read_periodic_input_file,
 )
-
-log = logging.getLogger(__name__)
 
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}")
@@ -1062,23 +1058,6 @@ class PeriodicPngCoordinator:
         if candidate.payload != state.payload:
             await self._persist(state, candidate)
 
-    def _retire_superseded_unknowns(
-        self,
-        state: PeriodicStateDocument,
-        *,
-        now: float,
-    ) -> PeriodicStateDocument:
-        """Drop ambiguities a later success has answered, saying which and why."""
-        settled, retired = resolve_superseded_unknowns(state, now=now)
-        for entry in retired:
-            log.info(
-                "periodic: retiring unresolved delivery for slot ending %s (%s); "
-                "a later delivery to the same destination succeeded",
-                entry["slot_end"],
-                entry["error_code"],
-            )
-        return settled
-
     async def _reconcile_step(self) -> bool:
         await self._refresh_periodic_authority_if_due()
         state = await self._load_state()
@@ -1086,15 +1065,6 @@ class PeriodicPngCoordinator:
         raw_wall = self._clock.wall_time()
         latest = latest_completed_slot(raw_wall, self._config.interval_s)
         now = self._logical_now(state)
-
-        # An ambiguity whose superseding success already happened -- before this
-        # code existed, or in an earlier process -- would otherwise sit in the
-        # ledger until the NEXT delivery rotated, degrading health the whole
-        # time. The condition is already satisfied; this is what evaluates it.
-        settled = self._retire_superseded_unknowns(state, now=now)
-        if settled is not state and settled.payload != state.payload:
-            await self._persist(state, settled)
-            return True
 
         if active is None:
             high_water = state.payload["high_water_slot_end"]
@@ -1143,11 +1113,6 @@ class PeriodicPngCoordinator:
         terminal_failed = status is PeriodicStatus.FAILED and active["retryable"] is False
         if status in {PeriodicStatus.SUCCEEDED, PeriodicStatus.DELIVERY_UNKNOWN} or terminal_failed:
             rotated = rotate_terminal_active(state, now=now)
-            # Rotation is what publishes last_terminal, so a delivery that
-            # SUCCEEDED becomes visible here -- and a success answers the
-            # question every older ambiguity to the same destination was
-            # holding open.
-            rotated = self._retire_superseded_unknowns(rotated, now=now)
             await self._persist(state, rotated)
             return True
 
