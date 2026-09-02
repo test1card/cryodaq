@@ -1462,8 +1462,13 @@ class ConductivityPanel(QWidget):
             self._table.setItem(row, 10, _cell(g_pred_str))
 
         total_row = len(pairs)
-        t_first = self._temps.get(self._chain[0], float("nan"))
-        t_last = self._temps.get(self._chain[-1], float("nan"))
+        # The ИТОГО row is the whole-chain result, so it must be computed the
+        # same way as the RECORDED point -- zone means, not endpoints. Reading
+        # one dT on screen while a different one is written to the CSV is the
+        # disagreement this panel exists to prevent.
+        hot_zone, cold_zone = self._thermal_zones(tuple(self._chain))
+        t_first, _hot_n = self._zone_mean(hot_zone, self._temps)
+        t_last, _cold_n = self._zone_mean(cold_zone, self._temps)
         total_dt = t_first - t_last
         total_G = P / total_dt if total_dt != 0 and P != 0 else float("nan")
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")

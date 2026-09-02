@@ -239,6 +239,11 @@ class SafetyManager:
         # Presentation identity only; no recovery or output authority.
         self._fault_revision = 0
         self._recovery_reason = ""
+        # Why the stand will not arm. _check_preconditions has always
+        # returned a reason and every caller discarded it, so a refusal
+        # to leave SAFE_OFF reached the operator as buttons that simply
+        # do nothing. Kept here so it can be logged and reported.
+        self._precondition_refusal = ""
         self._active_sources: set[SmuChannel] = set()
         self._source_observation_revisions: dict[SmuChannel, int] = {channel: 0 for channel in SMU_CHANNELS}
         self._source_observed_states: dict[SmuChannel, str | None] = {channel: None for channel in SMU_CHANNELS}
@@ -3380,6 +3385,7 @@ class SafetyManager:
             "mock": self._mock,
             "qualification_mode": qualification_mode,
             "qualification_refusal": qualification_refusal,
+            "precondition_refusal": self._precondition_refusal,
         }
 
     def get_events(self) -> list[SafetyEvent]:
@@ -4130,8 +4136,24 @@ class SafetyManager:
             return
 
         if self._state == SafetyState.SAFE_OFF:
-            ok, _ = self._check_preconditions()
-            if ok and self._latest:
+            ok, reason = self._check_preconditions()
+            if not ok:
+                blocker = reason
+            elif not self._latest:
+                blocker = "No channel data has been received yet"
+            else:
+                blocker = ""
+            # Log only on CHANGE: this runs on the monitor cadence, and a
+            # blocker that persists for hours must not bury the log. The
+            # operator needs to see it exactly when it appears and when it
+            # clears.
+            if blocker != self._precondition_refusal:
+                self._precondition_refusal = blocker
+                if blocker:
+                    logger.warning("SAFETY: остаётся SAFE_OFF, запуск источника заблокирован: %s", blocker)
+                else:
+                    logger.info("SAFETY: препятствий для запуска источника больше нет")
+            if not blocker:
                 self._transition(SafetyState.READY, "All preconditions satisfied")
             return
 
