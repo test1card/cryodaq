@@ -1500,6 +1500,19 @@ class ConductivityPanel(QWidget):
         total_dt = t_first - t_last
         total_G = P / total_dt if total_dt != 0 and P != 0 else float("nan")
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
+        # R and G in this row must describe the same measurement. total_r was
+        # the SUM of the pairwise resistances, which follows the chain's order,
+        # while dT and G moved to the zone means, which follow the sensor
+        # names. A mock sweep on a deliberately cold-end-first chain showed the
+        # two disagreeing in the same row: G = 0.0040 W/K, correct, beside
+        # R = -248 K/W for a sample whose resistance is 250. A negative
+        # resistance next to a positive conductance is not a second opinion,
+        # it is one of them being wrong.
+        #
+        # Both now come from the whole-chain dT. The per-pair R column is
+        # unchanged and still shows each segment, order and all -- that is what
+        # it is for, and it is where a reversed chain should be visible.
+        total_r = total_dt / P if P != 0 else 0.0
 
         self._table.setItem(total_row, 0, _cell("ИТОГО"))
         self._table.setItem(

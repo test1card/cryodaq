@@ -710,9 +710,14 @@ def test_table_total_row_present(app):
     # 2 pairs + 1 total row = 3 rows
     assert panel._table.rowCount() == 3
     assert panel._table.item(2, 0).text() == "ИТОГО"
-    # Total R = 1000 + 1000 = 2000 (four thermal-resistance decimals)
+    # Total R and total G must describe the SAME measurement, so both come from
+    # the whole-chain dT: 15 K / 0.01 W = 1500 K/W, and 1/1500 = 6.667e-4 W/K.
+    # Summing the pairwise resistances gave 2000 here, which was consistent
+    # with the old endpoint dT of 20 K and stopped being consistent the moment
+    # dT became the difference of the zone means -- it left a row reporting
+    # R = 2000 beside G = 6.667e-4, which are not the same sample.
     total_r_text = panel._table.item(2, 4).text()
-    assert total_r_text == "2.0000e+03", f"Expected total R '2.0000e+03', got {total_r_text!r}"
+    assert total_r_text == "1.5000e+03", f"Expected total R '1.5000e+03', got {total_r_text!r}"
     # Total G = P / total_dT, and the zones come from the channel NAMES.
     # These stubs are named from the real stand: Т1 "1 Верх образец 2" and
     # Т2 "2 Верх образец 1" are both top sensors, Т3 "2 Низ образец 2" is a

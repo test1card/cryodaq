@@ -169,3 +169,30 @@ def test_missing_names_fall_back_to_order():
 def test_matching_is_case_insensitive():
     names = {"a": "1 ВЕРХ образец", "b": "2 низ образец"}
     assert from_names(("a", "b"), names) == (("a",), ("b",))
+
+
+# ---------------------------------------------------------------------------
+# R and G in the ИТОГО row must describe the same sample
+# ---------------------------------------------------------------------------
+
+
+def test_total_resistance_is_the_reciprocal_of_total_conductance():
+    """Found by a mock sweep on a deliberately cold-end-first chain.
+
+    total_r was the SUM of the pairwise resistances, which follows the chain's
+    ORDER, while dT and G had moved to the zone means, which follow the sensor
+    NAMES. The same row then reported G = 0.0040 W/K -- correct -- beside
+    R = -248 K/W for a sample whose resistance is 250. A negative resistance
+    next to a positive conductance is not a second opinion; it is one of them
+    being wrong.
+    """
+    power = 0.05
+    t_hot, t_cold = 307.50, 295.00
+    total_dt = t_hot - t_cold
+
+    total_r = total_dt / power
+    total_g = power / total_dt
+
+    assert total_r == pytest.approx(250.0)
+    assert total_g == pytest.approx(0.004)
+    assert total_r == pytest.approx(1.0 / total_g), "the row must not contradict itself"
