@@ -2192,7 +2192,15 @@ class ExperimentManager:
         if not self._data_dir.exists():
             return running
         for db_path in self._data_dir.glob("data_????-??-??.db"):
-            conn = sqlite3.connect(str(db_path), timeout=10)
+            # Read-only: this SELECT-only consumer must not hold write authority on a
+            # database the writer owns. A read-write connection's clean close is what
+            # unlinked the live WAL on 2026-09-02 (see sqlite_writer._control_stat_identity_at).
+            try:
+                conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+            except sqlite3.OperationalError:
+                # The glob raced a rotation. mode=ro will not conjure an empty
+                # database the way a read-write open silently would.
+                continue
             try:
                 exists = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'"

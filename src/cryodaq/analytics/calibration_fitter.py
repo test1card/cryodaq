@@ -88,8 +88,13 @@ class CalibrationFitter:
 
         for db_path in sorted(data_dir.glob("data_????-??-??.db")):
             try:
-                with closing(sqlite3.connect(str(db_path), timeout=5)) as conn:
-                    conn.execute("PRAGMA journal_mode=WAL")
+                # Read-only: this SELECT-only consumer must not hold write authority on a
+                # database the writer owns. A read-write connection's clean close is what
+                # unlinked the live WAL on 2026-09-02 (see sqlite_writer._control_stat_identity_at).
+                # The PRAGMA journal_mode=WAL that used to sit here mutated a
+                # database this reader does not own, and created sidecars on the
+                # active day. A calibration reader changes no journal mode.
+                with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
                     cursor = conn.execute(
                         "SELECT timestamp, value, status FROM readings "
                         "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
