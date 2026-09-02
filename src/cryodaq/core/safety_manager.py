@@ -1312,6 +1312,19 @@ class SafetyManager:
                 continue
             if smu_channel in self._active_sources:
                 continue
+            # Re-read the LIVE intent. This loop awaits, and a Stop landing in
+            # between revokes the intent and advances the abort epoch -- so the
+            # snapshot taken above can describe an output the operator has since
+            # asked to be off. Restoring it then would turn the source back on
+            # after a Stop, which is the worst thing this feature could do.
+            live = self._admitted_intent.get(smu_channel)
+            if live != intent:
+                logger.critical(
+                    "Not restoring %s: the intent changed or was revoked while the resume was queued. "
+                    "The source stays OFF.",
+                    smu_channel,
+                )
+                continue
             logger.critical(
                 "Restoring the intended output on %s after reconnect: P=%.4f W (admitted %.0f s ago).",
                 smu_channel,
@@ -1324,6 +1337,10 @@ class SafetyManager:
                     intent.v_comp,
                     intent.i_comp,
                     channel=str(smu_channel),
+                    # Pin the epoch this intent was admitted under, so a Stop
+                    # that lands while the command is queued still invalidates
+                    # it at the existing command-lock cuts.
+                    _expected_abort_generation=intent.abort_generation,
                 )
             except Exception:
                 logger.exception("Resuming the intended output on %s failed", smu_channel)
@@ -1396,6 +1413,7 @@ class SafetyManager:
             Awaitable[dict[str, Any]],
         ]
         | None = None,
+        _expected_abort_generation: int | None = None,
     ) -> dict[str, Any]:
         """Admit RUN without letting warning persistence obstruct OFF.
 
@@ -1403,9 +1421,19 @@ class SafetyManager:
         can wait behind another RUN at ``_run_request_lock``.  Consequently an
         emergency OFF that occurs while this request is queued always changes
         the epoch the queued request must present at both command-lock cuts.
+
+        ``_expected_abort_generation`` lets a caller pin an EARLIER epoch: the
+        one its decision to command was actually based on. A reconnect resume
+        decides from an intent read before it awaits anything, so sampling the
+        epoch here would sample it after a Stop that landed in between, and the
+        existing cuts would wave the resumed command through. Pinning makes any
+        intervening abort invalidate it, using the validation that is already
+        there rather than a second mechanism beside it.
         """
 
-        start_abort_generation = self._abort_generation
+        start_abort_generation = (
+            self._abort_generation if _expected_abort_generation is None else _expected_abort_generation
+        )
         start_full_abort_generation = self._full_abort_generation
         async with self._run_request_lock:
             preflight = await self._request_run_locked(
@@ -2931,6 +2959,22 @@ class SafetyManager:
                     ),
                 }
             logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
+            # The intent is now this target, not the one the run started at.
+            # A sweep's first step comes through request_run and every later
+            # step through here, so recording intent only at the start left a
+            # reconnect restoring P1 while the sweep was logically at P3 --
+            # applying a power nobody had asked for, on a run that looked
+            # correct from the GUI. Only a CONFIRMED update replaces it: this
+            # line is past the driver call and its error handling, so a failed
+            # or cancelled update leaves the last confirmed intent standing.
+            previous = self._admitted_intent.get(smu_channel)
+            self._admitted_intent[smu_channel] = _AdmittedIntent(
+                p_target=p_target,
+                v_comp=previous.v_comp if previous is not None else self._config.max_voltage_v,
+                i_comp=previous.i_comp if previous is not None else self._config.max_current_a,
+                admitted_monotonic_s=time.monotonic(),
+                abort_generation=self._abort_generation,
+            )
 
             return {"ok": True, "channel": smu_channel, "p_target": p_target}
 
