@@ -39,9 +39,24 @@ MAX_BACKOFF_S = 60.0
 INITIAL_BACKOFF_S = 1.0
 READ_TIMEOUT_S = 10.0
 
-# Standalone (non-GPIB) instrument disconnect backoff
-_STANDALONE_INITIAL_BACKOFF_S = 30.0
-_STANDALONE_MAX_BACKOFF_S = 300.0
+# Standalone (non-GPIB) instrument disconnect backoff.
+#
+# These bound how long an instrument stays unread AFTER its cable is already
+# back, because a retry that is not due is a retry that does not happen. The
+# 2026-09-02 unplug test measured it: the vacuum gauge was reconnected 60 s
+# after the device returned, purely because its next attempt was not due --
+# 30 s, then 60 s. The old 300 s ceiling meant a three-minute outage would have
+# walked the schedule to 120 -> 240 -> 300 and left the gauge blind for five
+# further minutes with the cable already seated.
+#
+# What a retry actually costs here is opening a serial port or a VISA session
+# against an absent device: it fails immediately and locally. That does not
+# justify minutes of silence on a cryostat's only pressure reading. Backing off
+# still matters -- an instrument that is genuinely gone must not be hammered
+# every poll interval -- so the schedule is kept, with both ends brought down
+# to where the worst case is bounded by the poll cadence people actually watch.
+_STANDALONE_INITIAL_BACKOFF_S = 5.0
+_STANDALONE_MAX_BACKOFF_S = 30.0
 _DISCONNECT_TIMEOUT_S = 5.0
 
 

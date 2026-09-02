@@ -49,7 +49,7 @@ from __future__ import annotations
 import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.core.safety_manager import SafetyManager, SafetyShutdownUnverifiedError, SafetyState
 from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.base import InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
@@ -377,3 +377,46 @@ async def test_the_settled_driver_can_open_a_fresh_session():
     driver.cable_present = True
     await driver.connect()
     assert driver.connected is True
+
+
+# ---------------------------------------------------------------------------
+# Shutdown must not hold for a proof that can never arrive
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_completes_when_the_source_is_unreachable():
+    """Holding is only right while holding can still accomplish something.
+
+    The HOLD exists so a process that may still be able to de-energize a source
+    cannot walk away from it. When the instrument is physically gone that
+    inverts: the proof is unobtainable however long we wait, the engine ignores
+    SIGTERM, and the operator must SIGKILL -- the uncontrolled exit the
+    transport's PDEATHSIG design exists to avoid. That happened four times on
+    2026-09-02, and once in a plain standalone run:
+
+        SafetyManager shutdown HOLD: global OFF could not be verified
+        Keithley_1: SAFETY: emergency_off OFF readback failed on smua:
+                    USBTMC has no live process-owned session
+    """
+    driver = _VanishingSource()
+    binding = _bind(driver)
+    manager = _manager(driver, binding)
+    await manager.start()
+    driver.cable_present = False
+
+    # Must not raise SafetyShutdownUnverifiedError.
+    await manager.stop()
+
+
+async def test_shutdown_still_holds_while_a_live_handle_is_retained():
+    """A device that answers can still be acted on, so the hold stands."""
+    driver = _VanishingSource()
+    binding = _bind(driver)
+    manager = _manager(driver, binding)
+    await manager.start()
+    # Cable is in and the device answers, but it will not confirm OFF.
+    driver.device_answers = False
+    driver._demote()
+
+    with pytest.raises(SafetyShutdownUnverifiedError):
+        await manager.stop()

@@ -598,6 +598,36 @@ class SafetyManager:
 
         hold_reason = "SafetyManager shutdown HOLD: global OFF could not be verified"
 
+        async def _hold_can_still_accomplish_something() -> bool:
+            """Whether staying alive preserves any means of acting on the source.
+
+            The HOLD exists so a process that may still be able to de-energize
+            a source is not allowed to walk away from it. That is right while a
+            handle exists. When the instrument is physically gone it inverts:
+            the OFF proof is unobtainable no matter how long we wait, so the
+            HOLD is unsatisfiable, the engine ignores SIGTERM, and the operator
+            must SIGKILL -- the exact uncontrolled exit the transport's
+            PDEATHSIG design exists to avoid. That happened four times on
+            2026-09-02.
+
+            Holding is kept whenever a handle is still held or a teardown is
+            unsettled, because there the next attempt can still succeed. It is
+            released only for a driver that holds nothing -- after giving it
+            the chance to bury a handle whose device did not answer.
+            """
+            driver = self._keithley
+            if driver is None or self._mock:
+                return True
+            if getattr(driver, "unreachable_idle", None) is not True:
+                settle = getattr(driver, "settle_unreachable", None)
+                if callable(settle):
+                    settle_task = asyncio.create_task(settle())
+                    settled, settle_error, _settle_cancelled = await _settle_shielded_hardware_task(settle_task)
+                    if settle_error is not None and not isinstance(settle_error, asyncio.CancelledError):
+                        logger.exception("Shutdown settle of the unreachable source failed", exc_info=settle_error)
+                    del settled
+            return getattr(driver, "unreachable_idle", None) is not True
+
         def _begin_shutdown_hold(error: BaseException | None) -> None:
             logger.critical(
                 "SafetyManager shutdown HOLD: global OFF could not be verified: %s",
@@ -667,7 +697,7 @@ class SafetyManager:
         global_off_verified = global_off_error is None and global_off_result is True
         if global_off_verified:
             self._active_sources.clear()
-        else:
+        elif await _hold_can_still_accomplish_something():
             # Keep the process and exact safety children alive. A later stop()
             # retry may close the HOLD only after true OFF evidence; caller
             # cancellation never converts uncertainty into success.
@@ -675,6 +705,18 @@ class SafetyManager:
             if cancelled is not None:
                 raise cancelled
             raise SafetyShutdownUnverifiedError(hold_reason) from global_off_error
+        else:
+            # The source is physically unreachable and this process holds
+            # nothing that could ever reach it. Waiting cannot produce the
+            # proof, so an orderly exit -- sinks flushed, audit written -- is
+            # strictly better in every dimension than the SIGKILL the HOLD
+            # would otherwise force. The output state is recorded as UNKNOWN,
+            # not as OFF.
+            logger.critical(
+                "SafetyManager shutdown: the reviewed source is unreachable and this process holds "
+                "nothing that could reach it; completing shutdown with its output state UNKNOWN "
+                "rather than holding for a proof that can never arrive."
+            )
 
         # A retained older fault settlement can finish after the proof above
         # and publish an inconclusive result. Settle every such owner while the
@@ -702,10 +744,15 @@ class SafetyManager:
             ordered_result, ordered_error, ordered_cancelled = await _settle_shielded_hardware_task(ordered_proof_task)
             cancelled = cancelled or ordered_cancelled
             if ordered_error is not None or ordered_result is not True:
-                _begin_shutdown_hold(ordered_error)
-                if cancelled is not None:
-                    raise cancelled
-                raise SafetyShutdownUnverifiedError(hold_reason) from ordered_error
+                if await _hold_can_still_accomplish_something():
+                    _begin_shutdown_hold(ordered_error)
+                    if cancelled is not None:
+                        raise cancelled
+                    raise SafetyShutdownUnverifiedError(hold_reason) from ordered_error
+                logger.critical(
+                    "SafetyManager shutdown: the reviewed source is unreachable and this process holds "
+                    "nothing that could reach it; completing shutdown with its output state UNKNOWN."
+                )
             self._active_sources.clear()
 
         tasks = tuple(task for task in (collect_task, monitor_task) if task is not None)
@@ -752,10 +799,15 @@ class SafetyManager:
         final_result, final_error, final_cancelled = await _settle_shielded_hardware_task(final_proof_task)
         cancelled = cancelled or final_cancelled
         if final_error is not None or final_result is not True:
-            _begin_shutdown_hold(final_error)
-            if cancelled is not None:
-                raise cancelled
-            raise SafetyShutdownUnverifiedError(hold_reason) from final_error
+            if await _hold_can_still_accomplish_something():
+                _begin_shutdown_hold(final_error)
+                if cancelled is not None:
+                    raise cancelled
+                raise SafetyShutdownUnverifiedError(hold_reason) from final_error
+            logger.critical(
+                "SafetyManager shutdown: the reviewed source is unreachable and this process holds "
+                "nothing that could reach it; completing shutdown with its output state UNKNOWN."
+            )
         self._active_sources.clear()
 
         if self._child_generation == generation:
