@@ -961,8 +961,13 @@ async def test_persistence_fault_recovery_and_source_start_stop_each_refresh_own
         stopped = manager.snapshot_operator_safety()
         assert result["ok"] is True
         assert stopped.revision > running.revision
-        assert stopped.verified_off is False
-        assert stopped.device_readback_off is False
+        # This driver reports output_state_unverified False, i.e. it holds live
+        # readback proof that both outputs are off. A successful stop therefore
+        # ends with that proof, not without it. These two used to assert False:
+        # _safe_off discarded the proof the stop had just obtained, which left
+        # the stand unable to arm again after the operator's own stop.
+        assert stopped.verified_off is True
+        assert stopped.device_readback_off is True
 
         await manager.on_persistence_failure("disk unavailable")
         faulted = manager.snapshot_operator_safety()

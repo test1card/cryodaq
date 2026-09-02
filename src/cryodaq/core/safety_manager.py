@@ -3889,7 +3889,32 @@ class SafetyManager:
 
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
-        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
+        # Every requested channel stopped, and stop_source() returns success
+        # only AFTER OUTPUT_OFF and its readback verification -- so at this
+        # point the driver holds current-generation, current-epoch OFF proof
+        # for what it just turned off. Declaring the global state UNKNOWN here
+        # threw that proof away, and _check_preconditions then refused to leave
+        # SAFE_OFF ("Reviewed source OFF state is UNVERIFIED"). The stand could
+        # be started once and never again: the operator's own successful stop
+        # was what disarmed it, and only an emergency OFF -- which does record
+        # evidence -- or a reconnect could undo that. Nothing physical became
+        # uncertain at this line; the knowledge was discarded by bookkeeping.
+        #
+        # Ask the driver what it actually proved, exactly as
+        # complete_reviewed_source_connect does. output_state_unverified is
+        # False only when BOTH channels hold live readback proof, so a channel
+        # left mid-transition, a stale generation, or an absent driver still
+        # yields UNKNOWN and still refuses RUN. This stops manufacturing the
+        # absence of evidence; it does not manufacture its presence.
+        verified_off = (
+            retained_generation
+            and self._keithley is not None
+            and getattr(self._keithley, "output_state_unverified", None) is False
+        )
+        self._reviewed_source_off_evidence = SourceOffEvidence.from_global_result(
+            self._reviewed_source_off_tier(),
+            SourceOffResult.DEVICE_REPORTED_OFF if verified_off else SourceOffResult.PHYSICAL_STATE_UNKNOWN,
+        )
         self._transition(SafetyState.SAFE_OFF, reason)
         if caller_cancelled is not None:
             raise caller_cancelled
