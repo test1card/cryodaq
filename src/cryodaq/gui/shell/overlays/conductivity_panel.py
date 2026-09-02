@@ -1502,7 +1502,7 @@ class ConductivityPanel(QWidget):
         # same way as the RECORDED point -- zone means, not endpoints. Reading
         # one dT on screen while a different one is written to the CSV is the
         # disagreement this panel exists to prevent.
-        hot_zone, cold_zone = self._thermal_zones(tuple(self._chain))
+        hot_zone, cold_zone = self._confirmed_zones(tuple(self._chain))
         t_first, _hot_n = self._zone_mean(hot_zone, self._temps)
         t_last, _cold_n = self._zone_mean(cold_zone, self._temps)
         total_dt = t_first - t_last
@@ -3164,40 +3164,6 @@ class ConductivityPanel(QWidget):
             self._auto_record_point()
 
     @staticmethod
-    def _zones_from_names(
-        channels: tuple[str, ...],
-        display_names: dict[str, str],
-    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-        """Zones taken from the operator's own channel names, or None.
-
-        The names on this stand already state which end each sensor is on --
-        "1 Верх образец 2", "2 Низ образец 1" -- and that statement is a fact
-        about the hardware, whereas the order of a selection is an accident of
-        which checkbox was clicked first. Reading the names removes a trap in
-        which a correctly-selected chain in a different order yields a
-        plausible, silently wrong dT.
-
-        Returns None unless EVERY channel is unambiguous and both ends are
-        represented. A partial or contradictory naming is not evidence, and
-        guessing from half of it would be worse than falling back to order.
-        """
-
-        hot: list[str] = []
-        cold: list[str] = []
-        for channel in channels:
-            label = (display_names.get(channel) or "").casefold()
-            is_hot = "верх" in label
-            is_cold = "низ" in label
-            if is_hot == is_cold:
-                # Neither end named, or both named in one label.
-                return None
-            (hot if is_hot else cold).append(channel)
-        if not hot or not cold:
-            # All one end: there is no gradient to take a difference across.
-            return None
-        return tuple(hot), tuple(cold)
-
-    @staticmethod
     def _positional_zones(channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """First half hot, last half cold -- the fallback when names say nothing.
 
@@ -3295,39 +3261,6 @@ class ConductivityPanel(QWidget):
             return hot, cold
         return self._positional_zones(channels)
 
-    def _thermal_zones(self, channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Split a chain into its hot and cold zones.
-
-        This stand carries two sensors at the hot end and two at the cold end,
-        and dT should be the difference of the two zone MEANS -- not of two
-        arbitrary end sensors, which is what a single-sensor-per-end reading of
-        the chain gives.
-
-        Names decide when they can. Ordering decides only when they cannot, and
-        a disagreement between the two is reported rather than resolved
-        silently: it means the chain is ordered against its own labels, and the
-        operator is the one who can say which is wrong.
-        """
-
-        positional = self._positional_zones(channels)
-        try:
-            names = {channel: get_channel_manager().get_display_name(channel) for channel in channels}
-        except Exception:  # noqa: BLE001 - naming must never break a measurement
-            return positional
-        named = self._zones_from_names(channels, names)
-        if named is None:
-            return positional
-        if named != positional and named != (positional[1], positional[0]):
-            logger.warning(
-                "Порядок цепочки расходится с названиями датчиков: по названиям горячая зона "
-                "%s, холодная %s; по порядку %s и %s. Используются названия.",
-                [names[c] for c in named[0]],
-                [names[c] for c in named[1]],
-                [names[c] for c in positional[0]],
-                [names[c] for c in positional[1]],
-            )
-        return named
-
     @staticmethod
     def _zone_mean(zone: tuple[str, ...], values: dict[str, float]) -> tuple[float, int]:
         """Mean of the readings actually available in a zone, and how many.
@@ -3373,6 +3306,20 @@ class ConductivityPanel(QWidget):
         # reading is still recorded by the engine. What is refused is the
         # DERIVED row, because a number that cannot be trusted is worse in a
         # result table than a gap.
+        # A step qualifies for a published conductance only if ALL of these
+        # hold. Stated positively and checked explicitly, because the previous
+        # form -- "P is finite and positive AND dT <= 0" -- rejected an inverted
+        # gradient but let a zero, negative, NaN or infinite power fall straight
+        # through into R and G and be persisted.
+        #
+        #   * every confirmed zone member answered with a finite reading;
+        #   * the actual power is finite and strictly positive;
+        #   * dT is finite and strictly positive.
+        #
+        # Raw acquisition is untouched either way -- every temperature and power
+        # reading is still recorded by the engine. What is refused is the
+        # DERIVED row, because a number that cannot be trusted is worse in a
+        # result table than a gap.
         skip_reason: str | None = None
         if hot_used < len(hot_zone) or cold_used < len(cold_zone):
             self._auto_incomplete_zone_points += 1
@@ -3387,12 +3334,20 @@ class ConductivityPanel(QWidget):
                 "was set up.",
                 hot_used, len(hot_zone), hot_ch, cold_used, len(cold_zone), cold_ch,
             )
+        elif not (math.isfinite(P) and P > 0.0):
+            self._auto_incomplete_zone_points += 1
+            skip_reason = f"мощность недействительна: P = {P}"
+            logger.warning(
+                "Conductivity step skipped: source power is not a usable measurement (P = %r). "
+                "R = dT/P and G = P/dT are not defined here.",
+                P,
+            )
         elif not math.isfinite(dT):
             self._auto_incomplete_zone_points += 1
             skip_reason = "dT не определена (нет годных показаний)"
             logger.warning("Conductivity step skipped: dT is not finite from the confirmed zones.")
-        elif math.isfinite(P) and P > 0.0 and dT <= 0.0:
-            # elif, so one step never counts twice.
+        elif dT <= 0.0:
+            # elif throughout, so one step never counts twice.
             self._auto_nonpositive_dt_points += 1
             skip_reason = f"dT = {dT:.4f} K ≤ 0 при P = {P:.4f} Вт"
             logger.warning(
@@ -3405,6 +3360,14 @@ class ConductivityPanel(QWidget):
             self._auto_last_skip_reason = skip_reason
             self._auto_status_label.setVisible(True)
             self._auto_status_label.setText(f"Точка пропущена — {skip_reason}. Съём данных продолжается.")
+            # A skipped step must take the SAME authoritative transition a
+            # persisted one takes, minus the row. Returning here without it left
+            # _auto_tick re-evaluating the same already-stable powered step for
+            # ever: the source stayed at that power indefinitely, the skip
+            # counter incremented on every tick, the next target was never
+            # commanded and the run could not finish without the operator.
+            self._auto_step += 1
+            self._advance_after_step()
             return True
 
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
@@ -3467,6 +3430,17 @@ class ConductivityPanel(QWidget):
             pending["G"],
             pending["settled_pct"],
         )
+        self._advance_after_step()
+
+    def _advance_after_step(self) -> None:
+        """Leave the step just finished, however it finished.
+
+        Shared by a persisted point and a skipped one. A skipped step differs
+        only in appending nothing; the transition -- stop check, completion at
+        the end of the list, otherwise the next target -- is identical, and a
+        final degraded step must run the normal completion rather than leaving
+        the source powered.
+        """
         if self._persistence_completion_is_stopped():
             return
         if self._auto_step >= len(self._auto_power_list):
@@ -3598,7 +3572,7 @@ class ConductivityPanel(QWidget):
             )
         # Same split as the recorded point, so the live log and the accepted
         # result can never disagree about what dT means.
-        hot_zone, cold_zone = self._thermal_zones(tuple(self._chain))
+        hot_zone, cold_zone = self._confirmed_zones(tuple(self._chain))
         hot_ch = hot_zone[0]
         cold_ch = cold_zone[0]
         T_hot, _hot_used = self._zone_mean(hot_zone, self._temps)

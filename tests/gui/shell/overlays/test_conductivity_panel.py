@@ -730,23 +730,19 @@ def test_table_total_row_present(app):
     # 2 pairs + 1 total row = 3 rows
     assert panel._table.rowCount() == 3
     assert panel._table.item(2, 0).text() == "ИТОГО"
-    # Total R and total G must describe the SAME measurement, so both come from
-    # the whole-chain dT: 15 K / 0.01 W = 1500 K/W, and 1/1500 = 6.667e-4 W/K.
-    # Summing the pairwise resistances gave 2000 here, which was consistent
-    # with the old endpoint dT of 20 K and stopped being consistent the moment
-    # dT became the difference of the zone means -- it left a row reporting
-    # R = 2000 beside G = 6.667e-4, which are not the same sample.
+    # Total R and total G describe the SAME measurement, both from the
+    # whole-chain dT. With three channels the split proposes hot=(Т1,) and
+    # cold=(Т3,) -- the middle one is a gradient point in neither zone -- so
+    # dT = 20 K, R = 20/0.01 = 2000 K/W and G = 1/2000 = 5e-4.
+    #
+    # These numbers moved twice today and are back where they started. They
+    # changed when zone membership was briefly read from the display names,
+    # which put Т2 ("2 Верх образец 1") into the hot zone; that mechanism was
+    # retired in review because a rename could silently change the physics.
     total_r_text = panel._table.item(2, 4).text()
-    assert total_r_text == "1.5000e+03", f"Expected total R '1.5000e+03', got {total_r_text!r}"
-    # Total G = P / total_dT, and the zones come from the channel NAMES.
-    # These stubs are named from the real stand: Т1 "1 Верх образец 2" and
-    # Т2 "2 Верх образец 1" are both top sensors, Т3 "2 Низ образец 2" is a
-    # bottom one. So the hot zone is the mean of 120 and 110, the cold zone is
-    # 100, and dT is 15 -- not the 20 that the ORDER-based split gave by
-    # treating Т2 as a middle gradient point it is not named as.
-    # 0.01 / 15 = 6.667e-4.
+    assert total_r_text == "2.0000e+03", f"Expected total R '2.0000e+03', got {total_r_text!r}"
     total_g_text = panel._table.item(2, 5).text()
-    assert total_g_text == "0.0007", f"Expected total G '0.0007', got {total_g_text!r}"
+    assert total_g_text == "0.0005", f"Expected total G '0.0005', got {total_g_text!r}"
 
 
 def test_table_empty_when_chain_too_small(app):

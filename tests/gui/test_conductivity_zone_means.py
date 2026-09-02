@@ -98,82 +98,20 @@ def test_four_sensor_dt_uses_all_four():
 
 
 # ---------------------------------------------------------------------------
-# Zones come from the names when the names say something
+# Zones are no longer derived from display names
 # ---------------------------------------------------------------------------
 #
-# The split was positional: first half hot, last half cold. That makes the
-# ORDER of a selection load-bearing, and the order is an accident of which
-# checkbox was clicked first -- so a correctly-chosen chain in a different
-# order produced a plausible, silently wrong dT. The names on this stand
-# already state which end each sensor is on ("1 Верх образец 2", "2 Низ
-# образец 1"), and that is a fact about the hardware rather than about
-# clicking.
+# A section here tested _zones_from_names, which read "Верх"/"Низ" out of the
+# operator's channel labels to decide which end was hot. It removed one trap --
+# a chain selected in the wrong order -- by introducing another: a rename, a
+# translation or a typo silently changed the sign of dT while the number still
+# looked plausible. Display names are presentation.
+#
+# Review retired the mechanism. The order-based split below survives only as
+# the PROPOSAL shown to the operator; the physics comes from the channel IDs
+# they confirm once per run, which is covered in
+# tests/gui/test_conductivity_zone_confirmation.py.
 
-from_names = ConductivityPanel._zones_from_names
-positional = ConductivityPanel._positional_zones
-
-
-def test_names_decide_regardless_of_click_order():
-    names = {
-        "Т13": "1 Низ образец 2",
-        "Т1": "1 Верх образец 2",
-        "Т3": "2 Низ образец 2",
-        "Т14": "2 Верх образец 2",
-    }
-    # Selected cold-first, which positionally would invert the measurement.
-    chain = ("Т13", "Т3", "Т1", "Т14")
-
-    assert positional(chain) == (("Т13", "Т3"), ("Т1", "Т14")), "order alone would put the cold end first"
-    assert from_names(chain, names) == (("Т1", "Т14"), ("Т13", "Т3"))
-
-
-def test_a_correctly_ordered_chain_is_unaffected():
-    names = {
-        "Т1": "1 Верх образец 2",
-        "Т14": "2 Верх образец 2",
-        "Т13": "1 Низ образец 2",
-        "Т3": "2 Низ образец 2",
-    }
-    chain = ("Т1", "Т14", "Т13", "Т3")
-    assert from_names(chain, names) == positional(chain)
-
-
-def test_unequal_zone_sizes_are_allowed():
-    """Three sensors at the hot end and one at the cold is still a gradient."""
-    names = {"a": "Верх 1", "b": "Верх 2", "c": "Верх 3", "d": "Низ 1"}
-    assert from_names(("a", "b", "c", "d"), names) == (("a", "b", "c"), ("d",))
-
-
-# --- when the names are not evidence, order decides -------------------------
-
-
-def test_an_unnamed_channel_falls_back_to_order():
-    names = {"Т1": "1 Верх образец 2", "Т3": "Термостол"}
-    assert from_names(("Т1", "Т3"), names) is None
-
-
-def test_a_label_naming_both_ends_is_not_evidence():
-    names = {"a": "Верх и низ", "b": "Низ"}
-    assert from_names(("a", "b"), names) is None
-
-
-def test_all_one_end_has_no_gradient_to_measure():
-    names = {"a": "Верх 1", "b": "Верх 2"}
-    assert from_names(("a", "b"), names) is None
-
-
-def test_missing_names_fall_back_to_order():
-    assert from_names(("a", "b"), {}) is None
-
-
-def test_matching_is_case_insensitive():
-    names = {"a": "1 ВЕРХ образец", "b": "2 низ образец"}
-    assert from_names(("a", "b"), names) == (("a",), ("b",))
-
-
-# ---------------------------------------------------------------------------
-# R and G in the ИТОГО row must describe the same sample
-# ---------------------------------------------------------------------------
 
 
 def test_total_resistance_is_the_reciprocal_of_total_conductance():
