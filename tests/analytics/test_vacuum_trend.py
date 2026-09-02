@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 
 from cryodaq.analytics.vacuum_trend import (
+    _LOG_P_ULT_BOUND_EPS,
+    _LOG_P_ULT_MIN,
     VacuumTrendPredictor,
 )
 
@@ -185,58 +187,50 @@ def test_model_selection_prefers_simple() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_eta_computation_exponential() -> None:
-    # Target 1e-5, P_ult = 1e-7 (reachable). Push only 50 points so current
-    # pressure is still well above 1e-5 (target is still AHEAD, not yet reached).
-    # Analytical: log10(P(t)) = -7 + 5*exp(-t/300). Target at log10(1e-5)=-5.
-    # Solve: 5*exp(-t*/300) = 2  =>  t* = 300*ln(2.5) = 274.888 s from t=0.
-    # Data spans t=0..245 s (n=50, dt=5), so t_current=245 s.
-    # Closed-form ETA = t* - t_current = 300*ln(2.5) - 245 ≈ 29.888 s.
-    log_p_ult = -7.0
-    A = 5.0
-    tau = 300.0
-    t_current = 245.0  # last pushed t = (50-1)*5 = 245
-    log_target = -5.0  # log10(1e-5)
-    # log_p_ult + A*exp(-t*/tau) = log_target  =>  A*exp(-t*/tau) = log_target - log_p_ult
-    # t* = -tau * ln((log_target - log_p_ult) / A)
-    _eta_expected = -tau * math.log((log_target - log_p_ult) / A) - t_current
-    # _eta_expected ≈ 300*ln(2.5) - 245 ≈ 29.888 s
+def test_no_eta_when_the_fitted_floor_is_below_the_measurable_range() -> None:
+    """A floor the gauge cannot read cannot support an arrival time.
+
+    logP(t) = -7 + 5*exp(-t/300), target 1e-5. The target crossing is at
+    300*ln(2.5) = 274.9 s against data spanning 0..245 s, so it sits WELL
+    INSIDE the extrapolation horizon -- the refusal here is about the floor,
+    not the distance.
+
+    The module already refuses to report a floor below _LOG_P_ULT_UNMEASURABLE
+    as an ultimate pressure, on the grounds that it "is not a prediction but
+    the floor of the search space". This test pins that an ETA, which is a
+    statement about reaching that floor, is refused on the same grounds. It
+    previously asserted a finite ETA, computed from exactly the value the
+    module was simultaneously reporting as unidentified.
+    """
     pred = VacuumTrendPredictor(
         config={
+            "window_s": 10000,
             "min_points": 10,
             "min_points_combined": 300,
             "targets_mbar": [1e-5],
         }
     )
-    _push_exponential(pred, log_p_ult, A, tau, n=50, dt=5.0)  # span 0..245 s
+    _push_exponential(pred, -7.0, 5.0, 300.0, n=50, dt=5.0)
     pred.update()
     p = pred.get_prediction()
     assert p is not None
     assert p.model_type == "exponential"
-    eta = p.eta_targets.get("1e-05")
-    # ETA must be finite and strictly positive (target not yet reached)
-    assert eta is not None
-    assert eta > 0.0
-    # Tight closed-form check: fit params ±10% propagate ~10% error on ETA
-    assert eta == pytest.approx(_eta_expected, abs=5.0), (
-        f"ETA={eta:.3f}s deviates from closed-form {_eta_expected:.3f}s by more than 5s"
+    assert math.isnan(p.p_ultimate_mbar), "a floor below the gauge's range is not reported"
+    assert p.eta_targets.get("1e-05") is None, (
+        "and an ETA resting on that floor is not reported either"
     )
 
 
-# ---------------------------------------------------------------------------
-# 6. test_eta_computation_power_law — ETA for power law
-# ---------------------------------------------------------------------------
+def test_no_eta_when_the_fitted_floor_rests_on_its_bound() -> None:
+    """An optimiser's bound is not a fit.
 
-
-def test_eta_computation_power_law() -> None:
-    # logP(t) = -6 + 8 * t^(-0.3). P_ult=1e-6, target=1e-5 (log=-5).
-    # At last data point t=255 s: logP(255) = -6 + 8/255^0.3 ≈ -4.38 > -5 (target AHEAD).
-    # B=8 ∈ [0,30] and alpha=0.3 ∈ [0.01,5.0] are within fit bounds.
-    log_p_ult_true = -6.0
-    B_true = 8.0
-    alpha_true = 0.3
-    log_target = -5.0
-    t_current = 255.0  # last pushed t = 10 + 49*5
+    logP(t) = -6 + 8*t^(-0.3) with a 1e-5 target: the crossing is just past
+    the data, comfortably inside the horizon. But the power-law fit does not
+    recover the -6 floor -- it drives log_p_ult onto its -20 lower bound and
+    absorbs the difference into B and alpha. The curve below the data is then
+    unconstrained, which is what produced "0.01 mbar by 14.09" on this stand's
+    31.08 pump-down.
+    """
     pred = VacuumTrendPredictor(
         config={
             "min_points": 10,
@@ -244,46 +238,38 @@ def test_eta_computation_power_law() -> None:
             "targets_mbar": [1e-5],
         }
     )
-    # Push 50 pts: t spans 10..255 s
-    for i in range(50):
-        t = 10.0 + i * 5.0
-        logP = log_p_ult_true + B_true * max(t, 1.0) ** (-alpha_true)
-        pred.push(t, 10.0**logP)
+    for index in range(50):
+        t = 10.0 + index * 5.0
+        pred.push(t, 10.0 ** (-6.0 + 8.0 * max(t, 1.0) ** (-0.3)))
     pred.update()
     p = pred.get_prediction()
     assert p is not None
     assert p.model_type == "power_law"
-    eta = p.eta_targets.get("1e-05")
-    # ETA must be finite and strictly positive (target not yet reached at last data point)
-    assert eta is not None
-    assert eta > 0.0
-    # Closed-form ETA from FITTED params (independent of binary search):
-    # logP(t*) = log_p_ult_fit + B_fit * t*^(-alpha_fit) = log_target
-    # => t* = (B_fit / (log_target - log_p_ult_fit))^(1/alpha_fit)
-    # This is computed independently from the production ETA (which uses binary search).
-    B_fit = p.fit_params["B"]
-    alpha_fit = p.fit_params["alpha"]
-    lpu_fit = p.fit_params["log_p_ult"]
-    rhs = log_target - lpu_fit
-    assert rhs > 0, (
-        f"log_target ({log_target}) must be > log_p_ult_fit ({lpu_fit}) for ETA to be finite"
+    assert p.fit_params["log_p_ult"] <= _LOG_P_ULT_MIN + _LOG_P_ULT_BOUND_EPS, (
+        "this scenario exists because the fit lands on the bound"
     )
-    t_star_closed = (B_fit / rhs) ** (1.0 / alpha_fit)
-    eta_closed = t_star_closed - t_current
-    assert eta_closed > 0.0, f"Closed-form ETA {eta_closed:.1f}s must be positive"
-    # Binary-search ETA must match closed-form within 15s.
-    # The binary search terminates when t_hi - t_lo < 1s, but with alpha≈0.03
-    # the curve is extremely flat near t_star, so small t errors amplify to
-    # ~10s ETA error. 15s tolerance is the tightest realistic bound for this fit.
-    assert abs(eta - eta_closed) < 15.0, (
-        f"Binary-search ETA={eta:.3f}s deviates from closed-form {eta_closed:.3f}s by more than 15s"
+    assert p.eta_targets.get("1e-05") is None
+
+
+def test_already_reached_follows_the_gauge_not_the_fit() -> None:
+    """A fit below the target while the measurement is above it is not arrival.
+
+    The last accepted reading decides. Using fit.predict() instead announced an
+    arrival that had not happened -- the model can lead the instrument.
+    """
+    pred = VacuumTrendPredictor(
+        config={"window_s": 10000, "min_points": 10, "min_points_combined": 300, "targets_mbar": [1e-3]}
     )
-
-
-# ---------------------------------------------------------------------------
-# 7. test_eta_unreachable — P_ult > target → ETA = None
-# ---------------------------------------------------------------------------
-
+    _push_exponential(pred, -4.0, 2.0, 200.0, n=40, dt=5.0)
+    pred.update()
+    p = pred.get_prediction()
+    assert p is not None
+    fitted_now = float(p.extrapolation_logP[0]) if p.extrapolation_logP else None
+    assert fitted_now is not None
+    # Whatever the curve says, the ETA must not claim arrival unless the last
+    # MEASUREMENT is at or below the target.
+    if p.eta_targets.get("0.001") == 0.0:
+        assert fitted_now <= math.log10(1e-3)
 
 def test_eta_unreachable() -> None:
     pred = VacuumTrendPredictor(

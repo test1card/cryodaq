@@ -401,7 +401,6 @@ class VacuumTrendPredictor:
         # this stand the Pirani stops at 1e-4 mbar, and reporting a fitted
         # 3e-12 mbar "предел откачки" to an operator is a confident-looking
         # number about a pressure nothing here can see.
-        log_p_ult_for_eta = log_p_ult
         if math.isfinite(log_p_ult) and log_p_ult < _LOG_P_ULT_UNMEASURABLE:
             logger.debug(
                 "Vacuum fit %s: fitted floor %.3g mbar is below the measurable range; "
@@ -421,19 +420,24 @@ class VacuumTrendPredictor:
         else:
             p_ult = 10.0**log_p_ult
 
-        # ETAs come AFTER the asymptote has been judged, and are computed from
-        # the judged value. They used to be computed twelve lines earlier, from
-        # the raw fitted parameter -- so the two checks above would reject a
-        # floor as "not a prediction but the floor of the search space" and
-        # report the ultimate pressure as unidentified, while the ETAs derived
-        # from that same rejected floor were published anyway.
+        # ONE judged asymptote, consumed by everything downstream. An earlier
+        # attempt kept a separate pre-judgement copy for the ETA, which put the
+        # rejected floor straight back into the answer it was rejected from --
+        # the horizon bound below hid that in the observed example rather than
+        # fixing it. Both rejections above nan the same variable, and both the
+        # reported ultimate pressure and the ETA now read it.
         #
-        # Replaying this stand's 31.08 pump-down showed the result: at 24 h the
-        # panel reported an unidentified base pressure beside "0.01 mbar by
-        # 14.09" -- a date extrapolated to an asymptote the code had just
-        # declared unmeasurable. An ETA is a statement about reaching a floor;
-        # it cannot outlive the floor it rests on.
-        eta_targets = self._compute_eta(best, t_arr[-1], log_p_ult=log_p_ult_for_eta)
+        # The latest OBSERVATION is passed separately. Whether a target has been
+        # reached is a fact about the measured pressure; the fitted curve is for
+        # the future only. A fit can sit below a target while the gauge still
+        # reads above it, and answering "already reached" from the curve reports
+        # an arrival that has not happened.
+        eta_targets = self._compute_eta(
+            best,
+            t_arr[-1],
+            log_p_ult=log_p_ult,
+            latest_observed_logP=float(logP_arr[-1]),
+        )
 
         self._prediction = VacuumPrediction(
             model_type=best.model_type,
@@ -670,6 +674,7 @@ class VacuumTrendPredictor:
         t_current: float,
         *,
         log_p_ult: float | None = None,
+        latest_observed_logP: float | None = None,
     ) -> dict[str, float | None]:
         """Compute ETA to each target pressure.
 
@@ -679,13 +684,24 @@ class VacuumTrendPredictor:
         ``log_p_ult`` is the asymptote AFTER the caller has judged it. Passing
         the raw fitted parameter instead lets an ETA rest on a floor the caller
         has already rejected as unmeasurable.
+
+        ``latest_observed_logP`` is the last accepted MEASUREMENT. It decides
+        "already reached" on its own; the fitted curve is used only to
+        extrapolate forward.
         """
         result: dict[str, float | None] = {}
         if log_p_ult is None:
             log_p_ult = fit.params.get("log_p_ult", float("nan"))
 
-        # Current predicted pressure
-        logP_now = float(fit.predict(np.array([t_current]))[0])
+        # Arrival is decided by the gauge, not by the model. The fitted curve
+        # can already be below a target while the measured pressure is still
+        # above it -- reporting that as reached announces an arrival that has
+        # not happened.
+        logP_now = (
+            float(fit.predict(np.array([t_current]))[0])
+            if latest_observed_logP is None
+            else float(latest_observed_logP)
+        )
 
         for target in self.targets:
             log_target = math.log10(target)
