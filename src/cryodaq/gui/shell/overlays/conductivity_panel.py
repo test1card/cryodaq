@@ -3046,16 +3046,69 @@ class ConductivityPanel(QWidget):
         if is_stable:
             self._auto_record_point()
 
+    @staticmethod
+    def _thermal_zones(channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Split an ordered hot -> cold chain into its hot and cold zones.
+
+        This stand carries two sensors at the hot end and two at the cold end,
+        and dT should be the difference of the two zone MEANS -- not of two
+        arbitrary end sensors, which is what a single-sensor-per-end reading of
+        the chain gives.
+
+        First half hot, last half cold. With one sensor per end this is exactly
+        the old endpoint behaviour, so two- and three-channel chains are
+        unchanged. An odd middle channel belongs to neither zone: it is a
+        gradient point, and folding it into either end would bias dT toward
+        that end.
+        """
+
+        half = len(channels) // 2
+        return channels[:half], channels[len(channels) - half:]
+
+    @staticmethod
+    def _zone_mean(zone: tuple[str, ...], values: dict[str, float]) -> tuple[float, int]:
+        """Mean of the readings actually available in a zone, and how many.
+
+        A sensor that has dropped out contributes nothing rather than poisoning
+        the mean with NaN -- these joints loosen with thermal cycling, and one
+        bad contact should not end a sweep. The count is returned so the caller
+        can say that the average narrowed, because silently averaging one
+        sensor where two were selected is the same class of quiet substitution
+        this program keeps being bitten by.
+        """
+
+        finite = [
+            value
+            for value in (values.get(channel, float("nan")) for channel in zone)
+            if math.isfinite(value)
+        ]
+        if not finite:
+            return float("nan"), 0
+        return sum(finite) / len(finite), len(finite)
+
     def _auto_record_point(self) -> bool:
         P = self._auto_step_power_value
         temperature_channels = self._auto_step_temperature_channels
         if len(temperature_channels) < 2 or P is None:
             self._request_stop_after_point_persistence_failure(ValueError("step measurement identity is incomplete"))
             return False
-        hot_ch = temperature_channels[0]
-        cold_ch = temperature_channels[-1]
-        T_hot = self._auto_step_temperature_values.get(hot_ch, float("nan"))
-        T_cold = self._auto_step_temperature_values.get(cold_ch, float("nan"))
+        hot_zone, cold_zone = self._thermal_zones(temperature_channels)
+        hot_ch = "+".join(hot_zone)
+        cold_ch = "+".join(cold_zone)
+        T_hot, hot_used = self._zone_mean(hot_zone, self._auto_step_temperature_values)
+        T_cold, cold_used = self._zone_mean(cold_zone, self._auto_step_temperature_values)
+        if hot_used < len(hot_zone) or cold_used < len(cold_zone):
+            self._auto_nonphysical_points += 1
+            logger.warning(
+                "Conductivity point averaged fewer sensors than selected: hot %d/%d (%s), "
+                "cold %d/%d (%s). dT is still reported, from the sensors that answered.",
+                hot_used,
+                len(hot_zone),
+                hot_ch,
+                cold_used,
+                len(cold_zone),
+                cold_ch,
+            )
         dT = T_hot - T_cold
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
@@ -3260,10 +3313,13 @@ class ConductivityPanel(QWidget):
                     "auto_sweep_power",
                 ]
             )
-        hot_ch = self._chain[0]
-        cold_ch = self._chain[-1]
-        T_hot = self._temps.get(hot_ch, float("nan"))
-        T_cold = self._temps.get(cold_ch, float("nan"))
+        # Same split as the recorded point, so the live log and the accepted
+        # result can never disagree about what dT means.
+        hot_zone, cold_zone = self._thermal_zones(tuple(self._chain))
+        hot_ch = hot_zone[0]
+        cold_ch = cold_zone[0]
+        T_hot, _hot_used = self._zone_mean(hot_zone, self._temps)
+        T_cold, _cold_used = self._zone_mean(cold_zone, self._temps)
         dT = T_hot - T_cold
         P = self._power
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")

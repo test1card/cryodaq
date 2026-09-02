@@ -27,7 +27,10 @@ _REAL_ZMQ_COMMAND_WORKER = _zmq_client.ZmqCommandWorker
 class _SyncCommandWorkerStub(QObject):
     finished = Signal(dict)
 
-    def __init__(self, cmd: dict, parent=None) -> None:  # noqa: ANN001
+    def __init__(self, cmd: dict, parent=None, *, release_on_settle: bool = False) -> None:  # noqa: ANN001
+        # Mirrors ZmqCommandWorker's signature. The stub never settles
+        # through the registry, so the flag is accepted and ignored.
+        del release_on_settle
         super().__init__(parent)
         self._cmd = cmd
 
