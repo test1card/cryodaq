@@ -17,7 +17,9 @@ import pytest
 
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 
-zones = ConductivityPanel._thermal_zones
+# These cover the ORDER-based split, which is now the fallback used when the
+# channel names say nothing about which end a sensor is on.
+zones = ConductivityPanel._positional_zones
 mean = ConductivityPanel._zone_mean
 
 
@@ -93,3 +95,77 @@ def test_four_sensor_dt_uses_all_four():
     # The endpoint reading would have given 301.0 - 297.0 = 4.0 K: a third less,
     # and dependent on the list order within each zone.
     assert temps["Т1"] - temps["Т14"] == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------------------
+# Zones come from the names when the names say something
+# ---------------------------------------------------------------------------
+#
+# The split was positional: first half hot, last half cold. That makes the
+# ORDER of a selection load-bearing, and the order is an accident of which
+# checkbox was clicked first -- so a correctly-chosen chain in a different
+# order produced a plausible, silently wrong dT. The names on this stand
+# already state which end each sensor is on ("1 Верх образец 2", "2 Низ
+# образец 1"), and that is a fact about the hardware rather than about
+# clicking.
+
+from_names = ConductivityPanel._zones_from_names
+positional = ConductivityPanel._positional_zones
+
+
+def test_names_decide_regardless_of_click_order():
+    names = {
+        "Т13": "1 Низ образец 2",
+        "Т1": "1 Верх образец 2",
+        "Т3": "2 Низ образец 2",
+        "Т14": "2 Верх образец 2",
+    }
+    # Selected cold-first, which positionally would invert the measurement.
+    chain = ("Т13", "Т3", "Т1", "Т14")
+
+    assert positional(chain) == (("Т13", "Т3"), ("Т1", "Т14")), "order alone would put the cold end first"
+    assert from_names(chain, names) == (("Т1", "Т14"), ("Т13", "Т3"))
+
+
+def test_a_correctly_ordered_chain_is_unaffected():
+    names = {
+        "Т1": "1 Верх образец 2",
+        "Т14": "2 Верх образец 2",
+        "Т13": "1 Низ образец 2",
+        "Т3": "2 Низ образец 2",
+    }
+    chain = ("Т1", "Т14", "Т13", "Т3")
+    assert from_names(chain, names) == positional(chain)
+
+
+def test_unequal_zone_sizes_are_allowed():
+    """Three sensors at the hot end and one at the cold is still a gradient."""
+    names = {"a": "Верх 1", "b": "Верх 2", "c": "Верх 3", "d": "Низ 1"}
+    assert from_names(("a", "b", "c", "d"), names) == (("a", "b", "c"), ("d",))
+
+
+# --- when the names are not evidence, order decides -------------------------
+
+
+def test_an_unnamed_channel_falls_back_to_order():
+    names = {"Т1": "1 Верх образец 2", "Т3": "Термостол"}
+    assert from_names(("Т1", "Т3"), names) is None
+
+
+def test_a_label_naming_both_ends_is_not_evidence():
+    names = {"a": "Верх и низ", "b": "Низ"}
+    assert from_names(("a", "b"), names) is None
+
+
+def test_all_one_end_has_no_gradient_to_measure():
+    names = {"a": "Верх 1", "b": "Верх 2"}
+    assert from_names(("a", "b"), names) is None
+
+
+def test_missing_names_fall_back_to_order():
+    assert from_names(("a", "b"), {}) is None
+
+
+def test_matching_is_case_insensitive():
+    names = {"a": "1 ВЕРХ образец", "b": "2 низ образец"}
+    assert from_names(("a", "b"), names) == (("a",), ("b",))

@@ -713,9 +713,15 @@ def test_table_total_row_present(app):
     # Total R = 1000 + 1000 = 2000 (four thermal-resistance decimals)
     total_r_text = panel._table.item(2, 4).text()
     assert total_r_text == "2.0000e+03", f"Expected total R '2.0000e+03', got {total_r_text!r}"
-    # Total G = P / total_dT = 0.01 / 20 = 0.0005 (four conductance decimals)
+    # Total G = P / total_dT, and the zones come from the channel NAMES.
+    # These stubs are named from the real stand: Т1 "1 Верх образец 2" and
+    # Т2 "2 Верх образец 1" are both top sensors, Т3 "2 Низ образец 2" is a
+    # bottom one. So the hot zone is the mean of 120 and 110, the cold zone is
+    # 100, and dT is 15 -- not the 20 that the ORDER-based split gave by
+    # treating Т2 as a middle gradient point it is not named as.
+    # 0.01 / 15 = 6.667e-4.
     total_g_text = panel._table.item(2, 5).text()
-    assert total_g_text == "0.0005", f"Expected total G '0.0005', got {total_g_text!r}"
+    assert total_g_text == "0.0007", f"Expected total G '0.0007', got {total_g_text!r}"
 
 
 def test_table_empty_when_chain_too_small(app):

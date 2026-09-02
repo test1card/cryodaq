@@ -3120,23 +3120,84 @@ class ConductivityPanel(QWidget):
             self._auto_record_point()
 
     @staticmethod
-    def _thermal_zones(channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Split an ordered hot -> cold chain into its hot and cold zones.
+    def _zones_from_names(
+        channels: tuple[str, ...],
+        display_names: dict[str, str],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        """Zones taken from the operator's own channel names, or None.
+
+        The names on this stand already state which end each sensor is on --
+        "1 Верх образец 2", "2 Низ образец 1" -- and that statement is a fact
+        about the hardware, whereas the order of a selection is an accident of
+        which checkbox was clicked first. Reading the names removes a trap in
+        which a correctly-selected chain in a different order yields a
+        plausible, silently wrong dT.
+
+        Returns None unless EVERY channel is unambiguous and both ends are
+        represented. A partial or contradictory naming is not evidence, and
+        guessing from half of it would be worse than falling back to order.
+        """
+
+        hot: list[str] = []
+        cold: list[str] = []
+        for channel in channels:
+            label = (display_names.get(channel) or "").casefold()
+            is_hot = "верх" in label
+            is_cold = "низ" in label
+            if is_hot == is_cold:
+                # Neither end named, or both named in one label.
+                return None
+            (hot if is_hot else cold).append(channel)
+        if not hot or not cold:
+            # All one end: there is no gradient to take a difference across.
+            return None
+        return tuple(hot), tuple(cold)
+
+    @staticmethod
+    def _positional_zones(channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """First half hot, last half cold -- the fallback when names say nothing.
+
+        With one sensor per end this is exactly the old endpoint behaviour, so
+        two- and three-channel chains are unchanged. An odd middle channel
+        belongs to neither zone: it is a gradient point, and folding it into
+        either end would bias dT toward that end.
+        """
+
+        half = len(channels) // 2
+        return channels[:half], channels[len(channels) - half:]
+
+    def _thermal_zones(self, channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Split a chain into its hot and cold zones.
 
         This stand carries two sensors at the hot end and two at the cold end,
         and dT should be the difference of the two zone MEANS -- not of two
         arbitrary end sensors, which is what a single-sensor-per-end reading of
         the chain gives.
 
-        First half hot, last half cold. With one sensor per end this is exactly
-        the old endpoint behaviour, so two- and three-channel chains are
-        unchanged. An odd middle channel belongs to neither zone: it is a
-        gradient point, and folding it into either end would bias dT toward
-        that end.
+        Names decide when they can. Ordering decides only when they cannot, and
+        a disagreement between the two is reported rather than resolved
+        silently: it means the chain is ordered against its own labels, and the
+        operator is the one who can say which is wrong.
         """
 
-        half = len(channels) // 2
-        return channels[:half], channels[len(channels) - half:]
+        positional = self._positional_zones(channels)
+        try:
+            names = {channel: get_channel_manager().get_display_name(channel) for channel in channels}
+        except Exception:  # noqa: BLE001 - naming must never break a measurement
+            return positional
+        named = self._zones_from_names(channels, names)
+        if named is None:
+            return positional
+        if named != positional and named != (positional[1], positional[0]):
+            logger.warning(
+                "Порядок цепочки расходится с названиями датчиков: по названиям горячая зона "
+                "%s, холодная %s; по порядку %s и %s. Используются названия.",
+                [names[c] for c in named[0]],
+                [names[c] for c in named[1]],
+                [names[c] for c in positional[0]],
+                [names[c] for c in positional[1]],
+            )
+        return named
 
     @staticmethod
     def _zone_mean(zone: tuple[str, ...], values: dict[str, float]) -> tuple[float, int]:
