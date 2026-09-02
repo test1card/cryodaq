@@ -172,7 +172,14 @@ class TempPlotWidget(QWidget):
         pi.disableAutoRange(axis="y")
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
-        pi.getAxis("bottom").setStyle(showValues=False)
+        # The X axis is shared with the pressure plot below, and this one used
+        # to hide its tick labels on the usual stacked-plot convention that the
+        # bottom-most plot carries them. In this layout that does not work: the
+        # temperature plot is the tall one operators actually read (stretch 50
+        # against 18), and its times were an axis-height away at the bottom of
+        # another widget. Reading a temperature off a curve meant tracking down
+        # past the pressure plot to find when it happened.
+        pi.getAxis("bottom").setStyle(showValues=True)
         # Same wiring as PlotItem.addLegend(), with the clickable subclass so
         # the channel name toggles its curve and not only the colour swatch.
         if pi.legend is None:

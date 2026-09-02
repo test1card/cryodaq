@@ -650,15 +650,25 @@ class DashboardView(QScrollArea):
 
         if self._history_seed_worker is not None:
             return
-        span_s = _HISTORY_SEED_SPAN_S
+        # Ask only for what is plotted. The engine caps a history reply at a
+        # fixed TOTAL row count across every channel, so an unfiltered request
+        # spreads that budget over all ~33 channels and buys about an hour of
+        # depth. The plots draw the visible temperature channels and one
+        # pressure channel, so naming them concentrates the same budget where
+        # it is actually displayed.
+        channels = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("Т")]
+        if self._pressure_plot is not None:
+            channels.append(self._pressure_plot._channel_id)
+        if not channels:
+            return
         now = time.time()
         context = {"connection_generation": self._connection_generation}
         worker = ZmqCommandWorker(
             {
                 "cmd": "readings_history",
-                "from_ts": now - span_s,
+                "from_ts": now - _HISTORY_SEED_SPAN_S,
                 "to_ts": now,
-                "channels": None,
+                "channels": channels,
                 "limit_per_channel": _HISTORY_SEED_LIMIT,
             },
             parent=self,
