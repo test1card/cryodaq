@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 SAFETY_MANAGER_SOURCE_STATE_PUBLISHER = "safety_manager_source_state_v1"
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
+
+# How old an admitted intent may be and still be restored automatically after a
+# reconnect. Long enough for a real cable to be found and re-seated; short
+# enough that a setpoint from another sitting never re-energizes a cryostat on
+# its own. Beyond it the source stays OFF and an operator must Start again.
+_INTENT_RESUME_MAX_AGE_S = 900.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
 
 # Owner-authorised escape from the signed laboratory-qualification gate.
@@ -1247,7 +1253,89 @@ class SafetyManager:
             # proof, so it supersedes a previously failed OFF attempt.
             self._reviewed_source_off_proven = verified_off
             self._refresh_operator_safety_snapshot()
+            if verified_off and self._admitted_intent:
+                # Restore what the source was doing before the link was lost.
+                # Scheduled rather than awaited: request_run takes _cmd_lock,
+                # which this method already holds.
+                resume = asyncio.create_task(
+                    self._resume_admitted_intent(),
+                    name="safety_resume_admitted_intent",
+                )
+                self._pending_publishes.add(resume)
+                resume.add_done_callback(self._pending_publishes.discard)
             return self._reviewed_source_off_evidence
+
+    async def _resume_admitted_intent(self) -> None:
+        """Put the source back where it was intended after a reconnect.
+
+        A cable trip mid-sweep leaves the heater running -- the 2604B holds its
+        output across a controller-side disconnection -- but ``connect()``
+        leads with a forced OFF and zeroes the driver's ``p_target``, so
+        reconnecting used to end with the source off and the sweep dead, having
+        recovered the link and thrown away the run.
+
+        This re-issues the admitted intent through ``request_run``, which is
+        the same admission every operator Start goes through: state,
+        preconditions, critical-input freshness, the power ceiling, and the
+        interlocks. Minutes passed blind, so an interlock condition may have
+        arisen in the meantime, and a resume must be refused for exactly the
+        reasons a fresh Start would be. Nothing here bypasses a gate.
+
+        A refusal leaves the source OFF, which is the fail-closed direction.
+
+        The output does dip: the connect proves OFF and then this restores the
+        setpoint a moment later. That is deliberate -- authority is granted
+        only over an output verified to equal what this generation commanded,
+        and giving that up to avoid a second's dip after a multi-minute outage
+        is a bad trade.
+        """
+        if self._mock:
+            return
+        intents = dict(self._admitted_intent)
+        if not intents:
+            return
+        now = time.monotonic()
+        for smu_channel, intent in intents.items():
+            age_s = now - intent.admitted_monotonic_s
+            if age_s > _INTENT_RESUME_MAX_AGE_S:
+                # An intent admitted long ago is not evidence that it is still
+                # intended now. Same reasoning as the OFF-evidence bound.
+                logger.critical(
+                    "Not resuming %s at %.4f W: the intent is %.0f s old (bound %.0f s). "
+                    "The source stays OFF and requires a new Start.",
+                    smu_channel,
+                    intent.p_target,
+                    age_s,
+                    _INTENT_RESUME_MAX_AGE_S,
+                )
+                self._admitted_intent.pop(smu_channel, None)
+                continue
+            if smu_channel in self._active_sources:
+                continue
+            logger.critical(
+                "Restoring the intended output on %s after reconnect: P=%.4f W (admitted %.0f s ago).",
+                smu_channel,
+                intent.p_target,
+                age_s,
+            )
+            try:
+                result = await self.request_run(
+                    intent.p_target,
+                    intent.v_comp,
+                    intent.i_comp,
+                    channel=str(smu_channel),
+                )
+            except Exception:
+                logger.exception("Resuming the intended output on %s failed", smu_channel)
+                continue
+            if not (isinstance(result, dict) and result.get("ok") is True):
+                reason = result.get("error") if isinstance(result, dict) else "unknown"
+                logger.critical(
+                    "Refused to restore %s at %.4f W: %s. The source stays OFF.",
+                    smu_channel,
+                    intent.p_target,
+                    reason,
+                )
 
     async def mark_reviewed_source_uncertain(
         self,

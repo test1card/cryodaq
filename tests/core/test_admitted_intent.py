@@ -178,3 +178,129 @@ async def test_a_delivered_stop_clears_the_intent():
 
     assert channel not in manager._admitted_intent
     assert driver.stopped, "and it really did reach the instrument"
+
+
+# ---------------------------------------------------------------------------
+# Restoring it after a reconnect
+# ---------------------------------------------------------------------------
+
+
+async def test_the_intended_output_is_restored_after_a_reconnect():
+    """A cable trip mid-sweep must not end the run.
+
+    connect() leads with a forced OFF and zeroes the driver's p_target, so a
+    reconnect used to recover the link and throw away the run. The intent is
+    re-issued through request_run, which is the same admission an operator
+    Start goes through.
+    """
+    driver = _Keithley()
+    manager = _manager(driver)
+    _admit(manager, "smub", 0.7)
+    issued: list[tuple[float, float, float, str]] = []
+
+    async def _capture(p, v, i, *, channel=None, **kwargs):
+        issued.append((p, v, i, channel))
+        return {"ok": True}
+
+    manager.request_run = _capture  # type: ignore[method-assign]
+    manager._mock = False
+
+    await manager._resume_admitted_intent()
+
+    assert issued == [(0.7, 40.0, 1.0, "smub")], "the setpoint AND its limits are restored"
+
+
+async def test_a_stale_intent_is_not_restored():
+    """A setpoint from another sitting must not re-energize a cryostat."""
+    import time
+
+    from cryodaq.core.safety_manager import _INTENT_RESUME_MAX_AGE_S, _AdmittedIntent
+
+    driver = _Keithley()
+    manager = _manager(driver)
+    channel = manager._resolve_channels("smub").pop()
+    manager._admitted_intent[channel] = _AdmittedIntent(
+        p_target=0.7,
+        v_comp=40.0,
+        i_comp=1.0,
+        admitted_monotonic_s=time.monotonic() - (_INTENT_RESUME_MAX_AGE_S + 60),
+        abort_generation=manager._abort_generation,
+    )
+    issued: list = []
+
+    async def _capture(*args, **kwargs):
+        issued.append(args)
+        return {"ok": True}
+
+    manager.request_run = _capture  # type: ignore[method-assign]
+    manager._mock = False
+
+    await manager._resume_admitted_intent()
+
+    assert issued == [], "an intent older than the bound is not restored"
+    assert channel not in manager._admitted_intent, "and it is discarded, not left to age further"
+
+
+async def test_a_refused_resume_leaves_the_source_off():
+    """Minutes passed blind; an interlock may have arisen. Refusal is fail-closed."""
+    driver = _Keithley()
+    manager = _manager(driver)
+    _admit(manager, "smub", 0.7)
+
+    async def _refuse(*args, **kwargs):
+        return {"ok": False, "error": "Interlock latched"}
+
+    manager.request_run = _refuse  # type: ignore[method-assign]
+    manager._mock = False
+
+    await manager._resume_admitted_intent()
+
+    assert manager._active_sources == set(), "a refused resume does not energize anything"
+
+
+async def test_a_revoked_intent_is_never_restored():
+    """The whole point of recording a link-less Stop."""
+    driver = _Keithley()
+    manager = _manager(driver)
+    manager._state = SafetyState.RUNNING
+    _admit(manager, "smub", 0.7)
+    driver.reachable = False
+    issued: list = []
+
+    async def _capture(*args, **kwargs):
+        issued.append(args)
+        return {"ok": True}
+
+    try:
+        await manager.request_stop(channel="smub")
+    except Exception:
+        pass
+
+    manager.request_run = _capture  # type: ignore[method-assign]
+    manager._mock = False
+    await manager._resume_admitted_intent()
+
+    assert issued == [], (
+        "the operator stopped it while the cable was out; reconnect must not "
+        "restore the power they were stopping"
+    )
+
+
+async def test_an_already_active_channel_is_not_restarted():
+    driver = _Keithley()
+    manager = _manager(driver)
+    channel = manager._resolve_channels("smub").pop()
+    _admit(manager, "smub", 0.7)
+    manager._active_sources.add(channel)
+    issued: list = []
+
+    async def _capture(*args, **kwargs):
+        issued.append(args)
+        return {"ok": True}
+
+    manager.request_run = _capture  # type: ignore[method-assign]
+    manager._mock = False
+
+    await manager._resume_admitted_intent()
+
+    assert issued == []
