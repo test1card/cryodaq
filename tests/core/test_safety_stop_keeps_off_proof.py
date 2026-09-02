@@ -53,6 +53,12 @@ class _Keithley:
 def _manager(driver: _Keithley) -> SafetyManager:
     manager = SafetyManager(SafetyBroker(), keithley_driver=driver, mock=True)
     manager._state = SafetyState.RUNNING
+    # The qualification gate is evaluated before the OFF checks and would mask
+    # them. The stand runs with CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1; these
+    # tests are about the OFF evidence, so that gate is taken out of the way
+    # rather than being what they measure.
+    manager._energizing_mutation_refusal = lambda: None  # type: ignore[method-assign]
+    manager._config.critical_channels = []
     return manager
 
 
@@ -75,6 +81,62 @@ async def test_successful_stop_keeps_the_off_proof_it_just_obtained():
     assert manager._reviewed_source_off_evidence.verified_off is True, (
         "the stop verified OUTPUT_OFF by readback; discarding that proof is what disarmed the stand"
     )
+
+
+async def test_the_proof_survives_the_staleness_bound():
+    """Recording the evidence is not enough: it must keep being re-derived.
+
+    _expire_stale_off_evidence() revokes verified OFF older than
+    stale_timeout_s. _reviewed_source_off_proven is what lets
+    _refresh_operator_safety_snapshot re-derive it from the driver's live
+    readback; a run clears that flag and only _ensure_output_off restored it.
+    So an ordinary stop left a TEN SECOND window in which the source could be
+    restarted, and refused as UNVERIFIED after that -- observed on the stand:
+
+        12:51:23 stop / 12:51:26 start -> ran
+        12:51:33 stop / 12:54:33 start -> refused, UNVERIFIED
+    """
+    driver = _Keithley()
+    manager = _manager(driver)
+    channels = manager._resolve_channels(None)
+    manager._active_sources.update(channels)
+    # A run clears the flag; the stop must restore it.
+    manager._reviewed_source_off_proven = False
+
+    await manager._safe_off("Operator stop", channels=channels)
+    assert manager._reviewed_source_off_proven is True, (
+        "without this the evidence is revoked at the staleness bound and never restored"
+    )
+
+    # Age the evidence past the bound, then take a snapshot as the monitor does.
+    manager._reviewed_source_off_evidence_observed_monotonic_s -= manager._config.stale_timeout_s + 5.0
+    manager._refresh_operator_safety_snapshot()
+
+    assert manager._reviewed_source_off_evidence.verified_off is True, (
+        "the driver still holds live readback proof; the stand must remain armable"
+    )
+    ok, reason = manager._check_preconditions()
+    assert ok, f"a start well after a stop was refused: {reason}"
+
+
+async def test_a_driver_that_loses_proof_is_revoked_at_the_bound():
+    """Re-derivation must follow the driver, not outlive it."""
+    driver = _Keithley()
+    manager = _manager(driver)
+    channels = manager._resolve_channels(None)
+    manager._active_sources.update(channels)
+
+    await manager._safe_off("Operator stop", channels=channels)
+    assert manager._reviewed_source_off_evidence.verified_off is True
+
+    # The driver's own readback now says the output state is not verified.
+    driver.output_state_unverified = True
+    manager._reviewed_source_off_evidence_observed_monotonic_s -= manager._config.stale_timeout_s + 5.0
+    manager._refresh_operator_safety_snapshot()
+
+    assert manager._reviewed_source_off_evidence.verified_off is False
+    ok, reason = manager._check_preconditions()
+    assert not ok and "UNVERIFIED" in reason
 
 
 async def test_the_evidence_is_device_reported_not_assumed():

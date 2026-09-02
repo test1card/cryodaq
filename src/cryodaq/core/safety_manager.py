@@ -3915,6 +3915,20 @@ class SafetyManager:
             self._reviewed_source_off_tier(),
             SourceOffResult.DEVICE_REPORTED_OFF if verified_off else SourceOffResult.PHYSICAL_STATE_UNKNOWN,
         )
+        # Recording the evidence is only half of it. _reviewed_source_off_proven
+        # is what lets _refresh_operator_safety_snapshot keep RE-DERIVING OFF
+        # from the driver's live readback; without it the evidence above is
+        # revoked by _expire_stale_off_evidence() ten seconds later and nothing
+        # restores it, so a start was refused as UNVERIFIED from then on. A run
+        # clears the flag (correctly -- what proved OFF before a run says
+        # nothing about after it) and only _ensure_output_off restored it, which
+        # is why an emergency OFF re-armed the stand and an ordinary stop left a
+        # ten-second window and then nothing.
+        #
+        # Same rule as the other two sites that set this: only a proven OFF is
+        # proof. verified_off is False whenever the driver lacks live readback
+        # proof, so this stays fail-closed.
+        self._reviewed_source_off_proven = verified_off
         self._transition(SafetyState.SAFE_OFF, reason)
         if caller_cancelled is not None:
             raise caller_cancelled
