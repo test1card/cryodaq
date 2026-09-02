@@ -43,14 +43,20 @@ def test_a_vanishing_dt_makes_conductance_explode():
     assert g > 100.0, "a near-zero dT inflates G without any guard firing"
 
 
-def test_the_panel_counts_and_reports_non_physical_points():
-    """Source-level: the counter exists, is reset per panel, and reaches the UI."""
-    from pathlib import Path
+def test_the_panel_separates_and_reports_its_skip_reasons():
+    """The counters were merged under one label and could double-count.
 
-    source = Path("src/cryodaq/gui/shell/overlays/conductivity_panel.py").read_text(encoding="utf-8")
-    assert "self._auto_nonphysical_points = 0" in source, "no counter"
-    assert "P > 0.0 and dT <= 0.0" in source, "the non-physical condition is not detected"
-    assert "точек с dT ≤ 0" in source, "the operator is never shown the count"
-    # And the point must still be written: no early return on the warning path.
-    warn_block = source.split("P > 0.0 and dT <= 0.0")[1].split("point = {")[0]
-    assert "return" not in warn_block, "a non-physical point must be recorded, not dropped"
+    A single ``_auto_nonphysical_points`` counted both an incomplete zone and a
+    non-positive dT, under a status label that named only "dT <= 0" -- and a
+    step that was both incremented it twice. They are now separate, mutually
+    exclusive, and reset per sweep. The point itself is no longer kept: a step
+    that cannot produce an honest conductance produces none.
+    """
+    from pathlib import Path as _Path
+
+    source = _Path("src/cryodaq/gui/shell/overlays/conductivity_panel.py").read_text(encoding="utf-8")
+    assert "self._auto_incomplete_zone_points = 0" in source
+    assert "self._auto_nonpositive_dt_points = 0" in source
+    assert "_auto_nonphysical_points" not in source, "the merged counter is gone"
+    assert "пропущено (неполные зоны)" in source
+    assert "пропущено (dT ≤ 0)" in source

@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
+import pytest
+
 from cryodaq.gui.shell.overlays import conductivity_panel as panel_module
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from tests.gui.shell.overlays import test_conductivity_panel as guard_support
+
+
+@pytest.fixture(autouse=True)
+def _zones_confirmed(monkeypatch):
+    """Auto-confirm the once-per-run hot/cold zone dialog.
+
+    Start now asks the operator to confirm which channel IDs are the hot and
+    cold ends, because that mapping decides the sign and value of every
+    published dT and G. These tests are about other things, so they declare
+    here that they run with the zones confirmed rather than each one happening
+    to dismiss a dialog. The gate itself is tested separately, without this.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok),
+    )
+
+
 
 app = guard_support.app
 _isolated_state_root = guard_support._isolated_state_root

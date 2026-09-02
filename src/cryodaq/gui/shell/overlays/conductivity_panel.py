@@ -415,7 +415,15 @@ class ConductivityPanel(QWidget):
         # recorded (data is never dropped), but the operator is told, and the
         # count stays on screen for the rest of the sweep rather than flashing
         # past in a single status update.
-        self._auto_nonphysical_points = 0
+        # Separate reasons a step produced no publishable point. One counter
+        # labelled "dT <= 0" was carrying both, and a step that was BOTH
+        # incomplete and non-physical incremented it twice.
+        self._auto_incomplete_zone_points = 0
+        self._auto_nonpositive_dt_points = 0
+        self._auto_last_skip_reason: str | None = None
+        # Frozen for the lifetime of one run once the operator confirms them.
+        self._auto_confirmed_hot: tuple[str, ...] = ()
+        self._auto_confirmed_cold: tuple[str, ...] = ()
         self._auto_step_power_received_at: float | None = None
 
         # F81 finding: per-channel observed acquisition cadence (monotonic gap
@@ -1937,8 +1945,20 @@ class ConductivityPanel(QWidget):
             "power_values_w": list(powers),
             "stabilization_threshold_pct": threshold,
             "minimum_wait_s": minimum_wait,
+            # The geometry behind every published G in this run, as the
+            # operator confirmed it. Recorded so a result can be read back
+            # without re-deriving the zones from a selection order or a display
+            # name that may since have changed.
+            "hot_zone_channel_ids": list(self._auto_confirmed_hot),
+            "cold_zone_channel_ids": list(self._auto_confirmed_cold),
             **descriptor_parameters,
         }
+        # Every run starts its own tally. These used to be set once in the
+        # constructor, so a clean second sweep inherited the first one's
+        # warnings.
+        self._auto_incomplete_zone_points = 0
+        self._auto_nonpositive_dt_points = 0
+        self._auto_last_skip_reason = None
         self._auto_run_writer = None
         self._auto_run_path = path
         self._auto_run_id = run_id
@@ -2939,6 +2959,8 @@ class ConductivityPanel(QWidget):
             QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
             return
         temperature_channels = tuple(self._chain)
+        if not self._confirm_zones_for_run(temperature_channels):
+            return
         power_channel = self._power_channel
         threshold = float(self._settled_pct_spin.value())
         minimum_wait = float(self._min_wait_spin.value())
@@ -3126,7 +3148,16 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText(
             f"Шаг {step_idx + 1}/{step_total} — P = {power_text} Вт — {elapsed:.0f} с — "
             f"стабил.: {settled_str}"
-            + (f"   ⚠ точек с dT ≤ 0: {self._auto_nonphysical_points}" if self._auto_nonphysical_points else "")
+            + (
+                f"   ⚠ пропущено (неполные зоны): {self._auto_incomplete_zone_points}"
+                if self._auto_incomplete_zone_points
+                else ""
+            )
+            + (
+                f"   ⚠ пропущено (dT ≤ 0): {self._auto_nonpositive_dt_points}"
+                if self._auto_nonpositive_dt_points
+                else ""
+            )
         )
 
         if is_stable:
@@ -3178,6 +3209,91 @@ class ConductivityPanel(QWidget):
 
         half = len(channels) // 2
         return channels[:half], channels[len(channels) - half:]
+
+    def _confirm_zones_for_run(self, channels: tuple[str, ...]) -> bool:
+        """Ask once, before arming, which channels are the hot and cold ends.
+
+        The zone split decides the SIGN and the VALUE of every dT and G this run
+        publishes, and until now it was inferred -- first from the selection
+        order, then from words in the display names. Both are presentation: a
+        different click order or a renamed channel silently changed the physics
+        while the number still looked plausible.
+
+        So it is declared instead, once per run, in terms of physical channel
+        IDs. The proposal comes from the selection order; the display names are
+        shown beside each ID for recognition and take no part in the
+        calculation. Confirming freezes the two ID tuples for the lifetime of
+        the run and nothing consults names or order again.
+
+        Cancel returns to the reorder controls rather than starting.
+        """
+
+        hot, cold = self._positional_zones(channels)
+        selected = set(channels)
+        # Refuse an unusable mapping before the writer or the source is armed.
+        problems: list[str] = []
+        if not hot or not cold:
+            problems.append("одна из зон пуста")
+        if set(hot) & set(cold):
+            problems.append("канал попал в обе зоны")
+        if not (set(hot) | set(cold)) <= selected:
+            problems.append("в зоне канал вне выбранной цепочки")
+        if problems:
+            QMessageBox.warning(
+                self,
+                "Зоны не определены",
+                "Невозможно определить горячую и холодную зоны: "
+                + "; ".join(problems)
+                + ".\n\nИзмените порядок цепочки и повторите Старт.",
+            )
+            return False
+
+        def _describe(zone: tuple[str, ...]) -> str:
+            lines = []
+            for channel in zone:
+                try:
+                    name = get_channel_manager().get_display_name(channel)
+                except Exception:  # noqa: BLE001 - naming must never block a run
+                    name = ""
+                lines.append(f"    {channel}" + (f"  ({name})" if name and name != channel else ""))
+            return "\n".join(lines)
+
+        answer = QMessageBox.question(
+            self,
+            "Подтвердите зоны образца",
+            "Расчёт dT и G будет вести по этим каналам весь прогон.\n\n"
+            f"ГОРЯЧАЯ зона:\n{_describe(hot)}\n\n"
+            f"ХОЛОДНАЯ зона:\n{_describe(cold)}\n\n"
+            "Названия показаны только для узнавания — расчёт идёт по идентификаторам.\n"
+            "Если зоны перепутаны, отмените и измените порядок цепочки.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            self._refuse_auto_start("зоны не подтверждены оператором")
+            return False
+
+        self._auto_confirmed_hot = tuple(hot)
+        self._auto_confirmed_cold = tuple(cold)
+        logger.info(
+            "Автоизмерение: зоны подтверждены оператором — горячая %s, холодная %s",
+            list(self._auto_confirmed_hot),
+            list(self._auto_confirmed_cold),
+        )
+        return True
+
+    def _confirmed_zones(self, channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The zones the operator confirmed for this run, or the proposal.
+
+        A running sweep always has the frozen tuples. The fallback exists for
+        the live table, which renders before any run is armed.
+        """
+
+        hot = getattr(self, "_auto_confirmed_hot", ())
+        cold = getattr(self, "_auto_confirmed_cold", ())
+        if hot and cold and set(hot) | set(cold) <= set(channels):
+            return hot, cold
+        return self._positional_zones(channels)
 
     def _thermal_zones(self, channels: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Split a chain into its hot and cold zones.
@@ -3239,40 +3355,60 @@ class ConductivityPanel(QWidget):
         if len(temperature_channels) < 2 or P is None:
             self._request_stop_after_point_persistence_failure(ValueError("step measurement identity is incomplete"))
             return False
-        hot_zone, cold_zone = self._thermal_zones(temperature_channels)
+        hot_zone, cold_zone = self._confirmed_zones(temperature_channels)
         hot_ch = "+".join(hot_zone)
         cold_ch = "+".join(cold_zone)
         T_hot, hot_used = self._zone_mean(hot_zone, self._auto_step_temperature_values)
         T_cold, cold_used = self._zone_mean(cold_zone, self._auto_step_temperature_values)
-        if hot_used < len(hot_zone) or cold_used < len(cold_zone):
-            self._auto_nonphysical_points += 1
-            logger.warning(
-                "Conductivity point averaged fewer sensors than selected: hot %d/%d (%s), "
-                "cold %d/%d (%s). dT is still reported, from the sensors that answered.",
-                hot_used,
-                len(hot_zone),
-                hot_ch,
-                cold_used,
-                len(cold_zone),
-                cold_ch,
-            )
         dT = T_hot - T_cold
+
+        # A step that cannot produce an honest conductance produces NO
+        # conductance. It used to publish one anyway: a dT computed from one
+        # surviving sensor per side went into the CSV, the graph and the
+        # summary indistinguishable from a full four-sensor measurement, and a
+        # non-positive dT became a finite, plottable "conductance" that is not
+        # one. Both were counted and logged, and both were kept.
+        #
+        # The raw acquisition is untouched -- every temperature and power
+        # reading is still recorded by the engine. What is refused is the
+        # DERIVED row, because a number that cannot be trusted is worse in a
+        # result table than a gap.
+        skip_reason: str | None = None
+        if hot_used < len(hot_zone) or cold_used < len(cold_zone):
+            self._auto_incomplete_zone_points += 1
+            skip_reason = (
+                f"неполные зоны: горячая {hot_used}/{len(hot_zone)} ({hot_ch}), "
+                f"холодная {cold_used}/{len(cold_zone)} ({cold_ch})"
+            )
+            logger.warning(
+                "Conductivity step skipped: fewer sensors answered than were confirmed -- "
+                "hot %d/%d (%s), cold %d/%d (%s). Raw acquisition is kept; no G/R point is "
+                "published, because an average over one sensor is not the measurement that "
+                "was set up.",
+                hot_used, len(hot_zone), hot_ch, cold_used, len(cold_zone), cold_ch,
+            )
+        elif not math.isfinite(dT):
+            self._auto_incomplete_zone_points += 1
+            skip_reason = "dT не определена (нет годных показаний)"
+            logger.warning("Conductivity step skipped: dT is not finite from the confirmed zones.")
+        elif math.isfinite(P) and P > 0.0 and dT <= 0.0:
+            # elif, so one step never counts twice.
+            self._auto_nonpositive_dt_points += 1
+            skip_reason = f"dT = {dT:.4f} K ≤ 0 при P = {P:.4f} Вт"
+            logger.warning(
+                "Conductivity step skipped: non-physical temperature difference dT = %.4f K "
+                "(hot %s = %.4f K, cold %s = %.4f K) at P = %.4f W. G = P/dT is not a "
+                "conductance here -- check which end the heater is on. Raw acquisition is kept.",
+                dT, hot_ch, T_hot, cold_ch, T_cold, P,
+            )
+        if skip_reason is not None:
+            self._auto_last_skip_reason = skip_reason
+            self._auto_status_label.setVisible(True)
+            self._auto_status_label.setText(f"Точка пропущена — {skip_reason}. Съём данных продолжается.")
+            return True
+
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
-        if math.isfinite(dT) and math.isfinite(P) and P > 0.0 and dT <= 0.0:
-            self._auto_nonphysical_points += 1
-            logger.warning(
-                "Conductivity point with a non-physical temperature difference: dT = %.4f K "
-                "(hot %s = %.4f K, cold %s = %.4f K) at P = %.4f W. G = P/dT is not a "
-                "conductance here -- check the chain order and where the heater actually sits. "
-                "The point is kept, not discarded.",
-                dT,
-                hot_ch,
-                T_hot,
-                cold_ch,
-                T_cold,
-                P,
-            )
         settled_values = []
         for ch in temperature_channels:
             pred = self._predictor.get_prediction(ch)

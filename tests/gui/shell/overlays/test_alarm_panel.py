@@ -55,7 +55,7 @@ class _StubWorker:
     dispatched: list[dict] = []
     next_result: dict | None = None
 
-    def __init__(self, cmd, *, parent=None) -> None:
+    def __init__(self, cmd, *, parent=None, release_on_settle: bool = False) -> None:
         self._cmd = dict(cmd)
         self.dispatched.append(self._cmd)
         self.finished = _FakeSignal()

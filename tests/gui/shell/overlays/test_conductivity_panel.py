@@ -34,6 +34,26 @@ from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
 from cryodaq.gui.zmq_client import ZmqBridge, registered_gui_command_workers
 
+
+@pytest.fixture(autouse=True)
+def _zones_confirmed(monkeypatch):
+    """Auto-confirm the once-per-run hot/cold zone dialog.
+
+    Start now asks the operator to confirm which channel IDs are the hot and
+    cold ends, because that mapping decides the sign and value of every
+    published dT and G. These tests are about other things, so they declare
+    here that they run with the zones confirmed rather than each one happening
+    to dismiss a dialog. The gate itself is tested separately, without this.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok),
+    )
+
+
 if hasattr(panel_module, "_ConductivityPersistenceWorker"):
     from cryodaq.storage.conductivity_run import read_conductivity_run
 else:
