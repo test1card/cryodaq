@@ -6381,10 +6381,28 @@ async def _handle_gui_command(
                 limit_per_channel=limit,
             )
             # Serialize: {channel: [[ts, value], ...]}
-            return {
-                "ok": True,
-                "data": {ch: pts for ch, pts in data.items()},
-            }
+            #
+            # Non-finite values are dropped rather than sent. The reply encoder
+            # uses json.dumps(allow_nan=False) -- correct, because NaN is not
+            # JSON -- so a single NaN anywhere in the window made the WHOLE
+            # reply fail to serialize and the caller received
+            # "Command reply could not be serialized; outcome may be unknown."
+            # This stand produces NaN routinely: a railed sensor, an unwired
+            # one, and the physically-invalid-zero-Kelvin rejection all write
+            # it. So readings_history returned nothing usable whenever any bad
+            # sensor was in range, which is most of the time, and every caller
+            # of it -- the analytics widgets, and the plot history seeding --
+            # silently got no data.
+            #
+            # Dropping is right rather than sending null: these points are
+            # consumed as series, a gap is drawn as a gap, and a reading that
+            # was not usable is not a measurement to be plotted.
+            finite: dict[str, list] = {}
+            for channel, points in data.items():
+                kept = [point for point in points if math.isfinite(point[1])]
+                if kept:
+                    finite[channel] = kept
+            return {"ok": True, "data": finite}
         if action == "cooldown_history_get":
             return await _run_cooldown_history_command(cmd, experiment_manager, writer)
         if action == "log_entry":
