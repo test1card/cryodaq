@@ -21,6 +21,8 @@ that is only ever established by readback.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
@@ -311,52 +313,79 @@ async def test_an_already_active_channel_is_not_restarted():
 # ---------------------------------------------------------------------------
 
 
-async def test_a_stop_landing_mid_resume_prevents_the_source_coming_back_on():
-    """Deterministic: pause the resume after it reads intent, Stop, then release.
+async def test_a_stale_epoch_is_refused_by_the_real_locked_admission():
+    """The guard the resume relies on, exercised through production request_run.
 
-    _resume_admitted_intent reads the intent, then awaits. A Stop arriving in
-    that window revokes the intent and advances the abort epoch, but the value
-    already read still described a live output. Restoring it would turn the
-    source back on AFTER the operator pressed Stop, which is the worst thing
-    this feature could do.
+    This is one half of closing the Stop/resume race, and it is deliberately
+    the half that can be proven. An end-to-end race test was attempted twice
+    and both attempts were theatre: the first paused BEFORE resume started, so
+    the snapshot was taken after the Stop; the second queued a real resume
+    behind the admission lock but still passed with the fix disabled, because
+    after a Stop the run is refused by the ordinary preconditions anyway. A
+    test that passes without the mechanism does not test the mechanism.
+
+    So the two halves are asserted separately, on the production path:
+    here, that an epoch superseded since admission is refused before any driver
+    call; and in the test below, that the resume passes exactly the epoch its
+    intent was admitted under. Together they are the race.
     """
-    driver = _Keithley()
+
+    class _StartCounting(_Keithley):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started: list = []
+            runtime = lambda: type("R", (), {"active": False, "p_target": 0.0})()
+            self._channels = {"smua": runtime(), "smub": runtime()}
+
+        async def start_source(self, smu_channel, p_target, v_comp, i_comp):
+            self.started.append((str(smu_channel), p_target))
+            return True
+
+    driver = _StartCounting()
     manager = _manager(driver)
-    manager._state = SafetyState.RUNNING
-    channel = manager._resolve_channels("smub").pop()
-    _admit(manager, "smub", 0.7)
-    issued: list = []
-    released = __import__("asyncio").Event()
-    reached = __import__("asyncio").Event()
-
-    async def _slow_request_run(*args, **kwargs):
-        issued.append((args, kwargs))
-        return {"ok": True}
-
-    manager.request_run = _slow_request_run  # type: ignore[method-assign]
     manager._mock = False
+    manager._state = SafetyState.READY
+    admitted_under = manager._abort_generation
 
-    original_get = manager._admitted_intent.get
+    # Anything that aborts -- a Stop, an emergency OFF, an interlock -- advances
+    # this. The queued command still presents the epoch it was admitted under.
+    manager._register_abort_intent(full=True)
 
-    async def _resume_with_pause():
-        # Stand in for the await inside the loop: the Stop lands here.
-        reached.set()
-        await released.wait()
-        await manager._resume_admitted_intent()
+    result = await manager.request_run(
+        0.7, 40.0, 1.0, channel="smub", _expected_abort_generation=admitted_under
+    )
 
-    import asyncio
+    assert result.get("ok") is not True
+    assert "authority changed" in str(result.get("error", "")).lower()
+    assert driver.started == [], "no source may be started on a superseded epoch"
 
-    task = asyncio.create_task(_resume_with_pause())
-    await reached.wait()
-    try:
-        await manager.request_stop(channel="smub")
-    except Exception:
-        pass
-    released.set()
-    await task
 
-    assert channel not in manager._admitted_intent
-    assert issued == [], "a Stop must make a queued resume permanently stale"
+async def test_a_current_epoch_is_not_refused_by_that_guard():
+    """The guard must reject the stale case only, or resume never works."""
+
+    class _StartCounting(_Keithley):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started: list = []
+            runtime = lambda: type("R", (), {"active": False, "p_target": 0.0})()
+            self._channels = {"smua": runtime(), "smub": runtime()}
+
+        async def start_source(self, smu_channel, p_target, v_comp, i_comp):
+            self.started.append((str(smu_channel), p_target))
+            return True
+
+    driver = _StartCounting()
+    manager = _manager(driver)
+    manager._mock = False
+    manager._state = SafetyState.READY
+
+    result = await manager.request_run(
+        0.7, 40.0, 1.0, channel="smub", _expected_abort_generation=manager._abort_generation
+    )
+
+    assert "authority changed" not in str(result.get("error", "")).lower(), (
+        "a current epoch must not trip the superseded-authority guard"
+    )
 
 
 async def test_a_revoked_intent_is_not_restored_even_if_a_snapshot_held_it():
@@ -373,11 +402,8 @@ async def test_a_revoked_intent_is_not_restored_even_if_a_snapshot_held_it():
 
     manager.request_run = _capture  # type: ignore[method-assign]
     manager._mock = False
-    # Revoke between the snapshot and the issue, exactly as a Stop would.
-    original = manager._resume_admitted_intent
-
     manager._admitted_intent.pop(channel)
-    await original()
+    await manager._resume_admitted_intent()
 
     assert issued == []
 
@@ -408,61 +434,94 @@ async def test_the_resume_pins_the_epoch_its_intent_was_admitted_under():
 # ---------------------------------------------------------------------------
 
 
-async def test_a_confirmed_target_update_becomes_the_resumable_intent():
-    """start at P1 -> update to P2 -> reconnect restores P2, never P1."""
-    driver = _Keithley()
+class _SweepSource(_Keithley):
+    """A source that accepts targets and records what it was asked to start."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started: list = []
+        runtime = lambda: type("R", (), {"active": True, "p_target": 0.010})()
+        self._channels = {"smua": runtime(), "smub": runtime()}
+
+    async def update_source_target(self, smu_channel, p_target):
+        self._channels[str(smu_channel)].p_target = p_target
+
+    async def start_source(self, smu_channel, p_target, v_comp, i_comp):
+        self.started.append((str(smu_channel), p_target))
+        return True
+
+
+async def test_p1_then_update_to_p2_then_reconnect_restores_only_p2():
+    """The whole path, joined: start, step, lose the link, come back.
+
+    Previously this evidence was split -- one test wrote _admitted_intent by
+    hand, another called update_target but never resumed. Neither showed that a
+    reconnect after a step restores the STEP. A sweep's first target comes
+    through request_run and every later one through update_target, so recording
+    only the first meant a reconnect during step three reapplied step one: a
+    power nobody asked for, on a run that still looked correct in the GUI.
+    """
+    driver = _SweepSource()
     manager = _manager(driver)
+    manager._mock = False
+    # update_target requires live safety children, so this runs a real manager
+    # lifecycle rather than reaching past the check it has to satisfy.
+    await manager.start()
+    manager._state = SafetyState.RUNNING
     channel = manager._resolve_channels("smub").pop()
-    _admit(manager, "smub", 0.010)          # P1, as request_run records it
-    assert manager._admitted_intent[channel].p_target == 0.010
+    manager._active_sources.add(channel)
+    _admit(manager, "smub", 0.010)                       # P1, as request_run records it
 
-    # What a confirmed update_target does to the record.
-    from cryodaq.core.safety_manager import _AdmittedIntent
-    import time as _t
-
-    previous = manager._admitted_intent[channel]
-    manager._admitted_intent[channel] = _AdmittedIntent(
-        p_target=0.020,
-        v_comp=previous.v_comp,
-        i_comp=previous.i_comp,
-        admitted_monotonic_s=_t.monotonic(),
-        abort_generation=manager._abort_generation,
-    )
+    assert (await manager.update_target(0.020, channel="smub")).get("ok") is True
 
     issued: list = []
 
-    async def _capture(p, v, i, **kwargs):
-        issued.append(p)
+    async def _capture(p_target, v_comp, i_comp, **kwargs):
+        issued.append(p_target)
         return {"ok": True}
 
     manager.request_run = _capture  # type: ignore[method-assign]
-    manager._mock = False
-    await manager._resume_admitted_intent()
+    manager._active_sources.discard(channel)             # the link dropped; nothing is active
+    try:
+        await manager._resume_admitted_intent()
+    finally:
+        with contextlib.suppress(Exception):
+            await manager.stop()
 
-    assert issued == [0.020], "restoring P1 while the sweep is at P2 applies a power nobody asked for"
+    assert issued == [0.020], f"reconnect must restore the current step, not the first: {issued}"
 
 
-async def test_the_update_keeps_the_limits_from_the_start():
-    """A step change is a power change; the compliance limits are not re-asked."""
-    driver = _Keithley()
+async def test_a_failed_update_leaves_the_previous_target_resumable():
+    """P1 stands when the step to P2 did not reach the instrument."""
+    driver = _Keithley()          # no _channels: update_target cannot confirm
     manager = _manager(driver)
+    manager._mock = False
+    await manager.start()
+    manager._state = SafetyState.RUNNING
     channel = manager._resolve_channels("smub").pop()
+    manager._active_sources.add(channel)
     _admit(manager, "smub", 0.010)
-    before = manager._admitted_intent[channel]
 
-    from cryodaq.core.safety_manager import _AdmittedIntent
-    import time as _t
+    try:
+        assert (await manager.update_target(0.020, channel="smub")).get("ok") is not True
+    except Exception:
+        pass
 
-    manager._admitted_intent[channel] = _AdmittedIntent(
-        p_target=0.020,
-        v_comp=before.v_comp,
-        i_comp=before.i_comp,
-        admitted_monotonic_s=_t.monotonic(),
-        abort_generation=manager._abort_generation,
-    )
+    issued: list = []
 
-    assert manager._admitted_intent[channel].v_comp == before.v_comp
-    assert manager._admitted_intent[channel].i_comp == before.i_comp
+    async def _capture(p_target, v_comp, i_comp, **kwargs):
+        issued.append(p_target)
+        return {"ok": True}
+
+    manager.request_run = _capture  # type: ignore[method-assign]
+    manager._active_sources.discard(channel)
+    try:
+        await manager._resume_admitted_intent()
+    finally:
+        with contextlib.suppress(Exception):
+            await manager.stop()
+
+    assert issued == [0.010], f"an unconfirmed step must not become the resumable intent: {issued}"
 
 
 async def test_the_real_update_target_records_the_new_intent():
