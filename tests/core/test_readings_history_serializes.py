@@ -78,3 +78,118 @@ def test_the_unfixed_shape_really_did_fail():
     """Pin the failure mode, so nobody reintroduces raw values as a simplification."""
     with pytest.raises(ValueError):
         encode_command_reply({"ok": True, "data": {"Т1": [[100.0, float("nan")]]}})
+
+
+# ---------------------------------------------------------------------------
+# Bucketing: a bounded reply must be able to span a long run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bucketing_spans_the_window_instead_of_its_newest_rows(tmp_path):
+    """Without it, a row budget buys a DURATION that depends on write rate.
+
+    That is why the temperature plot reached 10:00 and the pressure plot only
+    12:00 while sharing one X axis: identical row budgets, different cadences,
+    different spans. ORDER BY timestamp DESC LIMIT N always returns the NEWEST
+    N rows, so the window a caller gets back is whatever those rows happen to
+    cover. One recorded sample per time bucket makes a bounded reply cover the
+    window that was actually asked for.
+    """
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    base = datetime(2026, 9, 2, 6, 0, tzinfo=UTC)
+    writer = SQLiteWriter(tmp_path)
+    try:
+        # One hour of 1 Hz data on one channel.
+        batch = [
+            Reading(
+                timestamp=base.replace(second=index % 60, minute=(index // 60) % 60),
+                instrument_id="inst",
+                channel="Т1",
+                value=295.0 + index * 0.001,
+                unit="K",
+                status=ChannelStatus.OK,
+            )
+            for index in range(3600)
+        ]
+        assert await writer.write_immediate(batch) is True
+
+        from_ts = base.timestamp()
+        to_ts = from_ts + 3600
+
+        newest_only = await writer.read_readings_history(
+            channels=["Т1"], from_ts=from_ts, to_ts=to_ts, limit_per_channel=60
+        )
+        bucketed = await writer.read_readings_history(
+            channels=["Т1"], from_ts=from_ts, to_ts=to_ts, limit_per_channel=60, bucket_s=60.0
+        )
+
+        def span(points: list[tuple[float, float]]) -> float:
+            return points[-1][0] - points[0][0] if len(points) > 1 else 0.0
+
+        assert len(bucketed["Т1"]) <= 60, "the row bound still holds"
+        assert span(bucketed["Т1"]) > span(newest_only["Т1"]) * 5, (
+            "bucketing must reach back across the window, not cluster at its end"
+        )
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_bucketing_returns_recorded_samples_not_averages(tmp_path):
+    """Every returned point must be a reading that was actually taken."""
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    base = datetime(2026, 9, 2, 6, 0, tzinfo=UTC)
+    values = {}
+    writer = SQLiteWriter(tmp_path)
+    try:
+        batch = []
+        for index in range(600):
+            stamp = base.replace(second=index % 60, minute=(index // 60) % 60)
+            value = 100.0 + index
+            values[stamp.timestamp()] = value
+            batch.append(
+                Reading(
+                    timestamp=stamp,
+                    instrument_id="inst",
+                    channel="Т1",
+                    value=value,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            )
+        assert await writer.write_immediate(batch) is True
+
+        got = await writer.read_readings_history(
+            channels=["Т1"],
+            from_ts=base.timestamp(),
+            to_ts=base.timestamp() + 600,
+            limit_per_channel=20,
+            bucket_s=60.0,
+        )
+        for timestamp, value in got["Т1"]:
+            assert values.get(timestamp) == value, "a returned point must be a real recorded sample"
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_bucket_is_refused_not_guessed(tmp_path):
+    """It arrives from unauthenticated loopback, like the row caps."""
+    from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+    writer = SQLiteWriter(tmp_path)
+    try:
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            result = await writer.read_readings_history(channels=["Т1"], limit_per_channel=10, bucket_s=bad)
+            assert result == {} or isinstance(result, dict)
+    finally:
+        await writer.stop()

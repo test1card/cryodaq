@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # How far back a reconnect tries to refill the plots. 24 h covers a cooldown,
 # which is the run people watch across a relaunch; the buffers bound it anyway.
 _HISTORY_SEED_SPAN_S = 24 * 3600
-_HISTORY_SEED_LIMIT = 20000
+_HISTORY_SEED_LIMIT = 3000
 
 _PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
 _LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
@@ -670,6 +670,14 @@ class DashboardView(QScrollArea):
                 "to_ts": now,
                 "channels": channels,
                 "limit_per_channel": _HISTORY_SEED_LIMIT,
+                # Spread the reply across the whole window instead of taking
+                # its most recent rows. Without this the same row budget buys a
+                # DURATION that depends on how fast each channel is written, so
+                # the temperature and pressure plots -- which share an X axis --
+                # began at different times. The widgets decimate to 2000 points
+                # anyway, so full cadence over a long span was fetched only to
+                # be discarded.
+                "bucket_s": _HISTORY_SEED_SPAN_S / _HISTORY_SEED_LIMIT,
             },
             parent=self,
         )

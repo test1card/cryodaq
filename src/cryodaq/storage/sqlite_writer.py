@@ -9585,6 +9585,7 @@ class SQLiteWriter:
         from_ts: float | None = None,
         to_ts: float | None = None,
         limit_per_channel: int = 3600,
+        bucket_s: float | None = None,
         _channel_row_caps: dict[str, int] | None = None,
         _cold_deadline_monotonic: float | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
@@ -9598,6 +9599,13 @@ class SQLiteWriter:
         # floor to 1 (a zero limit would otherwise slice result[-0:] = the whole
         # list, i.e. unbounded — the opposite of a limit).
         limit_per_channel = min(max(int(limit_per_channel), 1), _HISTORY_MAX_ROWS)
+        # Same trust boundary as the row caps: this arrives from unauthenticated
+        # loopback ZMQ. A non-positive or non-finite bucket would make the
+        # GROUP BY expression meaningless, so it is refused rather than guessed.
+        if bucket_s is not None:
+            bucket_s = float(bucket_s)
+            if not math.isfinite(bucket_s) or bucket_s <= 0:
+                bucket_s = None
         if channels:
             # Canonical order makes aggregate allocation independent of caller
             # order. Duplicate names cannot multiply retained-day work.
@@ -9620,6 +9628,7 @@ class SQLiteWriter:
                         from_ts=from_ts,
                         to_ts=to_ts,
                         limit_per_channel=limit_per_channel,
+                        bucket_s=bucket_s,
                         _channel_row_caps=channel_caps,
                         _cold_deadline_monotonic=allocation_cold_deadline,
                     )
@@ -9754,6 +9763,35 @@ class SQLiteWriter:
                         for ch in channels:
                             remaining = min(hot_deficits[ch], filtered_remaining)
                             if remaining <= 0:
+                                continue
+                            if bucket_s is not None:
+                                # One representative sample per time bucket
+                                # instead of the newest N rows. Without this a
+                                # budget buys a RECENT window whose duration
+                                # depends on how fast the channel is written:
+                                # the same row count reached 10:00 on the
+                                # thermometry and only 12:00 on the vacuum
+                                # gauge, so two plots sharing an X axis
+                                # disagreed about where history began.
+                                #
+                                # SQLite returns the row matching a bare
+                                # MAX() in a GROUP BY, so this takes the
+                                # newest reading in each bucket -- a real
+                                # recorded sample, never an average of
+                                # several. The LIMIT still bounds the reply.
+                                collected = _collect(
+                                    "SELECT MAX(timestamp) AS timestamp, channel, value, status"
+                                    " FROM readings WHERE 1=1"
+                                    + time_clause
+                                    + " AND channel = ?"
+                                    " GROUP BY CAST(timestamp / ? AS INTEGER)"
+                                    " ORDER BY timestamp DESC LIMIT ?",
+                                    [*time_params, ch, bucket_s, remaining],
+                                )
+                                hot_deficits[ch] -= collected
+                                filtered_remaining -= collected
+                                if filtered_remaining <= 0:
+                                    break
                                 continue
                             collected = _collect(
                                 base + time_clause + " AND channel = ? ORDER BY timestamp DESC LIMIT ?",
@@ -10022,14 +10060,21 @@ class SQLiteWriter:
         from_ts: float | None = None,
         to_ts: float | None = None,
         limit_per_channel: int = 3600,
+        bucket_s: float | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
-        """Async wrapper for _read_readings_history."""
+        """Async wrapper for _read_readings_history.
+
+        ``bucket_s`` returns at most one recorded sample per bucket of that many
+        seconds, so a bounded reply can span a long run instead of covering only
+        its most recent rows. Omitted, behaviour is unchanged.
+        """
         task = partial(
             self._read_readings_history,
             channels=channels,
             from_ts=from_ts,
             to_ts=to_ts,
             limit_per_channel=limit_per_channel,
+            bucket_s=bucket_s,
         )
         owner = self._owned_executor_task(
             self._read_executor,

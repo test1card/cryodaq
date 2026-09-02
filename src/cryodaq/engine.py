@@ -6374,11 +6374,13 @@ async def _handle_gui_command(
             from_ts = cmd.get("from_ts")
             to_ts = cmd.get("to_ts")
             limit = int(cmd.get("limit_per_channel", 3600))
+            bucket_raw = cmd.get("bucket_s")
             data = await writer.read_readings_history(
                 channels=channels,
                 from_ts=float(from_ts) if from_ts is not None else None,
                 to_ts=float(to_ts) if to_ts is not None else None,
                 limit_per_channel=limit,
+                bucket_s=float(bucket_raw) if bucket_raw is not None else None,
             )
             # Serialize: {channel: [[ts, value], ...]}
             #
