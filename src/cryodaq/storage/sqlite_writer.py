@@ -1296,6 +1296,52 @@ def _control_handle_identity(
     )
 
 
+def _control_stat_identity_at(
+    name: str,
+    *,
+    dir_fd: int,
+    directory: bool,
+) -> tuple[int, int, int, int, int]:
+    """Return the authority identity for one name WITHOUT opening a descriptor.
+
+    POSIX only, and it exists for one reason: on Linux, closing ANY descriptor a
+    process holds on a file releases ALL of that process's fcntl locks on that
+    file (POSIX close semantics, process-wide, not per-descriptor). The
+    open-fstat-close probes this replaces therefore destroyed SQLite's own WAL
+    dead-man-switch lock on `-shm` byte 128 and its SHARED range lock on the main
+    database, on every single validated statement. With those locks gone, any
+    other process that opened the database read-write and closed it cleanly
+    believed itself the last connection, checkpointed the WAL into the main
+    database and unlinked `-wal` and `-shm` — after which the retained handles
+    below correctly saw `st_nlink == 0` and refused every further write.
+    Windows locks are per-handle, so the transient CreateFileW probes are safe
+    there and are deliberately left alone; this is the same platform asymmetry
+    already noted in `_control_handle_identity`.
+
+    `fstatat(dir_fd, name, AT_SYMLINK_NOFOLLOW)` proves exactly what the open
+    proved — anchored to the trusted directory descriptor so the name cannot be
+    resolved through a swapped ancestor, refusing a symlink at the final
+    component (it stats as `S_IFLNK`, which fails the kind check rather than
+    being followed), refusing a hard-linked or unlinked file via `st_nlink`, and
+    yielding the same `(st_dev, st_ino, kind, nlink, 0)` identity tuple that
+    `_control_handle_identity` returns — but it opens nothing, so it drops no
+    locks.
+    """
+
+    observed = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    expected_kind = stat.S_IFDIR if directory else stat.S_IFREG
+    invalid_links = not directory and observed.st_nlink != 1
+    if stat.S_IFMT(observed.st_mode) != expected_kind or invalid_links:
+        raise RuntimeError("control database handle has invalid authority")
+    return (
+        int(observed.st_dev),
+        int(observed.st_ino),
+        expected_kind,
+        int(observed.st_nlink) if not directory else 0,
+        0,
+    )
+
+
 def _open_checked_control_handle(
     path: Path | str,
     *,
@@ -2085,10 +2131,14 @@ class _ControlDatabaseAuthority:
             if os.name == "nt":
                 fresh, fresh_identity = self._open_checked_handle(self.db_path, directory=False)
             else:
-                fresh, fresh_identity = self._open_checked_handle(
+                # No descriptor: opening and closing one here would drop this
+                # process's SQLite locks on the database. See
+                # _control_stat_identity_at.
+                fresh = None
+                fresh_identity = _control_stat_identity_at(
                     self.database_name,
-                    directory=False,
                     dir_fd=self._directory_handles[-1][1],
+                    directory=False,
                 )
         elif os.name == "nt":
             for component, _handle, identity in self._directory_handles:
@@ -2114,16 +2164,19 @@ class _ControlDatabaseAuthority:
                         raise RuntimeError("control database ancestor authority changed")
                 finally:
                     self._close_transient_handle(fresh)
-            fresh, fresh_identity = self._open_checked_handle(
+            # No descriptor — see _control_stat_identity_at.
+            fresh = None
+            fresh_identity = _control_stat_identity_at(
                 self.database_name,
-                directory=False,
                 dir_fd=self._directory_handles[-1][1],
+                directory=False,
             )
         try:
             if fresh_identity != self._database_handle[1]:
                 raise RuntimeError("control database authority changed")
         finally:
-            self._close_transient_handle(fresh)
+            if fresh is not None:
+                self._close_transient_handle(fresh)
         for sidecar, (_handle, identity) in self._sidecar_handles.items():
             if os.name == "nt":
                 fresh, fresh_identity = self._open_checked_handle(
@@ -2132,16 +2185,21 @@ class _ControlDatabaseAuthority:
                     share_delete=True,
                 )
             else:
-                fresh, fresh_identity = self._open_checked_handle(
+                # The WAL and SHM carry the locks SQLite coordinates on; probing
+                # them with a descriptor destroyed those locks. See
+                # _control_stat_identity_at.
+                fresh = None
+                fresh_identity = _control_stat_identity_at(
                     sidecar.name,
-                    directory=False,
                     dir_fd=self._directory_handles[-1][1],
+                    directory=False,
                 )
             try:
                 if fresh_identity != identity:
                     raise RuntimeError("control database sidecar authority changed")
             finally:
-                self._close_transient_handle(fresh)
+                if fresh is not None:
+                    self._close_transient_handle(fresh)
         self._validate_read_only_mutation_tokens()
 
     def validate_retained_handles(self, *, allow_unlinked_sidecars: bool = False) -> None:

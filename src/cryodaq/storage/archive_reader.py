@@ -2383,7 +2383,14 @@ class ArchiveReader:
         if self._data_dir.exists():
             for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
                 try:
-                    conn = sqlite3.connect(str(db_path), timeout=5)
+                    # mode=ro: a read-write open of a live day database is what
+                    # unlinked the writer's WAL on 2026-09-02. A read-only
+                    # connection never checkpoints and never deletes sidecars.
+                    conn = sqlite3.connect(
+                        f"file:{quote(str(db_path), safe='/')}?mode=ro",
+                        uri=True,
+                        timeout=5,
+                    )
                     try:
                         if (
                             conn.execute(
@@ -2532,7 +2539,12 @@ class ArchiveReader:
         try:
             relative = db_path.relative_to(self._data_dir).as_posix()
             db_path = self._contained_regular(self._data_dir, relative)
-            conn = sqlite3.connect(str(db_path), timeout=5)
+            # mode=ro — see the note at declared_descriptor_hashes.
+            conn = sqlite3.connect(
+                f"file:{quote(str(db_path), safe='/')}?mode=ro",
+                uri=True,
+                timeout=5,
+            )
             conn.row_factory = sqlite3.Row
             try:
                 exists = conn.execute(
@@ -2866,7 +2878,12 @@ class ArchiveReader:
         try:
             relative = db_path.relative_to(self._data_dir).as_posix()
             db_path = self._contained_regular(self._data_dir, relative)
-            conn = sqlite3.connect(str(db_path), timeout=5)
+            # mode=ro — see the note at declared_descriptor_hashes.
+            conn = sqlite3.connect(
+                f"file:{quote(str(db_path), safe='/')}?mode=ro",
+                uri=True,
+                timeout=5,
+            )
             conn.row_factory = sqlite3.Row
             try:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
