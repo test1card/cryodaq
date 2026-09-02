@@ -526,9 +526,7 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
             continue
         conn = None
         try:
-            # Read-only: this SELECT-only consumer must not hold write authority on a
-            # database the writer owns. A read-write connection's clean close is what
-            # unlinked the live WAL on 2026-09-02 (see sqlite_writer._control_stat_identity_at).
+            # Read-only: SELECT-only code needs no write authority.
             conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(

@@ -298,7 +298,8 @@ class ReplaySource:
         channels: list[str] | None,
     ) -> list[tuple[float, str, float, str, str, str]]:
         """Загрузить строки из readings, отсортированные по timestamp."""
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        # Read-only: SELECT-only code needs no write authority.
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
         try:
             query = "SELECT timestamp, channel, value, unit, status, instrument_id FROM readings"
             conditions: list[str] = []

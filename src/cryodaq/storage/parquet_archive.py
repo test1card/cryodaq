@@ -132,7 +132,8 @@ def export_experiment_readings_to_parquet(
                 current_day += timedelta(days=1)
                 continue
 
-            conn = sqlite3.connect(str(db_path), timeout=5)
+            # Read-only: SELECT-only code needs no write authority.
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
             conn.row_factory = sqlite3.Row
             try:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}

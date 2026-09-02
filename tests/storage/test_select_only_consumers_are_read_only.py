@@ -219,3 +219,131 @@ def test_broker_replay_load_rows_leaves_no_sidecars(tmp_path: Path) -> None:
     source._load_rows(day, start=None, end=None, channels=None)
 
     assert _sidecars(day) == sidecars_before
+
+
+# --------------------------------------------------------------------------
+# Connect spies — assert the ACTUAL mode=ro property, not just behaviour
+# --------------------------------------------------------------------------
+# The behavioural tests above pass with a read-write connection too, so on their
+# own they do not prove the conversion. These install a delegating spy around
+# sqlite3.connect *after* the fixture has built its database, and assert that
+# every call touching that database used the exact encoded read-only URI with
+# uri=True. They go red against a plain sqlite3.connect(str(path)).
+
+
+class _ConnectSpy:
+    """Delegating recorder for sqlite3.connect."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls: list[tuple[tuple, dict]] = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self._real(*args, **kwargs)
+
+    def calls_touching(self, database: Path) -> list[tuple[tuple, dict]]:
+        return [c for c in self.calls if database.name in str(c[0][0] if c[0] else "")]
+
+
+def _install_spy(monkeypatch: pytest.MonkeyPatch, module) -> _ConnectSpy:
+    spy = _ConnectSpy(module.sqlite3.connect)
+    monkeypatch.setattr(module.sqlite3, "connect", spy)
+    return spy
+
+
+def _assert_opened_read_only(spy: _ConnectSpy, database: Path) -> None:
+    touching = spy.calls_touching(database)
+    assert touching, f"no sqlite3.connect call touched {database.name}; spy saw {spy.calls}"
+    expected = database.resolve().as_uri() + "?mode=ro"
+    for args, kwargs in touching:
+        assert args[0] == expected, f"expected {expected!r}, connect got {args[0]!r}"
+        assert kwargs.get("uri") is True, f"uri=True missing from connect kwargs: {kwargs}"
+
+
+def test_web_query_history_opens_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryodaq.web import server
+
+    now = datetime.now(UTC)
+    day = tmp_path / f"data_{now.date().isoformat()}.db"
+    _make_readings_db(day, rows=[((now - timedelta(minutes=5)).timestamp(), "T1", 295.5, "K", "ok")])
+    monkeypatch.setattr(server, "_DATA_DIR", tmp_path)
+
+    spy = _install_spy(monkeypatch, server)
+    server._query_history(60)
+
+    _assert_opened_read_only(spy, day)
+
+
+def test_calibration_extract_pairs_opens_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryodaq.analytics import calibration_fitter
+
+    base = datetime(2026, 9, 2, 12, 0, tzinfo=UTC).timestamp()
+    day = tmp_path / "data_2026-09-02.db"
+    _make_readings_db(day, rows=[(base, "Т1", 295.0, "K", "ok"), (base + 0.5, "Т1_raw", 1.2, "V", "ok")])
+
+    spy = _install_spy(monkeypatch, calibration_fitter)
+    calibration_fitter.CalibrationFitter.extract_pairs(tmp_path, base - 60, base + 60, "Т1", "Т1", raw_channel="Т1_raw")
+
+    _assert_opened_read_only(spy, day)
+
+
+def test_broker_replay_load_rows_opens_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryodaq.storage import broker_replay
+
+    base = datetime(2026, 9, 2, 12, 0, tzinfo=UTC).timestamp()
+    day = tmp_path / "data_2026-09-02.db"
+    _make_readings_db(day, rows=[(base, "T1", 295.0, "K", "ok")])
+
+    spy = _install_spy(monkeypatch, broker_replay)
+    source = broker_replay.ReplaySource.__new__(broker_replay.ReplaySource)
+    source._load_rows(day, start=None, end=None, channels=None)
+
+    _assert_opened_read_only(spy, day)
+
+
+def test_persisted_running_experiment_ids_opens_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryodaq.core import experiment
+
+    day = tmp_path / "data_2026-09-02.db"
+    conn = sqlite3.connect(str(day))
+    try:
+        conn.execute("CREATE TABLE experiments (experiment_id TEXT, status TEXT)")
+        conn.execute("INSERT INTO experiments VALUES ('e', 'RUNNING')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    manager = experiment.ExperimentManager.__new__(experiment.ExperimentManager)
+    manager._data_dir = tmp_path
+    spy = _install_spy(monkeypatch, experiment)
+    manager._persisted_running_experiment_ids()
+
+    _assert_opened_read_only(spy, day)
+
+
+# --------------------------------------------------------------------------
+# P1: an unopenable-but-present database must NOT be silently skipped
+# --------------------------------------------------------------------------
+def test_unopenable_existing_database_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A database that exists but cannot be opened must raise, not vanish.
+
+    Swallowing every OperationalError would drop that day from the RUNNING scan
+    and could let a second, conflicting experiment start.
+    """
+
+    from cryodaq.core import experiment
+
+    day = tmp_path / "data_2026-09-02.db"
+    _make_readings_db(day, rows=[])
+    assert day.exists()
+
+    def refuse(*_args, **_kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    manager = experiment.ExperimentManager.__new__(experiment.ExperimentManager)
+    manager._data_dir = tmp_path
+    monkeypatch.setattr(experiment.sqlite3, "connect", refuse)
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        manager._persisted_running_experiment_ids()

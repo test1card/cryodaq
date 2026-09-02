@@ -474,7 +474,8 @@ def _load_db_rows(
     db_path: Path,
 ) -> list[tuple[float, str, float, str, str, str]]:
     """Load all rows from a SQLite readings table, ordered by timestamp."""
-    conn = sqlite3.connect(str(db_path), timeout=10)
+    # Read-only: SELECT-only code needs no write authority.
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
     try:
         cursor = conn.execute(
             "SELECT timestamp, channel, value, unit, status, instrument_id FROM readings ORDER BY timestamp;"

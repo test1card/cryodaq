@@ -2383,9 +2383,7 @@ class ArchiveReader:
         if self._data_dir.exists():
             for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
                 try:
-                    # mode=ro: a read-write open of a live day database is what
-                    # unlinked the writer's WAL on 2026-09-02. A read-only
-                    # connection never checkpoints and never deletes sidecars.
+                    # Read-only: SELECT-only code needs no write authority.
                     conn = sqlite3.connect(
                         f"file:{quote(str(db_path), safe='/')}?mode=ro",
                         uri=True,
@@ -2539,7 +2537,7 @@ class ArchiveReader:
         try:
             relative = db_path.relative_to(self._data_dir).as_posix()
             db_path = self._contained_regular(self._data_dir, relative)
-            # mode=ro — see the note at declared_descriptor_hashes.
+            # Read-only: SELECT-only code needs no write authority.
             conn = sqlite3.connect(
                 f"file:{quote(str(db_path), safe='/')}?mode=ro",
                 uri=True,
@@ -2878,7 +2876,7 @@ class ArchiveReader:
         try:
             relative = db_path.relative_to(self._data_dir).as_posix()
             db_path = self._contained_regular(self._data_dir, relative)
-            # mode=ro — see the note at declared_descriptor_hashes.
+            # Read-only: SELECT-only code needs no write authority.
             conn = sqlite3.connect(
                 f"file:{quote(str(db_path), safe='/')}?mode=ro",
                 uri=True,

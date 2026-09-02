@@ -159,7 +159,8 @@ class HDF5Exporter:
             #     carries no source_data (rotation skips such days), and its
             #     experiments metadata is not preserved in cold storage. ---
             if hot_db.exists():
-                conn = sqlite3.connect(str(hot_db), timeout=10)
+                # Read-only: SELECT-only code needs no write authority.
+                conn = sqlite3.connect(hot_db.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
                 conn.row_factory = sqlite3.Row
                 try:
                     total += self._export_source_data(conn, hf)

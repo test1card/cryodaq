@@ -88,9 +88,7 @@ class CalibrationFitter:
 
         for db_path in sorted(data_dir.glob("data_????-??-??.db")):
             try:
-                # Read-only: this SELECT-only consumer must not hold write authority on a
-                # database the writer owns. A read-write connection's clean close is what
-                # unlinked the live WAL on 2026-09-02 (see sqlite_writer._control_stat_identity_at).
+                # Read-only: SELECT-only code needs no write authority.
                 # The PRAGMA journal_mode=WAL that used to sit here mutated a
                 # database this reader does not own, and created sidecars on the
                 # active day. A calibration reader changes no journal mode.

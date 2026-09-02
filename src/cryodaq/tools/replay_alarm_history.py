@@ -326,7 +326,8 @@ def replay(
     for db_path in db_paths:
         con = None
         try:
-            con = sqlite3.connect(str(db_path))
+            # Read-only: SELECT-only code needs no write authority.
+            con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
             cur = con.cursor()
             cur.execute(
                 "SELECT timestamp, channel, value, status FROM readings "

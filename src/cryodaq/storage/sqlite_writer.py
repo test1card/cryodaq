@@ -9190,7 +9190,8 @@ class SQLiteWriter:
     ) -> list[OperatorLogEntry]:
         rows: list[OperatorLogEntry] = []
         for db_path in self._operator_log_db_paths(start_time=start_time, end_time=end_time):
-            conn = sqlite3.connect(str(db_path), timeout=10)
+            # Read-only: SELECT-only code needs no write authority.
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
             conn.row_factory = sqlite3.Row
             try:
                 # This is a read path over historical databases. Older files
@@ -9776,7 +9777,8 @@ class SQLiteWriter:
             elif unfiltered_remaining <= 0:
                 break
             try:
-                conn = sqlite3.connect(str(db_path), timeout=5)
+                # Read-only: SELECT-only code needs no write authority.
+                conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
                 conn.row_factory = sqlite3.Row
                 try:
                     base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
