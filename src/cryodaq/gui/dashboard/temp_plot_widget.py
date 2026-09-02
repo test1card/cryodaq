@@ -29,6 +29,10 @@ from cryodaq.gui.state.time_window import (
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 
 _MAX_POINTS = 2000
+# Re-fit when the view has grown this many times wider than the data. A
+# cooling curve's tail is exactly this shape: the range that fitted 295 K
+# still nominally contains 4 K, so "the data escaped" alone never fires.
+_Y_REFIT_SPAN_RATIO = 3.0
 # Opacity applied to a legend entry whose curve the operator has hidden.
 _LEGEND_HIDDEN_OPACITY = 0.35
 
@@ -108,6 +112,9 @@ class TempPlotWidget(QWidget):
         # do not trust pyqtgraph's getViewBox().viewRange() readings.
         self._y_cache_lo: float | None = None
         self._y_cache_hi: float | None = None
+        # Follow the data until the operator takes the axis.
+        self._y_follow = True
+        self._applying_y_range = False
         self._y_last_set_ts: float = 0.0
         self._build_ui()
         self._rebuild_curves()
@@ -170,6 +177,12 @@ class TempPlotWidget(QWidget):
         # setData → visible jitter. Disable native autoRange on Y so
         # _update_y_range_with_deadband owns the axis end-to-end.
         pi.disableAutoRange(axis="y")
+        view_box = pi.getViewBox()
+        # pyqtgraph reports operator-driven range changes separately from
+        # ranges we set, so intent is read rather than inferred.
+        view_box.sigRangeChangedManually.connect(self._on_y_range_changed_manually)
+        if getattr(pi, "autoBtn", None) is not None:
+            pi.autoBtn.clicked.connect(self._on_auto_range_requested)
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot.setAxisItems({"bottom": date_axis})
         # The X axis is shared with the pressure plot below, and this one used
@@ -280,10 +293,23 @@ class TempPlotWidget(QWidget):
         self._update_y_range_with_deadband(in_window_y)
 
     def _update_y_range_with_deadband(self, in_window_y: list[float]) -> None:
-        """Seed one compatible Y range without overriding later operator zoom.
+        """Follow the data until the operator takes the axis, then leave it alone.
 
-        Refreshes never authorize live auto-ranging. The only intentional
-        cache reset is an explicit linear/log scale change.
+        This used to set the Y range exactly once and return on every later
+        call, to avoid overriding a deliberate zoom. It could not tell a zoom
+        from an untouched axis, so it refused forever: across a cooldown from
+        295 K toward 4 K the curves walked out of view and the operator had to
+        press the auto-range button again and again to see their own data.
+
+        Following is now the default and stops the moment the operator changes
+        the view themselves -- pyqtgraph reports that separately from ranges we
+        set ourselves, so intent is read rather than guessed. Pressing the
+        auto-range button hands it back.
+
+        The deadband is what keeps it from twitching: a re-fit happens only when
+        the data has actually left the view, or when the view has grown far
+        wider than the data (which is what the tail of a cooldown looks like).
+        Ordinary wander inside the current range moves nothing.
         """
         import math
 
@@ -299,11 +325,40 @@ class TempPlotWidget(QWidget):
         new_hi = new_hi_raw + span * 0.05
         pi = self._plot.getPlotItem()
 
-        if self._y_cache_lo is not None and self._y_cache_hi is not None:
+        if not self._y_follow:
             return
-        pi.setYRange(new_lo, new_hi, padding=0)
-        self._y_cache_lo = new_lo
-        self._y_cache_hi = new_hi
+        if self._y_cache_lo is None or self._y_cache_hi is None:
+            self._set_y_range(pi, new_lo, new_hi)
+            return
+        view_lo, view_hi = pi.getViewBox().viewRange()[1]
+        data_escaped = new_lo_raw < view_lo or new_hi_raw > view_hi
+        view_span = view_hi - view_lo
+        much_too_wide = view_span > (new_hi - new_lo) * _Y_REFIT_SPAN_RATIO
+        if data_escaped or much_too_wide:
+            self._set_y_range(pi, new_lo, new_hi)
+
+    def _set_y_range(self, pi, low: float, high: float) -> None:
+        """Set the Y range without it counting as the operator taking the axis."""
+        self._applying_y_range = True
+        try:
+            pi.setYRange(low, high, padding=0)
+        finally:
+            self._applying_y_range = False
+        self._y_cache_lo = low
+        self._y_cache_hi = high
+
+    def _on_y_range_changed_manually(self, *_args) -> None:
+        """The operator moved the view: stop following until they ask again."""
+        if self._applying_y_range:
+            return
+        self._y_follow = False
+
+    def _on_auto_range_requested(self, *_args) -> None:
+        """The auto-range button means "follow the data again"."""
+        self._y_follow = True
+        self._y_cache_lo = None
+        self._y_cache_hi = None
+        self._y_follow = True
 
     # ------------------------------------------------------------------
     # Time picker
@@ -324,6 +379,7 @@ class TempPlotWidget(QWidget):
         self._plot.getPlotItem().setLogMode(x=False, y=checked)
         self._y_cache_lo = None
         self._y_cache_hi = None
+        self._y_follow = True
         self._log_button.setText("Лог Y" if checked else "Лин Y")
         self._style_time_button(self._log_button, checked)
         self.refresh()

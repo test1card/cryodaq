@@ -112,6 +112,14 @@ def test_live_refresh_does_not_override_operator_y_viewport(app):
     widget._on_log_y_toggled(True)
     plot_item = widget._plot.getPlotItem()
     plot_item.setYRange(0.5, 1.0, padding=0)
+    # A bare setYRange is what the widget itself does when it follows the data,
+    # so it cannot be what marks the axis as the operator's. A real zoom or pan
+    # emits sigRangeChangedManually, which is what the widget now listens to;
+    # emit it here so this expresses an operator zoom rather than any range
+    # change at all. Without this the axis keeps following, which is the point
+    # of the change -- it is why a cooldown no longer needs the auto-range
+    # button pressed on every visit.
+    plot_item.getViewBox().sigRangeChangedManually.emit([False, True])
 
     buf.append("\u04221", now + 0.1, 4000.0)
     widget.refresh()
