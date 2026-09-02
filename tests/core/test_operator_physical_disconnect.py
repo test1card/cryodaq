@@ -307,3 +307,89 @@ def test_the_declaration_releases_teardown_without_device_evidence():
 
 def test_neither_leaves_the_engine_running():
     assert _teardown_released(verified_off=False, declared=False) is False
+
+
+# ---------------------------------------------------------------------------
+# The GUI action: explicit, scoped, one-shot, dropped on cancel
+# ---------------------------------------------------------------------------
+
+
+class _Tray(_Recorder):
+    def __init__(self, source: str | None) -> None:
+        super().__init__()
+        self._source = source
+
+    def _configured_reviewed_source_name(self):
+        return self._source
+
+    def confirm_source_physically_disconnected(self, source_name: str) -> None:
+        from cryodaq.launcher import LauncherWindow
+
+        LauncherWindow.confirm_source_physically_disconnected(self, source_name)
+
+
+def _confirm_handler():
+    from cryodaq.launcher import LauncherWindow
+
+    return LauncherWindow._on_confirm_source_disconnected
+
+
+def _patch_dialog(monkeypatch, answer):
+    from PySide6.QtWidgets import QMessageBox
+
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: answer))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[1])))
+    return warned
+
+
+def test_confirming_arms_exactly_one_attempt(monkeypatch):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QMessageBox
+
+    _patch_dialog(monkeypatch, QMessageBox.StandardButton.Yes)
+    tray = _Tray("Keithley_1")
+    _confirm_handler()(tray)
+    assert tray._source_disconnect_confirmation == "Keithley_1"
+
+
+def test_declining_arms_nothing_and_drops_anything_already_armed(monkeypatch):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QMessageBox
+
+    _patch_dialog(monkeypatch, QMessageBox.StandardButton.No)
+    tray = _Tray("Keithley_1")
+    tray._source_disconnect_confirmation = "Keithley_1"
+    _confirm_handler()(tray)
+    assert tray._source_disconnect_confirmation is None, "a cancelled dialog left an armed confirmation"
+
+
+def test_no_configured_source_means_nothing_to_confirm(monkeypatch):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QMessageBox
+
+    warned = _patch_dialog(monkeypatch, QMessageBox.StandardButton.Yes)
+    tray = _Tray(None)
+    _confirm_handler()(tray)
+    assert tray._source_disconnect_confirmation is None
+    assert warned, "the operator was not told there is nothing to confirm"
+
+
+def test_the_ordinary_quit_path_is_fail_closed_without_a_confirmation():
+    """No confirmation, no assertion on the wire — the shutdown stays held."""
+    import inspect
+
+    from cryodaq.launcher import LauncherWindow
+
+    source = inspect.getsource(LauncherWindow)
+    raising = [
+        line.strip()
+        for line in source.splitlines()
+        if '"operator_physical_disconnect"' in line and "shutdown_command[" in line
+    ]
+    assert len(raising) == 1, raising
+    # It is reachable only behind the armed one-shot, and the slot is cleared
+    # in the same block.
+    block = source.split("confirmed_source = getattr")[1].split("worker = _EngineShutdownWorker")[0]
+    assert 'shutdown_command["operator_physical_disconnect"] = True' in block
+    assert "self._source_disconnect_confirmation = None" in block, "the confirmation is not consumed"

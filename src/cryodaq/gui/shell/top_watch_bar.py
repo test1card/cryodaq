@@ -1126,19 +1126,34 @@ class TopWatchBar(QWidget):
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
-        self._experiment_worker = ZmqCommandWorker(
-            {"cmd": "experiment_status"}, parent=self, release_on_settle=True
+        worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self, release_on_settle=True)
+        self._experiment_worker = worker
+        # The completing worker is captured so the handler can prove it is
+        # still the current one. Without that, a queued completion from a
+        # superseded poll could render stale status over a newer result, and
+        # nothing ever cleared the attribute.
+        worker.finished.connect(
+            lambda result, expected=expected_replay_authority, completed=worker: self._on_experiment_result(
+                result, expected, completed
+            )
         )
-        self._experiment_worker.finished.connect(
-            lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
-        )
-        self._experiment_worker.start()
+        worker.start()
 
     def _on_experiment_result(
         self,
         result: dict,
         expected_replay_authority: ReplayStatusAuthority | None = None,
+        completed: object | None = None,
     ) -> None:
+        if completed is not None:
+            if completed is not self._experiment_worker:
+                # Superseded: a newer poll owns the display. Render nothing and
+                # clear nothing -- clearing here would free the CURRENT worker's
+                # slot and let the next tick start a second concurrent poll.
+                return
+            # Ours: release the slot by identity, so the next tick may poll and
+            # so no destroyed wrapper is ever consulted again.
+            self._experiment_worker = None
         accepted = decode_experiment_status(result)
         if accepted is None:
             self._mark_experiment_status_unavailable()

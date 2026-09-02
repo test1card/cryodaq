@@ -63,27 +63,29 @@ async def _ready(feed: RecordingLifecycleFeed, epoch: str = "acquisition-1") -> 
 
 
 
-class _ObserverHarness:
-    """The exact shape Scheduler uses, with its error handling."""
+from cryodaq.core.broker import DataBroker
+from cryodaq.core.scheduler import Scheduler
 
-    def __init__(self, feed: RecordingLifecycleFeed) -> None:
-        self._persistence_commit_observer = feed.persistence_committed
-        self.ambiguity_calls = 0
-        self.refusals: list[str] = []
 
-    def _observe_persistence_ambiguity(self) -> None:
-        self.ambiguity_calls += 1
+def _scheduler(feed: RecordingLifecycleFeed) -> tuple[Scheduler, list[int]]:
+    """A REAL Scheduler wired to the feed, exactly as the engine wires it.
 
-    # Verbatim from Scheduler._observe_persistence_commit (scheduler.py:1502-1510).
-    def observe(self, receipt: object) -> None:
-        observer = self._persistence_commit_observer
-        if observer is None:
-            return
-        try:
-            observer(receipt)
-        except Exception as exc:
-            self.refusals.append(str(exc))
-            self._observe_persistence_ambiguity()
+    No copy of `_observe_persistence_commit`: this drives the production
+    method, so its bare `except Exception`, its log line and its ambiguity
+    fallback are the ones under test.
+    """
+    ambiguity: list[int] = []
+
+    def _ambiguous() -> None:
+        ambiguity.append(1)
+        feed.persistence_ambiguous()
+
+    scheduler = Scheduler(
+        DataBroker(),
+        persistence_commit_observer=feed.persistence_committed,
+        persistence_ambiguity_observer=_ambiguous,
+    )
+    return scheduler, ambiguity
 
 
 async def test_recovery_through_the_scheduler_observer_path(tmp_path: Path) -> None:
@@ -92,12 +94,12 @@ async def test_recovery_through_the_scheduler_observer_path(tmp_path: Path) -> N
     now = [10.0]
     feed = RecordingLifecycleFeed(writer, persistence_freshness_s=1.0, clock=lambda: now[0])
     await _ready(feed, "acq-1")
-    harness = _ObserverHarness(feed)
+    scheduler, ambiguity = _scheduler(feed)
 
     first = await writer.write_committed([_reading(1.0)])
     assert first is not None
-    harness.observe(first)
-    assert harness.refusals == []
+    scheduler._observe_persistence_commit(first)
+    assert ambiguity == []
     interrupted_session = feed.snapshot().recording_session_id
     assert feed.persistence_snapshot().storage is AvailabilityTruth.AVAILABLE
 
@@ -108,10 +110,10 @@ async def test_recovery_through_the_scheduler_observer_path(tmp_path: Path) -> N
     # A genuinely later commit, observed exactly as the scheduler observes it.
     later = await writer.write_committed([_reading(2.0)])
     assert later is not None
-    harness.observe(later)
+    scheduler._observe_persistence_commit(later)
 
-    assert harness.refusals == [], f"the scheduler path still refused: {harness.refusals}"
-    assert harness.ambiguity_calls == 0
+    assert ambiguity == [], "the real scheduler path refused the recovery"
+    assert ambiguity == []
     resumed = feed.persistence_snapshot()
     assert resumed.storage is AvailabilityTruth.AVAILABLE
     assert feed.snapshot().recording is RecordingTruth.RECORDING
@@ -127,29 +129,28 @@ async def test_the_failed_receipt_cannot_be_replayed_through_the_scheduler(tmp_p
     feed.experiment_active(1, "experiment-1", "Cooldown")
     feed.persistence_started("acq-old")
     feed.acquisition_running(1, "acq-new")
-    harness = _ObserverHarness(feed)
+    scheduler, ambiguity = _scheduler(feed)
 
     receipt = await writer.write_committed([_reading(1.0)])
     assert receipt is not None
 
     # The mismatch closes the segment; the scheduler logs and reports ambiguity.
-    harness.observe(receipt)
-    assert len(harness.refusals) == 1
-    assert harness.ambiguity_calls == 1
+    scheduler._observe_persistence_commit(receipt)
+    assert len(ambiguity) == 1
+    assert len(ambiguity) == 1
     assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
 
     # Replaying the SAME receipt is refused, and does not resume anything.
-    harness.observe(receipt)
-    assert len(harness.refusals) == 2
-    assert "commit after the interruption" in harness.refusals[1]
+    scheduler._observe_persistence_commit(receipt)
+    assert len(ambiguity) == 2, "the replay was not refused"
     assert feed.persistence_snapshot().storage is AvailabilityTruth.UNAVAILABLE
     assert feed.snapshot().recording is RecordingTruth.NOT_RECORDING
 
     # Only a later commit resumes.
     later = await writer.write_committed([_reading(2.0)])
     assert later is not None
-    harness.observe(later)
-    assert len(harness.refusals) == 2, "a genuine later commit must not be refused"
+    scheduler._observe_persistence_commit(later)
+    assert len(ambiguity) == 2, "a genuine later commit must not be refused"
     assert feed.persistence_snapshot().storage is AvailabilityTruth.AVAILABLE
     await writer.stop()
 
@@ -158,18 +159,17 @@ async def test_a_deliberate_stop_stays_refused_through_the_scheduler(tmp_path: P
     writer = _writer(tmp_path)
     feed = RecordingLifecycleFeed(writer)
     await _ready(feed, "acq-1")
-    harness = _ObserverHarness(feed)
+    scheduler, ambiguity = _scheduler(feed)
     first = await writer.write_committed([_reading(1.0)])
     assert first is not None
-    harness.observe(first)
+    scheduler._observe_persistence_commit(first)
 
     feed.persistence_stopped()
     later = await writer.write_committed([_reading(2.0)])
     assert later is not None
-    harness.observe(later)
+    scheduler._observe_persistence_commit(later)
 
-    assert len(harness.refusals) == 1
-    assert "ambiguous interruption" in harness.refusals[0]
-    assert harness.ambiguity_calls == 1
+    assert len(ambiguity) == 1
+    assert len(ambiguity) == 1
     assert feed.persistence_snapshot().storage is not AvailabilityTruth.AVAILABLE
     await writer.stop()

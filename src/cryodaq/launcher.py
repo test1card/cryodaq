@@ -4228,6 +4228,67 @@ class LauncherWindow(QMainWindow):
         with self._replay_ready_lock:
             self._replay_ready_state = {"receipt": None, "error": None}
 
+    def _configured_reviewed_source_name(self) -> str | None:
+        """The name of the source this stand is configured with.
+
+        Naming only. The profile never grants the authority -- it cannot say
+        whether the instrument is unplugged, and a persistent flag would
+        survive reconnection -- but the confirmation must say WHICH source the
+        operator went and looked at.
+        """
+
+        from cryodaq.paths import get_config_dir  # noqa: PLC0415
+
+        for name in ("instruments.local.yaml", "instruments.yaml"):
+            path = get_config_dir() / name
+            if not path.exists():
+                continue
+            try:
+                import yaml  # noqa: PLC0415
+
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                return None
+            if type(document) is not dict:
+                return None
+            for entry in document.get("instruments") or ():
+                if type(entry) is dict and str(entry.get("type", "")).startswith("keithley"):
+                    entry_name = entry.get("name")
+                    return entry_name if type(entry_name) is str and entry_name else None
+            return None
+        return None
+
+    def _on_confirm_source_disconnected(self) -> None:
+        """Ask the operator to confirm, then arm ONE shutdown attempt."""
+
+        from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+
+        source_name = self._configured_reviewed_source_name()
+        if source_name is None:
+            QMessageBox.warning(
+                None,
+                "Источник не настроен",
+                "В конфигурации стенда нет источника Keithley, подтверждать нечего.",
+            )
+            return
+        answer = QMessageBox.question(
+            None,
+            "Подтверждение отключения источника",
+            f"Я физически отключил {source_name} от сети.\n\n"
+            "Это утверждение оператора, а НЕ показание прибора. Оно разрешит "
+            "одну остановку без подтверждённого приборного OFF и будет "
+            "израсходовано этой попыткой.\n\n"
+            "Подтвердить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer is not QMessageBox.StandardButton.Yes:
+            # Cancelled: nothing is armed, and anything previously armed is
+            # dropped rather than left lying about.
+            self._source_disconnect_confirmation = None
+            return
+        self.confirm_source_physically_disconnected(source_name)
+
     def confirm_source_physically_disconnected(self, source_name: str) -> None:
         """Record, for ONE shutdown attempt, that the operator unplugged the source.
 
@@ -6658,6 +6719,8 @@ class LauncherWindow(QMainWindow):
         menu.addSeparator()
         restart_action = menu.addAction("Перезапустить Engine")
         restart_action.triggered.connect(self._on_restart_engine)
+        confirm_action = menu.addAction("Подтвердить: источник обесточен…")
+        confirm_action.triggered.connect(self._on_confirm_source_disconnected)
         menu.addSeparator()
         exit_action = menu.addAction("Выход")
         exit_action.triggered.connect(self._on_quit)

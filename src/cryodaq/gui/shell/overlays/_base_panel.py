@@ -49,6 +49,8 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 
+from cryodaq.gui.zmq_client import gui_worker_poll_in_flight
+
 class _Worker(Protocol):
     """Shape this module needs from a worker — matches ``ZmqCommandWorker``.
 
@@ -87,8 +89,26 @@ class OverlayPanelBase:
         retention + pruning + the result callback.
         """
 
-        def _handle(result: dict) -> None:
-            self._workers = [w for w in self._workers if w.isRunning()]
+        def _handle(result: dict, completed: _Worker = worker) -> None:
+            # Drop the EXACT worker that completed, by identity, and never
+            # raise on any other wrapper.
+            #
+            # The previous form filtered the whole list with `w.isRunning()`.
+            # Once settled workers began being destroyed, worker A could be
+            # gone by the time worker B completed, and touching A's wrapper
+            # raised "Internal C++ object already deleted" -- inside B's
+            # handler, BEFORE `on_result`. The panel's in-flight flag would
+            # never clear and its polling would freeze permanently. Alarm and
+            # cooldown status both come through here.
+            #
+            # `gui_worker_poll_in_flight` keeps the original pruning of
+            # finished-but-retained workers while treating a destroyed one as
+            # simply not in flight.
+            self._workers = [
+                w
+                for w in self._workers
+                if w is not completed and gui_worker_poll_in_flight(w)
+            ]
             on_result(result)
 
         worker.finished.connect(_handle)
