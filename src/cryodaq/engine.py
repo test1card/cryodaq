@@ -5688,10 +5688,7 @@ def _shutdown_command_identity(cmd: dict[str, Any]) -> tuple[str, str, str] | No
     capability = cmd.get("shutdown_capability")
     if not (
         set(cmd) in (required, required | optional)
-        and (
-            _OPERATOR_PHYSICAL_DISCONNECT_KEY not in cmd
-            or cmd[_OPERATOR_PHYSICAL_DISCONNECT_KEY] is True
-        )
+        and (_OPERATOR_PHYSICAL_DISCONNECT_KEY not in cmd or cmd[_OPERATOR_PHYSICAL_DISCONNECT_KEY] is True)
         and cmd.get("cmd") == "launcher_shutdown"
         and type(instance_id) is str
         and len(instance_id) == 32
@@ -7725,19 +7722,20 @@ async def _run_engine(
             state_tracker=_alarm_v2_state_tracker,
             alarm_state_mgr=alarm_v2_state_mgr,
             event_bus=event_bus,
-            # v0.55.12 wired this unconditionally, so a CRITICAL cooldown alarm
-            # de-energised the source with no way to opt out. It now takes the
-            # same strict, fail-closed opt-in gate the vacuum guard already
-            # uses: the handle is passed only on an explicit
-            # `escalate_to_safety: true`, and the default is alarm-only.
+            # No SafetyManager handle — see the boundary note at the vacuum
+            # guard below. v0.55.12 wired this unconditionally, so a CRITICAL
+            # cooldown alarm de-energised the source with no way to opt out.
             #
-            # Operator policy 2026-09-03: alarms warn, they do not stop the
-            # source. A trajectory deviating from the nine-curve ensemble is
-            # expected when a cooldown starts from a poor vacuum — that is
-            # information for the operator, not grounds to kill the heater.
-            # Genuine physical protection is unaffected: the over-temperature
-            # interlocks in interlocks.yaml still act on their own authority.
-            safety_manager=(safety_manager if _cooldown_cfg.get("escalate_to_safety") is True else None),
+            # A config gate was tried first and was not real: the accepted
+            # cooldown schema rejects unknown keys, so `escalate_to_safety`
+            # could never be set without making the whole configuration
+            # invalid, and its absence left the gate permanently closed. A knob
+            # that cannot be turned is not an opt-in.
+            #
+            # A trajectory deviating from the nine-curve ensemble is expected
+            # when a cooldown starts from a poor vacuum — that is information
+            # for the operator, not grounds to kill the heater.
+            safety_manager=None,
         )
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
     else:
@@ -7751,12 +7749,18 @@ async def _run_engine(
                 state_tracker=_alarm_v2_state_tracker,
                 alarm_state_mgr=alarm_v2_state_mgr,
                 event_bus=event_bus,
-                # Opt-in (external safety review, HIGH): wire SafetyManager so a
-                # FIRED vacuum guard latches a fault, not just an alarm. Strict
-                # bool, fail-closed like the wdog gate — pass the handle only on
-                # an explicit `escalate_to_safety: true`; default keeps None
-                # (alarm-only, byte-identical to prior behavior).
-                safety_manager=(safety_manager if _vacuum_cfg.get("escalate_to_safety") is True else None),
+                # No SafetyManager handle. Alarms are observations and
+                # notifications; source state changes come from explicit
+                # SafetyManager transitions — hard limits, interlocks, source
+                # faults, persistence and safety shutdowns, emergency stop —
+                # each of which keeps its own independent de-energisation path
+                # even when notifications are muted.
+                #
+                # `vacuum.escalate_to_safety` remains in the schema so existing
+                # configurations still load, but it no longer grants an alarm
+                # authority over the source. See the boundary note in
+                # core/vacuum_guard.py.
+                safety_manager=None,
             )
         except Exception as exc:
             logger.warning(
