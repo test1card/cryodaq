@@ -1391,15 +1391,27 @@ class MainWindowV2(QMainWindow):
         future_mean = meta.get("future_T_cold_mean")
         future_upper = meta.get("future_T_cold_upper")
         future_lower = meta.get("future_T_cold_lower")
-        # future_t is hours-from-now (plugin contract). Convert to absolute
-        # Unix timestamps so CooldownPredictionWidget's DateAxisItem renders
-        # a human-readable date rather than 1970-01-01.
-        future_t_abs: list[float] = []
-        if isinstance(future_t, list):
-            import time as _time
+        # Provenance first: the trajectory is anchored to it.
+        try:
+            generated_at = float(reading.timestamp.timestamp())
+        except (TypeError, ValueError, OSError, AttributeError):
+            generated_at = None
 
-            now_ts = _time.time()
-            future_t_abs = [now_ts + float(h) * 3600.0 for h in future_t]
+        # future_t is hours-from-*prediction-time* (plugin contract). Convert to
+        # absolute Unix timestamps so CooldownPredictionWidget's DateAxisItem
+        # renders a human-readable date rather than 1970-01-01.
+        #
+        # The anchor is the reading's own timestamp, NOT wall-clock now. Anchoring
+        # to receipt time slides a delayed or replayed forecast forward to the
+        # moment the GUI happened to see it, so the curve claims to describe a
+        # future measured from now while its text is classified stale — the plot
+        # and the label would disagree about the same prediction.
+        #
+        # Fails closed: with no trustworthy anchor we draw no trajectory at all,
+        # rather than manufacture a current-looking one from the wall clock.
+        future_t_abs: list[float] = []
+        if isinstance(future_t, list) and generated_at is not None:
+            future_t_abs = [generated_at + float(h) * 3600.0 for h in future_t]
         if future_t_abs and isinstance(future_mean, list) and len(future_t_abs) == len(future_mean):
             predicted = list(zip(future_t_abs, future_mean, strict=False))
         if (
@@ -1414,10 +1426,6 @@ class MainWindowV2(QMainWindow):
         # along and dropped here, so a pre-detection ensemble prior and a live
         # slope-adjusted forecast arrived at the widget indistinguishable.
         cooldown_active = meta.get("cooldown_active") is True
-        try:
-            generated_at = float(reading.timestamp.timestamp())
-        except (TypeError, ValueError, OSError, AttributeError):
-            generated_at = None
 
         return CooldownData(
             t_hours=t_hours,

@@ -42,6 +42,24 @@ over which an operator makes decisions. It matches the threshold the Telegram
 commands already applied, so adopting it here changes no existing behaviour.
 """
 
+PREDICTION_STALE_AFTER_S: Final = 120.0
+"""Age beyond which a cooldown prediction no longer describes *now*.
+
+The predictor publishes every 30 s (``config/cooldown.yaml``:
+``predict_interval_s``), so this is **four** missed publish cycles -- a clear
+stall rather than a hiccup, and still far shorter than the interval over which
+an ETA meaningfully changes.
+
+Longer than :data:`READING_STALE_AFTER_S` on purpose: a raw sensor polls at
+1-2 s, a forecast at 30 s, so the same bound would call every healthy
+prediction stale.
+
+This lives here, beside the judgement that consumes it, because it has two
+displays -- the full Analytics view and the compact dashboard header -- and
+when each owned a private copy they could drift apart and disagree about the
+same number in the same window.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class Freshness:

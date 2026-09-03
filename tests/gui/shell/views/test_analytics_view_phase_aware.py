@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -174,6 +175,12 @@ def test_set_cooldown_forwards_to_cooldown_prediction_widget(app):
         actual_trajectory=[(0.0, 295.0), (3600.0, 150.0)],
         predicted_trajectory=[(3600.0, 150.0), (14400.0, 50.0)],
         ci_trajectory=[(3600.0, 148.0, 152.0), (14400.0, 45.0, 55.0)],
+        # A cooldown forecast is only drawn when it can say what it is: an
+        # undated snapshot fails closed since nothing establishes that it
+        # describes now. This test is about forwarding, not provenance, so
+        # it supplies a live one.
+        cooldown_active=True,
+        generated_at=time.time(),
     )
     view.set_cooldown(data)
     main = view.active_widgets()["main"]
@@ -342,6 +349,12 @@ def test_phase_swap_replays_cached_cooldown(app):
         actual_trajectory=[(0.0, 295.0), (600.0, 200.0)],
         predicted_trajectory=[(600.0, 200.0), (3600.0, 100.0)],
         ci_trajectory=[(600.0, 198.0, 202.0), (3600.0, 95.0, 105.0)],
+        # A cooldown forecast is only drawn when it can say what it is: an
+        # undated snapshot fails closed since nothing establishes that it
+        # describes now. This test is about forwarding, not provenance, so
+        # it supplies a live one.
+        cooldown_active=True,
+        generated_at=time.time(),
     )
     # Push before the relevant widget is mounted.
     view.set_cooldown(data)

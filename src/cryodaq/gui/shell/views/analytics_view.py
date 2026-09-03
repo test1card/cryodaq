@@ -35,6 +35,7 @@ import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
+from cryodaq.core.reading_freshness import PREDICTION_STALE_AFTER_S
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.views import analytics_widgets
@@ -61,10 +62,10 @@ _PHASE_ALIASES: dict[str, str] = {
 # ─── Data contracts preserved from B.8 ────────────────────────────────
 
 
-# The predictor publishes every 30 s (cooldown.yaml: predict_interval_s). Three
-# missed cycles is a clear stall rather than a hiccup, and is still far shorter
-# than the interval over which an ETA meaningfully changes.
-_PREDICTION_STALE_AFTER_S = 120.0
+# One owner for this boundary, in cryodaq.core.reading_freshness. The compact
+# dashboard header renders the same ETA and used to keep its own copy of the
+# number; two copies of one rule are two rules waiting to disagree.
+_PREDICTION_STALE_AFTER_S = PREDICTION_STALE_AFTER_S
 
 
 @dataclass

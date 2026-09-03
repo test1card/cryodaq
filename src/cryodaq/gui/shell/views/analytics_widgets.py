@@ -20,6 +20,7 @@ Phase III.C contract:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -50,6 +51,8 @@ from cryodaq.gui.state.time_window import (
 from cryodaq.gui.widgets.shared.prediction_widget import PredictionWidget
 from cryodaq.gui.widgets.shared.pressure_plot import PressurePlot
 from cryodaq.gui.widgets.shared.time_window_selector import TimeWindowSelector
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Widget IDs — must match YAML
@@ -944,6 +947,35 @@ class CooldownPredictionWidget(QWidget):
         self._placeholder.setPos(cx, cy)
         self._steady_badge.setPos(cx, cy)
 
+    def _judge_provenance(self, data) -> tuple[bool, bool, str]:
+        """What is this prediction — baseline, live forecast, or stale?
+
+        Returns ``(is_current, is_baseline, label)``. Fails closed: an object
+        that cannot answer for its own age is not current, because nothing about
+        it establishes that it describes now.
+        """
+
+        verdict = None
+        judge = getattr(data, "freshness", None)
+        if callable(judge):
+            try:
+                verdict = judge()
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("cooldown freshness judgement failed", exc_info=True)
+                verdict = None
+        is_current = bool(getattr(verdict, "is_current", False)) if verdict is not None else False
+
+        is_baseline = not bool(getattr(data, "cooldown_active", False))
+
+        label = self._IDLE_MESSAGE
+        describe = getattr(data, "status_label", None)
+        if callable(describe):
+            try:
+                label = str(describe())
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("cooldown status label failed", exc_info=True)
+        return is_current, is_baseline, label
+
     def set_cooldown_data(self, data) -> None:
         if data is None:
             # Clear any stale forecast curves left from a prior active push
@@ -960,6 +992,27 @@ class CooldownPredictionWidget(QWidget):
         predicted = getattr(data, "predicted_trajectory", []) or []
         ci = getattr(data, "ci_trajectory", []) or []
 
+        # Three different things used to arrive here and be drawn identically as
+        # one confident forecast curve: the pre-detection ensemble prior, a live
+        # slope-adjusted forecast, and a value whose publisher had stopped. The
+        # provenance was on the object and this method never read it.
+        is_current, is_baseline, provenance = self._judge_provenance(data)
+
+        if not is_current:
+            # A stalled predictor must not leave its last curve on the plot
+            # looking live. Clear the forecast outright and say how old it is.
+            self._inner.set_prediction([], [], [], ci_level_pct=67.0)
+            self._asym_line.setVisible(False)
+            self._asym_band.setVisible(False)
+            self._steady_badge.setVisible(False)
+            self._placeholder.setText(provenance)
+            self._placeholder.setVisible(True)
+            self._reposition_overlays()
+            return
+
+        # Fresh from here on — drop any stale text a previous refusal left behind.
+        self._placeholder.setText(self._IDLE_MESSAGE)
+
         if predicted and ci:
             lower = [(t, lo) for (t, lo, _hi) in ci]
             upper = [(t, hi) for (t, _lo, hi) in ci]
@@ -971,7 +1024,15 @@ class CooldownPredictionWidget(QWidget):
             )
             self._asym_line.setVisible(False)
             self._asym_band.setVisible(False)
-            self._steady_badge.setVisible(False)
+            # Before a cooldown is detected the predictor still publishes the
+            # ensemble prior. That curve is a model reference, not a forecast for
+            # this run, so it is drawn but named.
+            if is_baseline:
+                self._steady_badge.setPlainText(provenance)
+                self._steady_badge.setVisible(True)
+                self._reposition_overlays()
+            else:
+                self._steady_badge.setVisible(False)
             self._placeholder.setVisible(False)
             return
 

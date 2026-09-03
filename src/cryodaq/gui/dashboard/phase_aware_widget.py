@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
+from cryodaq.core.reading_freshness import PREDICTION_STALE_AFTER_S
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_content.eta_display import (
     _format_duration_ru,
@@ -36,9 +37,10 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
-# The predictor publishes every 30 s; three missed cycles is a stall, not a
-# hiccup. Matches _PREDICTION_STALE_AFTER_S in analytics_view.
-_ETA_STALE_AFTER_S = 120.0
+# One owner for this boundary, in cryodaq.core.reading_freshness. The full
+# Analytics view renders the same ETA against the same rule; when each display
+# held its own 120.0 they could drift apart and disagree in the same window.
+_ETA_STALE_AFTER_S = PREDICTION_STALE_AFTER_S
 
 
 class PhaseAwareWidget(QWidget):
@@ -77,7 +79,7 @@ class PhaseAwareWidget(QWidget):
 
         self._duration_timer = QTimer(self)
         self._duration_timer.setInterval(_DURATION_UPDATE_MS)
-        self._duration_timer.timeout.connect(self._update_duration_display)
+        self._duration_timer.timeout.connect(self._on_duration_tick)
         self._duration_timer.start()
 
     # ------------------------------------------------------------------
@@ -495,6 +497,26 @@ class PhaseAwareWidget(QWidget):
             return
         self._back_btn.setEnabled(current_idx > 0)
         self._forward_btn.setEnabled(current_idx < len(PHASE_ORDER) - 1)
+
+    def _on_duration_tick(self) -> None:
+        """One-second tick: elapsed time, and whether the ETA still describes now.
+
+        Freshness used to be judged only inside :meth:`_refresh_context_label`,
+        which runs when a reading or a status update arrives. That is exactly the
+        wrong trigger for the failure it is meant to catch: when the predictor
+        stops publishing, nothing arrives, so nothing re-evaluated the age and the
+        last "fresh" ETA stayed on screen indefinitely — the stall being invisible
+        for the same reason it was a stall.
+
+        This timer already ran every second for the duration readout, so the label
+        rides along on it. No new timer.
+        """
+
+        self._update_duration_display()
+        try:
+            self._refresh_context_label()
+        except Exception:  # pragma: no cover - a display refresh must not kill the tick
+            logger.warning("context label refresh failed", exc_info=True)
 
     def _update_duration_display(self) -> None:
         if not self._has_active_experiment or self._phase_started_at is None:
