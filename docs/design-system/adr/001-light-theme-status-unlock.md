@@ -8,6 +8,11 @@
 - 2026-04-19 — Hue-lock tolerance refined to ±5° to accommodate sRGB
   8-bit quantization drift at low lightness (see «Implementation
   tolerance» section below).
+- 2026-09-04 — Решение в силе, область применения сузилась. Из трёх
+  light-пакетов, поставлявшихся с этим ADR, остался только `xcode`;
+  `gost` и `braun` удалены при сокращении набора тем до двух
+  (см. CHANGELOG [4.3.0]). Сам shifted-L комплект и hue-lock не
+  пересматривались.
 
 ---
 
@@ -208,6 +213,6 @@ Shifted-L внутри тех же имён токенов — минималь�
   больше не является живым контрактом.
 - `docs/design-system/tokens/colors.md` — авторитативный файл
   токенов.
-- `config/themes/gost.yaml`, `config/themes/xcode.yaml`,
-  `config/themes/braun.yaml` — light-темы, использующие
-  shifted-L комплект.
+- `config/themes/xcode.yaml` — единственная поставляемая light-тема,
+  использующая shifted-L комплект. Пакеты `gost` и `braun` применяли тот же
+  комплект и были удалены 04.09.2026; файлов в дереве больше нет.

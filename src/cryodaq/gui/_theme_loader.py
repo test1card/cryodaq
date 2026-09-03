@@ -3,7 +3,7 @@
 Reads the selected theme name from ``config/settings.local.yaml`` and
 loads the matching pack from ``config/themes/<name>.yaml``. Validates
 that every required token is present and hex-well-formed; on any
-failure, falls back to the bundled default pack (``warm_stone``).
+failure, falls back to the bundled default pack (``default_cool``).
 
 Imported at module-level by :mod:`cryodaq.gui.theme` before any color
 token is defined, so downstream consumers see the loaded values via
@@ -23,7 +23,13 @@ from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THEME = "warm_stone"
+# 2026-09-04: the shipped set is two packs — default_cool (dark) and xcode
+# (light). default_cool is the default because it IS the substrate the design
+# system's contrast matrix is measured against: RULE-A11Y-003 states every ratio
+# "vs BACKGROUND #0d0e12", which is this pack. Defaulting to any other
+# background would mean the documented AA numbers did not describe what the
+# operator actually sees.
+DEFAULT_THEME = "default_cool"
 
 _CONFIG_DIR = get_config_dir()
 THEMES_DIR = _CONFIG_DIR / "themes"

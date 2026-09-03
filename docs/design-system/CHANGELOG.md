@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-28
-version: 4.2.0
+last_updated: 2026-09-04
+version: 4.3.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.3.0] — 2026-09-04
+
+### Removed
+
+- **Ten theme packs removed; the shipped set is two, one per substrate.**
+  `default_cool` (dark) and `xcode` (light) remain. Removed: `amber`,
+  `anthropic_mono`, `braun`, `gost`, `instrument`, `ochre_bloom`, `rose_dusk`,
+  `signal`, `taupe_quiet`, `warm_stone`. Operator decision, 2026-09-04.
+
+  MINOR, not MAJOR, per `governance/versioning.md`. MAJOR is defined as
+  "breaks callers — existing panel code must be modified": token, component,
+  rule or pattern removal. A theme pack supplies *values* for tokens and does
+  not define the token set; `REQUIRED_TOKENS` is unchanged and no panel code
+  changes. What breaks is an operator's `settings.local.yaml` selection, which
+  is runtime configuration rather than design-system API — and that falls back
+  cleanly with a logged warning. Flagged for the architect: if removal of
+  shipped value-packs should count as MAJOR, this is the entry to re-cut.
+
+### Changed
+
+- **`DEFAULT_THEME` is now `default_cool`** (was `warm_stone`). This is not a
+  taste decision: RULE-A11Y-003's contrast matrix states every ratio "vs
+  BACKGROUND #0d0e12", which *is* `default_cool`. Defaulting to any other
+  substrate meant the published AA numbers did not describe what the operator
+  actually saw.
+- `docs/operator_manual.md` §9 — the GUI-recovery instructions told operators to
+  set `theme: warm_stone`, which would now name a deleted pack.
+- `_THEME_DISPLAY_ORDER` in `launcher.py` trimmed to the two shipped ids.
+
+### Notes
+
+- ADR 001 hue-separation and AA-contrast regressions ran on the six packs
+  shipped with that ADR; of those only `xcode` survives. `default_cool` predates
+  ADR 001 and remains out of that scope, so the surviving **dark** substrate is
+  un-audited by those particular checks — a pre-existing gap, not one introduced
+  here. Its body-contrast side is documented, since RULE-A11Y-003 is measured
+  against it. Retro-audit remains an architect call.
+- Several code comments and tests cite a themes handoff document that is absent
+  from the repository; those references are stale and were not propagated into
+  new material.
 
 ## [4.2.0] — 2026-08-28
 

@@ -21,10 +21,23 @@ def test_keithley_contract_distinguishes_missing_authority_from_current_blocker(
     assert "operator_warning_choice" in spec
 
     assert tuple(map(int, version.split("."))) >= (4, 2, 0)
-    current_release = re.search(
-        rf"^## \[{re.escape(version)}\].*?(?=^## \[|\Z)",
+    # The contract is recorded in the 4.2.0 entry and stays true for every later
+    # release. Asserting it appears in the *newest* entry pinned this test to
+    # 4.2.0 remaining the top of the changelog, so the next unrelated release
+    # broke it — 4.3.0 (theme reduction) did exactly that on 2026-09-04. What
+    # matters is that the contract is recorded at or after the version that
+    # introduced it, not that it is the most recent thing to have happened.
+    keithley_release = re.search(
+        r"^## \[(?P<v>\d+\.\d+\.\d+)\][^\n]*\n(?P<body>.*?)(?=^## \[|\Z)",
         changelog,
         flags=re.MULTILINE | re.DOTALL,
     )
-    assert current_release is not None
-    assert "Keithley" in current_release.group(0)
+    assert keithley_release is not None
+    releases = re.findall(
+        r"^## \[(\d+\.\d+\.\d+)\][^\n]*\n(.*?)(?=^## \[|\Z)",
+        changelog,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    documented = [v for v, body in releases if "Keithley" in body]
+    assert documented, "the Keithley channel-state contract must be recorded in the changelog"
+    assert max(tuple(map(int, v.split("."))) for v in documented) >= (4, 2, 0)

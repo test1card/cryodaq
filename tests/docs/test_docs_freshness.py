@@ -1376,9 +1376,21 @@ def test_operator_manual_matches_current_runtime_authority_boundaries() -> None:
 def test_keithley_channel_state_contract_separates_physical_badge_from_manager_latch() -> None:
     component = _read(REPO_ROOT / "docs/design-system/cryodaq-primitives/keithley-panel.md")
     manual = _read(REPO_ROOT / "docs/operator_manual.md")
-    version = _read(REPO_ROOT / "docs/design-system/VERSION").strip()
     changelog = _read(REPO_ROOT / "docs/design-system/CHANGELOG.md")
-    current_release = changelog.split(f"## [{version}]", 1)[1].split("\n## [", 1)[0]
+    # Find the release that RECORDS this contract, not whichever release happens
+    # to be newest. Splitting on the current VERSION pinned this test to 4.2.0
+    # staying at the top of the changelog; the next unrelated release broke it
+    # (4.3.0, theme reduction, 2026-09-04). The contract is a fact about a past
+    # release and remains true afterwards.
+    _releases = re.findall(
+        r"^## \[\d+\.\d+\.\d+\][^\n]*\n(.*?)(?=^## \[|\Z)",
+        changelog,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    current_release = next(
+        (body for body in _releases if "manager fault latch" in body),
+        "",
+    )
 
     for marker in (
         "Per-channel source state and manager safety state are separate truths.",

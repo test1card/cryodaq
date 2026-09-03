@@ -602,21 +602,15 @@ def _assistant_runtime_required(*, experiment_mode: bool = True) -> bool:
 # the handoff doc groups warm_stone / ochre_bloom / taupe_quiet /
 # rose_dusk as "light" but their BG hexes are all dark. Only
 # gost / xcode / braun are actual light substrates.
+# 2026-09-04, operator decision: the shipped set is two packs, one per
+# substrate. Ten exploratory warm packs were removed. default_cool is the
+# canonical dark — the contrast matrix in RULE-A11Y-003 is measured against its
+# #0d0e12 background — and xcode is the light substrate under ADR 001.
 _THEME_DISPLAY_ORDER: tuple[str, ...] = (
     # Dark
     "default_cool",
-    "warm_stone",
-    "anthropic_mono",
-    "ochre_bloom",
-    "taupe_quiet",
-    "rose_dusk",
-    "signal",
-    "instrument",
-    "amber",
     # Light (ADR 001 shifted-L STATUS set)
-    "gost",
     "xcode",
-    "braun",
 )
 _LIGHT_THEME_IDS: frozenset[str] = frozenset({"gost", "xcode", "braun"})
 
