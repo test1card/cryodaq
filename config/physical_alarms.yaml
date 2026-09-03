@@ -80,7 +80,15 @@ vacuum:
   # through FAULT_LATCHED → acknowledge → MANUAL_RECOVERY so a vacuum
   # incident while cold always needs operator eyes. Set false for
   # attended/debug runs where alarm-only (no source kill) is acceptable.
-  escalate_to_safety: true
+  #
+  # 2026-09-03, operator policy: alarms warn, they do not de-energise the
+  # source. The guard fired on the first cooldown it ever saw — P=7.2e-2 mbar
+  # at Т12=259 K — and latched the Keithley. Every cooldown this stand has
+  # recorded crossed 260 K between 7.3e-2 and 9.8e-1 mbar, so at
+  # fire_pressure_mbar=1.0e-2 it would latch on EVERY run, and an alarm that
+  # always fires is one that gets ignored. Alarm-only until the threshold is
+  # recalibrated to this stand's actual distribution.
+  escalate_to_safety: false
 
 # Channel landmarks — F-ChannelLandmarks (system-level declarations).
 # The tracked configuration declares Т11 / Т12 as fixed stage roles, but their

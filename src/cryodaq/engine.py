@@ -7725,9 +7725,19 @@ async def _run_engine(
             state_tracker=_alarm_v2_state_tracker,
             alarm_state_mgr=alarm_v2_state_mgr,
             event_bus=event_bus,
-            # v0.55.12 — wire SafetyManager so CooldownAlarm CRITICAL
-            # latches the safety FSM.
-            safety_manager=safety_manager,
+            # v0.55.12 wired this unconditionally, so a CRITICAL cooldown alarm
+            # de-energised the source with no way to opt out. It now takes the
+            # same strict, fail-closed opt-in gate the vacuum guard already
+            # uses: the handle is passed only on an explicit
+            # `escalate_to_safety: true`, and the default is alarm-only.
+            #
+            # Operator policy 2026-09-03: alarms warn, they do not stop the
+            # source. A trajectory deviating from the nine-curve ensemble is
+            # expected when a cooldown starts from a poor vacuum — that is
+            # information for the operator, not grounds to kill the heater.
+            # Genuine physical protection is unaffected: the over-temperature
+            # interlocks in interlocks.yaml still act on their own authority.
+            safety_manager=(safety_manager if _cooldown_cfg.get("escalate_to_safety") is True else None),
         )
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
     else:
