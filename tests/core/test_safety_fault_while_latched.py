@@ -14,8 +14,6 @@ is. Discarding the EVENT is not.
 
 from __future__ import annotations
 
-import pytest
-
 from cryodaq.core.safety_manager import SafetyState
 
 
