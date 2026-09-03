@@ -504,14 +504,10 @@ class MainWindowV2(QMainWindow):
         # observation arrived. The cut is coherent here: live, matching
         # experiment, transport healthy. It reports the source as on, which is
         # knowledge, not the absence of it.
-        source_live_and_coherent = (
-            not transport_unavailable
-            and readiness.lifecycle
-            in {
-                SafetyLifecycle.RUN_PERMITTED,
-                SafetyLifecycle.RUNNING,
-            }
-        )
+        source_live_and_coherent = not transport_unavailable and readiness.lifecycle in {
+            SafetyLifecycle.RUN_PERMITTED,
+            SafetyLifecycle.RUNNING,
+        }
         if (
             bridge_instance_id is not None
             and not self._replay_mode
@@ -1347,6 +1343,11 @@ class MainWindowV2(QMainWindow):
           - metadata["future_T_cold_mean"]  optional list[float], K
           - metadata["future_T_cold_upper"] optional list[float], K
           - metadata["future_T_cold_lower"] optional list[float], K
+          - metadata["cooldown_active"]     bool — whether a cooldown is
+            actually running. Before detection the predictor still emits the
+            ensemble PRIOR (19.3 h, progress 0.0%), which is a model reference
+            and not an ETA for this run. This adapter used to discard the flag,
+            so the widget could not tell the two apart.
         """
         # Lazy import — avoids a hard dependency at module-load time.
         from cryodaq.gui.shell.views.analytics_view import CooldownData
@@ -1409,6 +1410,15 @@ class MainWindowV2(QMainWindow):
         ):
             ci_traj = list(zip(future_t_abs, future_lower, future_upper, strict=False))
 
+        # Provenance travels with the number. cooldown_active was published all
+        # along and dropped here, so a pre-detection ensemble prior and a live
+        # slope-adjusted forecast arrived at the widget indistinguishable.
+        cooldown_active = meta.get("cooldown_active") is True
+        try:
+            generated_at = float(reading.timestamp.timestamp())
+        except (TypeError, ValueError, OSError, AttributeError):
+            generated_at = None
+
         return CooldownData(
             t_hours=t_hours,
             ci_hours=ci_hours,
@@ -1418,6 +1428,8 @@ class MainWindowV2(QMainWindow):
             predicted_trajectory=predicted,
             ci_trajectory=ci_traj,
             phase_boundaries_hours=[],
+            cooldown_active=cooldown_active,
+            generated_at=generated_at,
         )
 
     # ------------------------------------------------------------------

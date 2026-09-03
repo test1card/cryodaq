@@ -61,6 +61,12 @@ _PHASE_ALIASES: dict[str, str] = {
 # ─── Data contracts preserved from B.8 ────────────────────────────────
 
 
+# The predictor publishes every 30 s (cooldown.yaml: predict_interval_s). Three
+# missed cycles is a clear stall rather than a hiccup, and is still far shorter
+# than the interval over which an ETA meaningfully changes.
+_PREDICTION_STALE_AFTER_S = 120.0
+
+
 @dataclass
 class CooldownData:
     """Snapshot of cooldown predictor output.
@@ -78,6 +84,47 @@ class CooldownData:
     predicted_trajectory: list[tuple[float, float]] = field(default_factory=list)
     ci_trajectory: list[tuple[float, float, float]] = field(default_factory=list)
     phase_boundaries_hours: list[float] = field(default_factory=list)
+
+    # Provenance. Without these the widget cannot tell three different things
+    # apart, and showed all of them as one confident number:
+    #
+    #   * before a cooldown is detected the predictor emits the ensemble prior —
+    #     19.3 h, progress 0.0%, unchanging. That is a model reference, NOT an
+    #     ETA derived from this run, and it sat on screen for five hours on
+    #     2026-09-03 looking exactly like a live forecast;
+    #   * during an active cooldown it is a genuine slope-adjusted forecast;
+    #   * if the predictor is shed under load or fails, the last value simply
+    #     stops updating, and nothing said so.
+    #
+    # `cooldown_active` was already in the published metadata and was being
+    # discarded by the adapter. `generated_at` is the reading's own timestamp,
+    # so staleness is judged against when the prediction was made rather than
+    # when it happened to be rendered.
+    cooldown_active: bool = False
+    generated_at: float | None = None
+
+    def freshness(self, *, now_epoch: float | None = None):
+        """Judge this prediction against the shared freshness boundary."""
+
+        import time as _time
+
+        from cryodaq.core.reading_freshness import judge_freshness
+
+        return judge_freshness(
+            self.generated_at,
+            now_epoch=_time.time() if now_epoch is None else now_epoch,
+            max_age_s=_PREDICTION_STALE_AFTER_S,
+        )
+
+    def status_label(self, *, now_epoch: float | None = None) -> str:
+        """One operator-facing description of what this number actually is."""
+
+        verdict = self.freshness(now_epoch=now_epoch)
+        if not verdict.is_current:
+            return f"прогноз недоступен ({verdict.reason})"
+        if not self.cooldown_active:
+            return "базовая оценка по модели (охлаждение не обнаружено)"
+        return "прогноз по наблюдаемой скорости"
 
 
 @dataclass

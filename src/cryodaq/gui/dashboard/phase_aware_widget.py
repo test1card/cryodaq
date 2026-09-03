@@ -9,6 +9,7 @@ MilestoneList) preserved in phase_content/ for B.10 Analytics overlay.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -35,6 +36,11 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
+# The predictor publishes every 30 s; three missed cycles is a stall, not a
+# hiccup. Matches _PREDICTION_STALE_AFTER_S in analytics_view.
+_ETA_STALE_AFTER_S = 120.0
+
+
 class PhaseAwareWidget(QWidget):
     """Compact dashboard phase strip: stepper + inline context + controls."""
 
@@ -58,6 +64,10 @@ class PhaseAwareWidget(QWidget):
 
         # Cached analytics values for inline context
         self._cached_eta_s: float | None = None
+        # Provenance for the ETA above: whether it is the pre-detection model
+        # baseline, and when the publisher last produced it.
+        self._eta_is_baseline: bool = False
+        self._eta_generated_at: float | None = None
         self._cached_r_thermal: float | None = None
         self._cached_pressure: float | None = None
         self._last_context_text: str = ""
@@ -223,7 +233,26 @@ class PhaseAwareWidget(QWidget):
 
             if self._current_phase == "cooldown":
                 if self._cached_eta_s is not None:
-                    parts.append(self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s)))
+                    # Say which of the three things this number is, rather than
+                    # labelling all of them "ETA": a model baseline before
+                    # detection, a live slope-adjusted forecast during a
+                    # cooldown, or a value whose publisher has stopped.
+                    from cryodaq.core.reading_freshness import format_age, judge_freshness
+
+                    verdict = judge_freshness(
+                        self._eta_generated_at,
+                        now_epoch=time.time(),
+                        max_age_s=_ETA_STALE_AFTER_S,
+                    )
+                    if not verdict.is_current:
+                        age = format_age(verdict.age_s) if verdict.age_s is not None else "?"
+                        parts.append(self._styled_metric("ETA", f"нет обновления ({age})"))
+                    elif self._eta_is_baseline:
+                        parts.append(
+                            self._styled_metric("ETA", f"~{_format_duration_ru(self._cached_eta_s)} (по модели)")
+                        )
+                    else:
+                        parts.append(self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s)))
                 if self._cached_r_thermal is not None:
                     parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
             elif self._current_phase == "vacuum":
@@ -347,6 +376,8 @@ class PhaseAwareWidget(QWidget):
 
             if new_experiment_id != self._active_experiment_id:
                 self._cached_eta_s = None
+                self._eta_is_baseline = False
+                self._eta_generated_at = None
                 self._cached_r_thermal = None
                 self._cached_pressure = None
             self._active_experiment_id = new_experiment_id
@@ -369,7 +400,26 @@ class PhaseAwareWidget(QWidget):
         if not isinstance(value, (int, float)):
             return
         if channel.endswith("/cooldown_eta"):
-            self._cached_eta_s = value * 3600 if value > 0 else None
+            # The predictor publishes continuously, INCLUDING before a cooldown
+            # is detected — and that pre-detection value is the ensemble prior
+            # (19.3 h, progress 0.0%), a model reference rather than an ETA for
+            # this run. It sat on screen for five hours on 2026-09-03 labelled
+            # simply "ETA". cooldown_active was in the metadata the whole time
+            # and was never read here.
+            meta = getattr(reading, "metadata", None) or {}
+            if meta.get("cooldown_active") is True and value > 0:
+                self._cached_eta_s = value * 3600
+                self._eta_is_baseline = False
+            elif value > 0:
+                self._cached_eta_s = value * 3600
+                self._eta_is_baseline = True
+            else:
+                self._cached_eta_s = None
+                self._eta_is_baseline = False
+            try:
+                self._eta_generated_at = float(reading.timestamp.timestamp())
+            except (TypeError, ValueError, OSError, AttributeError):
+                self._eta_generated_at = None
             self._refresh_context_label()
         elif channel.endswith("/R_thermal"):
             self._cached_r_thermal = value
