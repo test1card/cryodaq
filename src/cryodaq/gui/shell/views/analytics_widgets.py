@@ -2224,6 +2224,11 @@ class GasInventoryWidget(QWidget):
         value_row.addStretch()
         lay.addLayout(value_row)
 
+        self._baseline_label = _muted_label("")
+        self._baseline_label.setWordWrap(True)
+        self._baseline_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._baseline_label)
+
         self._note_label = _muted_label("датчики объёма газа не выбраны")
         self._note_label.setWordWrap(True)
         # Left-align with the value above it; _muted_label centres by default.
@@ -2233,6 +2238,10 @@ class GasInventoryWidget(QWidget):
         self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         apply_plot_style(self._plot)
         self._plot.setLabel("left", "N/N₀", units="%")
+        # DESIGN: same rationale as RULE-DATA-008 for pressure. This quantity
+        # crosses the same decades during a pump-down, and on a linear axis the
+        # whole of it collapses onto the baseline once a decade has been removed.
+        self._plot.setLogMode(x=False, y=True)
         self._plot.setMouseEnabled(x=False, y=False)
         self._plot.setMenuEnabled(False)
         self._curve = self._plot.plot([], [], pen=series_pen(0))
@@ -2277,7 +2286,7 @@ class GasInventoryWidget(QWidget):
         self._curve.setData([t for t, _ in self._series], [v for _, v in self._series])
 
         # Value text stays FOREGROUND whatever the direction (RULE-A11Y-003).
-        self._value_label.setText(f"{float(value):.0f}%")
+        self._value_label.setText(self._format_inventory(float(value)))
         self._value_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
 
         colour = self._colour_for(rate)
@@ -2292,6 +2301,11 @@ class GasInventoryWidget(QWidget):
             self._rate_label.setText(f"{abs(rate):.1f} %/ч")
             self._note_label.setText(self._verdict_word(rate))
 
+        # 100% is stated, never implied. Without this the operator has to
+        # remember which event the zero was taken at, and a percentage against a
+        # forgotten reference is not a measurement.
+        self._baseline_label.setText(self._baseline_caption(meta))
+
     def set_gas_inventory_unavailable(self, reason: str) -> None:
         self._render_absent(reason)
 
@@ -2301,8 +2315,48 @@ class GasInventoryWidget(QWidget):
         self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
         self._arrow_label.setText("")
         self._rate_label.setText("")
+        self._baseline_label.setText("")
         self._note_label.setText(str(reason))
         self._apply_status_edge(None)
+
+    @staticmethod
+    def _format_inventory(pct: float) -> str:
+        """Percent near the baseline, decades far from it.
+
+        A pump-down legitimately crosses five decades: zero at 1 bar and 1e-2
+        mbar is 0.001% of baseline, where a further full decade of pumping is
+        invisible on a linear percent. A cooldown moves 80 -> 118%, where percent
+        reads perfectly. One format cannot serve both, so the format follows the
+        value.
+        """
+
+        if pct <= 0.0 or not math.isfinite(pct):
+            return "—"
+        if 10.0 <= pct <= 1000.0:
+            return f"{pct:.0f}%"
+        if 1.0 <= pct < 10.0:
+            return f"{pct:.1f}%"
+        # Far from the zero: decades say what percent cannot.
+        decades = math.log10(pct / 100.0)
+        return f"{decades:+.1f} дек"
+
+    @staticmethod
+    def _baseline_caption(meta: dict) -> str:
+        from datetime import datetime as _dt
+
+        reason = str(meta.get("baseline_reason") or "").strip()
+        epoch = meta.get("baseline_epoch")
+        when = ""
+        if isinstance(epoch, (int, float)) and math.isfinite(float(epoch)):
+            try:
+                when = _dt.fromtimestamp(float(epoch)).strftime("%d.%m %H:%M")
+            except (ValueError, OSError, OverflowError):
+                when = ""
+        if reason and when:
+            return f"100% = {reason}, {when}"
+        if reason:
+            return f"100% = {reason}"
+        return ""
 
     def _apply_status_edge(self, colour: str | None) -> None:
         """Carry the status on the card's left border (RULE-A11Y-003 pattern)."""

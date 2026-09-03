@@ -337,3 +337,122 @@ def test_it_emits_a_measurement_and_nothing_else() -> None:
     assert metric.unit == "%"
     forbidden = {"alarm", "severity", "action", "verdict", "ok", "ready", "go_no_go", "threshold"}
     assert forbidden.isdisjoint(metric.metadata), "the counter must not judge"
+
+
+# ==========================================================================
+# what 100% means is a property of the phase
+# ==========================================================================
+def test_entering_a_phase_rezeros_the_counter() -> None:
+    """One fixed zero cannot answer both questions.
+
+    During `vacuum` the useful zero is the start of pumping — how much of the
+    load has been removed, which is the number for drying the MLI. During
+    `cooldown` it is the start of cooling — whether the chamber is holding what
+    it had, which is what made 2026-09-03 legible (100% -> 80% -> 118%, crossing
+    back above its own start). Zeroed at pump-down, that run reads 3% -> 3.5%
+    and the crossing is invisible.
+    """
+
+    c = _counter()
+    _run(c, _batch(0.10, 295.0))
+    assert _run(c, _batch(0.05, 295.0))[0].value == pytest.approx(50.0, abs=0.1)
+
+    c.notify_phase_change("cooldown")
+
+    out = _run(c, _batch(0.05, 295.0))
+    assert out[0].value == pytest.approx(100.0), "the phase change is the new zero"
+    assert out[0].metadata["baseline_reason"] == "начало захолаживания"
+
+
+def test_the_zero_is_never_moved_by_the_data() -> None:
+    """A phase change is an operator action. Readings are not."""
+
+    c = _counter()
+    _run(c, _batch(0.10, 295.0))
+    epoch = c.baseline_epoch
+    for p in (0.30, 0.01, 0.50):
+        _run(c, _batch(p, 295.0))
+    assert c.baseline_epoch == epoch, "no excursion may re-zero the counter"
+
+
+def test_an_unknown_phase_leaves_a_good_baseline_alone() -> None:
+    c = _counter()
+    _run(c, _batch(0.10, 295.0))
+    epoch = c.baseline_epoch
+
+    for phase in ("preparation", "teardown", "", None, "нечто"):
+        c.notify_phase_change(phase)
+    assert c.baseline_epoch == epoch, "an irrelevant phase is not a reason to discard a measurement"
+
+
+def test_every_value_says_what_its_hundred_percent_was() -> None:
+    """A percentage against a forgotten reference is not a measurement."""
+
+    c = _counter()
+    c.notify_phase_change("vacuum")
+    meta = _run(c, _batch(0.10, 295.0))[0].metadata
+
+    assert meta["baseline_reason"] == "начало откачки"
+    assert isinstance(meta["baseline_epoch"], float)
+
+
+def test_each_phase_carries_its_own_meaning() -> None:
+    c = _counter()
+    for phase, label in (
+        ("vacuum", "начало откачки"),
+        ("cooldown", "начало захолаживания"),
+        ("measurement", "начало измерения"),
+        ("warmup", "начало отогрева"),
+    ):
+        c.notify_phase_change(phase)
+        assert _run(c, _batch(0.05, 250.0))[0].metadata["baseline_reason"] == label
+
+
+# ==========================================================================
+# the rate must survive five decades
+# ==========================================================================
+# Sampled inside _RATE_WINDOW_S (1800 s) at a cadence a real run would produce.
+_STEP_S = 300.0
+
+
+def _halving_series(p0: float, *, n: int = 7, step_s: float = _STEP_S):
+    """Pressure halving every hour, at constant temperature (so N ∝ P)."""
+
+    return [(p0 * 0.5 ** ((i * step_s) / 3600.0), 250.0) for i in range(n)]
+
+
+def test_the_rate_is_relative_to_what_is_in_the_chamber_now() -> None:
+    """100·d(ln N)/dt, not a slope of percent-of-baseline.
+
+    Zero at 1 bar and by 1e-2 mbar the inventory is 0.001% of baseline. A slope
+    of percent-of-baseline is then a rounding error, and a further full decade of
+    pumping — the most important thing that could happen — reads as a flat line.
+    A log slope means the same thing at every scale.
+    """
+
+    # The same fractional decay — halving per hour — sampled inside the rate
+    # window, once near the baseline and once five decades below it.
+    near = _spaced_run(_counter(), _halving_series(0.10), step_s=_STEP_S)
+    deep = _spaced_run(_counter(), _halving_series(1.0e-6), step_s=_STEP_S)
+
+    r_near = near[0].metadata["rate_pct_per_h"]
+    r_deep = deep[0].metadata["rate_pct_per_h"]
+    assert r_near is not None and r_deep is not None
+    assert r_near < 0 and r_deep < 0, "both are pumping down"
+    assert r_near == pytest.approx(r_deep, rel=0.05), (
+        "the same fractional decay must report the same rate at any absolute level"
+    )
+
+
+def test_a_halving_per_hour_reads_as_about_minus_69_percent() -> None:
+    """ln(0.5) = -0.693, so 100·d(ln N)/dt is -69.3 %/h. Anchors the units."""
+
+    out = _spaced_run(_counter(), _halving_series(0.10), step_s=_STEP_S)
+    assert out[0].metadata["rate_pct_per_h"] == pytest.approx(-69.3, abs=1.0)
+
+
+def test_the_rate_is_declared_fractional() -> None:
+    """Consumers must not read it as percent-of-baseline."""
+
+    out = _spaced_run(_counter(), [(0.05, 250.0)] * 4, step_s=600.0)
+    assert out[0].metadata["rate_is_fractional"] is True

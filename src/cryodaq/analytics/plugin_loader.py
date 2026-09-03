@@ -128,6 +128,33 @@ class PluginPipeline:
     # Публичный API
     # ------------------------------------------------------------------
 
+    def notify_phase_change(self, phase: str | None) -> None:
+        """Tell plugins the operator advanced the experiment phase.
+
+        Plugins had no phase awareness at all: the analytics *view* is phase
+        dependent via config/analytics_layout.yaml, but the pipeline was not.
+        The molecular counter needs it, because what "100%" means is a property
+        of the phase — during vacuum the useful zero is the start of pumping,
+        during cooldown it is the start of cooling, and one fixed zero cannot
+        answer both.
+
+        Duck-typed and individually guarded: a plugin that does not care omits
+        the method, and one that raises must not stop the others being told.
+        """
+
+        for plugin in list(self._plugins.values()):
+            hook = getattr(plugin, "notify_phase_change", None)
+            if not callable(hook):
+                continue
+            try:
+                hook(phase)
+            except Exception:
+                logger.warning(
+                    "плагин '%s': notify_phase_change завершился ошибкой",
+                    plugin.plugin_id,
+                    exc_info=True,
+                )
+
     async def start(self) -> None:
         """Запустить пайплайн.
 

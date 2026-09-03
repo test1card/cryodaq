@@ -64,6 +64,17 @@ _RATE_WINDOW_S = 1800.0
 # Five minutes is the shortest span over which this quantity moves detectably.
 _MIN_RATE_SPAN_S = 300.0
 
+# Which phases re-zero the counter, and what 100% then means to the operator.
+# Phases absent here (preparation, teardown) leave a good baseline alone: an
+# unknown or irrelevant phase is not a reason to discard a measurement in
+# progress.
+_PHASE_BASELINE_LABELS = {
+    "vacuum": "начало откачки",
+    "cooldown": "начало захолаживания",
+    "measurement": "начало измерения",
+    "warmup": "начало отогрева",
+}
+
 _log = logging.getLogger(__name__)
 
 
@@ -90,6 +101,7 @@ class MolecularCounter(AnalyticsPlugin):
         self._runtime_label: dict[str, str] = {}
 
         self._baseline: tuple[float, float, float] | None = None  # (p, t, ts)
+        self._baseline_reason: str = "начало наблюдения"
         self._history: list[tuple[float, float]] = []  # (ts, n_rel_pct)
         self._last_emit_ts: float = 0.0
         self._binding_error: str | None = None
@@ -162,7 +174,7 @@ class MolecularCounter(AnalyticsPlugin):
     # ------------------------------------------------------------------
     # baseline
     # ------------------------------------------------------------------
-    def reset_baseline(self, *, reason: str = "operator") -> None:
+    def reset_baseline(self, *, reason: str = "сброс оператором") -> None:
         """Drop the baseline; the next valid sample becomes the new 100%.
 
         The operator owns what "100%" means — normally the start of a cooldown.
@@ -173,11 +185,41 @@ class MolecularCounter(AnalyticsPlugin):
         if self._baseline is not None:
             _log.info("MolecularCounter: базовая линия сброшена (%s)", reason)
         self._baseline = None
+        self._baseline_reason = reason
         self._history.clear()
 
     @property
     def baseline_epoch(self) -> float | None:
         return None if self._baseline is None else self._baseline[2]
+
+    @property
+    def baseline_reason(self) -> str:
+        """Operator-facing description of what 100% currently means."""
+
+        return self._baseline_reason
+
+    def notify_phase_change(self, phase: str | None) -> None:
+        """Re-zero when the operator advances the phase.
+
+        What "100%" means is a property of the phase, and one fixed zero cannot
+        serve both questions. During `vacuum` the useful zero is the start of
+        pumping — "how much of the load have I removed?", which is the number
+        for drying the MLI. During `cooldown` it is the start of cooling — "is
+        the chamber holding what it had?", which is what made 2026-09-03
+        legible: 100% → 80% → 118%, crossing back above its own start. Zeroed at
+        pump-down instead, that same run would have read 3% → 3.5% and the
+        crossing would have been invisible.
+
+        This does not violate the rule that the counter never re-zeros itself. A
+        phase change is an operator action; the zero moves because someone moved
+        it, indirectly but deliberately. It is never moved by the data.
+        """
+
+        label = _PHASE_BASELINE_LABELS.get(str(phase or ""), None)
+        if label is None:
+            # An unknown phase is not a reason to discard a good baseline.
+            return
+        self.reset_baseline(reason=label)
 
     # ------------------------------------------------------------------
     # processing
@@ -236,7 +278,10 @@ class MolecularCounter(AnalyticsPlugin):
                 "%",
                 metadata={
                     "n_relative_pct": round(n_rel_pct, 2),
+                    # Fractional: percent of the CURRENT inventory per hour, so the
+                    # number stays meaningful across a five-decade pump-down.
                     "rate_pct_per_h": None if rate is None else round(rate, 3),
+                    "rate_is_fractional": True,
                     "pressure_mbar": pressure,
                     "t_bulk_k": round(t_bulk, 2),
                     "sensors_used": len(temps),
@@ -245,6 +290,10 @@ class MolecularCounter(AnalyticsPlugin):
                     "baseline_pressure_mbar": p0,
                     "baseline_t_bulk_k": round(t0, 2),
                     "baseline_age_s": round(now - baseline_ts, 1),
+                    # 100% is never implied. Every value carries what its zero
+                    # was and when it was taken, so the number is unambiguous
+                    # even hours later in a log or a report.
+                    "baseline_reason": self._baseline_reason,
                     # The one-zone assumption, stated with every value it produces.
                     "model": "single_zone",
                     "is_lower_bound": True,
@@ -286,7 +335,19 @@ class MolecularCounter(AnalyticsPlugin):
         return value
 
     def _rate_pct_per_h(self) -> float | None:
-        """Least-squares slope over the rate window, in percentage points/hour."""
+        """Fractional change per hour: 100·d(ln N)/dt.
+
+        Relative to what is in the chamber NOW, not to the baseline. A slope of
+        `n_rel_pct` answers "percent of the ORIGINAL load per hour", which is
+        meaningless once the original load is gone: zero the counter at 1 bar
+        and by 1e-2 mbar the inventory is 0.001% of baseline, so a full decade of
+        further pumping moves that slope by a rounding error and the readout goes
+        flat exactly where the work is happening.
+
+        A log slope is scale-invariant — "losing 5% of what is in there per hour"
+        means the same at 1 bar and at 1e-5 mbar — so one number serves a
+        five-decade pump-down and a sub-decade cooldown alike.
+        """
 
         if len(self._history) < 3:
             return None
@@ -295,9 +356,12 @@ class MolecularCounter(AnalyticsPlugin):
             # Not enough elapsed time to speak about a rate. Reporting None is
             # the honest answer; the value itself is still published.
             return None
-        t0 = self._history[0][0]
-        xs = [(ts - t0) / 3600.0 for ts, _ in self._history]
-        ys = [v for _, v in self._history]
+        points = [(ts, v) for ts, v in self._history if v > 0.0]
+        if len(points) < 3:
+            return None
+        t0 = points[0][0]
+        xs = [(ts - t0) / 3600.0 for ts, _ in points]
+        ys = [math.log(v) for _, v in points]
         n = len(xs)
         mx = sum(xs) / n
         my = sum(ys) / n
@@ -305,7 +369,9 @@ class MolecularCounter(AnalyticsPlugin):
         if denom <= 0.0:
             return None
         slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=False)) / denom
-        return slope if math.isfinite(slope) else None
+        if not math.isfinite(slope):
+            return None
+        return 100.0 * slope
 
 
 __all__ = ["MolecularCounter"]

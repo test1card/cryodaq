@@ -203,3 +203,77 @@ def test_status_fault_never_reaches_value_text(app) -> None:
         w.set_gas_inventory(_reading(pct, rate))
         assert theme.STATUS_FAULT not in w._value_label.styleSheet()
         assert theme.STATUS_STALE not in w._value_label.styleSheet()
+
+
+def test_the_widget_states_what_hundred_percent_was(app) -> None:
+    """A percentage against a forgotten reference is not a measurement."""
+
+    import time as _t
+
+    w = GasInventoryWidget()
+    r = _reading(118.0, +4.7)
+    r.metadata["baseline_reason"] = "начало захолаживания"
+    r.metadata["baseline_epoch"] = _t.time() - 3600.0
+    w.set_gas_inventory(r)
+
+    caption = w._baseline_label.text()
+    assert caption.startswith("100% =")
+    assert "начало захолаживания" in caption
+
+
+def test_the_baseline_caption_survives_a_missing_timestamp(app) -> None:
+    w = GasInventoryWidget()
+    r = _reading(96.0, -1.0)
+    r.metadata["baseline_reason"] = "начало откачки"
+    r.metadata["baseline_epoch"] = None
+    w.set_gas_inventory(r)
+    assert w._baseline_label.text() == "100% = начало откачки"
+
+
+def test_an_absent_reading_clears_the_caption(app) -> None:
+    w = GasInventoryWidget()
+    r = _reading(96.0, -1.0)
+    r.metadata["baseline_reason"] = "начало откачки"
+    w.set_gas_inventory(r)
+    w.set_gas_inventory(None)
+    assert w._baseline_label.text() == ""
+
+
+# --------------------------------------------------------------------------
+# the readout must survive a five-decade pump-down
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("pct", "expected"),
+    [
+        (118.0, "118%"),
+        (80.0, "80%"),
+        (10.0, "10%"),
+        (3.5, "3.5%"),
+        (0.001, "-5.0 дек"),
+        (1.0e-5, "-7.0 дек"),
+    ],
+)
+def test_the_value_format_follows_the_scale(app, pct, expected) -> None:
+    """Percent near the zero, decades far from it.
+
+    Zero at 1 bar and 1e-2 mbar is 0.001% of baseline; a further decade of
+    pumping is invisible on a linear percent, which is exactly where the work is.
+    """
+
+    w = GasInventoryWidget()
+    w.set_gas_inventory(_reading(pct, -1.0))
+    assert w._value_label.text() == expected
+
+
+def test_a_deep_pumpdown_still_shows_a_direction(app) -> None:
+    w = GasInventoryWidget()
+    w.set_gas_inventory(_reading(1.0e-5, -5.0))
+    assert w._arrow_label.text() == "↓"
+    assert "дек" in w._value_label.text()
+
+
+def test_the_history_plot_is_logarithmic(app) -> None:
+    """Same rationale as RULE-DATA-008 for pressure: it crosses decades."""
+
+    w = GasInventoryWidget()
+    assert w._plot.getPlotItem().ctrl.logYCheck.isChecked()

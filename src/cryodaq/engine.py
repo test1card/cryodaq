@@ -3242,6 +3242,7 @@ class EngineCommandContext:
     cooldown_service: Any = None
     zmq_publisher: ZMQPublisher | None = None
     analytics_admission: Any = None
+    plugin_pipeline: Any = None
     recording_lifecycle_feed: RecordingLifecycleFeed | None = None
     annunciation_registry: AnnunciationRegistry | None = None
     experiment_command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -5573,6 +5574,13 @@ async def _execute_owned_experiment_command(
                     reconciliation_failures,
                     "cooldown_alarm_phase_change",
                     lambda: cooldown_alarm.notify_phase_change(phase),
+                )
+            plugin_pipeline = getattr(context, "plugin_pipeline", None)
+            if plugin_pipeline is not None:
+                _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "analytics_plugin_phase_change",
+                    lambda: plugin_pipeline.notify_phase_change(phase),
                 )
             if phase == "cooldown" and cooldown_alarm is not None and cooldown_alarm.is_auto_arm_enabled:
                 armed = _attempt_experiment_reconciliation_sync(
@@ -7958,6 +7966,9 @@ async def _run_engine(
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
+    # Built after the command context, so attach it here: analytics plugins
+    # need to hear about phase changes (see PluginPipeline.notify_phase_change).
+    command_context.plugin_pipeline = plugin_pipeline
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None
