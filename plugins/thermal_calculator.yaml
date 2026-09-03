@@ -1,8 +1,16 @@
-# Bind to stable channel IDs. Display names in channels.yaml are
-# operator-editable presentation text: renaming a sensor must never change
-# which sensor the physics reads, and must never silently disable it.
-# These were 'Т1 Криостат верх' / 'Т7 Детектор' — an ID with a display name
-# glued on — which stopped matching the moment the names were rewritten.
-hot_sensor: "Т1"
-cold_sensor: "Т7"
+# Hot and cold sensors are a PER-RUN OPERATOR CHOICE, not a property of the
+# stand. Which end is hot and which is cold changes with every mounting, so
+# there is deliberately no default here.
+#
+# Left unbound, the calculation reports itself unavailable and produces
+# nothing. That is the correct behaviour: a hardcoded pair would keep
+# emitting R_thermal for whichever sensors were written down last, and an
+# operator running on a different pair would get a confident wrong number
+# with nothing to indicate it. Unavailable is honest; wrong is not.
+#
+# When bound, use stable channel IDs from channels.yaml (Т1, Т7, ...), never
+# display names — those are editable text and were renamed on 2026-09-02,
+# which silently disabled this plugin for seven hours.
+hot_sensor: ""
+cold_sensor: ""
 heater_channel: "Keithley_1/smua/power"

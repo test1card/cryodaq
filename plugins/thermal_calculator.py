@@ -50,6 +50,7 @@ class ThermalCalculator(AnalyticsPlugin):
         self._cold_sensor: str = ""
         self._heater_channel: str = ""
         self._binding_error: str | None = "конфигурация не применена"
+        self._awaiting_selection: bool = True
 
         # Последние известные значения каналов: channel -> float
         self._last: dict[str, float] = {}
@@ -77,13 +78,22 @@ class ThermalCalculator(AnalyticsPlugin):
 
         self._binding_error = self._validate_bindings()
         if self._binding_error is not None:
-            # Loudly, once, at configure time. This used to be a per-tick DEBUG
+            # Said once, at configure time. This used to be a per-tick DEBUG
             # line: between 2026-09-03 02:38 and 09:53 it printed 26 044 times
             # and the operator had no idea the calculation was dead.
-            _log.error(
-                "ThermalCalculator: %s. Вычисление НЕДОСТУПНО до исправления конфигурации.",
-                self._binding_error,
-            )
+            #
+            # Awaiting an operator choice is a NORMAL state and is reported as
+            # such; a binding that cannot resolve is a configuration fault.
+            if self._awaiting_selection:
+                _log.info(
+                    "ThermalCalculator: %s. Вычисление недоступно, пока датчики не выбраны.",
+                    self._binding_error,
+                )
+            else:
+                _log.error(
+                    "ThermalCalculator: %s. Вычисление НЕДОСТУПНО до исправления конфигурации.",
+                    self._binding_error,
+                )
             return
 
         _log.info(
@@ -109,6 +119,7 @@ class ThermalCalculator(AnalyticsPlugin):
         An unresolvable binding makes the calculation unavailable, and says so.
         """
 
+        self._awaiting_selection = False
         missing = [
             label
             for label, value in (
@@ -119,7 +130,12 @@ class ThermalCalculator(AnalyticsPlugin):
             if not value
         ]
         if missing:
-            return f"не заданы обязательные привязки: {', '.join(missing)}"
+            # Hot and cold are chosen per run: shipping unbound is expected, not
+            # a fault. A default pair would emit R_thermal for whichever sensors
+            # were written down last, and a run on a different pair would get a
+            # confident wrong number with nothing to indicate it.
+            self._awaiting_selection = set(missing) <= {"hot_sensor", "cold_sensor"}
+            return f"не выбраны датчики: {', '.join(missing)}"
 
         try:
             from cryodaq.core.channel_manager import get_channel_manager

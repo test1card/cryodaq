@@ -131,12 +131,63 @@ def test_resolution_is_exact_with_no_name_lookup(plugin) -> None:
     assert "hot_sensor" in plugin._binding_error
 
 
-def test_the_shipped_configuration_binds_ids() -> None:
-    """The file the stand actually loads must not carry display names."""
+def test_the_shipped_configuration_hardcodes_no_sensor_pair() -> None:
+    """Hot and cold are a per-run operator choice, so nothing may be shipped.
+
+    Which end is hot changes with every mounting. A default pair would keep
+    emitting R_thermal for whichever sensors were written down last, and a run
+    on a different pair would get a confident wrong number with nothing to
+    indicate it. Unavailable is honest; wrong is not.
+    """
 
     import yaml
 
     config = yaml.safe_load((_PLUGIN.with_suffix(".yaml")).read_text(encoding="utf-8"))
     for key in ("hot_sensor", "cold_sensor"):
-        value = str(config[key])
-        assert " " not in value, f"{key}={value!r} looks like a display name, not an ID"
+        value = str(config.get(key) or "")
+        assert value == "", f"{key}={value!r} is hardcoded; the operator chooses it per run"
+        # And should anyone bind it later, it must be an ID and not a display name.
+        assert " " not in value
+
+
+def test_shipping_unbound_is_awaiting_a_choice_not_a_fault(plugin, caplog) -> None:
+    """An unbound plugin is a normal startup state, reported without alarm."""
+
+    import yaml
+
+    config = yaml.safe_load((_PLUGIN.with_suffix(".yaml")).read_text(encoding="utf-8"))
+    with caplog.at_level(logging.DEBUG):
+        plugin.configure(config)
+
+    assert plugin._binding_error is not None, "unbound means unavailable"
+    assert plugin._awaiting_selection is True
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "awaiting an operator choice must not be reported as a configuration fault"
+    )
+    assert any("не выбраны датчики" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_an_unbound_plugin_publishes_nothing(plugin) -> None:
+    """It must not guess a pair, and must not emit a metric from one."""
+
+    plugin.configure({"hot_sensor": "", "cold_sensor": "", "heater_channel": "Keithley_1/smua/power"})
+    metrics = await plugin.process(
+        [
+            _reading("Т1", 300.0),
+            _reading("Т7", 295.0),
+            _reading("Keithley_1/smua/power", 0.5, unit="W"),
+        ]
+    )
+    assert metrics == [], "an unbound calculation must publish nothing, not a guess"
+
+
+def test_a_bad_binding_is_a_fault_not_an_awaited_choice(plugin, caplog) -> None:
+    with caplog.at_level(logging.DEBUG):
+        plugin.configure(
+            {"hot_sensor": "Т1 Криостат верх", "cold_sensor": "Т7", "heater_channel": "Keithley_1/smua/power"}
+        )
+    assert plugin._awaiting_selection is False
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "an unresolvable binding is a configuration fault, not a pending choice"
+    )
