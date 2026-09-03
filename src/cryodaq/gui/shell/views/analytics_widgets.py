@@ -811,6 +811,11 @@ class CooldownPredictionWidget(QWidget):
     # cadence has not surfaced the same UX issue.
     _MAX_RAW_PTS: int = 50000
     _IDLE_MESSAGE = "Охлаждение не активно — прогноз недоступен"
+    # A forecast has to be able to go stale while nothing at all is happening —
+    # that is the whole failure. One second is the same cadence the compact
+    # dashboard header already ages on, and the tick costs one comparison when
+    # the forecast is still current.
+    _FRESHNESS_TICK_MS: int = 1000
     # Canonical cold-stage landmark id from config/physical_alarms.yaml.
     # MainWindowV2 routes only readings whose channel resolves to this id;
     # configuration-decoupling is left to a future spec per architect.
@@ -891,8 +896,59 @@ class CooldownPredictionWidget(QWidget):
         # (intentional contract — see _cooldown_reading_to_data adapter).
         self._raw_cold_buffer: list[tuple[float, float]] = []
 
+        # The most recent snapshot, retained so it can be re-judged while the
+        # predictor is silent. Only the latest is kept — this is not a history.
+        self._last_cooldown_data = None
+        # Latched once the retained snapshot has been refused, so the tick does
+        # not re-apply the same refusal every second.
+        self._cooldown_expired: bool = False
+
+        # ONE timer, parented to this widget, connected once. Qt parent teardown
+        # is sufficient; it needs no worker registry and no per-refresh timers.
+        self._freshness_timer = QTimer(self)
+        self._freshness_timer.setInterval(self._FRESHNESS_TICK_MS)
+        self._freshness_timer.timeout.connect(self._on_freshness_tick)
+        self._freshness_timer.start()
+
         self._reposition_overlays()
         self._placeholder.setVisible(True)
+
+    @Slot()
+    def _on_freshness_tick(self) -> None:
+        """Age the retained forecast while nothing is being delivered.
+
+        `_judge_provenance` used to run only on delivery, so a prediction that
+        was already stale when it arrived was refused correctly while the real
+        sequence went unnoticed: draw a fresh forecast, let the publisher stop,
+        and the curve stays on the plot indefinitely because no setter is ever
+        called again. Silence was the one case that could not trigger the check.
+
+        Cheap and idempotent: one freshness comparison, and nothing at all once
+        the retained snapshot has already been refused.
+        """
+
+        if self._last_cooldown_data is None or self._cooldown_expired:
+            return
+        is_current, _is_baseline, provenance = self._judge_provenance(self._last_cooldown_data)
+        if is_current:
+            return
+        self._cooldown_expired = True
+        self._refuse_cooldown(provenance)
+
+    def _refuse_cooldown(self, provenance: str) -> None:
+        """Clear the forecast and say why. The one refusal path, shared.
+
+        A stalled predictor must not leave its last curve on the plot looking
+        live, so this clears rather than relabels.
+        """
+
+        self._inner.set_prediction([], [], [], ci_level_pct=67.0)
+        self._asym_line.setVisible(False)
+        self._asym_band.setVisible(False)
+        self._steady_badge.setVisible(False)
+        self._placeholder.setText(provenance)
+        self._placeholder.setVisible(True)
+        self._reposition_overlays()
 
     def set_cold_temperature_reading(self, reading) -> None:
         """Receive one cold-stage temperature reading (Т12 by default).
@@ -977,6 +1033,12 @@ class CooldownPredictionWidget(QWidget):
         return is_current, is_baseline, label
 
     def set_cooldown_data(self, data) -> None:
+        # Retain the latest snapshot so the freshness tick can age it while the
+        # predictor is silent, and drop any latched refusal — this delivery gets
+        # judged on its own merits.
+        self._last_cooldown_data = data
+        self._cooldown_expired = False
+
         if data is None:
             # Clear any stale forecast curves left from a prior active push
             # (mirrors VacuumPredictionWidget._on_trend_result no-data path).
@@ -984,6 +1046,7 @@ class CooldownPredictionWidget(QWidget):
             self._asym_line.setVisible(False)
             self._asym_band.setVisible(False)
             self._steady_badge.setVisible(False)
+            self._placeholder.setText(self._IDLE_MESSAGE)
             self._placeholder.setVisible(True)
             return
         # CooldownData from analytics_view has predicted_trajectory and
@@ -999,15 +1062,9 @@ class CooldownPredictionWidget(QWidget):
         is_current, is_baseline, provenance = self._judge_provenance(data)
 
         if not is_current:
-            # A stalled predictor must not leave its last curve on the plot
-            # looking live. Clear the forecast outright and say how old it is.
-            self._inner.set_prediction([], [], [], ci_level_pct=67.0)
-            self._asym_line.setVisible(False)
-            self._asym_band.setVisible(False)
-            self._steady_badge.setVisible(False)
-            self._placeholder.setText(provenance)
-            self._placeholder.setVisible(True)
-            self._reposition_overlays()
+            # Already stale on arrival. Same refusal the tick applies.
+            self._cooldown_expired = True
+            self._refuse_cooldown(provenance)
             return
 
         # Fresh from here on — drop any stale text a previous refusal left behind.

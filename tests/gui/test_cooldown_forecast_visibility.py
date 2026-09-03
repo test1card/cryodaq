@@ -166,6 +166,103 @@ def test_recovery_after_a_stall_clears_the_refusal_text(app) -> None:
     assert "10 мин" not in w._placeholder.toPlainText()
 
 
+# --------------------------------------------------------------------------
+# 1b. the graph must age during SILENCE, not only on delivery
+# --------------------------------------------------------------------------
+def test_the_graph_expires_a_drawn_forecast_when_the_publisher_stops(app, monkeypatch) -> None:
+    """The real failure sequence, which rejection-on-delivery does not cover.
+
+    Draw a fresh active forecast, let the predictor stop, let the boundary pass,
+    deliver NOTHING, and drive the production timer slot. Judging provenance
+    only inside `set_cooldown_data` meant silence — the one thing that actually
+    happens when a publisher dies — could never trigger the check, so the curve
+    stayed on the plot indefinitely.
+    """
+
+    import time as _time
+
+    w = CooldownPredictionWidget()
+    w.set_cooldown_data(_data(active=True, age_s=5.0))
+
+    assert w._inner._central, "precondition: a live curve is drawn"
+    assert w._inner._lower_ci and w._inner._upper_ci, "precondition: a CI band is drawn"
+    assert not w._placeholder.isVisible()
+
+    real_now = _time.time()
+    monkeypatch.setattr(_time, "time", lambda: real_now + PREDICTION_STALE_AFTER_S + 30.0)
+
+    w._on_freshness_tick()  # the production timer slot; no second delivery
+
+    assert not w._inner._central, "the central forecast must be cleared"
+    assert not w._inner._lower_ci and not w._inner._upper_ci, "and the CI band with it"
+    assert w._placeholder.isVisible()
+    assert "недоступен" in w._placeholder.toPlainText()
+
+
+def test_the_graph_freshness_timer_is_one_parented_timer(app) -> None:
+    """Guards the shape the reviewer asked for, not just the behaviour.
+
+    A slot nothing invokes would satisfy the test above and change nothing on
+    screen; a timer created per refresh would leak one per delivery.
+    """
+
+    from PySide6.QtCore import QTimer
+
+    w = CooldownPredictionWidget()
+    assert w._freshness_timer.parent() is w, "Qt parent teardown must own it"
+    assert w._freshness_timer.isActive()
+    assert w._freshness_timer.interval() == w._FRESHNESS_TICK_MS
+
+    before = w.findChildren(QTimer)
+    for _ in range(5):
+        w.set_cooldown_data(_data(active=True, age_s=1.0))
+    assert len(w.findChildren(QTimer)) == len(before), "no per-refresh timers"
+
+    calls: list[str] = []
+    w._refuse_cooldown = lambda provenance: calls.append(provenance)  # type: ignore[method-assign]
+    w.set_cooldown_data(_data(active=True, age_s=600.0))
+    assert len(calls) == 1, "the timer must be connected exactly once"
+
+
+def test_a_still_fresh_forecast_is_left_alone_by_the_tick(app) -> None:
+    """The tick must not disturb a forecast that is still current."""
+
+    w = CooldownPredictionWidget()
+    w.set_cooldown_data(_data(active=True, age_s=5.0))
+    drawn = list(w._inner._central)
+
+    for _ in range(3):
+        w._on_freshness_tick()
+
+    assert list(w._inner._central) == drawn
+    assert not w._placeholder.isVisible()
+
+
+def test_expiry_latches_and_then_releases_on_a_new_forecast(app, monkeypatch) -> None:
+    """Refusal is applied once, and a recovered publisher is drawn again."""
+
+    import time as _time
+
+    w = CooldownPredictionWidget()
+    w.set_cooldown_data(_data(active=True, age_s=5.0))
+
+    real_now = _time.time()
+    monkeypatch.setattr(_time, "time", lambda: real_now + PREDICTION_STALE_AFTER_S + 30.0)
+    w._on_freshness_tick()
+    assert w._cooldown_expired is True
+
+    calls: list[str] = []
+    w._refuse_cooldown = lambda provenance: calls.append(provenance)  # type: ignore[method-assign]
+    for _ in range(4):
+        w._on_freshness_tick()
+    assert calls == [], "an expired snapshot must not be re-refused every second"
+
+    monkeypatch.undo()
+    w.set_cooldown_data(_data(active=True, age_s=5.0))
+    assert w._cooldown_expired is False, "a new forecast clears the latch"
+    assert w._inner._central, "and is drawn again"
+
+
 # ==========================================================================
 # 2. the compact dashboard — the timer path, with no reading arriving
 # ==========================================================================
