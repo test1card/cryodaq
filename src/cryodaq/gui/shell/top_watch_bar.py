@@ -577,6 +577,9 @@ def _format_pressure(p: float) -> str:
 SECOND_STAGE_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-cooler (~2.9 K floor)
 N2_PLATE_CHANNEL = "Т11"  # U+0422 Cyrillic Т — азотная плита (~40 K floor)
 
+# Derived, published by the molecular_counter analytics plugin.
+_GAS_INVENTORY_CHANNEL = "analytics/molecular_counter/gas_inventory"
+
 
 def _fmt_elapsed(start_iso: str) -> str:
     try:
@@ -809,6 +812,31 @@ class TopWatchBar(QWidget):
 
         ctx.addWidget(self._make_ctx_dot())
 
+        # Gas inventory — a DERIVED cell, not a fourth physical reading. The
+        # three physical readings remain exactly three and keep their fixed
+        # relative order (pressure → Т12 → Т11); this sits between the first two
+        # because it answers the question the gauge beside it cannot: whether
+        # the pump is winning. On 2026-09-03 the pressure fell 31% over ten
+        # hours while the chamber was gaining molecules the whole time.
+        #
+        # Marked as derived by the "~" prefix on its label, so it is never read
+        # as a measured channel: it is computed from an operator-chosen sensor
+        # set and is meaningless if that set is wrong.
+        self._ctx_gas_label = QLabel("~ Газ")
+        self._ctx_gas_label.setStyleSheet(label_style)
+        self._ctx_gas_value = QLabel("\u2014")
+        self._ctx_gas_value.setStyleSheet(value_style)
+        # DESIGN: RULE-A11Y-003. STATUS_FAULT is 3.94:1 and fails AA body
+        # contrast, so it never colours the value. The arrow carries the colour;
+        # the digits stay TEXT_PRIMARY whatever the direction.
+        self._ctx_gas_arrow = QLabel("")
+        self._ctx_gas_arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;")
+        ctx.addWidget(self._ctx_gas_label)
+        ctx.addWidget(self._ctx_gas_arrow)
+        ctx.addWidget(self._ctx_gas_value)
+
+        ctx.addWidget(self._make_ctx_dot())
+
         # Т12 is physically fixed on the second cryocooler stage.
         # The operator label names that location instead of implying a
         # computed minimum across the channel fleet.
@@ -850,6 +878,31 @@ class TopWatchBar(QWidget):
         self._last_interval_cuts: dict[str, _PendingVitalCut] = {}
         for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
             self._render_vital(key)
+
+    def _render_gas_inventory(self, reading) -> None:
+        """Show N/N₀ and its direction. Refuses rather than guessing."""
+
+        value = getattr(reading, "value", None)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            self._ctx_gas_value.setText("\u2014")
+            self._ctx_gas_arrow.setText("")
+            return
+
+        meta = getattr(reading, "metadata", None) or {}
+        rate = meta.get("rate_pct_per_h")
+        rate = float(rate) if isinstance(rate, (int, float)) and math.isfinite(float(rate)) else None
+
+        self._ctx_gas_value.setText(f"{float(value):.0f}%")
+        if rate is None or abs(rate) < 0.2:
+            self._ctx_gas_arrow.setText("")
+            self._ctx_gas_arrow.setStyleSheet(
+                f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;"
+            )
+            return
+        falling = rate < 0
+        self._ctx_gas_arrow.setText("\u2193" if falling else "\u2191")
+        colour = theme.STATUS_OK if falling else theme.STATUS_FAULT
+        self._ctx_gas_arrow.setStyleSheet(f"color: {colour}; font-size: {theme.FONT_SIZE_SM}px;")
 
     @staticmethod
     def _make_ctx_dot() -> QLabel:
@@ -1090,6 +1143,14 @@ class TopWatchBar(QWidget):
                 vital_key = short_id
         elif ch.endswith("/pressure"):
             vital_key = _PRESSURE_VITAL
+        elif ch == _GAS_INVENTORY_CHANNEL:
+            # Deliberately outside the _PendingVitalCut path. That machinery
+            # exists to reconcile full-rate instrument samples with source-time
+            # ordering and a 500 ms repaint; this arrives once a minute already
+            # reconciled, and pushing it through would buy nothing and couple a
+            # derived analytic to the physical-vital contract.
+            self._render_gas_inventory(reading)
+            return
 
         if vital_key is None:
             return

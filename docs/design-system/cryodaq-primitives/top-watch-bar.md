@@ -66,6 +66,7 @@ cues must not be replaced by a summary-only presentation.
 | **Engine zone** | Yes | Engine connection/state with a non-color cue |
 | **Experiment zone** | Yes | Active experiment, phase, elapsed time, and «Эксперимент»/«Отладка»/replay identity |
 | **Physical context** | 3 fixed readings | Давление, `Т 2-й ступени` (`Т12`), `Т плиты N₂` (`Т11`) — in that order |
+| **Derived context** | 0+ marked cells | `~ Газ` (N/N₀). Must not displace or reorder the three physical readings; `~` prefix marks it as computed |
 | **Channel summary** | Yes | Current normal/total count without replacing channel detail |
 | **Alarm zone** | Yes | Validated attention count, worst severity, availability, and route to alarm detail |
 | **Divider** | Implicit | 1px bottom border separates bar from main content |
@@ -73,7 +74,18 @@ cues must not be replaced by a summary-only presentation.
 ## Invariants
 
 1. **Height = HEADER_HEIGHT (56).** Coupled to TOOL_RAIL_WIDTH per RULE-SPACE-006 (corner square).
-2. **Exactly three persistent physical readings.** Order is fixed: pressure → `Т 2-й ступени` (`Т12`) → `Т плиты N₂` (`Т11`). Heater current remains in the Keithley panel; it is not a TopWatchBar vital.
+2. **Exactly three persistent physical readings, in fixed relative order:** pressure → `Т 2-й ступени` (`Т12`) → `Т плиты N₂` (`Т11`). Heater current remains in the Keithley panel; it is not a TopWatchBar vital.
+
+   **Derived cells (2026-09-04).** A derived value may sit in the strip provided
+   it does not displace or reorder the three physical readings and is visibly
+   marked as derived — currently a `~` prefix on its label. The first is `~ Газ`
+   (`analytics/molecular_counter/gas_inventory`), placed after pressure because
+   it answers what the gauge beside it cannot: whether the pump is winning.
+   A derived cell is computed from an operator-chosen input set and is
+   meaningless if that set is wrong, so it must never be readable as a measured
+   channel. Derived cells are ingested outside the `_PendingVitalCut` path —
+   they arrive already reconciled and must not be coupled to the physical-vital
+   source-time contract.
 3. **Pressure always in мбар, scientific notation.** (RULE-COPY-006, RULE-DATA-005)
 4. **Physical labels identify fixed channels, not extrema.** `Т 2-й ступени` reads only `Т12`; `Т плиты N₂` reads only `Т11`. These references are positionally fixed and cannot be relocated without dismantling the rheostat. Other temperature channels may change position between experiments, so neither fleet-wide minima/maxima nor substitute channels may be presented under these labels.
 5. **Mode badge always visible.** Even during fault states. Operator must always know whether actions have real-world consequences.

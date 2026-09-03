@@ -5,12 +5,12 @@ enforcement: strict
 priority: critical
 last_updated: 2026-08-28
 status: canonical
-version: 4.3.0
+version: 4.4.0
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.3.0`
+**Current design-system version:** `4.4.0`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 

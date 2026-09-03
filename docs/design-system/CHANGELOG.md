@@ -2,7 +2,7 @@
 title: Design System Changelog
 status: canonical
 last_updated: 2026-09-04
-version: 4.3.0
+version: 4.4.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.4.0] — 2026-09-04
+
+### Added
+
+- **`cryodaq-primitives/top-watch-bar.md` — derived context cells.** Invariant 2
+  previously read "exactly three persistent physical readings"; it now states
+  that the three physical readings keep their fixed *relative* order and that
+  additional **derived** cells may sit in the strip if they neither displace nor
+  reorder them and are visibly marked (`~` prefix). The first is `~ Газ`, the
+  molecular counter's N/N₀.
+
+  Rationale for allowing it at all: a derived value earns chrome when it changes
+  how the operator reads a physical value beside it. Pressure fell 31% over ten
+  hours on 2026-09-03 while the chamber gained molecules throughout; the gauge
+  alone could not say so.
+
+  Derived cells are ingested outside the `_PendingVitalCut` path — they arrive
+  already reconciled once a minute, and coupling them to the physical-vital
+  source-time contract would buy nothing.
 
 ## [4.3.0] — 2026-09-04
 
