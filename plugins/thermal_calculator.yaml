@@ -1,3 +1,8 @@
-hot_sensor: "Т1 Криостат верх"
-cold_sensor: "Т7 Детектор"
+# Bind to stable channel IDs. Display names in channels.yaml are
+# operator-editable presentation text: renaming a sensor must never change
+# which sensor the physics reads, and must never silently disable it.
+# These were 'Т1 Криостат верх' / 'Т7 Детектор' — an ID with a display name
+# glued on — which stopped matching the moment the names were rewritten.
+hot_sensor: "Т1"
+cold_sensor: "Т7"
 heater_channel: "Keithley_1/smua/power"

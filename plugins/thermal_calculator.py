@@ -49,6 +49,7 @@ class ThermalCalculator(AnalyticsPlugin):
         self._hot_sensor: str = ""
         self._cold_sensor: str = ""
         self._heater_channel: str = ""
+        self._binding_error: str | None = "конфигурация не применена"
 
         # Последние известные значения каналов: channel -> float
         self._last: dict[str, float] = {}
@@ -70,9 +71,20 @@ class ThermalCalculator(AnalyticsPlugin):
         """
         super().configure(config)
 
-        self._hot_sensor = str(config.get("hot_sensor", ""))
-        self._cold_sensor = str(config.get("cold_sensor", ""))
-        self._heater_channel = str(config.get("heater_channel", ""))
+        self._hot_sensor = str(config.get("hot_sensor", "")).strip()
+        self._cold_sensor = str(config.get("cold_sensor", "")).strip()
+        self._heater_channel = str(config.get("heater_channel", "")).strip()
+
+        self._binding_error = self._validate_bindings()
+        if self._binding_error is not None:
+            # Loudly, once, at configure time. This used to be a per-tick DEBUG
+            # line: between 2026-09-03 02:38 and 09:53 it printed 26 044 times
+            # and the operator had no idea the calculation was dead.
+            _log.error(
+                "ThermalCalculator: %s. Вычисление НЕДОСТУПНО до исправления конфигурации.",
+                self._binding_error,
+            )
+            return
 
         _log.info(
             "ThermalCalculator сконфигурирован: горячий=%r, холодный=%r, нагреватель=%r",
@@ -80,6 +92,56 @@ class ThermalCalculator(AnalyticsPlugin):
             self._cold_sensor,
             self._heater_channel,
         )
+
+    def _validate_bindings(self) -> str | None:
+        """Bind to stable channel IDs. Names are presentation; IDs are identity.
+
+        A sensor's display name is operator-editable free text. On 2026-09-02
+        the names in ``channels.yaml`` were rewritten (``Т1`` became
+        "1 Верх образец 2"), and this plugin — configured as
+        ``hot_sensor: "Т1 Криостат верх"``, an ID glued to a since-replaced
+        display name — silently stopped matching anything.
+
+        There is deliberately no fuzzy resolution here. ``ChannelManager``
+        offers ``find_by_name`` and ``normalize_channel_id``; using either would
+        make the physics depend on editable text again, and would make a rename
+        change which sensor the answer came from rather than making it fail.
+        An unresolvable binding makes the calculation unavailable, and says so.
+        """
+
+        missing = [
+            label
+            for label, value in (
+                ("hot_sensor", self._hot_sensor),
+                ("cold_sensor", self._cold_sensor),
+                ("heater_channel", self._heater_channel),
+            )
+            if not value
+        ]
+        if missing:
+            return f"не заданы обязательные привязки: {', '.join(missing)}"
+
+        try:
+            from cryodaq.core.channel_manager import get_channel_manager
+
+            known = set(get_channel_manager().get_all())
+        except Exception:  # noqa: BLE001 - configuration must not crash the engine
+            known = set()
+
+        problems: list[str] = []
+        for label, value in (("hot_sensor", self._hot_sensor), ("cold_sensor", self._cold_sensor)):
+            if known and value not in known:
+                hint = ""
+                # The classic mis-binding: "<id> <display name>".
+                head = value.split()[0] if value.split() else ""
+                if head and head in known:
+                    hint = f" — похоже на идентификатор с приписанным именем; используйте {head!r}"
+                problems.append(f"{label}={value!r} не является известным идентификатором канала{hint}")
+            elif not known and " " in value:
+                problems.append(f"{label}={value!r} содержит пробел — это отображаемое имя, а не идентификатор")
+        if problems:
+            return "; ".join(problems)
+        return None
 
     # ------------------------------------------------------------------
     # Основная логика
@@ -100,21 +162,15 @@ class ThermalCalculator(AnalyticsPlugin):
             с метрикой ``"R_thermal"`` (K/W), либо пустой список,
             если данных недостаточно или P == 0.
         """
-        if not self._hot_sensor or not self._cold_sensor or not self._heater_channel:
-            _log.warning(
-                "ThermalCalculator: конфигурация не задана, вычисление пропущено"
-            )
+        if self._binding_error is not None:
+            # Already reported at configure time; do not repeat it every tick.
             return []
 
         # Обновить последние известные значения из текущего пакета.
         # Показания сортируются по времени, чтобы последнее значение
         # гарантированно перезаписало более раннее.
         target_channels = {self._hot_sensor, self._cold_sensor, self._heater_channel}
-        relevant = [
-            r
-            for r in readings
-            if r.channel in target_channels and r.status is ChannelStatus.OK
-        ]
+        relevant = [r for r in readings if r.channel in target_channels and r.status is ChannelStatus.OK]
         relevant.sort(key=lambda r: r.timestamp)
 
         for reading in relevant:
@@ -134,16 +190,12 @@ class ThermalCalculator(AnalyticsPlugin):
         P = self._last[self._heater_channel]
 
         if P == 0.0:
-            _log.debug(
-                "ThermalCalculator: мощность нагревателя равна нулю, "
-                "тепловое сопротивление не определено"
-            )
+            _log.debug("ThermalCalculator: мощность нагревателя равна нулю, тепловое сопротивление не определено")
             return []
 
         if P < 0.0:
             _log.warning(
-                "ThermalCalculator: мощность нагревателя отрицательна (P=%.6g Вт), "
-                "вычисление пропущено",
+                "ThermalCalculator: мощность нагревателя отрицательна (P=%.6g Вт), вычисление пропущено",
                 P,
             )
             return []
@@ -151,8 +203,7 @@ class ThermalCalculator(AnalyticsPlugin):
         R_thermal = (T_hot - T_cold) / P
 
         _log.debug(
-            "ThermalCalculator: T_hot=%.4f K, T_cold=%.4f K, P=%.6g Вт "
-            "→ R_thermal=%.6g К/Вт",
+            "ThermalCalculator: T_hot=%.4f K, T_cold=%.4f K, P=%.6g Вт → R_thermal=%.6g К/Вт",
             T_hot,
             T_cold,
             P,

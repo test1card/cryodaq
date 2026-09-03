@@ -16,14 +16,37 @@ COLD_CH = "lakeshore/ch2"
 HEATER_CH = "keithley/power"
 
 
+@pytest.fixture(autouse=True)
+def _declared_inventory(monkeypatch: pytest.MonkeyPatch):
+    """Declare this file's synthetic channels to the plugin's ID check.
+
+    ThermalCalculator binds stable channel IDs and refuses one that is not in
+    the declared inventory, because a binding to a channel that does not exist
+    can never produce a measurement and must say so rather than run forever
+    producing nothing (2026-09-02: 26 044 silent DEBUG lines).
+
+    These tests are about the physics, not the naming, and they must not be
+    coupled to the lab's live channels.yaml — renaming a real sensor must not
+    break arithmetic tests. So they declare their own inventory instead.
+    """
+
+    import cryodaq.core.channel_manager as channel_manager
+
+    class _Inventory:
+        @staticmethod
+        def get_all() -> dict[str, dict[str, object]]:
+            return {HOT_CH: {}, COLD_CH: {}, HEATER_CH: {}}
+
+    monkeypatch.setattr(channel_manager, "get_channel_manager", lambda: _Inventory())
+    return _Inventory()
+
+
 def _make_reading(channel: str, value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
     return Reading.now(channel=channel, value=value, unit="K", instrument_id="test", status=status)
 
 
 def _make_heater_reading(value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(
-        channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status
-    )
+    return Reading.now(channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status)
 
 
 def _configured_plugin() -> ThermalCalculator:
