@@ -76,6 +76,7 @@ WIDGET_EXPERIMENT_SUMMARY = "experiment_summary"
 # SteadyStatePredictor instances and surfaces the asymptote + ±σ band
 # on the same plot.
 WIDGET_TEMPERATURE_STEADY_STATE = "temperature_steady_state"
+WIDGET_GAS_INVENTORY = "gas_inventory"
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -2155,6 +2156,154 @@ class TemperatureSteadyStateWidget(QWidget):
 # Registration (module load time)
 # ---------------------------------------------------------------------------
 
+class GasInventoryWidget(QWidget):
+    """Сколько газа реально в камере — N/N₀ с поправкой на температуру.
+
+    Occupies the quarter that held an "awaiting F8" placeholder through every
+    cooldown. The number answers one question the pressure gauge cannot: is the
+    pump winning? On 2026-09-03 the gauge fell 31% over ten hours while this
+    quantity went 100% → 80% → 118%, and the run was stopped on that reading,
+    worked out by hand at hour nine.
+
+    Colour follows the RATE, not the level: falling is green (откачка), rising
+    is red (набор газа). A level of 118% is not itself bad — the operator
+    decides what it means. The direction is what the readout is for.
+
+    Reports nothing rather than guessing: no baseline, stale data, or too little
+    history for a slope each produce an explicit absence.
+    """
+
+    _MAX_POINTS = 720  # 12 h at the 60 s publish cadence
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        card = _card("analyticsGasInventory")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        lay.setSpacing(theme.SPACE_2)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(_title_label("Газ в камере"))
+        header.addStretch()
+        lay.addLayout(header)
+
+        value_row = QHBoxLayout()
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_row.setSpacing(theme.SPACE_2)
+
+        self._value_label = QLabel("—")
+        big = QFont(theme.FONT_MONO)
+        big.setPixelSize(theme.FONT_SIZE_2XL)
+        big.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+        self._value_label.setFont(big)
+        self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        value_row.addWidget(self._value_label)
+
+        self._rate_label = QLabel("")
+        rate_font = QFont(theme.FONT_MONO)
+        rate_font.setPixelSize(theme.FONT_SIZE_LG)
+        self._rate_label.setFont(rate_font)
+        self._rate_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        value_row.addWidget(self._rate_label)
+        value_row.addStretch()
+        lay.addLayout(value_row)
+
+        self._note_label = _muted_label("датчики объёма газа не выбраны")
+        self._note_label.setWordWrap(True)
+        # Left-align with the value above it; _muted_label centres by default.
+        self._note_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._note_label)
+
+        self._plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        apply_plot_style(self._plot)
+        self._plot.setLabel("left", "N/N₀", units="%")
+        self._plot.setMouseEnabled(x=False, y=False)
+        self._plot.setMenuEnabled(False)
+        self._curve = self._plot.plot([], [], pen=series_pen(0))
+        # 100% is the baseline the operator set; the line makes crossing it visible.
+        self._baseline_line = pg.InfiniteLine(
+            angle=0,
+            pos=100.0,
+            pen=pg.mkPen(color=QColor(theme.MUTED_FOREGROUND), width=1, style=Qt.DashLine),
+        )
+        self._plot.addItem(self._baseline_line)
+        lay.addWidget(self._plot, stretch=1)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(card)
+
+        self._series: list[tuple[float, float]] = []
+
+    def set_gas_inventory(self, reading) -> None:
+        """Ingest one analytics/molecular_counter/gas_inventory reading."""
+
+        if reading is None:
+            self._render_absent("нет данных")
+            return
+        value = getattr(reading, "value", None)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            self._render_absent("нет данных")
+            return
+
+        meta = getattr(reading, "metadata", None) or {}
+        rate = meta.get("rate_pct_per_h")
+        rate = float(rate) if isinstance(rate, (int, float)) and math.isfinite(float(rate)) else None
+
+        try:
+            ts = float(reading.timestamp.timestamp())
+        except (TypeError, ValueError, OSError, AttributeError):
+            ts = time.time()
+
+        self._series.append((ts, float(value)))
+        if len(self._series) > self._MAX_POINTS:
+            del self._series[: len(self._series) - self._MAX_POINTS]
+        self._curve.setData([t for t, _ in self._series], [v for _, v in self._series])
+
+        self._value_label.setText(f"{float(value):.0f}%")
+        self._value_label.setStyleSheet(f"color: {self._colour_for(rate)}; background: transparent;")
+
+        if rate is None:
+            self._rate_label.setText("")
+            self._note_label.setText("скорость: недостаточно истории")
+        else:
+            self._rate_label.setText(f"{self._arrow_for(rate)} {abs(rate):.1f} %/ч")
+            self._rate_label.setStyleSheet(f"color: {self._colour_for(rate)}; background: transparent;")
+            self._note_label.setText(self._verdict_word(rate))
+
+    def set_gas_inventory_unavailable(self, reason: str) -> None:
+        self._render_absent(reason)
+
+    # ------------------------------------------------------------------
+    def _render_absent(self, reason: str) -> None:
+        self._value_label.setText("—")
+        self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        self._rate_label.setText("")
+        self._note_label.setText(str(reason))
+
+    @staticmethod
+    def _colour_for(rate: float | None) -> str:
+        # Neutral until the sign is actually known.
+        if rate is None or abs(rate) < 0.2:
+            return theme.MUTED_FOREGROUND
+        return theme.STATUS_OK if rate < 0 else theme.STATUS_FAULT
+
+    @staticmethod
+    def _arrow_for(rate: float) -> str:
+        if abs(rate) < 0.2:
+            return "\u2192"
+        return "\u2193" if rate < 0 else "\u2191"
+
+    @staticmethod
+    def _verdict_word(rate: float) -> str:
+        # Describes the measurement, never what to do about it.
+        if abs(rate) < 0.2:
+            return "держится"
+        return "откачка идёт" if rate < 0 else "газ прибывает"
+
+
+
 register(WIDGET_TEMPERATURE_OVERVIEW, TemperatureOverviewWidget)
 register(WIDGET_VACUUM_PREDICTION, VacuumPredictionWidget)
 register(WIDGET_COOLDOWN_PREDICTION, CooldownPredictionWidget)
@@ -2167,3 +2316,4 @@ register(WIDGET_TEMPERATURE_TRAJECTORY, TemperatureTrajectoryWidget)
 register(WIDGET_COOLDOWN_HISTORY, CooldownHistoryWidget)
 register(WIDGET_EXPERIMENT_SUMMARY, ExperimentSummaryWidget)
 register(WIDGET_TEMPERATURE_STEADY_STATE, lambda: TemperatureSteadyStateWidget())
+register(WIDGET_GAS_INVENTORY, GasInventoryWidget)

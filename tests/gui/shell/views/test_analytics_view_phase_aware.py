@@ -62,7 +62,10 @@ def test_vacuum_layout_swaps_main_to_prediction(app):
     slots = view.active_widgets()
     assert analytics_widgets.id_of(slots["main"]) == "vacuum_prediction"
     assert analytics_widgets.id_of(slots["top_right"]) == "temperature_overview"
-    assert analytics_widgets.id_of(slots["bottom_right"]) == "pressure_current"
+    # 2026-09-04: pressure_current here duplicated the main slot — vacuum_prediction
+    # already plots pressure. The quarter now carries the molecular counter, which
+    # answers what the gauge cannot: whether the pump is actually winning.
+    assert analytics_widgets.id_of(slots["bottom_right"]) == "gas_inventory"
 
 
 def test_cooldown_layout_main_is_cooldown_prediction(app):

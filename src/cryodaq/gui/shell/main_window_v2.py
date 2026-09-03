@@ -1322,6 +1322,8 @@ class MainWindowV2(QMainWindow):
                     history=list(history),
                 ),
             )
+        elif channel == "analytics/molecular_counter/gas_inventory":
+            self._push_analytics("set_gas_inventory", reading)
         elif channel == "analytics/instrument_health":
             health = reading.metadata.get("health") if reading.metadata else None
             self._push_analytics("set_instrument_health", health)

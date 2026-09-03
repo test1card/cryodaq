@@ -193,23 +193,29 @@ def test_temperature_panel_receives_data_in_cooldown_phase(qt_app):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_pressure_panel_renders_in_vacuum_phase(qt_app):
+def test_pressure_panel_renders_with_x_axis_pinned_to_now(qt_app):
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()
         w = MainWindowV2()
         _stop_timers(w)
         try:
             w._ensure_overlay("analytics")
-            w._on_experiment_status_received({"active_experiment": {}, "current_phase": "vacuum"})
+            # Retargeted 2026-09-04: vacuum's bottom_right now carries the molecular
+            # counter. The subject of this test is that PressureCurrentWidget renders
+            # a series and pins its X right-edge to now (the T5 fix) — not which
+            # phase hosts it. `preparation` still mounts it in bottom_right, so the
+            # guard is preserved rather than weakened. Pressure remains visible in
+            # vacuum via vacuum_prediction in the main slot.
+            w._on_experiment_status_received({"active_experiment": {}, "current_phase": "preparation"})
             now = time.time()
             for i in range(5):
                 reading = _pressure_reading(1e-5 * (i + 1), ts=now + i)
                 w.dispatch_qualified_reading(_qualified(reading, ChannelQuantity.PRESSURE))
                 qt_app.processEvents()
 
-            # In vacuum, pressure_current is bottom_right.
+            # In preparation, pressure_current is top_right.
             slots = w._analytics_view.active_widgets()
-            pressure = slots.get("bottom_right")
+            pressure = slots.get("top_right")
             assert isinstance(pressure, aw.PressureCurrentWidget)
             assert len(pressure._series) >= 5
 

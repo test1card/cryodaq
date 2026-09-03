@@ -192,6 +192,7 @@ class AnalyticsView(QWidget):
         # so a fresh layout reflects the current state immediately.
         self._last_cooldown: CooldownData | None = None
         self._last_r_thermal: RThermalData | None = None
+        self._last_gas_inventory = None
         self._last_temperature_readings: dict[str, Reading] = {}
         self._last_pressure_reading: Reading | None = None
         self._last_keithley_readings: dict[str, Reading] = {}
@@ -268,6 +269,12 @@ class AnalyticsView(QWidget):
     def set_r_thermal(self, data: RThermalData | None) -> None:
         self._last_r_thermal = data
         self._forward("set_r_thermal_data", data)
+
+    def set_gas_inventory(self, reading) -> None:
+        """Latest molecular-counter reading. Retained for replay on phase swap."""
+
+        self._last_gas_inventory = reading
+        self._forward("set_gas_inventory", reading)
 
     def set_temperature_readings(self, readings: dict[str, Reading]) -> None:
         # Keep the latest value per channel for replay on layout swap.
@@ -410,6 +417,7 @@ class AnalyticsView(QWidget):
             return
         if self._last_cooldown is not None:
             self._forward_to(widgets, "set_cooldown_data", self._last_cooldown)
+            self._forward_to(widgets, "set_gas_inventory", self._last_gas_inventory)
         if self._last_r_thermal is not None:
             self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)
         if self._last_temperature_readings:

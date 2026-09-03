@@ -18,12 +18,20 @@ phases:
   vacuum:
     main: vacuum_prediction
     top_right: temperature_overview
-    bottom_right: pressure_current
+    # 2026-09-04: was pressure_current, which duplicated the main slot —
+    # vacuum_prediction already plots pressure. The molecular counter answers
+    # the question the gauge cannot: is the pump actually winning? During the
+    # 03.09 pump-down the pressure was flat at 5e-2 mbar for hours while the
+    # chamber gained gas.
+    bottom_right: gas_inventory
 
   cooldown:
     main: cooldown_prediction
     top_right: temperature_overview
-    bottom_right: r_thermal_placeholder
+    # 2026-09-04: was r_thermal_placeholder — a card reading "данные источника
+    # ожидают (зависит от F8)" that occupied a quarter of the view for every
+    # cooldown ever run. Nothing is displaced by replacing it.
+    bottom_right: gas_inventory
 
   measurement:
     # v0.55.6.1: temperature steady-state asymptote is the headline
