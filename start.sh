@@ -24,6 +24,14 @@ fi
 # to restore the signed-qualification requirement.
 export CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1
 
+# Print a traceback when a NATIVE fault kills a process (SIGBUS, SIGSEGV).
+# The engine died with SIGBUS six times on 2026-09-02 and left no evidence:
+# without this, Python dies silently on a fault, so the launcher's stderr
+# capture had nothing to forward and the cause could not be named. It costs
+# nothing in normal operation -- it prints only when a process is already
+# dying -- and it is the difference between "code=-7" and a library and line.
+export PYTHONFAULTHANDLER=1
+
 echo "=== CryoDAQ — запуск системы ==="
 echo "Интерпретатор: $CRYODAQ_PY"
 echo "ВНИМАНИЕ: energizing разрешён без qualification receipt (CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1)"
