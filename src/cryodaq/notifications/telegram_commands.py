@@ -26,6 +26,7 @@ from cryodaq.core.broker import DataBroker
 # missing "vacuum") so remote operators received bogus "unknown phase"
 # errors for phases that exist locally.
 from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
+from cryodaq.core.reading_freshness import READING_STALE_AFTER_S, judge_freshness
 from cryodaq.core.ru_labels import phase_display_name
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
@@ -82,7 +83,9 @@ _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
 _OPERATOR_LOG_PENDING_KEYS = _OPERATOR_LOG_SUCCESS_KEYS | {"error_code", "error"}
 _OPERATOR_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
 _OPERATOR_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
-_READING_STALE_AFTER_S = 60.0
+# Threshold now lives in core.reading_freshness, shared with the periodic
+# report. Kept as an alias so existing references and tests still resolve.
+_READING_STALE_AFTER_S = READING_STALE_AFTER_S
 
 
 class _TelegramAuthError(Exception):
@@ -469,15 +472,18 @@ class TelegramCommandBot:
         """Return available/stale/reason for a cached operator reading."""
         if not reading.is_usable():
             return False, True, f"статус {reading.status.value}"
+        # One shared boundary — see core.reading_freshness. This used to carry
+        # its own 60 s rule while the periodic report carried none at all.
         try:
-            age_s = (datetime.now(UTC) - reading.timestamp).total_seconds()
-        except (TypeError, ValueError):
+            measured_at = reading.timestamp.timestamp()
+        except (TypeError, ValueError, OSError, AttributeError):
             return False, True, "неизвестное время измерения"
-        if age_s < 0:
-            return False, True, "время измерения в будущем"
-        if age_s > _READING_STALE_AFTER_S:
-            return True, True, f"возраст {age_s:.0f} с"
-        return True, False, None
+        freshness = judge_freshness(measured_at, now_epoch=datetime.now(UTC).timestamp())
+        if freshness.is_current:
+            return True, False, None
+        if freshness.age_s is None or freshness.age_s < 0:
+            return False, True, freshness.reason
+        return True, True, freshness.reason
 
     @classmethod
     def _cached_value(cls, channel: str, reading: Reading, value: str) -> str:

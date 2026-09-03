@@ -23,6 +23,7 @@ import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
+from cryodaq.core.reading_freshness import judge_freshness  # noqa: E402
 from cryodaq.reporting.periodic_input import (  # noqa: E402
     MAX_CAPTION_BYTES,
     MAX_CAPTION_CODEPOINTS,
@@ -421,6 +422,11 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             if not usable:
                 continue
             row = usable[-1]
+            # Freshness is a separate question from usability, asked once, in
+            # core.reading_freshness. On 2026-09-02 this line printed the last
+            # reading seen before the writer stopped persisting, as though it
+            # were current, in the same message as three data-loss alarms.
+            freshness = judge_freshness(row.timestamp, now_epoch=float(snapshot.slot.slot_end))
             suffix = rendered_unit if rendered_unit is not None else item.unit
             line_prefix = "  "
             # Pressure spans decades and is read as an order of magnitude, so
@@ -430,6 +436,9 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             # than 2.941e+02.
             rendered_value = f"{row.value:.2e}" if item.unit == "mbar" else f"{row.value:.4g}"
             line_suffix = f": {rendered_value} {_escape(suffix)}"
+            if not freshness.is_current:
+                # Shown, but never as a current value: the age travels with it.
+                line_suffix += f" ⚠ не актуально ({_escape(freshness.reason or 'возраст неизвестен')})"
             lines.append(
                 (
                     line_prefix + _escape(item.label) + line_suffix,

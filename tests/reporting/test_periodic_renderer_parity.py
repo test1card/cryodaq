@@ -212,10 +212,15 @@ def test_ordinary_report_keeps_every_authority_supplied_channel(
 
 
 def test_caption_short_exact_contract(tmp_path: Path) -> None:
+    # Inside the slot's freshness window (slot_end is 7_200): this test is about
+    # the exact caption contract for CURRENT readings. At the original 7_000 the
+    # rows were 200 s old, an artifact of the synthetic epoch rather than intent,
+    # and the report now marks a stale value with its age instead of printing it
+    # as current — see core.reading_freshness.
     readings = [
-        _row(7_000, "ls", "Т1", 4.0, "K"),
-        _row(7_001, "vac", "P", 1e-5, "mbar"),
-        _row(7_002, "smu", "smua/voltage", 0.0123456, "V"),
+        _row(7_180, "ls", "Т1", 4.0, "K"),
+        _row(7_181, "vac", "P", 1e-5, "mbar"),
+        _row(7_182, "smu", "smua/voltage", 0.0123456, "V"),
     ]
     alarms = [
         {
