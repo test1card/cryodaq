@@ -12,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cryodaq.core.channel_identity import channel_id_of
+
 if TYPE_CHECKING:
     from cryodaq.drivers.base import Reading
 
@@ -86,8 +88,11 @@ class ChannelStateTracker:
         )
         self._states[reading.channel] = state
 
-        # Build short→full index for prefix resolution
-        short = reading.channel.split(" ", 1)[0] if " " in reading.channel else reading.channel
+        # Build short→full index for prefix resolution. The projection itself
+        # lives in core.channel_identity so that every consumer lining a
+        # configured reference up against a live reading uses the same rule —
+        # ThermalCalculator did not, and silently matched nothing.
+        short = channel_id_of(reading.channel)
         if short != reading.channel:
             self._short_to_full[short] = reading.channel
 

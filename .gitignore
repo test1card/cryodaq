@@ -32,7 +32,11 @@ export/
 # Local config overrides (machine-specific, not committed)
 config/*.local.yaml
 config/*.local.yaml.yaml
-config/*.local.yaml.bak
+# Any editor/manual backup under config/, not just *.local.yaml.bak. The
+# narrower rule missed instruments.local.yaml.bak2 and the plain *.yaml.bak
+# pair, and a `git add -A config` published all three on 2026-09-03.
+config/*.bak*
+config/*.orig
 config/.first_run_done
 config/.first_run_pending
 config/.first_run_recovery.*

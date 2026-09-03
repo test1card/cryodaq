@@ -9,10 +9,21 @@
 from __future__ import annotations
 
 import logging
+import math
+from datetime import UTC, datetime
 from typing import Any
 
 from cryodaq.analytics.base_plugin import AnalyticsPlugin, DerivedMetric
+from cryodaq.core.channel_identity import channel_id_of, matches_channel_id
+from cryodaq.core.reading_freshness import judge_freshness
 from cryodaq.drivers.base import ChannelStatus, Reading
+
+# Every selected input must be no older than this at the moment the result is
+# computed. Instruments poll at 1-2 s, so 30 s covers a normal batch and any
+# ordinary hiccup, while rejecting a temperature left over from before a sensor
+# failed. Measured against the processing reference, never against the cache
+# itself — see the note in process().
+_INPUT_WINDOW_S = 30.0
 
 _log = logging.getLogger(__name__)
 
@@ -52,8 +63,14 @@ class ThermalCalculator(AnalyticsPlugin):
         self._binding_error: str | None = "конфигурация не применена"
         self._awaiting_selection: bool = True
 
-        # Последние известные значения каналов: channel -> float
-        self._last: dict[str, float] = {}
+        # channel ID -> (value, timestamp, status). Provenance travels with the
+        # value: caching bare floats let a fresh power reading republish stale
+        # temperatures as a new result.
+        self._last: dict[str, tuple[float, datetime, ChannelStatus]] = {}
+        # Frozen ID <-> runtime-label binding, resolved once per run.
+        self._resolved: dict[str, str] = {}
+        self._runtime_label: dict[str, str] = {}
+        self._unavailable_note: str | None = None
 
     # ------------------------------------------------------------------
     # Конфигурация
@@ -75,6 +92,14 @@ class ThermalCalculator(AnalyticsPlugin):
         self._hot_sensor = str(config.get("hot_sensor", "")).strip()
         self._cold_sensor = str(config.get("cold_sensor", "")).strip()
         self._heater_channel = str(config.get("heater_channel", "")).strip()
+
+        # Rebinding starts a new calculation. Carrying the previous run's
+        # temperatures across would let a single fresh power reading publish a
+        # result built from the sensors the operator just stopped using.
+        self._last.clear()
+        self._resolved.clear()
+        self._runtime_label.clear()
+        self._unavailable_note = None
 
         self._binding_error = self._validate_bindings()
         if self._binding_error is not None:
@@ -102,6 +127,19 @@ class ThermalCalculator(AnalyticsPlugin):
             self._cold_sensor,
             self._heater_channel,
         )
+
+    def _log_unavailable(self, note: str) -> None:
+        """Say why there is no result — once per distinct reason, not per tick.
+
+        The per-tick DEBUG line this replaces printed 26 044 times in seven
+        hours while the calculation was dead, which is indistinguishable from
+        healthy silence.
+        """
+
+        if note == self._unavailable_note:
+            return
+        self._unavailable_note = note
+        _log.info("ThermalCalculator: результат недоступен — %s", note)
 
     def _validate_bindings(self) -> str | None:
         """Bind to stable channel IDs. Names are presentation; IDs are identity.
@@ -137,24 +175,35 @@ class ThermalCalculator(AnalyticsPlugin):
             self._awaiting_selection = set(missing) <= {"hot_sensor", "cold_sensor"}
             return f"не выбраны датчики: {', '.join(missing)}"
 
+        # The inventory is the authority on what a channel ID is. If it cannot
+        # be read we refuse rather than accept an unverifiable bare ID: logging
+        # "configured" over an unchecked binding is the silent-success failure
+        # this plugin already suffered once.
         try:
             from cryodaq.core.channel_manager import get_channel_manager
 
             known = set(get_channel_manager().get_all())
-        except Exception:  # noqa: BLE001 - configuration must not crash the engine
-            known = set()
+        except Exception as exc:  # noqa: BLE001 - configuration must not crash the engine
+            return f"инвентарь каналов недоступен ({type(exc).__name__}), привязки не проверены"
+        if not known:
+            return "инвентарь каналов пуст, привязки не проверены"
+
+        # One sensor cannot be both ends of a thermal path. dT is identically
+        # zero, so R = dT/P publishes a confident 0 K/W — an operator
+        # configuration mistake rendered as valid physics, which is worse than
+        # no number at all.
+        if self._hot_sensor == self._cold_sensor:
+            return f"hot_sensor и cold_sensor указывают на один канал ({self._hot_sensor!r})"
 
         problems: list[str] = []
         for label, value in (("hot_sensor", self._hot_sensor), ("cold_sensor", self._cold_sensor)):
-            if known and value not in known:
+            if value not in known:
                 hint = ""
                 # The classic mis-binding: "<id> <display name>".
-                head = value.split()[0] if value.split() else ""
-                if head and head in known:
+                head = channel_id_of(value)
+                if head != value and head in known:
                     hint = f" — похоже на идентификатор с приписанным именем; используйте {head!r}"
                 problems.append(f"{label}={value!r} не является известным идентификатором канала{hint}")
-            elif not known and " " in value:
-                problems.append(f"{label}={value!r} содержит пробел — это отображаемое имя, а не идентификатор")
         if problems:
             return "; ".join(problems)
         return None
@@ -182,28 +231,84 @@ class ThermalCalculator(AnalyticsPlugin):
             # Already reported at configure time; do not repeat it every tick.
             return []
 
-        # Обновить последние известные значения из текущего пакета.
-        # Показания сортируются по времени, чтобы последнее значение
-        # гарантированно перезаписало более раннее.
-        target_channels = {self._hot_sensor, self._cold_sensor, self._heater_channel}
-        relevant = [r for r in readings if r.channel in target_channels and r.status is ChannelStatus.OK]
-        relevant.sort(key=lambda r: r.timestamp)
+        # Instruments label readings with the string from instruments.yaml —
+        # the stable ID with a human name appended ("Т1 Криостат верх"). The
+        # configuration stores the ID. Comparing Reading.channel against the
+        # bare ID matched NOTHING in production, silently, once per tick.
+        #
+        # Each configured ID is projected onto the runtime label once, through
+        # the shared rule in core.channel_identity, and the label is then frozen
+        # for the run. Afterwards matching is exact against that frozen label,
+        # so a sensor renamed mid-run is a hard mismatch rather than a silent
+        # re-binding to a different physical sensor.
+        target_ids = (self._hot_sensor, self._cold_sensor, self._heater_channel)
+        accepted_this_batch = False
+        for reading in sorted(readings, key=lambda r: r.timestamp):
+            frozen = self._runtime_label.get(reading.channel)
+            if frozen is None:
+                matched = next(
+                    (cid for cid in target_ids if matches_channel_id(reading.channel, cid)),
+                    None,
+                )
+                if matched is None:
+                    continue
+                if matched in self._resolved and self._resolved[matched] != reading.channel:
+                    _log.error(
+                        "ThermalCalculator: канал %s теперь приходит как %r, а был %r — "
+                        "привязка заморожена, вычисление остановлено",
+                        matched,
+                        reading.channel,
+                        self._resolved[matched],
+                    )
+                    self._binding_error = f"метка канала {matched} изменилась во время прогона"
+                    return []
+                self._resolved[matched] = reading.channel
+                self._runtime_label[reading.channel] = matched
+                frozen = matched
+            # Retain status and timestamp, not just the value: a cached number
+            # with no provenance let a fresh power reading republish stale
+            # temperatures as a new result.
+            self._last[frozen] = (reading.value, reading.timestamp, reading.status)
+            accepted_this_batch = True
 
-        for reading in relevant:
-            self._last[reading.channel] = reading.value
-
-        # Проверить, что все три канала известны
-        missing = target_channels - self._last.keys()
-        if missing:
-            _log.debug(
-                "ThermalCalculator: недостаточно данных, отсутствуют каналы: %s",
-                ", ".join(sorted(missing)),
-            )
+        # A result must be caused by this batch. Without this, a later call
+        # carrying no selected channel left the cache untouched and republished
+        # the previous answer as a brand-new DerivedMetric.now().
+        if not accepted_this_batch:
+            self._log_unavailable("в пакете нет выбранных каналов")
             return []
 
-        T_hot = self._last[self._hot_sensor]
-        T_cold = self._last[self._cold_sensor]
-        P = self._last[self._heater_channel]
+        missing = [cid for cid in target_ids if cid not in self._last]
+        if missing:
+            # An ID that is never observed stays visibly unavailable. The
+            # configuration check proves only that the ID exists in
+            # channels.yaml; it is NOT proof that the sensor is on this stand's
+            # instrument roster. First observation is what establishes that.
+            self._log_unavailable("нет показаний по каналам: " + ", ".join(missing))
+            return []
+
+        # Freshness is measured against an explicit processing reference, NOT
+        # against the newest cached input. Comparing the cache to itself tests
+        # coherence, not currency: three mutually aligned readings from five
+        # hours ago agreed with each other perfectly and were published as a new
+        # result.
+        reference = datetime.now(UTC)
+        unusable: list[str] = []
+        for cid in target_ids:
+            value, ts, status = self._last[cid]
+            if status is not ChannelStatus.OK or not math.isfinite(value):
+                unusable.append(f"{cid}: статус {getattr(status, 'value', status)}")
+                continue
+            verdict = judge_freshness(ts.timestamp(), now_epoch=reference.timestamp(), max_age_s=_INPUT_WINDOW_S)
+            if not verdict.is_current:
+                unusable.append(f"{cid}: {verdict.reason}")
+        if unusable:
+            self._log_unavailable("вход не годен — " + "; ".join(unusable))
+            return []
+
+        T_hot = self._last[self._hot_sensor][0]
+        T_cold = self._last[self._cold_sensor][0]
+        P = self._last[self._heater_channel][0]
 
         if P == 0.0:
             _log.debug("ThermalCalculator: мощность нагревателя равна нулю, тепловое сопротивление не определено")

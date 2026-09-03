@@ -151,29 +151,48 @@ async def test_partial_batch_accumulates():
     assert metrics2[0].value == pytest.approx(2.0)
 
 
-async def test_only_ok_status_used():
-    """Readings with SENSOR_ERROR status are ignored; only OK readings count."""
+async def test_a_failed_sensor_stops_the_result_rather_than_being_papered_over():
+    """A SENSOR_ERROR input must suppress the metric, not fall back to a cache.
+
+    This test previously asserted the opposite — "cache must keep old value",
+    "should still compute using cached T_hot" — and so codified the defect it
+    was named for. `test_only_ok_status_used` claimed only OK readings count,
+    while requiring a result built from a stale reading in place of a failed
+    one.
+
+    That is how a failing sensor became invisible: the plugin kept publishing
+    R_thermal from the last good temperature while the probe was in
+    SENSOR_ERROR, and nothing downstream could tell the difference. Every
+    selected input must be OK, finite, and from the same measurement window, or
+    there is no result.
+    """
+
     plugin = _configured_plugin()
 
-    # Good readings with OK status
     readings_ok = [
         _make_reading(HOT_CH, 50.0),
         _make_reading(COLD_CH, 10.0),
         _make_heater_reading(8.0),
     ]
-    await plugin.process(readings_ok)
+    assert await plugin.process(readings_ok), "a complete healthy triplet publishes"
 
-    # Now send a batch where hot sensor has SENSOR_ERROR — cache must keep old value
     readings_err = [
         _make_reading(HOT_CH, 999.0, status=ChannelStatus.SENSOR_ERROR),
         _make_reading(COLD_CH, 10.0),
         _make_heater_reading(8.0),
     ]
-    metrics = await plugin.process(readings_err)
+    assert await plugin.process(readings_err) == [], (
+        "a failed hot sensor must suppress the result, not resurrect the cached value"
+    )
 
-    # Plugin should still compute using cached T_hot = 50.0
-    assert len(metrics) == 1
-    assert metrics[0].value == pytest.approx((50.0 - 10.0) / 8.0)
+    # And it recovers on its own once the sensor comes back.
+    assert await plugin.process(
+        [
+            _make_reading(HOT_CH, 50.0),
+            _make_reading(COLD_CH, 10.0),
+            _make_heater_reading(8.0),
+        ]
+    ), "a recovered sensor must resume publishing"
 
 
 async def test_metric_has_correct_metadata():
