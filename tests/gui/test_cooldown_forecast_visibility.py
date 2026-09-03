@@ -191,7 +191,7 @@ def test_the_graph_expires_a_drawn_forecast_when_the_publisher_stops(app, monkey
     real_now = _time.time()
     monkeypatch.setattr(_time, "time", lambda: real_now + PREDICTION_STALE_AFTER_S + 30.0)
 
-    w._on_freshness_tick()  # the production timer slot; no second delivery
+    w._freshness_timer.timeout.emit()  # the real timer signal; no second delivery
 
     assert not w._inner._central, "the central forecast must be cleared"
     assert not w._inner._lower_ci and not w._inner._upper_ci, "and the CI band with it"
@@ -218,10 +218,19 @@ def test_the_graph_freshness_timer_is_one_parented_timer(app) -> None:
         w.set_cooldown_data(_data(active=True, age_s=1.0))
     assert len(w.findChildren(QTimer)) == len(before), "no per-refresh timers"
 
-    calls: list[str] = []
-    w._refuse_cooldown = lambda provenance: calls.append(provenance)  # type: ignore[method-assign]
-    w.set_cooldown_data(_data(active=True, age_s=600.0))
-    assert len(calls) == 1, "the timer must be connected exactly once"
+    # Connected exactly once. This has to be measured on a FRESH snapshot: with
+    # a stale one the expiry latch makes a double connection undetectable, since
+    # the second invocation returns at the latch before judging anything. Fresh,
+    # the tick judges and returns without latching, so one emitted signal yields
+    # exactly one judgement per connection.
+    w.set_cooldown_data(_data(active=True, age_s=1.0))
+    judged: list[object] = []
+    original = w._judge_provenance
+    w._judge_provenance = lambda data: (judged.append(data), original(data))[1]  # type: ignore[method-assign]
+
+    w._freshness_timer.timeout.emit()
+
+    assert len(judged) == 1, "the timer must be connected to the slot exactly once"
 
 
 def test_a_still_fresh_forecast_is_left_alone_by_the_tick(app) -> None:
