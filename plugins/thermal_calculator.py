@@ -18,10 +18,19 @@ from cryodaq.core.channel_identity import channel_id_of, matches_channel_id
 from cryodaq.core.reading_freshness import judge_freshness
 from cryodaq.drivers.base import ChannelStatus, Reading
 
-# Every selected input must be no older than this at the moment the result is
-# computed. Instruments poll at 1-2 s, so 30 s covers a normal batch and any
-# ordinary hiccup, while rejecting a temperature left over from before a sensor
-# failed. Measured against the processing reference, never against the cache
+# Calculation-specific maximum input age, deliberately STRICTER than the shared
+# reporting default (core.reading_freshness.READING_STALE_AFTER_S, 60 s). It is
+# passed explicitly to judge_freshness and does not change that default for any
+# other caller.
+#
+# The two answer different questions. A report shows an operator a number to
+# read, where a value a minute old is still informative if its age is stated.
+# This combines three inputs into a derived quantity, where a temperature from
+# before a sensor failed silently corrupts the result rather than merely aging
+# it. Instruments poll at 1-2 s, so 30 s still covers a normal batch and any
+# ordinary hiccup.
+#
+# Measured against an explicit processing reference, never against the cache
 # itself — see the note in process().
 _INPUT_WINDOW_S = 30.0
 
@@ -280,10 +289,12 @@ class ThermalCalculator(AnalyticsPlugin):
 
         missing = [cid for cid in target_ids if cid not in self._last]
         if missing:
-            # An ID that is never observed stays visibly unavailable. The
-            # configuration check proves only that the ID exists in
-            # channels.yaml; it is NOT proof that the sensor is on this stand's
-            # instrument roster. First observation is what establishes that.
+            # An ID that is never observed is LOGGED unavailable — it is not
+            # surfaced in the GUI or the report, so an operator watching either
+            # of those sees no metric and no reason. The configuration check
+            # proves only that the ID exists in channels.yaml; it is NOT proof
+            # that the sensor is on this stand's instrument roster. First
+            # observation is what establishes that.
             self._log_unavailable("нет показаний по каналам: " + ", ".join(missing))
             return []
 
