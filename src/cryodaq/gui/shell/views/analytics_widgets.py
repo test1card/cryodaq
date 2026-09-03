@@ -660,7 +660,25 @@ class VacuumPredictionWidget(QWidget):
         self._poll_timer.setInterval(10_000)
         self._poll_timer.timeout.connect(self._poll_trend)
         self._poll_timer.start()
-        QTimer.singleShot(500, self._poll_trend)
+
+        # The initial poll used to be a static QTimer.singleShot, which is owned
+        # by nobody: destroying this widget inside its 500 ms window left the
+        # callback armed and it fired into a deleted object. A single-shot timer
+        # parented here dies with the widget.
+        self._initial_poll_timer = QTimer(self)
+        self._initial_poll_timer.setSingleShot(True)
+        self._initial_poll_timer.setInterval(500)
+        self._initial_poll_timer.timeout.connect(self._poll_trend)
+        self._initial_poll_timer.start()
+
+        # One retained worker. Each poll used to construct a local
+        # ZmqCommandWorker(parent=self), keep no reference, and never ask
+        # whether the previous one had finished — so a slow engine let workers
+        # overlap and accumulate as children of the widget. The real disposal
+        # path is AnalyticsView's phase swap (setParent(None) then
+        # deleteLater()), not closeEvent, so an accumulating child QThread could
+        # still be running when the widget is destroyed.
+        self._trend_worker = None
 
     def set_pressure_reading(self, reading: Reading) -> None:
         if reading is None:
@@ -694,14 +712,27 @@ class VacuumPredictionWidget(QWidget):
 
     @Slot()
     def _poll_trend(self) -> None:
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
+        from cryodaq.gui.zmq_client import ZmqCommandWorker, gui_worker_poll_in_flight
 
-        worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, parent=self)
+        # One poll at a time. Without this a slow engine reply let the 10 s
+        # timer stack workers on top of each other.
+        if gui_worker_poll_in_flight(self._trend_worker):
+            return
+
+        # Unparented plus release_on_settle: the global worker registry owns the
+        # in-flight lifetime, so a phase swap deleting this widget cannot take a
+        # running QThread down with it.
+        worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, release_on_settle=True)
+        self._trend_worker = worker
         worker.finished.connect(self._on_trend_result)
         worker.start()
 
     @Slot(dict)
     def _on_trend_result(self, result: dict) -> None:
+        # Terminal path: release the retained reference on EVERY outcome, before
+        # any early return, so a rejected or empty reply cannot leave the poll
+        # gate stuck closed for the life of the widget.
+        self._trend_worker = None
         if not result.get("ok") or result.get("status") == "no_data":
             # Clear any previously-rendered forecast so no stale overlay persists
             # after a bridge restart, disabled predictor, or empty buffer.
