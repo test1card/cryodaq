@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -66,6 +67,33 @@ class VacuumGuard:
         self._fire_pressure: float = float(cfg.get("fire_pressure_mbar", 1.0e-2))
         self._clear_pressure: float = float(cfg.get("clear_pressure_mbar", 1.0e-3))
         self._sustained_s: float = float(cfg.get("sustained_s", 30))
+
+        # --- Fractional rise detection -------------------------------------
+        # A level threshold cannot separate "this stand's vacuum" from "the
+        # vacuum is failing". On 2026-09-03 the guard fired 31 s after its
+        # temperature gate opened, at 7.3e-2 mbar against a 1.0e-2 threshold —
+        # 73x over — and every cooldown this stand has recorded crossed 260 K
+        # between 7.3e-2 and 9.8e-1 mbar. It was reporting the gate, not an event.
+        #
+        # A vacuum loss is a RISE. And the rise must be fractional, not absolute:
+        # +0.001 mbar/h is catastrophic at 1e-5 mbar and invisible at 5e-2, so an
+        # mbar/h threshold is wrong by orders of magnitude at one end or the other.
+        # 100*d(ln P)/dt means the same thing at every pressure.
+        #
+        # Disabled unless configured, so the level path stands alone until an
+        # operator opts in.
+        rise = cfg.get("fire_rise_pct_per_h")
+        self._fire_rise: float | None = float(rise) if rise is not None else None
+        clear_rise = cfg.get("clear_rise_pct_per_h")
+        self._clear_rise: float = float(clear_rise) if clear_rise is not None else 10.0
+        self._rise_window_s: float = float(cfg.get("rise_window_s", 600.0))
+        # A slope needs a baseline in TIME. Fitted over seconds, one gauge
+        # quantization step reads as tens of percent per hour — measuring this
+        # stand's own history produced a spurious +71.5 %/h from a single 0.00016
+        # mbar step across a database rollover. Half the window is the floor.
+        self._min_rise_span_s: float = self._rise_window_s * 0.5
+        self._pressure_history: list[tuple[float, float]] = []
+        self._rise_sustained_since: float | None = None
         self._severity: str = str(cfg.get("severity", "CRITICAL"))
 
         self._state = VacuumState.DISARMED
@@ -79,6 +107,33 @@ class VacuumGuard:
     @property
     def state(self) -> VacuumState:
         return self._state
+
+    def _fractional_rise_pct_per_h(self) -> float | None:
+        """100·d(ln P)/dt over the rise window, or None if it cannot be said.
+
+        Fractional so one threshold holds across every decade the gauge covers.
+        Returns None rather than a number whenever the window is too short in
+        TIME — a slope fitted over seconds turns gauge quantization into tens of
+        percent per hour.
+        """
+
+        points = [(t, v) for t, v in self._pressure_history if v > 0.0]
+        if len(points) < 3:
+            return None
+        span = points[-1][0] - points[0][0]
+        if span < self._min_rise_span_s:
+            return None
+        t0 = points[0][0]
+        xs = [(t - t0) / 3600.0 for t, _ in points]
+        ys = [math.log(v) for _, v in points]
+        n = len(xs)
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        denom = sum((x - mx) ** 2 for x in xs)
+        if denom <= 0.0:
+            return None
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=False)) / denom
+        return 100.0 * slope if math.isfinite(slope) else None
 
     async def tick(self) -> None:
         """Evaluate vacuum guard state. Called every eval_interval_s by engine."""
@@ -120,6 +175,14 @@ class VacuumGuard:
                 t_ref, self._arm_threshold_K,
             )
 
+        # Record pressure history for the fractional-rise path.
+        now_mono = time.monotonic()
+        if p_mbar > 0.0:
+            self._pressure_history.append((now_mono, p_mbar))
+            cutoff = now_mono - self._rise_window_s
+            self._pressure_history = [(t, v) for t, v in self._pressure_history if t >= cutoff]
+        rise_pct_per_h = self._fractional_rise_pct_per_h()
+
         # Step 3: pressure recovery when FIRED (deadband)
         if self._state == VacuumState.FIRED and p_mbar < self._clear_pressure:
             self._state = VacuumState.ARMED
@@ -140,6 +203,36 @@ class VacuumGuard:
                     )
             else:
                 self._sustained_since = None
+
+            # Fractional-rise path, independent of the level backstop above.
+            if self._state == VacuumState.ARMED and self._fire_rise is not None:
+                if rise_pct_per_h is not None and rise_pct_per_h > self._fire_rise:
+                    if self._rise_sustained_since is None:
+                        self._rise_sustained_since = now_mono
+                    if now_mono - self._rise_sustained_since >= self._sustained_s:
+                        self._state = VacuumState.FIRED
+                        logger.warning(
+                            "VacuumGuard: FIRED (рост давления %+.0f %%/ч > %+.0f %%/ч, "
+                            "P=%.2e мбар, T-опорная=%.1f K)",
+                            rise_pct_per_h, self._fire_rise, p_mbar, t_ref,
+                        )
+                else:
+                    self._rise_sustained_since = None
+
+        # Recovery from a rise-triggered fire: the rise has to stop, not the level.
+        if (
+            self._state == VacuumState.FIRED
+            and self._fire_rise is not None
+            and rise_pct_per_h is not None
+            and rise_pct_per_h < self._clear_rise
+            and p_mbar <= self._fire_pressure
+        ):
+            self._state = VacuumState.ARMED
+            self._rise_sustained_since = None
+            self._sustained_since = None
+            logger.info(
+                "VacuumGuard: ARMED (рост прекратился, %+.0f %%/ч)", rise_pct_per_h
+            )
 
         if prev_state != self._state:
             await self._publish_state_event()

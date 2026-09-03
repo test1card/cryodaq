@@ -107,6 +107,12 @@ _VACUUM_DEFAULTS: dict[str, Any] = {
     "fire_pressure_mbar": 1.0e-2,
     "clear_pressure_mbar": 1.0e-3,
     "sustained_s": 30,
+    # Fractional rise detection, 100·d(ln P)/dt. Fractional because +0.001
+    # mbar/h is catastrophic at 1e-5 mbar and invisible at 5e-2 — one absolute
+    # threshold is wrong by orders of magnitude at one end or the other.
+    "fire_rise_pct_per_h": 50.0,
+    "clear_rise_pct_per_h": 10.0,
+    "rise_window_s": 600.0,
     "severity": "CRITICAL",
     # Opt-in SafetyManager escalation on FIRED (default false = alarm-only).
     # Strict bool: only YAML `true` enables — see fail-closed override below.
@@ -156,6 +162,9 @@ def _validate_complete_vacuum_config(loaded: dict[str, Any]) -> dict[str, Any]:
         "fire_pressure_mbar",
         "clear_pressure_mbar",
         "sustained_s",
+        "fire_rise_pct_per_h",
+        "clear_rise_pct_per_h",
+        "rise_window_s",
     ):
         value = loaded[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -167,6 +176,11 @@ def _validate_complete_vacuum_config(loaded: dict[str, Any]) -> dict[str, Any]:
     for key in ("eval_interval_s", "fire_pressure_mbar", "clear_pressure_mbar", "sustained_s"):
         if numeric[key] <= 0:
             raise ValueError(f"vacuum.{key} must be > 0")
+    for key in ("fire_rise_pct_per_h", "clear_rise_pct_per_h", "rise_window_s"):
+        if numeric[key] <= 0:
+            raise ValueError(f"vacuum.{key} must be > 0")
+    if numeric["clear_rise_pct_per_h"] >= numeric["fire_rise_pct_per_h"]:
+        raise ValueError("vacuum clear_rise_pct_per_h must be below fire_rise_pct_per_h")
     for key in ("arm_threshold_K", "disarm_threshold_K"):
         if numeric[key] < 0:
             raise ValueError(f"vacuum.{key} must be >= 0")
@@ -181,6 +195,9 @@ def _validate_complete_vacuum_config(loaded: dict[str, Any]) -> dict[str, Any]:
         "fire_pressure_mbar": 1_000_000.0,
         "clear_pressure_mbar": 1_000_000.0,
         "sustained_s": 86_400.0,
+        "fire_rise_pct_per_h": 1_000_000.0,
+        "clear_rise_pct_per_h": 1_000_000.0,
+        "rise_window_s": 86_400.0,
     }
     for key, maximum in upper_bounds.items():
         if numeric[key] > maximum:

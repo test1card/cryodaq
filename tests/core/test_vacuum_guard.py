@@ -398,3 +398,135 @@ async def test_latch_fault_failure_is_non_fatal():
     event_arg = alarm_mgr.process.call_args[0][1]
     assert event_arg is not None
     assert event_arg.level == "CRITICAL"
+
+
+# ---------------------------------------------------------------------------
+# Fractional-rise detection
+#
+# The level path reports that the temperature gate opened, not that anything
+# happened: on 2026-09-03 the guard fired 31 s after arming, at 7.3e-2 mbar
+# against a 1.0e-2 threshold, and every recorded cooldown on this stand crossed
+# 260 K between 7.3e-2 and 9.8e-1 mbar. A vacuum loss is a RISE — and a
+# fractional one, because +0.001 mbar/h is catastrophic at 1e-5 mbar and
+# invisible at 5e-2.
+# ---------------------------------------------------------------------------
+
+_RISE_CFG = {
+    "fire_pressure_mbar": 1.0,       # backstop only — far above normal
+    "clear_pressure_mbar": 0.5,
+    "fire_rise_pct_per_h": 50.0,
+    "clear_rise_pct_per_h": 10.0,
+    "rise_window_s": 600.0,
+    "sustained_s": 0.0,
+}
+
+
+async def _feed(guard, tracker, series, *, t_ref: float = 250.0, start: float = 0.0, step_s: float = 60.0):
+    """Feed (pressure) samples step_s apart on a controlled monotonic clock."""
+
+    import cryodaq.core.vacuum_guard as vg_mod
+
+    real = vg_mod.time.monotonic
+    try:
+        for i, p in enumerate(series):
+            vg_mod.time.monotonic = lambda _t=start + i * step_s: _t
+            tracker.get.side_effect = (
+                lambda ch, _p=p, _t=t_ref: _make_channel_state(_t) if "Т12" in ch else _make_pressure_state(_p)
+            )
+            await guard.tick()
+    finally:
+        vg_mod.time.monotonic = real
+
+
+@pytest.mark.asyncio
+async def test_a_flat_bad_vacuum_does_not_fire():
+    """5e-2 mbar and steady is this stand's normal cold vacuum, not an event.
+
+    The whole 2026-09-03 cooldown ran here and the level path called it CRITICAL
+    within 31 seconds of arming.
+    """
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    await _feed(guard, tracker, [5.0e-2] * 12)
+    assert guard.state == VacuumState.ARMED
+
+
+@pytest.mark.asyncio
+async def test_a_slow_drift_within_normal_does_not_fire():
+    """Measured on this stand: normal fractional rise is at most ~+2.5 %/h."""
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    series = [5.0e-2 * (1.0 + 0.025 * (i * 60.0) / 3600.0) for i in range(12)]
+    await _feed(guard, tracker, series)
+    assert guard.state == VacuumState.ARMED
+
+
+@pytest.mark.asyncio
+async def test_a_sustained_fractional_rise_fires():
+    """Doubling per hour is ~+69 %/h — far outside anything this stand does."""
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    series = [5.0e-2 * 2.0 ** ((i * 60.0) / 3600.0) for i in range(12)]
+    await _feed(guard, tracker, series)
+    assert guard.state == VacuumState.FIRED
+
+
+@pytest.mark.asyncio
+async def test_the_same_fractional_rise_fires_at_any_absolute_pressure():
+    """Scale invariance: the point of a fractional threshold.
+
+    An mbar/h threshold would be wrong by orders of magnitude at one end.
+    """
+
+    for p0 in (5.0e-2, 1.0e-5):
+        guard, tracker, *_ = _make_vg(_RISE_CFG)
+        series = [p0 * 2.0 ** ((i * 60.0) / 3600.0) for i in range(12)]
+        await _feed(guard, tracker, series)
+        assert guard.state == VacuumState.FIRED, f"failed at {p0:.0e} mbar"
+
+
+@pytest.mark.asyncio
+async def test_a_short_window_cannot_manufacture_a_rise():
+    """Regression against a real analysis error.
+
+    Measuring this stand's own history produced a spurious +71.5 %/h from a
+    single 0.00016 mbar quantization step whose window had collapsed to seconds
+    across a database rollover. A slope needs a baseline in TIME.
+    """
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    # A big jump, but sampled a second apart — no real span.
+    await _feed(guard, tracker, [5.0e-2, 6.0e-2, 8.0e-2, 1.2e-1], step_s=1.0)
+    assert guard.state == VacuumState.ARMED, "no time span, no rate, no alarm"
+
+
+@pytest.mark.asyncio
+async def test_the_rise_path_is_off_unless_configured():
+    """Existing deployments keep the level path alone until an operator opts in."""
+
+    guard, tracker, *_ = _make_vg()  # no fire_rise_pct_per_h
+    series = [1.0e-5 * 2.0 ** ((i * 60.0) / 3600.0) for i in range(12)]
+    await _feed(guard, tracker, series)
+    assert guard.state == VacuumState.ARMED
+
+
+@pytest.mark.asyncio
+async def test_recovery_needs_the_rise_to_stop():
+    """Fired on a rise, cleared when the rise stops — not when a level is met."""
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    await _feed(guard, tracker, [5.0e-2 * 2.0 ** ((i * 60.0) / 3600.0) for i in range(12)])
+    assert guard.state == VacuumState.FIRED
+
+    steady = guard._pressure_history[-1][1]
+    await _feed(guard, tracker, [steady] * 12, start=10_000.0)
+    assert guard.state == VacuumState.ARMED
+
+
+@pytest.mark.asyncio
+async def test_the_absolute_backstop_still_fires():
+    """A level this bad while cold is an emergency however it got there."""
+
+    guard, tracker, *_ = _make_vg(_RISE_CFG)
+    await _feed(guard, tracker, [2.0] * 4)
+    assert guard.state == VacuumState.FIRED

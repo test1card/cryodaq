@@ -66,10 +66,43 @@ vacuum:
   arm_threshold_K: 260.0            # T_ref < this → arm vacuum guard
   disarm_threshold_K: 270.0         # T_ref > this → disarm (10K hysteresis)
 
-  # Pressure thresholds (mbar) with one-decade deadband
-  fire_pressure_mbar: 1.0e-2
-  clear_pressure_mbar: 1.0e-3
-  sustained_s: 30                   # P > fire_pressure must persist this long
+  # 2026-09-04: the guard detects a RISE; the level is only a backstop.
+  #
+  # A level threshold could not separate "this stand's vacuum" from "the vacuum
+  # is failing". At 1.0e-2 the guard fired 31 s after its temperature gate
+  # opened, at 7.3e-2 mbar — 73x over — and every cooldown this stand has
+  # recorded crossed 260 K between 7.3e-2 and 9.8e-1 mbar. It was reporting the
+  # gate, not an event, and an alarm that always fires is one that gets ignored.
+  #
+  # Raising the level would only move the false-positive point, and if the poor
+  # vacuum is water in the MLI it is temporary — a threshold detuned to this
+  # stand's current floor becomes dead weight once it is dry. So the level stays
+  # as a genuine emergency backstop only: 1 mbar while the cryostat is cold is a
+  # catastrophe however it got there.
+  fire_pressure_mbar: 1.0
+  clear_pressure_mbar: 0.5
+  sustained_s: 30                   # a fire condition must persist this long
+
+  # Primary detection: fractional pressure rise, 100·d(ln P)/dt.
+  #
+  # Fractional, not mbar/h, because +0.001 mbar/h is catastrophic at 1e-5 mbar
+  # and invisible at 5e-2 — one absolute threshold is wrong by orders of
+  # magnitude at one end or the other.
+  #
+  # 50 %/h is derived from this stand's measured history, not chosen: across
+  # 01.09-03.09 (two room-temperature pump-downs, a cooldown and a warmup) the
+  # largest genuine fractional rise over a 5-minute window was +2.5 %/h. The
+  # threshold is 20x above anything this stand has actually done, while a real
+  # leak into a cold cryostat blows through it immediately. Recalibrate once a
+  # real vacuum loss has been recorded — none has.
+  fire_rise_pct_per_h: 50.0
+  clear_rise_pct_per_h: 10.0
+  # A slope needs a baseline in TIME. Fitted over seconds, one gauge
+  # quantization step reads as tens of percent per hour: measuring this stand's
+  # own history produced a spurious +71.5 %/h from a single 0.00016 mbar step
+  # whose window had collapsed across a database rollover. Rates are refused
+  # below half this window.
+  rise_window_s: 600
 
   severity: CRITICAL
 

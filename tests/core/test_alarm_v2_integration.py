@@ -227,7 +227,7 @@ def test_shipped_vacuum_loss_cold_holds_when_pressure_becomes_unusable() -> None
     state, _, evaluator, state_mgr = _make_stack()
     state.update(_reading("Т11", 100.0))
     state.update(_reading("Т12", 100.0))
-    state.update(_reading("VSP63D_1/pressure", 2.0e-3, unit="mbar"))
+    state.update(_reading("VSP63D_1/pressure", 2.0, unit="mbar"))
 
     _, initial_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
     assert initial_transition == "TRIGGERED"
@@ -264,11 +264,11 @@ def test_shipped_vacuum_loss_cold_holds_when_evaluator_raises(monkeypatch, caplo
     state, _, evaluator, state_mgr = _make_stack()
     state.update(_reading("Т11", 100.0))
     state.update(_reading("Т12", 100.0))
-    state.update(_reading("VSP63D_1/pressure", 2.0e-3, unit="mbar"))
+    state.update(_reading("VSP63D_1/pressure", 2.0, unit="mbar"))
     _, first_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
     assert first_transition == "TRIGGERED"
 
-    state.update(_reading("VSP63D_1/pressure", 9.9e-1, unit="mbar"))
+    state.update(_reading("VSP63D_1/pressure", 1.5, unit="mbar"))
     _, positive_control_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
     assert positive_control_transition is None
     assert "vacuum_loss_cold" in state_mgr.get_active()
