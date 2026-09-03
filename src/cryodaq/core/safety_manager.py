@@ -84,6 +84,11 @@ class SafetyShutdownUnverifiedError(RuntimeError):
     """Raised while shutdown must HOLD because safety settlement is incomplete."""
 
 
+# Faults arriving while latched are retained as operator evidence, not as a
+# journal. A stuck source could otherwise repeat indefinitely.
+_MAX_SUPPRESSED_FAULTS = 32
+
+
 class SafetyState(Enum):
     SAFE_OFF = "safe_off"
     READY = "ready"
@@ -263,6 +268,10 @@ class SafetyManager:
         # latch is restartable only when it is still exclusively an interlock
         # decision, never after persistence or safety-authority loss joined it.
         self._fault_sources: set[str] = set()
+        # Faults that arrived while already latched. Bounded: this is evidence
+        # for the operator, not a journal, and an unbounded list under a stuck
+        # fault source would grow without limit.
+        self._suppressed_faults: list[dict[str, Any]] = []
         self._fault_time = 0.0
         self._fault_activated_at = 0.0
         # Presentation identity only; no recovery or output authority.
@@ -1102,6 +1111,41 @@ class SafetyManager:
     @property
     def fault_reason(self) -> str:
         return self._fault_reason
+
+    @property
+    def suppressed_faults(self) -> tuple[dict[str, Any], ...]:
+        """Faults that arrived while already latched, oldest first.
+
+        The latch refuses to change state; it must not also make the events
+        disappear. Cleared when the latch clears, since they describe one
+        latched episode.
+        """
+
+        return tuple(dict(entry) for entry in self._suppressed_faults)
+
+    def _record_suppressed_fault(
+        self,
+        reason: str,
+        *,
+        channel: str,
+        value: float,
+        source: str,
+    ) -> None:
+        if len(self._suppressed_faults) >= _MAX_SUPPRESSED_FAULTS:
+            # Keep the FIRST ones: the earliest fault after the latch is the one
+            # most likely to explain what actually went wrong, and a stuck
+            # source repeating itself must not push it out.
+            return
+        self._suppressed_faults.append(
+            {
+                "reason": reason,
+                "channel": channel,
+                "value": value,
+                "source": source,
+                "at": time.time(),
+                "latched_reason": self._fault_reason,
+            }
+        )
 
     def snapshot_operator_safety(self) -> OperatorSafetySnapshot:
         """Return the owner cache after consuming already-terminal children.
@@ -3203,6 +3247,8 @@ class SafetyManager:
                 except Exception as exc:
                     logger.error("persistence_failure_clear callback failed: %s", exc)
             self._persistence_fault_active = False
+            # The operator has seen the episode; its suppressed faults are spent.
+            self._suppressed_faults = []
             self._transition(SafetyState.MANUAL_RECOVERY, f"Fault acknowledged: {reason}")
             await self._publish_keithley_channel_states("fault_acknowledged")
             return {"ok": True, "state": self._state.value}
@@ -3906,11 +3952,24 @@ class SafetyManager:
         # FAULT_LATCHED and exits.
         if self._state == SafetyState.FAULT_LATCHED:
             self._fault_sources.add(source)
-            logger.info(
-                "_fault() re-entry ignored (already latched); new reason=%s channel=%s source=%s",
+            # Refusing the STATE change is correct — that is what a latch is for.
+            # Dropping the FAULT was not. On 2026-09-03 the manager latched at
+            # 11:19 on a vacuum threshold that fires on every cooldown, and when
+            # the cryocooler stopped at 22:07 that CRITICAL arrived here and left
+            # as one INFO line. The first fault of a session was silently
+            # deciding what the whole session could report.
+            #
+            # So: keep the refusal, keep the record. Logged at the severity it
+            # actually has, and retained so it can be recovered afterwards
+            # rather than reconstructed from a log grep.
+            self._record_suppressed_fault(reason, channel=channel, value=value, source=source)
+            logger.critical(
+                "FAULT WHILE LATCHED (state unchanged, fault recorded): reason=%s channel=%s "
+                "source=%s | latched since: %s",
                 reason,
                 channel or "-",
                 source,
+                self._fault_reason or "-",
             )
             return False
 
@@ -3921,6 +3980,9 @@ class SafetyManager:
         self._latched_fault_abort_generation = self._register_abort_intent(full=True)
         self._pending_interlock_start_warning = None
         self._fault_sources = {source}
+        # A new latched episode starts with no suppressed faults: the retained
+        # ones describe the episode that just ended, not this one.
+        self._suppressed_faults = []
         self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
