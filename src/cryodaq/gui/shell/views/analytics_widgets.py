@@ -725,14 +725,32 @@ class VacuumPredictionWidget(QWidget):
         worker = ZmqCommandWorker({"cmd": "get_vacuum_trend"}, release_on_settle=True)
         self._trend_worker = worker
         worker.finished.connect(self._on_trend_result)
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # start() refuses while the process-wide admission gate is closed,
+            # e.g. during shutdown. A never-started QThread reports
+            # isFinished() == False forever, so leaving it in _trend_worker
+            # would hold the single-flight gate shut for the widget's lifetime.
+            self._trend_worker = None
+            raise
 
     @Slot(dict)
     def _on_trend_result(self, result: dict) -> None:
-        # Terminal path: release the retained reference on EVERY outcome, before
-        # any early return, so a rejected or empty reply cannot leave the poll
-        # gate stuck closed for the life of the widget.
-        self._trend_worker = None
+        # Release the retained reference on EVERY outcome, before any early
+        # return, so a rejected or empty reply cannot leave the poll gate stuck
+        # closed — but ONLY if the completing worker is still the retained one.
+        #
+        # gui_worker_poll_in_flight is `not isFinished()`, and the result is
+        # delivered to this thread over a QueuedConnection, so there is a real
+        # window: worker A's thread finishes, the gate opens, a later poll
+        # stores worker B, and only then does A's queued result arrive. Clearing
+        # unconditionally there would orphan B and let a third poll overlap it.
+        #
+        # sender() rather than a lambda binding the worker: a lambda capturing
+        # self would defeat Qt's automatic receiver disconnection.
+        if self._trend_worker is self.sender():
+            self._trend_worker = None
         if not result.get("ok") or result.get("status") == "no_data":
             # Clear any previously-rendered forecast so no stale overlay persists
             # after a bridge restart, disabled predictor, or empty buffer.

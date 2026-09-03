@@ -47,20 +47,35 @@ def app():
 
 
 def _settle_all(application, timeout_s: float = 5.0) -> None:
-    """Drain until no worker this module started is still in flight."""
+    """Drain until no worker this module started is in flight, or FAIL.
+
+    Fail-closed on purpose. The previous version waited five seconds and then
+    cleared the tracking list regardless, so a worker still running at teardown
+    was silently forgotten — which could both manufacture a crash in a later
+    test and conceal that this file was the origin. A real QThread left alive is
+    a defect in the test, and the test must say so rather than leave it for the
+    next file to trip over.
+    """
 
     from cryodaq.gui.zmq_client import gui_worker_poll_in_flight
 
+    tracked = list(_STARTED)
+    _STARTED.clear()
     deadline = time.monotonic() + timeout_s
+    alive: list = []
     while time.monotonic() < deadline:
-        alive = [w for w in _STARTED if gui_worker_poll_in_flight(w)]
+        alive = [w for w in tracked if gui_worker_poll_in_flight(w)]
         if not alive:
             break
         application.processEvents()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
         time.sleep(0.01)
     _drain(application, ms=150)
-    _STARTED.clear()
+    if alive:
+        raise AssertionError(
+            f"{len(alive)} worker(s) still in flight after {timeout_s:.0f}s of bounded cleanup; "
+            "a live QThread must not escape this test"
+        )
 
 
 _STARTED: list = []
