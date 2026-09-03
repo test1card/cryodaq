@@ -2177,7 +2177,8 @@ class GasInventoryWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        card = _card("analyticsGasInventory")
+        self._card = _card("analyticsGasInventory")
+        card = self._card
         lay = QVBoxLayout(card)
         lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         lay.setSpacing(theme.SPACE_2)
@@ -2192,6 +2193,12 @@ class GasInventoryWidget(QWidget):
         value_row.setContentsMargins(0, 0, 0, 0)
         value_row.setSpacing(theme.SPACE_2)
 
+        # DESIGN: RULE-A11Y-003 + MANIFEST decision #25. STATUS_FAULT measures
+        # 3.94:1 and fails AA body contrast, so it never colours value text. The
+        # compound pattern is used instead: readable FOREGROUND text, the status
+        # colour carried by the arrow glyph and a border-left on the card. Colour
+        # is therefore never the only channel (decision #39) — arrow, word and
+        # border all say the same thing.
         self._value_label = QLabel("—")
         big = QFont(theme.FONT_MONO)
         big.setPixelSize(theme.FONT_SIZE_2XL)
@@ -2200,11 +2207,19 @@ class GasInventoryWidget(QWidget):
         self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
         value_row.addWidget(self._value_label)
 
+        self._arrow_label = QLabel("")
+        arrow_font = QFont(theme.FONT_BODY)
+        arrow_font.setPixelSize(theme.FONT_SIZE_XL)
+        arrow_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
+        self._arrow_label.setFont(arrow_font)
+        self._arrow_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        value_row.addWidget(self._arrow_label)
+
         self._rate_label = QLabel("")
         rate_font = QFont(theme.FONT_MONO)
         rate_font.setPixelSize(theme.FONT_SIZE_LG)
         self._rate_label.setFont(rate_font)
-        self._rate_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        self._rate_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
         value_row.addWidget(self._rate_label)
         value_row.addStretch()
         lay.addLayout(value_row)
@@ -2261,15 +2276,20 @@ class GasInventoryWidget(QWidget):
             del self._series[: len(self._series) - self._MAX_POINTS]
         self._curve.setData([t for t, _ in self._series], [v for _, v in self._series])
 
+        # Value text stays FOREGROUND whatever the direction (RULE-A11Y-003).
         self._value_label.setText(f"{float(value):.0f}%")
-        self._value_label.setStyleSheet(f"color: {self._colour_for(rate)}; background: transparent;")
+        self._value_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
 
+        colour = self._colour_for(rate)
+        self._apply_status_edge(colour)
         if rate is None:
+            self._arrow_label.setText("")
             self._rate_label.setText("")
             self._note_label.setText("скорость: недостаточно истории")
         else:
-            self._rate_label.setText(f"{self._arrow_for(rate)} {abs(rate):.1f} %/ч")
-            self._rate_label.setStyleSheet(f"color: {self._colour_for(rate)}; background: transparent;")
+            self._arrow_label.setText(self._arrow_for(rate))
+            self._arrow_label.setStyleSheet(f"color: {colour}; background: transparent;")
+            self._rate_label.setText(f"{abs(rate):.1f} %/ч")
             self._note_label.setText(self._verdict_word(rate))
 
     def set_gas_inventory_unavailable(self, reason: str) -> None:
@@ -2279,8 +2299,23 @@ class GasInventoryWidget(QWidget):
     def _render_absent(self, reason: str) -> None:
         self._value_label.setText("—")
         self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
+        self._arrow_label.setText("")
         self._rate_label.setText("")
         self._note_label.setText(str(reason))
+        self._apply_status_edge(None)
+
+    def _apply_status_edge(self, colour: str | None) -> None:
+        """Carry the status on the card's left border (RULE-A11Y-003 pattern)."""
+
+        edge = colour or theme.BORDER_SUBTLE
+        self._card.setStyleSheet(
+            "#analyticsGasInventory {"
+            f" background-color: {theme.SURFACE_CARD};"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f" border-left: 3px solid {edge};"
+            f" border-radius: {theme.RADIUS_MD}px;"
+            "}"
+        )
 
     @staticmethod
     def _colour_for(rate: float | None) -> str:

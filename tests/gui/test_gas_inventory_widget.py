@@ -1,9 +1,15 @@
-"""The gas readout colours by direction, and refuses rather than guesses.
+"""The gas readout signals direction, and refuses rather than guesses.
 
 The quarter it occupies held an "awaiting F8" placeholder through every cooldown
 this stand has ever run. What replaces it has one job: say whether the pump is
-winning. Colour follows the RATE, not the level — 118% is not itself bad, and
+winning. The signal follows the RATE, not the level — 118% is not itself bad, and
 the operator decides what it means. Direction is the decision-relevant part.
+
+Signalling obeys RULE-A11Y-003 and MANIFEST decision #25: STATUS_FAULT measures
+3.94:1 and fails AA body contrast, so it never colours value text. The status
+colour rides on the arrow glyph and the card's left border, while the number
+stays FOREGROUND — three channels (arrow, word, border) carrying one fact, per
+decision #39.
 """
 
 from __future__ import annotations
@@ -50,8 +56,10 @@ def test_pumping_reads_green_with_a_down_arrow(app) -> None:
     w.set_gas_inventory(_reading(82.0, -3.5))
 
     assert "82" in w._value_label.text()
-    assert theme.STATUS_OK in w._value_label.styleSheet()
-    assert "↓" in w._rate_label.text(), "falling must show a down arrow"
+    assert theme.FOREGROUND in w._value_label.styleSheet(), "RULE-A11Y-003: value text stays readable"
+    assert w._arrow_label.text() == "↓", "falling must show a down arrow"
+    assert theme.STATUS_OK in w._arrow_label.styleSheet(), "the glyph carries the colour"
+    assert theme.STATUS_OK in w._card.styleSheet(), "and so does the left border"
     assert "3.5" in w._rate_label.text()
     assert w._note_label.text() == "откачка идёт"
 
@@ -63,8 +71,13 @@ def test_filling_reads_red_with_an_up_arrow(app) -> None:
     w.set_gas_inventory(_reading(118.0, +4.7))
 
     assert "118" in w._value_label.text()
-    assert theme.STATUS_FAULT in w._value_label.styleSheet()
-    assert "↑" in w._rate_label.text()
+    assert theme.STATUS_FAULT not in w._value_label.styleSheet(), (
+        "RULE-A11Y-003: STATUS_FAULT is 3.94:1 and must never colour value text"
+    )
+    assert theme.FOREGROUND in w._value_label.styleSheet()
+    assert w._arrow_label.text() == "↑"
+    assert theme.STATUS_FAULT in w._arrow_label.styleSheet(), "the glyph carries it instead"
+    assert theme.STATUS_FAULT in w._card.styleSheet(), "with the border-left as the second channel"
     assert w._note_label.text() == "газ прибывает"
 
 
@@ -78,18 +91,18 @@ def test_a_high_level_with_no_motion_is_not_painted_red(app) -> None:
     w = GasInventoryWidget()
     w.set_gas_inventory(_reading(118.0, 0.0))
 
-    assert theme.STATUS_FAULT not in w._value_label.styleSheet()
-    assert theme.STATUS_OK not in w._value_label.styleSheet()
+    assert theme.STATUS_FAULT not in w._card.styleSheet()
+    assert theme.STATUS_OK not in w._card.styleSheet()
     assert w._note_label.text() == "держится"
 
 
 def test_the_sign_alone_decides_the_colour(app) -> None:
     w = GasInventoryWidget()
     w.set_gas_inventory(_reading(40.0, +1.0))
-    assert theme.STATUS_FAULT in w._value_label.styleSheet(), "low but filling is still red"
+    assert theme.STATUS_FAULT in w._card.styleSheet(), "low but filling is still red"
 
     w.set_gas_inventory(_reading(150.0, -1.0))
-    assert theme.STATUS_OK in w._value_label.styleSheet(), "high but pumping is still green"
+    assert theme.STATUS_OK in w._card.styleSheet(), "high but pumping is still green"
 
 
 # --------------------------------------------------------------------------
@@ -102,8 +115,8 @@ def test_no_rate_yet_shows_the_value_without_a_direction(app) -> None:
     w.set_gas_inventory(_reading(96.0, None))
 
     assert "96" in w._value_label.text(), "the value is still worth showing"
-    assert w._rate_label.text() == "", "but no arrow is invented"
-    assert theme.MUTED_FOREGROUND in w._value_label.styleSheet()
+    assert w._arrow_label.text() == "", "but no arrow is invented"
+    assert w._rate_label.text() == ""
     assert "недостаточно" in w._note_label.text()
 
 
@@ -129,6 +142,7 @@ def test_none_clears_the_readout(app) -> None:
     w.set_gas_inventory(_reading(96.0, -1.0))
     w.set_gas_inventory(None)
     assert w._value_label.text() == "—"
+    assert w._arrow_label.text() == ""
     assert w._rate_label.text() == ""
 
 
@@ -174,3 +188,18 @@ def test_it_is_registered_and_claims_both_free_quarters() -> None:
         "vacuum's quarter duplicated the pressure already in the main slot"
     )
     assert create(WIDGET_GAS_INVENTORY) is not None, "the id must resolve in the registry"
+
+
+def test_status_fault_never_reaches_value_text(app) -> None:
+    """RULE-A11Y-003, asserted directly.
+
+    STATUS_FAULT is 3.94:1 against the default dark background and fails AA body
+    contrast. An operator who cannot read the number may miss the very condition
+    it was coloured to announce. It belongs on the glyph and the border.
+    """
+
+    w = GasInventoryWidget()
+    for pct, rate in ((118.0, +7.5), (80.0, -3.0), (100.0, 0.0), (96.0, None)):
+        w.set_gas_inventory(_reading(pct, rate))
+        assert theme.STATUS_FAULT not in w._value_label.styleSheet()
+        assert theme.STATUS_STALE not in w._value_label.styleSheet()
