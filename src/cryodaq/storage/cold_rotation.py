@@ -28,7 +28,11 @@ import pyarrow.parquet as pq
 
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.archive_reader import validate_archive_index_authority
+from cryodaq.storage.archive_reader import (
+    OperatorLogDeclaration,
+    classify_operator_log_declaration,
+    validate_archive_index_authority,
+)
 from cryodaq.storage.descriptor_archive import (
     MAX_ARCHIVE_DESCRIPTORS,
     ArchivedDescriptor,
@@ -1179,6 +1183,19 @@ class ColdRotationService:
                         exc,
                     )
                     continue
+            # One canonical reading — see classify_operator_log_declaration.
+            # This used to be `any(value is not None ...)` over the five fields.
+            # An empty declaration carries rows == 0, and `0 is not None`, so a
+            # valid stranded database was read as having operator fields and
+            # then rejected for the sidecar metadata it correctly lacks — and
+            # was therefore never reclaimed.
+            sweep_declaration = classify_operator_log_declaration(entry)
+            if sweep_declaration is OperatorLogDeclaration.INVALID:
+                logger.warning(
+                    "Stranded hot DB %s has an incomplete operator-log index — NOT deleting",
+                    name,
+                )
+                continue
             operator_fields = (
                 entry.get("operator_log_path"),
                 entry.get("operator_log_rows"),
@@ -1186,8 +1203,7 @@ class ColdRotationService:
                 entry.get("operator_log_size_bytes"),
                 entry.get("operator_log_schema"),
             )
-            has_any_operator_field = any(value is not None for value in operator_fields)
-            if not has_any_operator_field:
+            if sweep_declaration is OperatorLogDeclaration.EMPTY:
                 try:
                     if self._table_has_rows(db_path, "operator_log"):
                         logger.warning(
@@ -1202,13 +1218,7 @@ class ColdRotationService:
                         exc,
                     )
                     continue
-            if has_any_operator_field:
-                if any(value is None for value in operator_fields):
-                    logger.warning(
-                        "Stranded hot DB %s has an incomplete operator-log index — NOT deleting",
-                        name,
-                    )
-                    continue
+            else:
                 operator_rel, operator_rows, operator_checksum, operator_size, operator_schema = operator_fields
                 expected_rel = archive_rel.removesuffix(".parquet") + ".operator_log.parquet"
                 operator_path = self._archive_dir / str(operator_rel)
@@ -1441,15 +1451,22 @@ class ColdRotationService:
                 or entry.get("checksum_md5") != checksum
             ):
                 continue
-            operator_ok = (
-                not any(key.startswith("operator_log_") for key in entry)
-                if operator_log_rel is None
-                else entry.get("operator_log_path") == operator_log_rel
-                and entry.get("operator_log_rows") == operator_log_rows
-                and entry.get("operator_log_checksum_md5") == operator_log_checksum
-                and entry.get("operator_log_size_bytes") == operator_log_size_bytes
-                and entry.get("operator_log_schema") == operator_log_schema
-            )
+            # One canonical reading — see classify_operator_log_declaration.
+            # This used to demand that a no-log entry carry no operator_log_*
+            # key at all, which _update_index never writes, so a committed
+            # empty declaration was judged uncommitted and its Parquet removed.
+            declaration = classify_operator_log_declaration(entry)
+            if operator_log_rel is None:
+                operator_ok = declaration is OperatorLogDeclaration.EMPTY
+            else:
+                operator_ok = (
+                    declaration is OperatorLogDeclaration.COMPLETE
+                    and entry.get("operator_log_path") == operator_log_rel
+                    and entry.get("operator_log_rows") == operator_log_rows
+                    and entry.get("operator_log_checksum_md5") == operator_log_checksum
+                    and entry.get("operator_log_size_bytes") == operator_log_size_bytes
+                    and entry.get("operator_log_schema") == operator_log_schema
+                )
             descriptor_ok = (
                 not any(key.startswith("channel_descriptors_") for key in entry)
                 if descriptor_rel is None
@@ -1499,17 +1516,14 @@ class ColdRotationService:
             or pq.read_metadata(str(archive_path)).num_rows != row_count
         ):
             raise RuntimeError("indexed readings artifact integrity mismatch")
+        # One canonical reading — see classify_operator_log_declaration.
+        archive_declaration = classify_operator_log_declaration(entry)
         if operator_log_rel is None:
-            # Absence is now declared, so verify the declaration rather than
-            # the absence of any mention: exactly a null path and a zero count,
-            # and no sidecar metadata claiming an artifact that was not written.
-            if entry.get("operator_log_path") is not None or entry.get("operator_log_rows") != 0:
+            if archive_declaration is not OperatorLogDeclaration.EMPTY:
                 raise RuntimeError("indexed operator_log absence is not declared correctly")
-            if any(
-                key in entry for key in ("operator_log_checksum_md5", "operator_log_size_bytes", "operator_log_schema")
-            ):
-                raise RuntimeError("indexed operator_log metadata is unexpected")
         else:
+            if archive_declaration is not OperatorLogDeclaration.COMPLETE:
+                raise RuntimeError("indexed operator_log declaration is incomplete")
             operator_log_path = self._archive_dir / operator_log_rel
             if (
                 entry.get("operator_log_path") != operator_log_rel

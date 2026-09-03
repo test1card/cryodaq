@@ -1339,3 +1339,175 @@ def test_cold_rotation_imports_channel_contract_only_through_storage_adapter() -
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cryodaq.channels")
     ]
     assert direct == []
+
+
+# ---------------------------------------------------------------------------
+# One canonical operator-log declaration (2026-09-03)
+# ---------------------------------------------------------------------------
+def test_no_log_day_survives_the_whole_round_trip(tmp_path: Path) -> None:
+    """A day with no operator entries must pass every stage that reads its declaration.
+
+    The same contract used to be implemented four different ways, and they
+    disagreed about the one shape rotation actually writes for an empty day
+    (null path, zero rows, no sidecar keys):
+
+    * commit recognition demanded no ``operator_log_*`` key at all, so it could
+      never recognise its own write. A rotation whose atomic replace landed and
+      which then raised was judged uncommitted, and recovery deleted the Parquet
+      while ``index.json`` kept pointing at it;
+    * the stranded sweep computed ``any(value is not None ...)``, and since
+      ``rows`` is ``0`` it read the entry as having operator fields, then
+      rejected the sidecar metadata an empty day correctly lacks — so the hot
+      database was never reclaimed.
+
+    This walks the whole path: rotate → index → post-commit recognition →
+    stranded sweep → cold read.
+    """
+
+    import asyncio
+
+    from cryodaq.storage.archive_reader import ArchiveReader
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    _create_db(
+        data_dir / old_name,
+        rows=5,
+        base_ts=datetime(old_day.year, old_day.month, old_day.day, tzinfo=UTC).timestamp(),
+    )
+    # Deliberately NO operator_log table: this is the normal no-log day.
+
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    results = asyncio.run(service.run_once(now=today))
+    assert results, "a no-log day must rotate"
+
+    # --- the declaration is the explicit empty one -------------------------
+    index = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))
+    entry = next(e for e in index["files"] if e["original_name"] == old_name)
+    assert entry["operator_log_path"] is None
+    assert entry["operator_log_rows"] == 0
+    for key in ("operator_log_checksum_md5", "operator_log_size_bytes", "operator_log_schema"):
+        assert key not in entry, f"an empty day must not claim {key}"
+
+    # The reader's own predicate must accept it (this one predates the fix, so
+    # the assertion is meaningful on both trees).
+    from cryodaq.storage.archive_reader import operator_log_declared_absent
+
+    assert operator_log_declared_absent(entry) is True
+
+    # --- the archive it committed is intact, and stays intact --------------
+    archive_path = archive_dir / entry["archive_path"]
+    assert archive_path.is_file(), "the committed Parquet must survive recognition"
+    assert pq.read_metadata(str(archive_path)).num_rows == 5
+
+    # --- the stranded hot copy is reclaimed on the next pass ---------------
+    # It was never deleted in pass 1 only if the unlink failed; force the
+    # stranded state directly so the sweep is what is under test.
+    assert not (data_dir / old_name).exists(), "pass 1 should have reclaimed it"
+
+    # --- the cold operator log answers explicitly empty, not "unknown" -----
+    reader = ArchiveReader(data_dir, archive_dir)
+    entries = reader.query_operator_log(None, None)
+    assert entries == [], "a declared-empty day must read back as an empty log, not an error"
+
+
+def test_stranded_no_log_database_is_reclaimed_by_the_sweep(tmp_path: Path) -> None:
+    """The sweep must reclaim an unchanged stranded DB whose day declared no log.
+
+    This is the half that `any(value is not None ...)` broke: rows == 0 made the
+    sweep believe operator fields were present, and it then refused to delete
+    because the sidecar metadata was absent — which is exactly correct for an
+    empty declaration.
+    """
+
+    import asyncio
+    import pathlib
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    old_day = today - timedelta(days=40)
+    old_name = f"data_{old_day.date().isoformat()}.db"
+    _create_db(
+        data_dir / old_name,
+        rows=5,
+        base_ts=datetime(old_day.year, old_day.month, old_day.day, tzinfo=UTC).timestamp(),
+    )
+
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+
+    # Pass 1 with the unlink refused: the day is archived and indexed, and the
+    # hot database is left stranded next to its Parquet.
+    real_unlink = pathlib.Path.unlink
+    lock = {"active": True}
+
+    def flaky_unlink(self, *args, **kwargs):
+        if lock["active"] and self.name.startswith(old_name):
+            raise PermissionError("simulated file lock")
+        return real_unlink(self, *args, **kwargs)
+
+    with patch.object(pathlib.Path, "unlink", flaky_unlink):
+        assert asyncio.run(service.run_once(now=today))
+        assert (data_dir / old_name).exists(), "the locked hot DB must survive pass 1"
+
+    # Pass 2, lock released: the sweep must reclaim it. _find_candidates skips
+    # the already-indexed day, so only the sweep can.
+    lock["active"] = False
+    asyncio.run(service.run_once(now=today))
+    assert not (data_dir / old_name).exists(), (
+        "a stranded no-log database with a valid empty declaration must be reclaimed"
+    )
+
+
+def test_the_declaration_classifier_is_the_single_source_of_truth() -> None:
+    """The one predicate every consumer must ask, and its fail-closed edges.
+
+    Introduced with the fix, so it cannot be red on the pre-fix tree — the
+    symbols did not exist. Its value is guarding the contract from here on:
+    the behavioural reds live in the two tests above and in the three
+    stranded-sweep tests.
+    """
+
+    from cryodaq.storage.archive_reader import (
+        OperatorLogDeclaration,
+        classify_operator_log_declaration,
+        operator_log_declared_absent,
+    )
+
+    empty = {"operator_log_path": None, "operator_log_rows": 0}
+    complete = {
+        "operator_log_path": "year=2026/month=03/data_2026-03-20.operator_log.parquet",
+        "operator_log_rows": 3,
+        "operator_log_checksum_md5": "d41d8cd98f00b204e9800998ecf8427e",
+        "operator_log_size_bytes": 128,
+        "operator_log_schema": "operator_log_v2",
+    }
+
+    assert classify_operator_log_declaration(empty) is OperatorLogDeclaration.EMPTY
+    assert classify_operator_log_declaration(complete) is OperatorLogDeclaration.COMPLETE
+    assert operator_log_declared_absent(empty) is True
+    assert operator_log_declared_absent(complete) is False
+
+    # Every partial or ambiguous shape is INVALID, and callers fail closed on it.
+    invalid = {
+        "legacy entry with no declaration at all": {},
+        "null path but a non-zero row count": {"operator_log_path": None, "operator_log_rows": 3},
+        "null path carrying sidecar metadata": {**empty, "operator_log_schema": "operator_log_v1"},
+        "declared artifact missing its checksum": {
+            k: v for k, v in complete.items() if k != "operator_log_checksum_md5"
+        },
+        "declared artifact with an unknown schema": {**complete, "operator_log_schema": "operator_log_v9"},
+        "row count present but not written as an int": {"operator_log_path": None, "operator_log_rows": "0"},
+        "bool must not pass as a row count": {"operator_log_path": None, "operator_log_rows": False},
+        "declared artifact with zero rows": {**complete, "operator_log_rows": 0},
+    }
+    for label, entry in invalid.items():
+        assert classify_operator_log_declaration(entry) is OperatorLogDeclaration.INVALID, label
+        assert operator_log_declared_absent(entry) is False, label

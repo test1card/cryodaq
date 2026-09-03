@@ -16,7 +16,7 @@ import stat
 import struct
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -100,6 +100,97 @@ def _validate_partitioned_artifact(relative: object, day: date, basenames: set[s
 _MISSING = object()
 
 
+_OPERATOR_LOG_SIDECAR_KEYS = (
+    "operator_log_checksum_md5",
+    "operator_log_size_bytes",
+    "operator_log_schema",
+)
+_OPERATOR_LOG_SCHEMA_NAMES = frozenset({"operator_log_v1", "operator_log_v2"})
+
+
+class OperatorLogDeclaration(StrEnum):
+    """How an index entry declares its operator-log archive."""
+
+    EMPTY = "empty"
+    """Explicitly declared as having no operator log: null path, zero rows."""
+
+    COMPLETE = "complete"
+    """A sidecar artifact is declared with every field needed to verify it."""
+
+    INVALID = "invalid"
+    """Partial, malformed, or a legacy entry that predates the declaration."""
+
+
+def classify_operator_log_declaration(entry: Mapping[str, object]) -> OperatorLogDeclaration:
+    """The ONE reading of an entry's operator-log declaration.
+
+    This predicate exists because the same contract was previously implemented
+    three different ways, and the three disagreed:
+
+    * ``_update_index`` writes an empty day as ``operator_log_path=None`` plus
+      ``operator_log_rows=0``, and writes no sidecar keys at all.
+    * ``_index_has_complete_entry`` demanded that a no-log entry carry *no*
+      ``operator_log_*`` key whatsoever, so it could never recognise the empty
+      declaration that ``_update_index`` had just written. A rotation whose
+      atomic replace succeeded and which then raised was therefore judged
+      uncommitted, and recovery deleted the Parquet — leaving ``index.json``
+      pointing at an archive that no longer existed.
+    * ``_sweep_stranded`` computed ``any(value is not None ...)`` over the five
+      fields. For an empty declaration ``rows`` is ``0``, and ``0 is not None``,
+      so it concluded that operator fields were present and then rejected the
+      absent sidecar metadata as incomplete. A valid stranded hot database was
+      never reclaimed.
+
+    Every caller now asks this function instead, so the three cannot drift
+    apart again. Partial declarations are INVALID and every caller must treat
+    that as fail-closed: refuse to recognise a commit, refuse to delete a hot
+    database, refuse to certify an archive.
+
+    An entry carrying no ``operator_log_*`` keys at all is INVALID rather than
+    empty. Absence used to be expressed that way, which is indistinguishable
+    from an index written before the field existed — the ambiguity that on
+    2026-09-01 made every operator-log read fail once fifteen such days had
+    been archived. Absence must now be stated, not inferred.
+    """
+
+    if "operator_log_path" not in entry or "operator_log_rows" not in entry:
+        return OperatorLogDeclaration.INVALID
+
+    path = entry.get("operator_log_path")
+    rows = entry.get("operator_log_rows")
+    declared_sidecar_keys = [key for key in _OPERATOR_LOG_SIDECAR_KEYS if key in entry]
+
+    if path is None:
+        # `type(rows) is int` rather than isinstance: bool is a subclass of int,
+        # and True/False must not pass as a row count.
+        if type(rows) is int and rows == 0 and not declared_sidecar_keys:
+            return OperatorLogDeclaration.EMPTY
+        return OperatorLogDeclaration.INVALID
+
+    if (
+        type(path) is not str
+        or not path
+        or type(rows) is not int
+        or rows <= 0
+        or len(declared_sidecar_keys) != len(_OPERATOR_LOG_SIDECAR_KEYS)
+    ):
+        return OperatorLogDeclaration.INVALID
+
+    checksum = entry.get("operator_log_checksum_md5")
+    size_bytes = entry.get("operator_log_size_bytes")
+    schema = entry.get("operator_log_schema")
+    if (
+        type(checksum) is not str
+        or not checksum
+        or type(size_bytes) is not int
+        or size_bytes <= 0
+        or schema not in _OPERATOR_LOG_SCHEMA_NAMES
+    ):
+        return OperatorLogDeclaration.INVALID
+
+    return OperatorLogDeclaration.COMPLETE
+
+
 def operator_log_declared_absent(entry: dict[str, object]) -> bool:
     """Whether this entry states, explicitly, that its day has no operator log.
 
@@ -115,24 +206,15 @@ def operator_log_declared_absent(entry: dict[str, object]) -> bool:
     metadata. Anything else carrying operator fields is a real sidecar and is
     validated as one.
     """
-    if "operator_log_path" not in entry:
-        return False
-    if entry.get("operator_log_path") is not None:
-        return False
-    # The row count must be WRITTEN, not defaulted.
+    # Delegates so that this reader, rotation's commit recognition, its
+    # stranded-file sweep and its committed-archive verification all share ONE
+    # implementation. They used to carry four, and they disagreed.
     #
-    # Treating an absent count as zero accepts a half-written entry -- a null
-    # path and nothing else -- as proof that the day held no entries. That is
-    # the one thing this predicate must never do: it is indistinguishable from
-    # an entry whose count was lost, and declaring it empty hides an unknown
-    # journal permanently. An incomplete declaration is not a declaration, and
-    # the reader is right to refuse it.
-    rows = entry.get("operator_log_rows", _MISSING)
-    if type(rows) is not int or rows != 0:
-        return False
-    return not any(
-        field in entry for field in ("operator_log_size_bytes", "operator_log_checksum_md5", "operator_log_schema")
-    )
+    # The row count must be WRITTEN, not defaulted, which the classifier
+    # enforces: treating an absent count as zero would accept a half-written
+    # entry — a null path and nothing else — as proof that the day held no
+    # entries, which is indistinguishable from an entry whose count was lost.
+    return classify_operator_log_declaration(entry) is OperatorLogDeclaration.EMPTY
 
 
 def validate_archive_index_authority(document: object) -> dict[str, object]:
