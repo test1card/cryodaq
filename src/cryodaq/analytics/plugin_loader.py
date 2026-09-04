@@ -15,6 +15,7 @@ import inspect
 import logging
 import types
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,27 @@ _SUBSCRIBE_NAME = "plugin_pipeline"
 
 class _PluginCleanupAmbiguity(RuntimeError):
     """A constructed but inactive plugin owner could not be torn down exactly."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PhaseReceiver:
+    """One plugin's phase-event destination, captured at load time.
+
+    The destination is a real ``dict`` taken once, on the plugin-load path,
+    where running plugin code is already expected and accounted for. Publication
+    then writes into this captured object and introspects nothing, so no
+    attribute hook, property or ``__dict__`` descriptor can execute on the
+    critical path.
+
+    ``generation`` is what makes a hot reload safe: the replacement instance
+    gets a new generation, so a delivery bound before the reload no longer
+    matches and is not handed to a plugin that was not there for it.
+    """
+
+    plugin_id: str
+    plugin: AnalyticsPlugin
+    generation: int
+    namespace: dict[str, Any]
 
 
 def _create_owned_task(
@@ -113,9 +135,10 @@ class PluginPipeline:
         self._plugins_dir = plugins_dir
         self._plugins: dict[str, AnalyticsPlugin] = {}
         # Phase delivery is decoupled from the command handler that sets it —
-        # see notify_phase_change. A plain slot assignment is the only work done
-        # on the engine loop.
-        self._latest_phase_entry: PhaseEntry | None = None
+        # see notify_phase_change. Recipients are captured on the plugin-load
+        # path, never discovered by introspection at publication time.
+        self._phase_receivers: dict[str, _PhaseReceiver] = {}
+        self._pending_phase_delivery: tuple[PhaseEntry, tuple[_PhaseReceiver, ...]] | None = None
         self._batch_interval_s = batch_interval_s
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
@@ -134,66 +157,95 @@ class PluginPipeline:
     # ------------------------------------------------------------------
 
     def notify_phase_change(self, entry: PhaseEntry | None) -> None:
-        """Record the latest authoritative phase entry. Runs NO plugin code.
+        """Bind one authoritative phase entry to the recipients present NOW.
 
         Called from the experiment-phase command handler, on the engine event
-        loop. The previous design called plugin hooks here; the correction after
-        that moved the hooks to the analytics task — which was still the SAME
-        event loop, so a blocking hook still stalled acquisition. Moving
-        blocking work between asyncio tasks is not isolation.
+        loop. It runs no plugin code: the recipient records were captured when
+        each plugin was loaded, so this only pairs an immutable value with an
+        immutable tuple of those records.
 
-        So there is no hook any more. This stores one immutable value. Plugins
-        that care read it during their OWN `process()` call, which is plugin
-        code the pipeline already runs and already accounts for; no new
-        execution path into plugin code exists at any point.
+        Binding at notify rather than resolving at publish is what closes the
+        reload window. The dangerous order is `notify -> reload -> publish`: a
+        replacement instance appearing between the transition and its delivery
+        would otherwise be handed a phase it was never there for, adopt it as
+        fresh, and re-base its baseline on it. Because the binding names exact
+        instances and generations, the replacement simply does not match.
 
         Latest-only is sufficient because `PhaseEntry` carries identity and the
-        manager's `started_at`: a consumer can tell a re-entry from a duplicate
-        without needing the intermediate events.
-
-        The value is held only until the next `_publish_phase_entry`, which
-        clears it. It is a hand-off slot, not a record: a plugin loaded after
-        the transition must not be told about a phase it was not there for.
+        manager's `started_at`, so a consumer can tell a re-entry from a
+        duplicate without the intermediate events.
         """
 
-        self._latest_phase_entry = entry
+        if entry is None:
+            self._pending_phase_delivery = None
+            return
+        self._pending_phase_delivery = (entry, tuple(self._phase_receivers.values()))
 
     def _publish_phase_entry(self) -> None:
-        """Hand the latest entry to the plugins that were present to receive it.
+        """Write the bound entry into the captured destinations. Introspects nothing.
 
-        Delivery touches the instance ``__dict__`` directly and never
-        ``hasattr``/``setattr``. Both of those go through
-        ``__getattribute__``/``__setattr__``, so a plugin declaring
-        ``pending_phase_event`` as a property — or overriding attribute access
-        at all — would run its own code here, on the shared engine event loop.
-        That was demonstrated with a blocking descriptor: the delivery is not
-        supposed to be an execution path into plugin code, and it was one.
+        Every earlier version of this reached into the plugin object here, and
+        each time that turned out to be an execution path into plugin code:
+        `hasattr`/`setattr` run `__getattribute__`/`__setattr__`, and
+        `object.__getattribute__(plugin, "__dict__")` still runs a class data
+        descriptor named `__dict__` — a blocking `@property def __dict__` was
+        demonstrated stalling this call. There is no safe way to ask a plugin
+        object anything on this path, so it is not asked.
 
-        ``object.__getattribute__`` is used rather than ``vars()`` because
-        ``vars()`` resolves ``__dict__`` through normal attribute lookup, which
-        an instance-level override can intercept. A plugin with ``__slots__``
-        has no ``__dict__`` at all; it simply does not opt in.
-
-        The entry is CLEARED once published. Retaining it meant a plugin loaded
-        or hot-reloaded afterwards received a phase entry from before it
-        existed, adopted it as a fresh transition, and re-based its baseline on
-        a phase it never saw. Nothing needs the retention: a plugin that got
-        the entry holds it in its own ``pending_phase_event`` until it consumes
-        it in ``process()``.
+        The generation check is the reload guard: a plugin replaced since the
+        binding is a different instance with a newer generation, and receives
+        nothing.
         """
 
-        entry = self._latest_phase_entry
-        if entry is None:
+        pending = self._pending_phase_delivery
+        if pending is None:
             return
-        for plugin in list(self._plugins.values()):
-            try:
-                namespace = object.__getattribute__(plugin, "__dict__")
-            except AttributeError:
-                continue
-            if "pending_phase_event" in namespace:
-                namespace["pending_phase_event"] = entry
-        self._latest_phase_entry = None
+        entry, receivers = pending
+        self._pending_phase_delivery = None
+        for receiver in receivers:
+            if (
+                self._plugins.get(receiver.plugin_id) is receiver.plugin
+                and self._plugin_generations.get(receiver.plugin_id, 0) == receiver.generation
+            ):
+                receiver.namespace["pending_phase_event"] = entry
 
+    def _capture_phase_receiver(
+        self,
+        plugin_id: str,
+        plugin: AnalyticsPlugin,
+        generation: int,
+    ) -> _PhaseReceiver | None:
+        """Take a plugin's phase destination once, on the load path.
+
+        This is the only place the plugin object is introspected for phase
+        delivery, and it is a path where plugin code already runs — the
+        constructor and `configure` have just executed. A failure here means
+        the plugin does not receive phase events; it never means an exception
+        reaches the loader.
+
+        A non-`dict` namespace is refused rather than used: publication writes
+        into this object directly, and an exotic mapping would put arbitrary
+        `__setitem__` back on the critical path, which is the whole defect.
+        """
+
+        try:
+            namespace = object.__getattribute__(plugin, "__dict__")
+        except Exception:
+            return None
+        if type(namespace) is not dict:
+            logger.warning(
+                "Плагин '%s': __dict__ не является обычным словарём — фазовые события не доставляются",
+                plugin_id,
+            )
+            return None
+        if "pending_phase_event" not in namespace:
+            return None
+        return _PhaseReceiver(
+            plugin_id=plugin_id,
+            plugin=plugin,
+            generation=generation,
+            namespace=namespace,
+        )
 
     async def start(self) -> None:
         """Запустить пайплайн.
@@ -400,6 +452,7 @@ class PluginPipeline:
             return RuntimeError(f"analytics plugin owner changed during teardown: {plugin_id!r}")
         del self._plugins[plugin_id]
         self._plugin_generations.pop(plugin_id, None)
+        self._phase_receivers.pop(plugin_id, None)
         logger.info("Плагин выгружен: id='%s'", plugin_id)
         return None
 
@@ -623,6 +676,11 @@ class PluginPipeline:
             self._next_plugin_generation += 1
             self._plugins[plugin_id] = plugin
             self._plugin_generations[plugin_id] = self._next_plugin_generation
+            receiver = self._capture_phase_receiver(plugin_id, plugin, self._next_plugin_generation)
+            if receiver is None:
+                self._phase_receivers.pop(plugin_id, None)
+            else:
+                self._phase_receivers[plugin_id] = receiver
             logger.info(
                 "Плагин загружен: id='%s', класс=%s, файл=%s",
                 plugin_id,

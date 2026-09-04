@@ -54,12 +54,31 @@ def _entry(phase: str = "cooldown", started_at: float = 1000.0) -> PhaseEntry:
     return PhaseEntry(experiment_id="exp", phase=phase, started_at=started_at)
 
 
+def _register(pipe, plugin_id: str, plugin: object) -> None:
+    """Register a plugin the way the loader does.
+
+    Recipients are captured on the plugin-load path now, not discovered by
+    introspecting plugin objects at publication time — that introspection was
+    itself the execution path into plugin code these tests exist to forbid. A
+    harness that assigns `_plugins` directly therefore registers no recipient
+    and would show "nothing delivered" for the wrong reason.
+    """
+
+    pipe._next_plugin_generation += 1
+    generation = pipe._next_plugin_generation
+    pipe._plugins[plugin_id] = plugin
+    pipe._plugin_generations[plugin_id] = generation
+    receiver = pipe._capture_phase_receiver(plugin_id, plugin, generation)
+    if receiver is not None:
+        pipe._phase_receivers[plugin_id] = receiver
+
+
 def test_the_command_handler_call_touches_no_plugin() -> None:
     """This is the blocker: the sync call must do nothing but store a value."""
 
     pipe = _pipeline()
     mine = _Landmine()
-    pipe._plugins = {"landmine": mine}
+    _register(pipe, "landmine", mine)
 
     pipe.notify_phase_change(_entry())
 
@@ -71,7 +90,7 @@ def test_publishing_calls_no_plugin_method_either() -> None:
 
     pipe = _pipeline()
     mine = _Landmine()
-    pipe._plugins = {"landmine": mine}
+    _register(pipe, "landmine", mine)
 
     pipe.notify_phase_change(_entry())
     pipe._publish_phase_entry()
@@ -83,7 +102,8 @@ def test_a_plugin_that_does_not_opt_in_is_left_alone() -> None:
     pipe = _pipeline()
     plain = _NotOpted()
     opted = _Opted()
-    pipe._plugins = {"plain": plain, "opted": opted}
+    _register(pipe, "plain", plain)
+    _register(pipe, "opted", opted)
 
     pipe.notify_phase_change(_entry())
     pipe._publish_phase_entry()
@@ -97,7 +117,7 @@ def test_only_the_latest_entry_is_published() -> None:
 
     pipe = _pipeline()
     opted = _Opted()
-    pipe._plugins = {"opted": opted}
+    _register(pipe, "opted", opted)
 
     pipe.notify_phase_change(_entry("vacuum", 1000.0))
     pipe.notify_phase_change(_entry("cooldown", 2000.0))
@@ -122,7 +142,7 @@ def test_a_re_entry_is_distinguishable_from_a_duplicate() -> None:
 def test_publishing_before_any_entry_does_nothing() -> None:
     pipe = _pipeline()
     opted = _Opted()
-    pipe._plugins = {"opted": opted}
+    _register(pipe, "opted", opted)
 
     pipe._publish_phase_entry()
 

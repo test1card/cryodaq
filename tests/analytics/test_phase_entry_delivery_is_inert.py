@@ -36,6 +36,25 @@ def _pipeline() -> PluginPipeline:
     return PluginPipeline(MagicMock(), Path("plugins"))
 
 
+def _register(pipeline: PluginPipeline, plugin_id: str, plugin: object) -> None:
+    """Register a plugin exactly as the loader does, generation and all.
+
+    Tests that poke `_plugins` directly would not exercise the receiver capture
+    or the generation bump, and it is the generation that closes the reload
+    window — so the harness has to do what the real load path does.
+    """
+
+    pipeline._next_plugin_generation += 1
+    generation = pipeline._next_plugin_generation
+    pipeline._plugins[plugin_id] = plugin  # type: ignore[assignment]
+    pipeline._plugin_generations[plugin_id] = generation
+    receiver = pipeline._capture_phase_receiver(plugin_id, plugin, generation)  # type: ignore[arg-type]
+    if receiver is None:
+        pipeline._phase_receivers.pop(plugin_id, None)
+    else:
+        pipeline._phase_receivers[plugin_id] = receiver
+
+
 class _OptedIn:
     """An ordinary consumer: declares the slot in __init__, like the real one."""
 
@@ -73,6 +92,29 @@ class _BlockingDescriptor:
         self._value = value
 
 
+class _HostileDict:
+    """A blocking data descriptor named __dict__.
+
+    This is what defeated the previous correction. `object.__getattribute__`
+    bypasses an overridden `__getattribute__`, but `__dict__` is itself looked
+    up on the TYPE, so a class-level property named `__dict__` still runs — and
+    a blocking one stalls the engine loop exactly as the original `hasattr`
+    did. The lesson is that there is no safe question to ask a plugin object on
+    the publication path, which is why the destination is captured at load.
+    """
+
+    touched: list[str] = []
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_real", {"pending_phase_event": None})
+
+    @property
+    def __dict__(self):  # type: ignore[override]
+        type(self).touched.append("dict")
+        time.sleep(0.15)
+        return object.__getattribute__(self, "_real")
+
+
 class _HostileAttributeAccess:
     """Overrides attribute access itself, not just one name."""
 
@@ -96,7 +138,7 @@ def test_delivery_reaches_a_plugin_that_opted_in() -> None:
 
     pipeline = _pipeline()
     plugin = _OptedIn()
-    pipeline._plugins = {"p": plugin}  # type: ignore[assignment]
+    _register(pipeline, "p", plugin)
 
     entry = _entry()
     pipeline.notify_phase_change(entry)
@@ -108,7 +150,7 @@ def test_delivery_reaches_a_plugin_that_opted_in() -> None:
 def test_a_plugin_that_did_not_opt_in_is_untouched() -> None:
     pipeline = _pipeline()
     plugin = _NotOptedIn()
-    pipeline._plugins = {"p": plugin}  # type: ignore[assignment]
+    _register(pipeline, "p", plugin)
 
     pipeline.notify_phase_change(_entry())
     pipeline._publish_phase_entry()
@@ -122,19 +164,37 @@ def test_a_blocking_descriptor_is_never_executed() -> None:
     _BlockingDescriptor.touched = []
     pipeline = _pipeline()
     plugin = _BlockingDescriptor()
-    pipeline._plugins = {"p": plugin}  # type: ignore[assignment]
+    _register(pipeline, "p", plugin)
 
     pipeline.notify_phase_change(_entry())
     started = time.monotonic()
     pipeline._publish_phase_entry()
     elapsed = time.monotonic() - started
 
-    assert _BlockingDescriptor.touched == [], (
-        f"delivery executed plugin descriptor code: {_BlockingDescriptor.touched}"
-    )
-    assert elapsed < 0.05, (
-        f"delivery blocked the caller for {elapsed:.3f}s — a plugin descriptor ran"
-    )
+    assert _BlockingDescriptor.touched == [], f"delivery executed plugin descriptor code: {_BlockingDescriptor.touched}"
+    assert elapsed < 0.05, f"delivery blocked the caller for {elapsed:.3f}s — a plugin descriptor ran"
+
+
+def test_a_hostile_dict_descriptor_executes_zero_times_during_publication() -> None:
+    """The control the previous correction failed.
+
+    Capture happens on the load path, where plugin code already runs, so the
+    descriptor may fire there. What must never happen is a descriptor running
+    during PUBLICATION — that is the engine loop, mid-batch.
+    """
+
+    pipeline = _pipeline()
+    plugin = _HostileDict()
+    _register(pipeline, "p", plugin)
+
+    _HostileDict.touched = []  # ignore whatever capture cost at load time
+    pipeline.notify_phase_change(_entry())
+    started = time.monotonic()
+    pipeline._publish_phase_entry()
+    elapsed = time.monotonic() - started
+
+    assert _HostileDict.touched == [], f"a __dict__ descriptor ran during publication: {_HostileDict.touched}"
+    assert elapsed < 0.05, f"publication blocked for {elapsed:.3f}s on a __dict__ descriptor"
 
 
 def test_hostile_attribute_access_is_not_invoked() -> None:
@@ -145,7 +205,7 @@ def test_hostile_attribute_access_is_not_invoked() -> None:
     pipeline = _pipeline()
     plugin = _HostileAttributeAccess()
     _HostileAttributeAccess.seen = []  # ignore construction
-    pipeline._plugins = {"p": plugin}  # type: ignore[assignment]
+    _register(pipeline, "p", plugin)
 
     pipeline.notify_phase_change(_entry())
     pipeline._publish_phase_entry()
@@ -162,7 +222,7 @@ def test_a_slotted_plugin_is_skipped_rather_than_raising() -> None:
         __slots__ = ()
 
     pipeline = _pipeline()
-    pipeline._plugins = {"p": _Slotted()}  # type: ignore[assignment]
+    _register(pipeline, "p", _Slotted())
     pipeline.notify_phase_change(_entry())
     pipeline._publish_phase_entry()  # must not raise
 
@@ -172,38 +232,53 @@ def test_a_slotted_plugin_is_skipped_rather_than_raising() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_plugin_loaded_after_the_transition_is_not_told_about_it() -> None:
-    """The second P1: a hot-reloaded plugin must not adopt a historical phase.
+def test_notify_then_reload_then_publish_does_not_reach_the_replacement() -> None:
+    """The dangerous order, driven through the real load path.
 
-    `plugins/*.py` is watched by mtime and reloaded into the RUNNING engine, so
-    a fresh instance appearing after a phase change is the normal case, not an
-    exotic one. Handing it the old entry made it re-base its baseline on a
-    transition it never saw — silently, and at a moment nothing else marked.
+    The previous test exercised `notify -> publish -> reload`, which is the SAFE
+    sequence — the entry is already delivered and cleared before the reload. It
+    asserted the wrong thing while claiming to cover the hazard.
+
+    The hazard is `notify -> reload -> publish`: a transition is recorded, the
+    plugin is hot-reloaded before the batch that would deliver it, and the fresh
+    instance is handed a phase it was never there for. `plugins/*.py` is watched
+    by mtime and reloaded into the running engine, so this window is ordinary.
     """
 
     pipeline = _pipeline()
-    present = _OptedIn()
-    pipeline._plugins = {"p": present}  # type: ignore[assignment]
+    original = _OptedIn()
+    _register(pipeline, "p", original)
+
+    entry = _entry()
+    pipeline.notify_phase_change(entry)  # transition recorded...
+    replacement = _OptedIn()
+    _register(pipeline, "p", replacement)  # ...plugin reloaded before delivery
+    pipeline._publish_phase_entry()
+
+    assert replacement.pending_phase_event is None, (
+        "a plugin loaded between the transition and its delivery was handed a historical phase entry"
+    )
+    assert original.pending_phase_event is None, "the retired instance must not be written to either"
+
+
+def test_an_unchanged_recipient_still_receives_across_that_window() -> None:
+    """The guard must not be so strict that ordinary delivery stops working."""
+
+    pipeline = _pipeline()
+    plugin = _OptedIn()
+    _register(pipeline, "p", plugin)
 
     entry = _entry()
     pipeline.notify_phase_change(entry)
     pipeline._publish_phase_entry()
-    assert present.pending_phase_event is entry
 
-    # The reload: a new instance replaces the old one.
-    reloaded = _OptedIn()
-    pipeline._plugins = {"p": reloaded}  # type: ignore[assignment]
-    pipeline._publish_phase_entry()
-
-    assert reloaded.pending_phase_event is None, (
-        "a plugin loaded after the transition was handed a historical phase entry"
-    )
+    assert plugin.pending_phase_event is entry
 
 
 def test_publishing_twice_does_not_redeliver() -> None:
     pipeline = _pipeline()
     plugin = _OptedIn()
-    pipeline._plugins = {"p": plugin}  # type: ignore[assignment]
+    _register(pipeline, "p", plugin)
 
     pipeline.notify_phase_change(_entry())
     pipeline._publish_phase_entry()
@@ -217,12 +292,12 @@ def test_a_genuinely_new_transition_still_arrives_after_a_reload() -> None:
     """Clearing must not make the pipeline deaf — only forgetful of the past."""
 
     pipeline = _pipeline()
-    pipeline._plugins = {"p": _OptedIn()}  # type: ignore[assignment]
+    _register(pipeline, "p", _OptedIn())
     pipeline.notify_phase_change(_entry("vacuum", 1_000.0))
     pipeline._publish_phase_entry()
 
     reloaded = _OptedIn()
-    pipeline._plugins = {"p": reloaded}  # type: ignore[assignment]
+    _register(pipeline, "p", reloaded)
 
     later = _entry("cooldown", 2_000.0)
     pipeline.notify_phase_change(later)
