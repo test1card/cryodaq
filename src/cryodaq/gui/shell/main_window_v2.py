@@ -294,6 +294,10 @@ class MainWindowV2(QMainWindow):
         # Accumulating setters: separate dicts keyed by full channel name.
         # set_fault is intentionally excluded from replay (spec §4.5).
         self._analytics_snapshot: dict[str, tuple] = {}
+        # Ordering position for the cached gas reading, captured once at
+        # admission. Separate from the snapshot itself, which is dropped
+        # whenever an unplaceable reading arrives.
+        self._gas_snapshot_ordering_epoch: float | None = None
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
         # Source-state publications belong to the engine/SafetyManager
@@ -713,11 +717,53 @@ class MainWindowV2(QMainWindow):
         cached values into the fresh instance — preventing the empty-on-open
         UX bug described in F4 (spec §4.5).
         """
-        self._analytics_snapshot[setter_name] = args
+        if setter_name == "set_gas_inventory":
+            if not self._admit_gas_inventory_snapshot(args):
+                return
+        else:
+            self._analytics_snapshot[setter_name] = args
         if self._analytics_view is not None:
             fn = getattr(self._analytics_view, setter_name, None)
             if callable(fn):
                 fn(*args)
+
+    def _admit_gas_inventory_snapshot(self, args: tuple) -> bool:
+        """Order the shell's gas snapshot the way AnalyticsView orders its own.
+
+        This is the outermost of three caches holding the same reading, and it
+        is the one that matters before Analytics has ever been opened: with no
+        view in existence there is nothing to reject an older reading, so the
+        shell would keep it and replay it into the first view ever created,
+        which then has no ordering history to judge it by. Observed as top bar
+        blank, shell cache 55%, freshly opened card 55%.
+
+        Same three rules AnalyticsView applies, for the same reasons:
+
+        * an unplaceable reading (undateable, or dated beyond the future-skew
+          bound) is forwarded so the view can fail closed, but is NOT kept for
+          replay and does NOT move the ordering position — a reading that
+          cannot be placed in time says nothing about what is newest, and that
+          verdict is reached once, against the clock at admission;
+        * a reading no newer than the last admitted one is ignored entirely;
+        * anything newer is admitted and becomes the new ordering position.
+
+        Returns whether the caller should forward to a live view.
+        """
+
+        reading = args[0] if args else None
+        incoming = AnalyticsView._ordering_epoch(reading)
+
+        if incoming is None:
+            self._analytics_snapshot.pop("set_gas_inventory", None)
+            return True
+
+        held = self._gas_snapshot_ordering_epoch
+        if held is not None and incoming <= held:
+            return False
+
+        self._gas_snapshot_ordering_epoch = incoming
+        self._analytics_snapshot["set_gas_inventory"] = args
+        return True
 
     def _replay_keithley_channel_state_snapshot(self) -> None:
         """Present retained producer truth without claiming a new observation."""
