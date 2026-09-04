@@ -40,7 +40,12 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.channel_manager import get_channel_manager
-from cryodaq.core.gas_inventory_format import ABSENT, format_inventory, format_rate
+from cryodaq.core.gas_inventory_format import (
+    ABSENT,
+    MAX_FUTURE_SKEW_S,
+    format_inventory,
+    format_rate,
+)
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
@@ -2310,13 +2315,22 @@ class GasInventoryWidget(QWidget):
         if not math.isfinite(ts):
             self._render_absent("время измерения нечитаемо")
             return
+        if ts > time.time() + MAX_FUTURE_SKEW_S:
+            # A future-dated sample would never age out of freshness.
+            self._render_absent("время измерения в будущем")
+            return
 
         if self._expired:
             # Recovery after silence: the outage is a discontinuity, and joining
             # across it would draw a line through time in which nothing is known.
             self._series.clear()
             self._expired = False
-        self._last_value_ts = time.time()
+        # Age from the MEASUREMENT time, not from arrival. `ts` was already
+        # parsed and fail-closed above and was then thrown away, which meant a
+        # replayed or backlogged sample restarted the freshness clock: an
+        # hour-old value looked current for another three minutes. Arrival time
+        # says when the GUI heard about a number, never how old the number is.
+        self._last_value_ts = ts
 
         epoch = meta.get("baseline_epoch")
         epoch = float(epoch) if isinstance(epoch, (int, float)) and math.isfinite(float(epoch)) else None

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.gas_inventory_format import (
     ABSENT,
+    MAX_FUTURE_SKEW_S,
     format_inventory,
 )
 from cryodaq.core.gas_inventory_format import (
@@ -921,12 +922,16 @@ class TopWatchBar(QWidget):
             ts = float(reading.timestamp.timestamp())
         except (TypeError, ValueError, OSError, AttributeError):
             ts = None
-        if ts is None or not math.isfinite(ts):
-            # Fail closed rather than treating an undateable sample as current.
+        if ts is None or not math.isfinite(ts) or ts > time.time() + MAX_FUTURE_SKEW_S:
+            # Fail closed rather than treating an undateable sample as current —
+            # and a future-dated one would never age out of freshness at all.
             self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
             return
-        self._gas_last_ts = time.time()
+        # Measurement time, not arrival — see the note in GasInventoryWidget.
+        # The source timestamp was already parsed and fail-closed just above;
+        # stamping `now` here discarded it and let a stale sample read fresh.
+        self._gas_last_ts = ts
         self._ctx_gas_value.setText(format_inventory(float(value)))
         if rate is None or abs(rate) < 0.2:
             self._ctx_gas_arrow.setText("")

@@ -18,7 +18,26 @@ from __future__ import annotations
 import math
 from typing import Final
 
-__all__ = ["ABSENT", "GAS_INVENTORY_CHANNEL", "format_inventory", "format_rate"]
+__all__ = [
+    "ABSENT",
+    "GAS_INVENTORY_CHANNEL",
+    "MAX_FUTURE_SKEW_S",
+    "format_inventory",
+    "format_rate",
+]
+
+MAX_FUTURE_SKEW_S: Final = 300.0
+"""How far ahead of now a sample may be dated before it is unusable.
+
+Freshness is measured from the MEASUREMENT time, so a sample dated in the
+future would otherwise never age: ``now - ts`` stays negative and the value
+reads current forever. That is the failure mode ageing-from-arrival was
+replaced to avoid, arriving from the other direction.
+
+The bound matches the launcher's ``_PERIODIC_HEALTH_FUTURE_SKEW_S`` rather
+than inventing a second number: both answer the same question about the same
+clocks. Modest skew is tolerated; a sample beyond it is refused, not shown.
+"""
 
 GAS_INVENTORY_CHANNEL: Final = "analytics/molecular_counter/gas_inventory"
 """The one place this identity is written on the consumer side.
