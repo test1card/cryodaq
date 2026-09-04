@@ -39,6 +39,7 @@ from cryodaq.channels.descriptors import (
 from cryodaq.core.broker import PUBLISHER_AUTHORITY_METADATA_KEY
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.core.gas_inventory_format import GAS_INVENTORY_CHANNEL
 from cryodaq.core.safety_manager import SAFETY_MANAGER_SOURCE_STATE_PUBLISHER
 from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState
 from cryodaq.drivers.base import Reading
@@ -1322,7 +1323,7 @@ class MainWindowV2(QMainWindow):
                     history=list(history),
                 ),
             )
-        elif channel == "analytics/molecular_counter/gas_inventory":
+        elif channel == GAS_INVENTORY_CHANNEL:
             self._push_analytics("set_gas_inventory", reading)
         elif channel == "analytics/instrument_health":
             health = reading.metadata.get("health") if reading.metadata else None

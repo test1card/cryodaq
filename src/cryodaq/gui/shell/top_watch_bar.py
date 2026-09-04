@@ -21,7 +21,13 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
-from cryodaq.core.gas_inventory_format import ABSENT, format_inventory
+from cryodaq.core.gas_inventory_format import (
+    ABSENT,
+    format_inventory,
+)
+from cryodaq.core.gas_inventory_format import (
+    GAS_INVENTORY_CHANNEL as _GAS_INVENTORY_CHANNEL,
+)
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
@@ -578,8 +584,6 @@ def _format_pressure(p: float) -> str:
 SECOND_STAGE_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-cooler (~2.9 K floor)
 N2_PLATE_CHANNEL = "Т11"  # U+0422 Cyrillic Т — азотная плита (~40 K floor)
 
-# Derived, published by the molecular_counter analytics plugin.
-_GAS_INVENTORY_CHANNEL = "analytics/molecular_counter/gas_inventory"
 
 
 def _fmt_elapsed(start_iso: str) -> str:

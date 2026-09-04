@@ -18,7 +18,22 @@ from __future__ import annotations
 import math
 from typing import Final
 
-__all__ = ["ABSENT", "format_inventory", "format_rate"]
+__all__ = ["ABSENT", "GAS_INVENTORY_CHANNEL", "format_inventory", "format_rate"]
+
+GAS_INVENTORY_CHANNEL: Final = "analytics/molecular_counter/gas_inventory"
+"""The one place this identity is written on the consumer side.
+
+The plugin COMPOSES it from its own ``plugin_id`` and the metric name, so the
+string here is a mirror of a value produced elsewhere. It was previously
+mirrored twice — a named constant in ``top_watch_bar`` and a bare inline
+literal in ``main_window_v2`` — which is the failure this module already exists
+to prevent for formatting: two consumers of one quantity that can silently
+disagree. Rename the plugin or its metric and a single mismatch here makes one
+consumer go quiet while the other keeps working, with nothing raised.
+
+Kept beside the formatters deliberately: every consumer that renders this
+quantity already imports from this module, so there is no new coupling.
+"""
 
 ABSENT: Final = "—"
 """Rendered when there is no usable value. Never a zero, never a guess."""
