@@ -4,12 +4,18 @@
 connector — and they report -8.888e+88, the LakeShore no-sensor sentinel, on
 every poll. `channels.yaml` has said `visible: false` for both all along.
 
-`config/channel_descriptors.local.yaml` did not. It carried
-`visible_by_default: true` for each, and the periodic report decides what to
-plot from DESCRIPTOR visibility (`reporting/sections.py::_visible_quantity`),
-not from `channels.yaml`. So two sensors that cannot produce a reading stayed
-eligible for formal temperature plots, and the two files disagreed with nothing
-to notice it.
+The descriptor catalogue did not. It carried `visible_by_default: true` for
+each, and the periodic report decides what to plot from DESCRIPTOR visibility
+(`reporting/sections.py::_visible_quantity`), not from `channels.yaml`. So two
+sensors that cannot produce a reading stayed eligible for formal temperature
+plots, and the files disagreed with nothing to notice it.
+
+Both catalogues are checked. `channel_descriptors.yaml` is the tracked base and
+the only one a reviewer or a fresh checkout has; `channel_descriptors.local.yaml`
+is a gitignored per-stand override that the engine prefers when
+`instruments.local.yaml` is in use (engine.py ~2753). Fixing only one of them
+would leave the other free to re-enable a sensor that cannot report — which is
+exactly the divergence this file exists to catch, one layer down.
 
 This pins the agreement rather than the fix, because the fix is one flag and
 the hazard is the divergence.
@@ -29,10 +35,21 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PHYSICALLY_ABSENT = ("Т8", "Т16")
 
 
-def _descriptors() -> dict[str, dict]:
-    document = yaml.safe_load(
-        (_ROOT / "config" / "channel_descriptors.local.yaml").read_text(encoding="utf-8")
-    )
+_BASE_CATALOGUE = _ROOT / "config" / "channel_descriptors.yaml"
+_LOCAL_CATALOGUE = _ROOT / "config" / "channel_descriptors.local.yaml"
+
+
+def _catalogues() -> list[tuple[str, Path]]:
+    """The tracked base always; the per-stand override when it exists."""
+
+    found = [("channel_descriptors.yaml", _BASE_CATALOGUE)]
+    if _LOCAL_CATALOGUE.exists():
+        found.append(("channel_descriptors.local.yaml", _LOCAL_CATALOGUE))
+    return found
+
+
+def _descriptors(path: Path = _BASE_CATALOGUE) -> dict[str, dict]:
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
     return {
         entry["channel_id"]: entry
         for entry in document["descriptors"]
@@ -47,20 +64,22 @@ def _channels() -> dict[str, dict]:
 
 @pytest.mark.parametrize("channel_id", _PHYSICALLY_ABSENT)
 def test_an_absent_sensor_is_not_report_visible(channel_id: str) -> None:
-    """The gate the periodic report actually consults."""
+    """The gate the periodic report actually consults, in every catalogue."""
 
-    descriptor = _descriptors()[channel_id]
-    assert descriptor["visible_by_default"] is False, (
-        f"{channel_id} is not physically connected, but its descriptor makes it "
-        "eligible for a formal temperature plot — reports select on "
-        "descriptor.visible_by_default, not on channels.yaml"
-    )
+    for name, path in _catalogues():
+        descriptor = _descriptors(path)[channel_id]
+        assert descriptor["visible_by_default"] is False, (
+            f"{channel_id} is not physically connected, but {name} makes it "
+            "eligible for a formal temperature plot — reports select on "
+            "descriptor.visible_by_default, not on channels.yaml"
+        )
 
 
 @pytest.mark.parametrize("channel_id", _PHYSICALLY_ABSENT)
 def test_the_raw_sibling_is_not_report_visible_either(channel_id: str) -> None:
-    raw = _descriptors()[f"{channel_id}.raw"]
-    assert raw["visible_by_default"] is False
+    for name, path in _catalogues():
+        raw = _descriptors(path)[f"{channel_id}.raw"]
+        assert raw["visible_by_default"] is False, name
 
 
 @pytest.mark.parametrize("channel_id", _PHYSICALLY_ABSENT)
