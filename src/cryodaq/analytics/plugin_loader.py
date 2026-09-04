@@ -150,24 +150,49 @@ class PluginPipeline:
         Latest-only is sufficient because `PhaseEntry` carries identity and the
         manager's `started_at`: a consumer can tell a re-entry from a duplicate
         without needing the intermediate events.
+
+        The value is held only until the next `_publish_phase_entry`, which
+        clears it. It is a hand-off slot, not a record: a plugin loaded after
+        the transition must not be told about a phase it was not there for.
         """
 
         self._latest_phase_entry = entry
 
     def _publish_phase_entry(self) -> None:
-        """Hand the latest entry to plugins by plain attribute assignment.
+        """Hand the latest entry to the plugins that were present to receive it.
 
-        `hasattr` + `setattr` on a plugin instance executes no plugin logic. A
-        plugin opts in by declaring `pending_phase_event`; it consumes and
-        clears the value inside its own `process()`.
+        Delivery touches the instance ``__dict__`` directly and never
+        ``hasattr``/``setattr``. Both of those go through
+        ``__getattribute__``/``__setattr__``, so a plugin declaring
+        ``pending_phase_event`` as a property — or overriding attribute access
+        at all — would run its own code here, on the shared engine event loop.
+        That was demonstrated with a blocking descriptor: the delivery is not
+        supposed to be an execution path into plugin code, and it was one.
+
+        ``object.__getattribute__`` is used rather than ``vars()`` because
+        ``vars()`` resolves ``__dict__`` through normal attribute lookup, which
+        an instance-level override can intercept. A plugin with ``__slots__``
+        has no ``__dict__`` at all; it simply does not opt in.
+
+        The entry is CLEARED once published. Retaining it meant a plugin loaded
+        or hot-reloaded afterwards received a phase entry from before it
+        existed, adopted it as a fresh transition, and re-based its baseline on
+        a phase it never saw. Nothing needs the retention: a plugin that got
+        the entry holds it in its own ``pending_phase_event`` until it consumes
+        it in ``process()``.
         """
 
         entry = self._latest_phase_entry
         if entry is None:
             return
         for plugin in list(self._plugins.values()):
-            if hasattr(plugin, "pending_phase_event"):
-                plugin.pending_phase_event = entry
+            try:
+                namespace = object.__getattribute__(plugin, "__dict__")
+            except AttributeError:
+                continue
+            if "pending_phase_event" in namespace:
+                namespace["pending_phase_event"] = entry
+        self._latest_phase_entry = None
 
 
     async def start(self) -> None:
