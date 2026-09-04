@@ -28,8 +28,12 @@ from cryodaq.core.physical_alarms_config import (
 
 def _make_ch(ch: str, value: float, stale: bool = False) -> ChannelState:
     return ChannelState(
-        channel=ch, value=value, timestamp=time.time(),
-        unit="K", instrument_id="test", is_stale=stale,
+        channel=ch,
+        value=value,
+        timestamp=time.time(),
+        unit="K",
+        instrument_id="test",
+        is_stale=stale,
     )
 
 
@@ -74,6 +78,7 @@ def _fake_model(duration_mean: float = 72.0, duration_std: float = 8.0):
 
 def test_safety_manager_has_public_latch_fault_method():
     from cryodaq.core.safety_manager import SafetyManager
+
     assert hasattr(SafetyManager, "latch_fault")
     assert callable(SafetyManager.latch_fault)
 
@@ -87,7 +92,9 @@ async def test_latch_fault_delegates_to_private_fault():
     sm._fault = AsyncMock()
     # Bind real method to mock
     await SafetyManager.latch_fault(
-        sm, reason="test reason", source="cooldown_alarm",
+        sm,
+        reason="test reason",
+        source="cooldown_alarm",
     )
     sm._fault.assert_awaited_once_with(
         reason="test reason",
@@ -138,9 +145,7 @@ async def test_a_critical_trajectory_annunciates_and_nothing_more(tmp_path):
     alarm._state = CooldownState.WATCHING
 
     # Cold T well above base, deviation large.
-    tracker.get.side_effect = lambda ch: (
-        _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
-    )
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
     alarm._sustained_count = alarm._sustained_min - 1
     alarm._model._p_of_t_mean = lambda t: 0.9  # expected 90%
     alarm._model.duration_mean = 72.0
@@ -148,6 +153,7 @@ async def test_a_critical_trajectory_annunciates_and_nothing_more(tmp_path):
 
     # Actual progress far below expected, so deviation > k_p * sigma.
     import cryodaq.analytics.cooldown_predictor as cdp
+
     original_predict = cdp.predict
     cdp.predict = MagicMock(return_value=MagicMock(progress=0.1, t_remaining_hours=10.0))
     try:
@@ -156,10 +162,7 @@ async def test_a_critical_trajectory_annunciates_and_nothing_more(tmp_path):
         cdp.predict = original_predict
 
     assert alarm.state == CooldownState.FIRED
-    critical_calls = [
-        c for c in alarm_mgr.process.call_args_list
-        if len(c.args) >= 2 and c.args[1] is not None
-    ]
+    critical_calls = [c for c in alarm_mgr.process.call_args_list if len(c.args) >= 2 and c.args[1] is not None]
     assert critical_calls, "alarm_mgr.process must be called with a non-None CRITICAL event"
     event = critical_calls[-1].args[1]
     assert event.level == "CRITICAL", f"expected CRITICAL, got {event.level!r}"
@@ -262,9 +265,7 @@ async def test_tick_aborts_when_cycle_invalidated_during_publish(tmp_path):
     alarm._state = CooldownState.WATCHING
     alarm._sustained_count = alarm._sustained_min - 1
     alarm._model._p_of_t_mean = lambda t: 0.9
-    tracker.get.side_effect = lambda ch: (
-        _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
-    )
+    tracker.get.side_effect = lambda ch: _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
 
     # Make publish_state_event bump the cycle DURING its await — simulating
     # an operator disarm landing between sustained_count >= threshold and
@@ -275,6 +276,7 @@ async def test_tick_aborts_when_cycle_invalidated_during_publish(tmp_path):
     alarm._publish_state_event = disrupting_publish
 
     import cryodaq.analytics.cooldown_predictor as cdp
+
     cdp.predict = MagicMock(return_value=MagicMock(progress=0.1, t_remaining_hours=10.0))
 
     result = await alarm.tick()
@@ -282,10 +284,7 @@ async def test_tick_aborts_when_cycle_invalidated_during_publish(tmp_path):
     assert result is None
     # alarm_state_mgr.process was not called for the CRITICAL event because
     # the cycle check fired before it.
-    assert not any(
-        c.args and c.args[0] == ALARM_ID and c.args[1] is not None
-        for c in alarm_mgr.process.call_args_list
-    )
+    assert not any(c.args and c.args[0] == ALARM_ID and c.args[1] is not None for c in alarm_mgr.process.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -317,9 +316,7 @@ def test_yaml_auto_arm_false_honored(tmp_path):
     object; previously silently dropped because absent from defaults."""
     yaml_path = tmp_path / "physical_alarms.yaml"
     yaml_path.write_text(
-        "cooldown:\n"
-        "  auto_arm: false\n"
-        "  watchdog_enabled: true\n",
+        "cooldown:\n  auto_arm: false\n  watchdog_enabled: true\n",
         encoding="utf-8",
     )
     cooldown_cfg, _ = load_physical_alarms_config(yaml_path)
@@ -330,9 +327,7 @@ def test_yaml_auto_arm_false_honored(tmp_path):
 def test_yaml_watchdog_enabled_true_honored(tmp_path):
     yaml_path = tmp_path / "physical_alarms.yaml"
     yaml_path.write_text(
-        "cooldown:\n"
-        "  watchdog_enabled: true\n"
-        "  watchdog_margin_K: 2.5\n",
+        "cooldown:\n  watchdog_enabled: true\n  watchdog_margin_K: 2.5\n",
         encoding="utf-8",
     )
     cooldown_cfg, _ = load_physical_alarms_config(yaml_path)
@@ -357,9 +352,7 @@ def test_cold_start_detected_when_cold_in_base_range():
 
 
 def test_cold_start_not_detected_when_cold_above_range():
-    alarm, tracker, *_ = _make_alarm(
-        cfg_overrides={"base_temp_K": 5.0, "cold_start_skip_margin_K": 5.0}
-    )
+    alarm, tracker, *_ = _make_alarm(cfg_overrides={"base_temp_K": 5.0, "cold_start_skip_margin_K": 5.0})
     tracker.get.side_effect = lambda ch: _make_ch(ch, 80.0)  # cold = 80K, way above
     assert alarm._is_cold_start() is False
 

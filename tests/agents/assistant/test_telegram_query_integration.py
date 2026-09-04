@@ -258,18 +258,20 @@ async def test_telegram_query_error_user_message() -> None:
 
 def test_config_parses_query_agent_params_when_enabled() -> None:
     """AssistantConfig correctly parses all query params from a dict (no engine construction)."""
-    cfg = AssistantConfig.from_dict({
-        "query": {
-            "enabled": True,
-            "intent_model": "gemma4:e2b",
-            "format_model": "gemma4:e2b",
-            "intent_temperature": 0.1,
-            "format_temperature": 0.3,
-            "intent_timeout_s": 10.0,
-            "format_timeout_s": 20.0,
-            "rate_limit": {"max_queries_per_chat_per_hour": 30},
+    cfg = AssistantConfig.from_dict(
+        {
+            "query": {
+                "enabled": True,
+                "intent_model": "gemma4:e2b",
+                "format_model": "gemma4:e2b",
+                "intent_temperature": 0.1,
+                "format_temperature": 0.3,
+                "intent_timeout_s": 10.0,
+                "format_timeout_s": 20.0,
+                "rate_limit": {"max_queries_per_chat_per_hour": 30},
+            }
         }
-    })
+    )
 
     assert cfg.query_enabled is True
     assert cfg.query_intent_model == "gemma4:e2b"

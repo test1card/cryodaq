@@ -373,7 +373,7 @@ async def test_recovery_and_retrip_still_move_the_state_machine():
 # ---------------------------------------------------------------------------
 
 _RISE_CFG = {
-    "fire_pressure_mbar": 1.0,       # backstop only — far above normal
+    "fire_pressure_mbar": 1.0,  # backstop only — far above normal
     "clear_pressure_mbar": 0.5,
     "fire_rise_pct_per_h": 50.0,
     "clear_rise_pct_per_h": 10.0,
@@ -391,8 +391,8 @@ async def _feed(guard, tracker, series, *, t_ref: float = 250.0, start: float = 
     try:
         for i, p in enumerate(series):
             vg_mod.time.monotonic = lambda _t=start + i * step_s: _t
-            tracker.get.side_effect = (
-                lambda ch, _p=p, _t=t_ref: _make_channel_state(_t) if "Т12" in ch else _make_pressure_state(_p)
+            tracker.get.side_effect = lambda ch, _p=p, _t=t_ref: (
+                _make_channel_state(_t) if "Т12" in ch else _make_pressure_state(_p)
             )
             await guard.tick()
     finally:

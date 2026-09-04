@@ -242,8 +242,8 @@ async def test_a_command_after_a_slow_question_in_one_batch_is_still_answered() 
     payload = {
         "ok": True,
         "result": [
-            _update(1, "что сейчас?"),   # goes to the model, ~58 s in production
-            _update(2, "/status"),        # must NOT wait behind it
+            _update(1, "что сейчас?"),  # goes to the model, ~58 s in production
+            _update(2, "/status"),  # must NOT wait behind it
         ],
     }
     bot._get_session = AsyncMock(return_value=_FakeSession(payload))

@@ -7,6 +7,7 @@ Arms when T_ref drops below arm_threshold; fires when vacuum degrades sustained.
 State machine: DISARMED → ARMED → FIRED (and back).
 All transitions read fresh state per tick from ChannelStateTracker (LATE BINDING).
 """
+
 from __future__ import annotations
 
 import enum
@@ -97,7 +98,9 @@ class VacuumGuard:
 
         logger.info(
             "VacuumGuard: P-канал=%s, T-опорная=%s, порог арм.=%.0f K",
-            self._pressure_ch, self._ref_temp_ch, self._arm_threshold_K,
+            self._pressure_ch,
+            self._ref_temp_ch,
+            self._arm_threshold_K,
         )
 
     @property
@@ -168,7 +171,8 @@ class VacuumGuard:
             self._state = VacuumState.ARMED
             logger.info(
                 "VacuumGuard: ARMED (T-опорная=%.1f K < %.0f K)",
-                t_ref, self._arm_threshold_K,
+                t_ref,
+                self._arm_threshold_K,
             )
 
         # Record pressure history for the fractional-rise path.
@@ -195,7 +199,8 @@ class VacuumGuard:
                     self._state = VacuumState.FIRED
                     logger.warning(
                         "VacuumGuard: FIRED (P=%.2e мбар, T-опорная=%.1f K)",
-                        p_mbar, t_ref,
+                        p_mbar,
+                        t_ref,
                     )
             else:
                 self._sustained_since = None
@@ -208,9 +213,11 @@ class VacuumGuard:
                     if now_mono - self._rise_sustained_since >= self._sustained_s:
                         self._state = VacuumState.FIRED
                         logger.warning(
-                            "VacuumGuard: FIRED (рост давления %+.0f %%/ч > %+.0f %%/ч, "
-                            "P=%.2e мбар, T-опорная=%.1f K)",
-                            rise_pct_per_h, self._fire_rise, p_mbar, t_ref,
+                            "VacuumGuard: FIRED (рост давления %+.0f %%/ч > %+.0f %%/ч, P=%.2e мбар, T-опорная=%.1f K)",
+                            rise_pct_per_h,
+                            self._fire_rise,
+                            p_mbar,
+                            t_ref,
                         )
                 else:
                     self._rise_sustained_since = None
@@ -226,9 +233,7 @@ class VacuumGuard:
             self._state = VacuumState.ARMED
             self._rise_sustained_since = None
             self._sustained_since = None
-            logger.info(
-                "VacuumGuard: ARMED (рост прекратился, %+.0f %%/ч)", rise_pct_per_h
-            )
+            logger.info("VacuumGuard: ARMED (рост прекратился, %+.0f %%/ч)", rise_pct_per_h)
 
         if prev_state != self._state:
             await self._publish_state_event()
@@ -252,9 +257,7 @@ class VacuumGuard:
         else:
             event = None
 
-        transition = self._alarm_state_mgr.process(
-            ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
-        )
+        transition = self._alarm_state_mgr.process(ALARM_ID, event, {"sustained_s": None, "hysteresis": None})
 
         # A FIRED edge used to latch a SafetyManager fault here, cutting the
         # source. It fired on the first cooldown it ever saw, on a threshold
@@ -266,6 +269,7 @@ class VacuumGuard:
 
     async def _publish_state_event(self) -> None:
         from cryodaq.core.event_bus import EngineEvent
+
         try:
             await self._event_bus.publish(
                 EngineEvent(

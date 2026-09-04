@@ -312,8 +312,7 @@ class MolecularCounter(AnalyticsPlugin):
                 return []
             self._baseline = (pressure, t_bulk, now)
             _log.info(
-                "MolecularCounter: базовая линия — P=%.5g мбар, T=%.1f K, %d датчиков "
-                "(%s; вход в фазу %s)",
+                "MolecularCounter: базовая линия — P=%.5g мбар, T=%.1f K, %d датчиков (%s; вход в фазу %s)",
                 pressure,
                 t_bulk,
                 len(temps),

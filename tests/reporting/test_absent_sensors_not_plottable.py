@@ -61,11 +61,7 @@ def _catalogues() -> list[tuple[str, Path]]:
 
 def _descriptors(path: Path = _BASE_CATALOGUE) -> dict[str, dict]:
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return {
-        entry["channel_id"]: entry
-        for entry in document["descriptors"]
-        if isinstance(entry, dict)
-    }
+    return {entry["channel_id"]: entry for entry in document["descriptors"] if isinstance(entry, dict)}
 
 
 def _channels() -> dict[str, dict]:

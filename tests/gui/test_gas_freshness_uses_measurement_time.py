@@ -60,15 +60,22 @@ def _reading(age_s: float, pct: float = 96.0) -> Reading:
 
 
 def test_card_ages_a_replayed_sample_from_its_own_timestamp(app) -> None:
-    """An hour-old sample is an hour old the instant it arrives."""
+    """A delayed sample is already that old the instant it arrives.
+
+    Deliberately inside the staleness window: past it the reading is refused
+    outright at ingestion, which is a different guarantee tested below. Here the
+    point is that an ACCEPTED sample carries its own age rather than being
+    handed a fresh clock.
+    """
 
     widget = GasInventoryWidget()
-    widget.set_gas_inventory(_reading(age_s=3600.0))
+    delay = widget._STALE_AFTER_S * 0.5
+    widget.set_gas_inventory(_reading(age_s=delay))
 
     assert widget._last_value_ts is not None
     measured_age = time.time() - widget._last_value_ts
-    assert measured_age > 3500.0, (
-        f"the card thinks a 3600 s old sample is {measured_age:.0f} s old — "
+    assert measured_age > delay * 0.9, (
+        f"the card thinks a {delay:.0f} s old sample is {measured_age:.0f} s old — "
         "it stamped arrival time, not measurement time"
     )
 
@@ -113,12 +120,15 @@ def test_card_tolerates_modest_clock_skew(app) -> None:
 
 
 def test_bar_ages_a_replayed_sample_from_its_own_timestamp(app) -> None:
+    """As above: inside the window, so the sample is accepted and carries its age."""
+
     bar = twb.TopWatchBar()
-    bar.on_reading(_reading(age_s=3600.0))
+    delay = bar._GAS_STALE_AFTER_S * 0.5
+    bar.on_reading(_reading(age_s=delay))
 
     assert bar._gas_last_ts is not None
     measured_age = time.time() - bar._gas_last_ts
-    assert measured_age > 3500.0, f"the bar thinks a 3600 s old sample is {measured_age:.0f} s old"
+    assert measured_age > delay * 0.9, f"the bar thinks a {delay:.0f} s old sample is {measured_age:.0f} s old"
 
 
 def test_bar_blanks_a_stale_sample_on_the_next_flush(app) -> None:
@@ -214,7 +224,7 @@ def test_a_late_first_sample_is_shown_rather_than_hidden() -> None:
         baseline_epoch=phase_entry + 1020.0,
     )
 
-    assert "первый замер" in caption
+    assert "первая оценка" in caption
     assert _clock(phase_entry + 1020.0) in caption
 
 
@@ -228,7 +238,7 @@ def test_an_ordinary_one_interval_lag_is_not_announced() -> None:
         baseline_epoch=phase_entry + 60.0,
     )
 
-    assert "первый замер" not in caption
+    assert "первая оценка" not in caption
     assert _clock(phase_entry) in caption
 
 
@@ -240,7 +250,7 @@ def test_without_a_phase_entry_the_baseline_sample_still_times_it() -> None:
 
     assert "сброс оператором" in caption
     assert _clock(sample) in caption
-    assert "первый замер" not in caption
+    assert "первая оценка" not in caption
 
 
 def test_a_reason_without_any_usable_time_still_names_the_zero() -> None:
@@ -250,3 +260,90 @@ def test_a_reason_without_any_usable_time_still_names_the_zero() -> None:
 
 def test_no_reason_yields_no_caption() -> None:
     assert _caption(baseline_epoch=1_000.0) == ""
+
+
+# ---------------------------------------------------------------------------
+# Staleness must be decided AT INGESTION, not on the next timer
+#
+# The consumers accepted an already-stale reading, rendered its value as an
+# ordinary current number, and only removed it when the next tick fired — up to
+# 1 s for the card, 0.5 s for the bar, and UNBOUNDED whenever the GUI loop is
+# blocked, which is precisely when the operator most needs the readout to be
+# honest.
+#
+# The earlier tests concealed this by calling the tick before asserting. These
+# deliberately do not touch any timer.
+# ---------------------------------------------------------------------------
+
+
+def test_card_never_shows_an_already_stale_replay_even_for_an_instant(app) -> None:
+    widget = GasInventoryWidget()
+    widget.set_gas_inventory(_reading(age_s=widget._STALE_AFTER_S + 60.0))
+
+    # No _on_freshness_tick() call. This is the state the operator would see.
+    assert widget._value_label.text() == ABSENT, "a reading that was already stale on arrival was displayed as a value"
+    assert widget._last_value_ts is None, "a stale sample must not become the freshness anchor"
+
+
+def test_bar_never_shows_an_already_stale_replay_even_for_an_instant(app) -> None:
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 60.0))
+
+    # No _flush_persistent_context() call.
+    assert bar._ctx_gas_value.text() == ABSENT
+    assert bar._ctx_gas_arrow.text() == ""
+    assert bar._gas_last_ts is None
+
+
+def test_card_does_not_let_an_older_replay_regress_a_newer_value(app) -> None:
+    """Ordering is not guaranteed across a replay or a backlog drain."""
+
+    widget = GasInventoryWidget()
+    widget.set_gas_inventory(_reading(age_s=1.0, pct=82.0))
+    fresh_anchor = widget._last_value_ts
+    assert widget._value_label.text() == "82%"
+
+    widget.set_gas_inventory(_reading(age_s=100.0, pct=44.0))
+
+    assert widget._value_label.text() == "82%", "an older reading overwrote a newer one"
+    assert widget._last_value_ts == fresh_anchor
+
+
+def test_bar_does_not_let_an_older_replay_regress_a_newer_value(app) -> None:
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=1.0, pct=82.0))
+    fresh_anchor = bar._gas_last_ts
+    assert bar._ctx_gas_value.text() == "82%"
+
+    bar.on_reading(_reading(age_s=100.0, pct=44.0))
+
+    assert bar._ctx_gas_value.text() == "82%"
+    assert bar._gas_last_ts == fresh_anchor
+
+
+def test_card_still_expires_a_formerly_fresh_value_through_the_timer(app) -> None:
+    """Ingestion-time refusal must not replace the ageing path, only precede it.
+
+    A value that WAS fresh when it arrived still has to go stale where it sits.
+    """
+
+    widget = GasInventoryWidget()
+    widget.set_gas_inventory(_reading(age_s=1.0))
+    assert widget._expired is False
+
+    # Backdate the anchor rather than waiting three minutes.
+    widget._last_value_ts = time.time() - (widget._STALE_AFTER_S + 30.0)
+    widget._on_freshness_tick()
+
+    assert widget._expired is True
+
+
+def test_bar_still_expires_a_formerly_fresh_value_through_the_timer(app) -> None:
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=1.0, pct=82.0))
+    assert bar._ctx_gas_value.text() == "82%"
+
+    bar._gas_last_ts = time.time() - (bar._GAS_STALE_AFTER_S + 30.0)
+    bar._flush_persistent_context()
+
+    assert bar._ctx_gas_value.text() == ABSENT

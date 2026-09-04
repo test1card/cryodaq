@@ -60,9 +60,7 @@ class _Harness:
         counter = self.pipeline._plugins.get("molecular_counter")
         assert counter is not None, "the real plugin must load from plugins/"
         # Bind through the plugin's own public configure(), as the loader does.
-        counter.configure(
-            {"pressure_channel": _P, "bulk_sensors": list(_BULK), "update_interval_s": 0.0}
-        )
+        counter.configure({"pressure_channel": _P, "bulk_sensors": list(_BULK), "update_interval_s": 0.0})
         self.queue = await self.broker.subscribe("test_sink")
         return self
 
@@ -112,7 +110,7 @@ async def test_an_incomplete_sensor_set_publishes_nothing() -> None:
 
     async with _Harness() as h:
         await h.broker.publish(_reading(_P, 0.10, unit="mbar"))
-        await h.broker.publish(_reading("Т1", 300.0, unit="K"))   # Т2 missing
+        await h.broker.publish(_reading("Т1", 300.0, unit="K"))  # Т2 missing
         for _ in range(20):
             await asyncio.sleep(0.02)
         assert h.latest_gas() is None, "a partial sensor set must produce no value"
@@ -135,8 +133,7 @@ async def test_a_phase_entry_rezeros_through_the_real_pipeline() -> None:
 
         # Exactly what engine.py does on a committed phase advance.
         h.pipeline.notify_phase_change(
-            PhaseEntry(experiment_id="exp", phase="cooldown",
-                       started_at=datetime.now(UTC).timestamp() - 0.5)
+            PhaseEntry(experiment_id="exp", phase="cooldown", started_at=datetime.now(UTC).timestamp() - 0.5)
         )
         await h.feed(0.05, 300.0)
 

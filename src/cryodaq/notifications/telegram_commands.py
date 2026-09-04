@@ -483,8 +483,7 @@ class TelegramCommandBot:
             # message the bot sends.
             await self._send(
                 chat_id,
-                "🤖 Гемма: уже обрабатываю предыдущий вопрос. "
-                "Подожди, пока он закончится, и спроси снова.",
+                "🤖 Гемма: уже обрабатываю предыдущий вопрос. Подожди, пока он закончится, и спроси снова.",
             )
             return
 
@@ -493,9 +492,7 @@ class TelegramCommandBot:
         # could not be served while the model was working — head-of-line
         # blocking on the operator's only remote control surface. The answer
         # arrives in the same chat whenever it is ready.
-        self._query_task = asyncio.create_task(
-            self._run_query(text, chat_id), name="tg_llm_query"
-        )
+        self._query_task = asyncio.create_task(self._run_query(text, chat_id), name="tg_llm_query")
 
     async def _run_query(self, text: str, chat_id: int | str) -> None:
         """Await one assistant answer and deliver it, off the collect loop.

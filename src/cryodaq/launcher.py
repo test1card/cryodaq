@@ -64,11 +64,11 @@ from cryodaq.gui.zmq_client import (
     LateCommandResult,
     ZmqBridge,
     ZmqCommandWorker,
+    gui_worker_poll_in_flight,
     open_gui_command_worker_admission,
     revoke_gui_command_worker_admission,
     set_bridge,
     settle_registered_gui_command_workers,
-    gui_worker_poll_in_flight,
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 from cryodaq.operator_snapshot import SnapshotMode

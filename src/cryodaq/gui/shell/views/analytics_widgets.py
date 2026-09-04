@@ -2325,9 +2325,31 @@ class GasInventoryWidget(QWidget):
         if not math.isfinite(ts):
             self._render_absent("время измерения нечитаемо")
             return
-        if ts > time.time() + MAX_FUTURE_SKEW_S:
+        now = time.time()
+        if ts > now + MAX_FUTURE_SKEW_S:
             # A future-dated sample would never age out of freshness.
             self._render_absent("время измерения в будущем")
+            return
+
+        # Staleness is decided HERE, before anything is stored, plotted or
+        # displayed. Judging it only on the next timer meant an already-stale
+        # replay was rendered as an ordinary current value and stayed on screen
+        # until the tick — up to a second, and unbounded whenever the GUI loop
+        # is blocked, which is exactly when the operator most needs the readout
+        # to be honest. A value that was never fresh must never be shown as if
+        # it were.
+        age = now - ts
+        if age > self._STALE_AFTER_S:
+            self._expired = True
+            self._series.clear()
+            self._render_absent(f"данные устарели ({int(age)} с)")
+            return
+
+        # An older replay must not displace a newer value already on screen.
+        # Ordering is not guaranteed across a replay or a backlog drain, and
+        # overwriting a current reading with a superseded one is a regression
+        # the operator cannot see happening.
+        if self._last_value_ts is not None and ts < self._last_value_ts:
             return
 
         if self._expired:
@@ -2417,6 +2439,10 @@ class GasInventoryWidget(QWidget):
         gap is shown rather than hidden — it says the counter had no usable
         reading at the transition, which is worth knowing and is invisible
         otherwise.
+
+        Labelled `первая оценка`, not `первый замер`: `baseline_epoch` is when
+        the first derived estimate was COMPUTED, which is not necessarily the
+        hardware sample time behind it.
         """
 
         from datetime import datetime as _dt
@@ -2442,7 +2468,7 @@ class GasInventoryWidget(QWidget):
             and _clock(baseline_epoch)
             and abs(float(baseline_epoch) - float(phase_epoch)) > _BASELINE_LAG_VISIBLE_S
         ):
-            lag = f" (первый замер {_clock(baseline_epoch)})"
+            lag = f" (первая оценка {_clock(baseline_epoch)})"
 
         if reason and when:
             return f"100% = {reason}, {when}{lag}"
@@ -2485,7 +2511,6 @@ class GasInventoryWidget(QWidget):
         if abs(rate) < 0.2:
             return "показатель держится"
         return "показатель убывает" if rate < 0 else "показатель растёт"
-
 
 
 register(WIDGET_TEMPERATURE_OVERVIEW, TemperatureOverviewWidget)

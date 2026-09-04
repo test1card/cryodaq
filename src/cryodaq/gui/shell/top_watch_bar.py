@@ -586,7 +586,6 @@ SECOND_STAGE_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-c
 N2_PLATE_CHANNEL = "Т11"  # U+0422 Cyrillic Т — азотная плита (~40 K floor)
 
 
-
 def _fmt_elapsed(start_iso: str) -> str:
     try:
         start = datetime.fromisoformat(start_iso).astimezone(UTC)
@@ -922,22 +921,35 @@ class TopWatchBar(QWidget):
             ts = float(reading.timestamp.timestamp())
         except (TypeError, ValueError, OSError, AttributeError):
             ts = None
-        if ts is None or not math.isfinite(ts) or ts > time.time() + MAX_FUTURE_SKEW_S:
+        now = time.time()
+        if ts is None or not math.isfinite(ts) or ts > now + MAX_FUTURE_SKEW_S:
             # Fail closed rather than treating an undateable sample as current —
             # and a future-dated one would never age out of freshness at all.
             self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
+            self._gas_last_ts = None
             return
+
+        # Decided at ingestion, not on the next flush. Judging staleness only on
+        # the 0.5 s tick meant an already-stale replay was painted as a normal
+        # current value first, and stayed until the flush — unbounded if the GUI
+        # loop is blocked. A value that was never fresh must never be shown.
+        if (now - ts) > self._GAS_STALE_AFTER_S:
+            self._ctx_gas_value.setText(ABSENT)
+            self._ctx_gas_arrow.setText("")
+            self._gas_last_ts = None
+            return
+
+        # An older replay must not displace a newer value already displayed.
+        if self._gas_last_ts is not None and ts < self._gas_last_ts:
+            return
+
         # Measurement time, not arrival — see the note in GasInventoryWidget.
-        # The source timestamp was already parsed and fail-closed just above;
-        # stamping `now` here discarded it and let a stale sample read fresh.
         self._gas_last_ts = ts
         self._ctx_gas_value.setText(format_inventory(float(value)))
         if rate is None or abs(rate) < 0.2:
             self._ctx_gas_arrow.setText("")
-            self._ctx_gas_arrow.setStyleSheet(
-                f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;"
-            )
+            self._ctx_gas_arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;")
             return
         falling = rate < 0
         self._ctx_gas_arrow.setText("\u2193" if falling else "\u2191")
