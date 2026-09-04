@@ -7750,20 +7750,11 @@ async def _run_engine(
             state_tracker=_alarm_v2_state_tracker,
             alarm_state_mgr=alarm_v2_state_mgr,
             event_bus=event_bus,
-            # No SafetyManager handle — see the boundary note at the vacuum
-            # guard below. v0.55.12 wired this unconditionally, so a CRITICAL
-            # cooldown alarm de-energised the source with no way to opt out.
-            #
-            # A config gate was tried first and was not real: the accepted
-            # cooldown schema rejects unknown keys, so `escalate_to_safety`
-            # could never be set without making the whole configuration
-            # invalid, and its absence left the gate permanently closed. A knob
-            # that cannot be turned is not an opt-in.
-            #
-            # A trajectory deviating from the nine-curve ensemble is expected
-            # when a cooldown starts from a poor vacuum — that is information
-            # for the operator, not grounds to kill the heater.
-            safety_manager=None,
+            # There is no SafetyManager parameter to pass — see the boundary
+            # note at the vacuum guard below. v0.55.12 wired one unconditionally,
+            # so a CRITICAL cooldown alarm de-energised the source with no way to
+            # opt out, and a trajectory deviating from the nine-curve ensemble is
+            # exactly what a cooldown from a poor vacuum produces.
         )
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
     else:
@@ -7777,18 +7768,17 @@ async def _run_engine(
                 state_tracker=_alarm_v2_state_tracker,
                 alarm_state_mgr=alarm_v2_state_mgr,
                 event_bus=event_bus,
-                # No SafetyManager handle. Alarms are observations and
-                # notifications; source state changes come from explicit
-                # SafetyManager transitions — hard limits, interlocks, source
-                # faults, persistence and safety shutdowns, emergency stop —
-                # each of which keeps its own independent de-energisation path
-                # even when notifications are muted.
+                # There is no SafetyManager parameter on either advisory alarm.
+                # Alarms are observations and notifications; source state changes
+                # come from explicit SafetyManager transitions — hard limits,
+                # interlocks, source faults, persistence and safety shutdowns,
+                # operator emergency stop — each of which keeps its own
+                # independent de-energisation path even when notifications are
+                # muted.
                 #
-                # `vacuum.escalate_to_safety` remains in the schema so existing
-                # configurations still load, but it no longer grants an alarm
-                # authority over the source. See the boundary note in
-                # core/vacuum_guard.py.
-                safety_manager=None,
+                # `vacuum.escalate_to_safety` stays in the schema so existing
+                # configurations still load, but nothing reads it. See the
+                # boundary note in core/vacuum_guard.py.
             )
         except Exception as exc:
             logger.warning(

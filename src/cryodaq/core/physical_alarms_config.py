@@ -114,22 +114,32 @@ _VACUUM_DEFAULTS: dict[str, Any] = {
     "clear_rise_pct_per_h": 10.0,
     "rise_window_s": 600.0,
     "severity": "CRITICAL",
-    # Opt-in SafetyManager escalation on FIRED (default false = alarm-only).
-    # Strict bool: only YAML `true` enables — see fail-closed override below.
+    # Retained for backward compatibility ONLY. Nothing reads this key: the
+    # vacuum guard has no SafetyManager parameter, so no value here can grant
+    # an alarm authority over the source. It stays in the schema — and stays
+    # strictly validated — because `_validate_complete_vacuum_config` rejects
+    # unknown keys, and the deployed physical_alarms.yaml carries it; dropping
+    # it from the schema would turn an existing configuration into a startup
+    # error. `load_vacuum_config` warns when it is set true.
     "escalate_to_safety": False,
 }
 
 
 def _invalid_existing_config_defaults(reason: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Keep startup available but strengthen vacuum escalation on corrupt input."""
+    """Keep startup available on corrupt input, with the documented defaults.
+
+    This used to force `escalate_to_safety` true here, which read as a
+    fail-closed protection and was not one: no code has consulted that key
+    since the vacuum guard lost its SafetyManager parameter. Setting it
+    claimed a guarantee the system could not deliver, which is worse than
+    not claiming it — the alarm still fires and still notifies either way.
+    """
 
     logger.critical(
-        "physical_alarms.yaml is invalid (%s); enabling fail-safe vacuum escalation",
+        "physical_alarms.yaml is invalid (%s); falling back to built-in vacuum defaults",
         reason,
     )
-    vacuum = dict(_VACUUM_DEFAULTS)
-    vacuum["escalate_to_safety"] = True
-    return dict(_COOLDOWN_DEFAULTS), vacuum
+    return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
 
 
 def _validate_complete_vacuum_config(loaded: dict[str, Any]) -> dict[str, Any]:
@@ -341,11 +351,17 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
         vacuum_cfg = _validate_complete_vacuum_config(vacuum_raw)
     except Exception as exc:
         logger.critical(
-            "physical_alarms.yaml vacuum safety schema is invalid (%s); enabling fail-safe vacuum escalation",
+            "physical_alarms.yaml vacuum safety schema is invalid (%s); falling back to built-in defaults",
             exc,
         )
         vacuum_cfg = dict(_VACUUM_DEFAULTS)
-        vacuum_cfg["escalate_to_safety"] = True
+
+    if vacuum_cfg.get("escalate_to_safety"):
+        logger.warning(
+            "physical_alarms.yaml: vacuum.escalate_to_safety is true, but the key is "
+            "retained for backward compatibility only and grants no authority over "
+            "the source. The vacuum guard annunciates; it does not de-energise."
+        )
 
     return cooldown_cfg, vacuum_cfg
 

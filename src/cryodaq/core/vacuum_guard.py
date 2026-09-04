@@ -46,19 +46,15 @@ class VacuumGuard:
         state_tracker: ChannelStateTracker,
         alarm_state_mgr: AlarmStateManager,
         event_bus: EventBus,
-        safety_manager: Any = None,
     ) -> None:
         self._state_tracker = state_tracker
         self._alarm_state_mgr = alarm_state_mgr
         self._event_bus = event_bus
-        # Opt-in SafetyManager escalation (external safety review, HIGH).
-        # The engine passes a handle ONLY when config sets
-        # escalate_to_safety: true (strict bool, fail-closed) — so a
-        # non-None handle IS the operator opt-in. When set, a FIRED-edge
-        # additionally latches a SafetyManager fault (source OFF +
-        # FAULT_LATCHED) so a vacuum incident while cold stops the source,
-        # not just raises an alarm. None = today's alarm-only behavior.
-        self._safety_manager = safety_manager
+        # This guard annunciates and nothing else. It holds no handle on the
+        # source and cannot be given one: the parameter is gone, so restoring
+        # that authority is a TypeError rather than a one-word wiring change.
+        # Source state belongs to SafetyManager — hard limits, interlocks,
+        # source faults, persistence and safety shutdowns, operator E-stop.
 
         self._pressure_ch: str = cfg.get("pressure_channel", "VSP63D_1/pressure")
         self._ref_temp_ch: str = cfg.get("reference_temp_channel", "Т12")
@@ -260,39 +256,12 @@ class VacuumGuard:
             ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
         )
 
-        # Opt-in escalation: latch a SafetyManager fault on the FIRED edge only.
-        # Gated on the transition INTO FIRED so the fault latches once per
-        # incident, not on every tick while FIRED. A recovery (FIRED→ARMED) and
-        # re-trip (ARMED→FIRED) is a fresh edge → escalates again. No auto-clear
-        # when pressure recovers: latch_fault drives the normal FAULT_LATCHED →
-        # acknowledge → MANUAL_RECOVERY flow — a cold-vacuum incident needs
-        # operator eyes. The handle is present only when the operator enabled
-        # escalate_to_safety.
-        just_fired = prev_state != VacuumState.FIRED and self._state == VacuumState.FIRED
-        if just_fired and self._safety_manager is not None:
-            reason = (
-                f"Потеря вакуума при холодном криостате: P = {p_mbar:.2e} мбар "
-                f"(порог {self._fire_pressure:.1e} мбар), {self._ref_temp_ch} = "
-                f"{t_ref:.0f} K (ниже порога арм. {self._arm_threshold_K:.0f} K). "
-                f"Эскалация в SafetyManager включена оператором "
-                f"(escalate_to_safety)."
-            )
-            try:
-                await self._safety_manager.latch_fault(
-                    reason=reason,
-                    source="vacuum_guard",
-                    channel=self._pressure_ch,
-                    value=p_mbar,
-                )
-            except Exception as exc:
-                # Latch failure is logged, never re-raised — the tick task must
-                # keep running so the CRITICAL still surfaces via the alarm path.
-                logger.error(
-                    "VacuumGuard: latch_fault failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-
+        # A FIRED edge used to latch a SafetyManager fault here, cutting the
+        # source. It fired on the first cooldown it ever saw, on a threshold
+        # every recorded cooldown on this stand would have crossed, and held the
+        # manager latched for eleven hours — during which the cryocooler CRITICAL
+        # arrived and left as a single INFO line. Losing vacuum while cold is
+        # worth waking someone for; it is not the software's call to make.
         return transition
 
     async def _publish_state_event(self) -> None:

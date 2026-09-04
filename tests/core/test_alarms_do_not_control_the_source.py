@@ -66,6 +66,32 @@ def test_no_advisory_alarm_is_given_a_safety_manager(alarm: str) -> None:
         )
 
 
+@pytest.mark.parametrize("alarm", _ADVISORY_ALARMS)
+def test_no_advisory_alarm_can_accept_a_safety_manager(alarm: str) -> None:
+    """Stronger than the wiring check: the parameter does not exist.
+
+    While the parameter survived with a `None` default, the entire distance
+    between "annunciates" and "de-energises the source" was one keyword in
+    engine.py — and the guarantee rested on a convention that a reviewer had to
+    notice. With the parameter gone, restoring that authority is a TypeError at
+    construction, which no one can merge by accident.
+    """
+
+    import importlib
+    import inspect
+
+    module = {
+        "CooldownAlarm": "cryodaq.core.cooldown_alarm",
+        "VacuumGuard": "cryodaq.core.vacuum_guard",
+    }[alarm]
+    cls = getattr(importlib.import_module(module), alarm)
+    params = inspect.signature(cls.__init__).parameters
+    assert "safety_manager" not in params, (
+        f"{alarm}.__init__ still accepts safety_manager; an advisory alarm must "
+        "not be able to hold authority over the source at all"
+    )
+
+
 def test_the_over_temperature_interlocks_are_untouched() -> None:
     """Hard protection keeps its independent path.
 

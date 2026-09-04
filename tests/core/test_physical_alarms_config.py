@@ -49,7 +49,7 @@ def test_incomplete_vacuum_preserves_valid_cooldown_but_fails_vacuum_safe(tmp_pa
     cd, vd = load_physical_alarms_config(p)
     assert cd["k_p"] == 3.0
     assert cd["cold_channel"] == "Т12"
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
+    assert vd == _VACUUM_DEFAULTS
 
 
 def test_missing_file_returns_defaults(tmp_path):
@@ -70,7 +70,7 @@ def test_partial_yaml_fills_missing_section(tmp_path):
     cd, vd = load_physical_alarms_config(p)
     assert cd["k_p"] == 2.0
     # vacuum section entirely missing → full defaults
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
+    assert vd == _VACUUM_DEFAULTS
 
 
 def test_complete_vacuum_accepts_valid_override(tmp_path):
@@ -113,26 +113,39 @@ def test_null_value_falls_back_to_default(tmp_path):
     assert vd["enabled"] == _VACUUM_DEFAULTS["enabled"]
 
 
-def test_existing_yaml_parse_error_fails_safe_and_visible(tmp_path, caplog):
+def test_existing_yaml_parse_error_falls_back_and_is_visible(tmp_path, caplog):
     p = tmp_path / "physical_alarms.yaml"
     p.write_text("cooldown: {\n  broken yaml", encoding="utf-8")
     with caplog.at_level(logging.CRITICAL):
         cd, vd = load_physical_alarms_config(p)
     assert cd == _COOLDOWN_DEFAULTS
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
-    assert "fail-safe" in caplog.text.lower()
+    assert vd == _VACUUM_DEFAULTS
+    assert "falling back to built-in" in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# `escalate_to_safety` is a retained key with no reader.
+#
+# The loader used to force it true whenever the document was malformed, and
+# that read as a fail-closed protection. It was not one: no code has consulted
+# the key since the vacuum guard lost its SafetyManager parameter, so the
+# override promised a de-energisation the system could not perform. The key is
+# still parsed and still strictly validated — the deployed physical_alarms.yaml
+# carries it, and the schema rejects unknown keys — but a malformed document now
+# yields the documented defaults and says so.
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("content", ["[]", "vacuum: []"])
-def test_existing_malformed_root_or_vacuum_fails_safe(tmp_path, content, caplog):
+def test_existing_malformed_root_or_vacuum_falls_back_to_defaults(tmp_path, content, caplog):
     p = _write(tmp_path, content)
     with caplog.at_level(logging.CRITICAL):
         _cd, vd = load_physical_alarms_config(p)
-    assert vd["escalate_to_safety"] is True
-    assert "fail-safe" in caplog.text.lower()
+    assert vd == _VACUUM_DEFAULTS
+    assert "falling back to built-in" in caplog.text.lower()
 
 
-def test_escalate_to_safety_absent_in_existing_file_fails_safe_true(tmp_path):
+def test_escalate_to_safety_absent_in_existing_file_takes_the_default(tmp_path):
     p = _write(
         tmp_path,
         """
@@ -141,18 +154,28 @@ def test_escalate_to_safety_absent_in_existing_file_fails_safe_true(tmp_path):
     """,
     )
     _, vd = load_physical_alarms_config(p)
-    assert vd["escalate_to_safety"] is True
+    assert vd["escalate_to_safety"] is False
 
 
-def test_escalate_to_safety_true_enables(tmp_path):
+def test_escalate_to_safety_true_is_preserved_but_warns(tmp_path, caplog):
+    """The value round-trips, and the loader says plainly that it does nothing."""
+
     p = _write_complete_vacuum(tmp_path, escalate_to_safety=True)
-    _, vd = load_physical_alarms_config(p)
+    with caplog.at_level(logging.WARNING):
+        _, vd = load_physical_alarms_config(p)
     assert vd["escalate_to_safety"] is True
+    assert "grants no authority over the source" in caplog.text
 
 
 @pytest.mark.parametrize("raw", ['"true"', '"yes"', "1", '"on"', '"false"'])
 def test_escalate_to_safety_strict_bool_rejects_non_bool(tmp_path, raw):
-    """Non-bools are rejected as config and trigger the stronger fallback."""
+    """A non-bool is still a validation failure, so the whole section falls back.
+
+    Kept deliberately. The key no longer carries authority, but a configuration
+    that misspells a boolean is a configuration the operator should hear about,
+    and loosening the parse here would hide that everywhere else in the section.
+    """
+
     p = _write(
         tmp_path,
         f"""
@@ -161,7 +184,7 @@ def test_escalate_to_safety_strict_bool_rejects_non_bool(tmp_path, raw):
     """,
     )
     _, vd = load_physical_alarms_config(p)
-    assert vd["escalate_to_safety"] is True
+    assert vd == _VACUUM_DEFAULTS
 
 
 def test_defaults_round_trip(tmp_path):
@@ -176,7 +199,7 @@ def test_defaults_round_trip(tmp_path):
     assert vd["fire_pressure_mbar"] == pytest.approx(_VACUUM_DEFAULTS["fire_pressure_mbar"])
 
 
-def test_invalid_utf8_existing_file_never_raises_and_escalates(tmp_path, caplog):
+def test_invalid_utf8_existing_file_never_raises_and_is_visible(tmp_path, caplog):
     p = tmp_path / "physical_alarms.yaml"
     p.write_bytes(b"vacuum:\n  enabled: true\n\xff")
 
@@ -184,8 +207,8 @@ def test_invalid_utf8_existing_file_never_raises_and_escalates(tmp_path, caplog)
         cd, vd = load_physical_alarms_config(p)
 
     assert cd == _COOLDOWN_DEFAULTS
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
-    assert "fail-safe" in caplog.text.lower()
+    assert vd == _VACUUM_DEFAULTS
+    assert "falling back to built-in" in caplog.text.lower()
 
 
 @pytest.mark.parametrize("missing", sorted(_VACUUM_DEFAULTS))
@@ -200,7 +223,7 @@ def test_existing_vacuum_missing_any_critical_field_fails_safe(tmp_path, missing
     with caplog.at_level(logging.CRITICAL):
         _cd, vd = load_physical_alarms_config(p)
 
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
+    assert vd == _VACUUM_DEFAULTS
     assert "safety schema is invalid" in caplog.text
 
 
@@ -229,7 +252,7 @@ def test_invalid_vacuum_numbers_ranges_order_and_opt_in_fail_safe(
     with caplog.at_level(logging.CRITICAL):
         _cd, vd = load_physical_alarms_config(p)
 
-    assert vd == {**_VACUUM_DEFAULTS, "escalate_to_safety": True}
+    assert vd == _VACUUM_DEFAULTS
     assert reason in caplog.text
 
 

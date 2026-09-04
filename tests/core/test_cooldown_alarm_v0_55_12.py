@@ -33,8 +33,7 @@ def _make_ch(ch: str, value: float, stale: bool = False) -> ChannelState:
     )
 
 
-def _make_alarm(model_dir: Path | None = None, cfg_overrides: dict | None = None,
-                safety_manager=None):
+def _make_alarm(model_dir: Path | None = None, cfg_overrides: dict | None = None):
     cfg = {
         "cold_channel": "Т12",
         "warm_channel": "Т11",
@@ -55,9 +54,7 @@ def _make_alarm(model_dir: Path | None = None, cfg_overrides: dict | None = None
     event_bus = MagicMock()
     event_bus.publish = AsyncMock()
 
-    alarm = CooldownAlarm(
-        cfg, tracker, alarm_mgr, event_bus, safety_manager=safety_manager
-    )
+    alarm = CooldownAlarm(cfg, tracker, alarm_mgr, event_bus)
     return alarm, tracker, alarm_mgr, event_bus
 
 
@@ -124,84 +121,41 @@ async def test_latch_fault_forwards_optional_channel_value():
 
 
 @pytest.mark.asyncio
-async def test_cooldown_alarm_critical_calls_latch_fault(tmp_path):
-    """When the alarm transitions FIRED→fires, it must escalate to
-    SafetyManager.latch_fault with source='cooldown_alarm'."""
-    safety_manager = MagicMock()
-    safety_manager.latch_fault = AsyncMock()
+async def test_a_critical_trajectory_annunciates_and_nothing_more(tmp_path):
+    """A deviating trajectory publishes CRITICAL and touches no source state.
 
-    alarm, tracker, alarm_mgr, _ = _make_alarm(
-        model_dir=tmp_path, safety_manager=safety_manager,
-    )
+    v0.55.12 escalated this to `SafetyManager.latch_fault`, unconditionally —
+    there was never a config key that could switch it off, because the cooldown
+    schema rejects unknown keys. So "the cooldown is not following the
+    nine-curve ensemble" was sufficient to de-energise the heater, and a
+    cooldown started from a poor vacuum deviates by construction. The alarm is
+    still right and still loud; it simply no longer decides.
+    """
+
+    alarm, tracker, alarm_mgr, _ = _make_alarm(model_dir=tmp_path)
     alarm._model = _fake_model(duration_mean=72.0, duration_std=8.0)
     alarm._t_armed = time.monotonic() - 3600  # 1h elapsed (past baseline)
     alarm._state = CooldownState.WATCHING
 
-    # Set up readings: cold T well above base, deviation large
+    # Cold T well above base, deviation large.
     tracker.get.side_effect = lambda ch: (
         _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
     )
-
-    # Force sustained count to threshold so the next tick fires
     alarm._sustained_count = alarm._sustained_min - 1
-
-    # Stub model._p_of_t_mean to return high expected progress
     alarm._model._p_of_t_mean = lambda t: 0.9  # expected 90%
     alarm._model.duration_mean = 72.0
     alarm._model.duration_std = 8.0
 
-    # Force the predictor.predict to return low actual progress (so deviation > k_p*sigma)
-    import cryodaq.analytics.cooldown_predictor as cdp
-    original_predict = cdp.predict
-    fake_pred = MagicMock(progress=0.1, t_remaining_hours=10.0)
-    cdp.predict = MagicMock(return_value=fake_pred)
-    try:
-        await alarm.tick()
-    finally:
-        cdp.predict = original_predict
-
-    safety_manager.latch_fault.assert_awaited_once()
-    call_kwargs = safety_manager.latch_fault.await_args.kwargs
-    assert call_kwargs["source"] == "cooldown_alarm"
-    assert "Захолаживание" in call_kwargs["reason"]
-
-
-@pytest.mark.asyncio
-async def test_cooldown_alarm_critical_swallows_latch_fault_exception(tmp_path):
-    """latch_fault failure must NOT propagate — alarm tick keeps running.
-
-    Strengthened: verifies latch_fault was actually awaited, alarm reached
-    FIRED state, and alarm_mgr.process received a non-None (CRITICAL) event.
-    """
-    safety_manager = MagicMock()
-    safety_manager.latch_fault = AsyncMock(side_effect=RuntimeError("safety down"))
-
-    alarm, tracker, alarm_mgr, _ = _make_alarm(
-        model_dir=tmp_path, safety_manager=safety_manager,
-    )
-    alarm._model = _fake_model()
-    alarm._t_armed = time.monotonic() - 3600
-    alarm._state = CooldownState.WATCHING
-    alarm._sustained_count = alarm._sustained_min - 1
-    alarm._model._p_of_t_mean = lambda t: 0.9
-    tracker.get.side_effect = lambda ch: (
-        _make_ch(ch, 60.0) if ch == "Т12" else _make_ch(ch, 80.0)
-    )
-
+    # Actual progress far below expected, so deviation > k_p * sigma.
     import cryodaq.analytics.cooldown_predictor as cdp
     original_predict = cdp.predict
     cdp.predict = MagicMock(return_value=MagicMock(progress=0.1, t_remaining_hours=10.0))
     try:
-        # Must not raise even though latch_fault raises
         await alarm.tick()
     finally:
         cdp.predict = original_predict
 
-    # latch_fault must have been called (not silently skipped)
-    safety_manager.latch_fault.assert_awaited_once()
-    # Alarm must have transitioned to FIRED
     assert alarm.state == CooldownState.FIRED
-    # alarm_mgr.process must have been called with a CRITICAL event carrying the expected alarm_id
     critical_calls = [
         c for c in alarm_mgr.process.call_args_list
         if len(c.args) >= 2 and c.args[1] is not None
@@ -210,13 +164,22 @@ async def test_cooldown_alarm_critical_swallows_latch_fault_exception(tmp_path):
     event = critical_calls[-1].args[1]
     assert event.level == "CRITICAL", f"expected CRITICAL, got {event.level!r}"
     assert event.alarm_id == "cooldown_alarm", f"expected alarm_id='cooldown_alarm', got {event.alarm_id!r}"
+    assert "Захолаживание" in event.message
 
 
-def test_cooldown_alarm_constructible_without_safety_manager():
-    """safety_manager defaults to None — backward compat for unit tests
-    that don't care about the safety wiring."""
+def test_the_alarm_cannot_be_given_a_safety_manager():
+    """The authority is gone from the signature, not merely left unwired.
+
+    Asserting on the signature rather than on a None default is deliberate: a
+    default of None is one keyword in engine.py away from being restored, and
+    that is exactly how it arrived both times.
+    """
+
+    import inspect
+
+    assert "safety_manager" not in inspect.signature(CooldownAlarm.__init__).parameters
     alarm, *_ = _make_alarm()
-    assert alarm._safety_manager is None
+    assert not hasattr(alarm, "_safety_manager")
 
 
 # ---------------------------------------------------------------------------
@@ -291,14 +254,9 @@ def test_notify_phase_change_disarm_increments_cycle_generation():
 @pytest.mark.asyncio
 async def test_tick_aborts_when_cycle_invalidated_during_publish(tmp_path):
     """Disarm during the publish_state_event await must prevent the
-    subsequent alarm_state_mgr.process() and latch_fault calls from
-    firing on stale state."""
-    safety_manager = MagicMock()
-    safety_manager.latch_fault = AsyncMock()
+    subsequent alarm_state_mgr.process() call from firing on stale state."""
 
-    alarm, tracker, alarm_mgr, event_bus = _make_alarm(
-        model_dir=tmp_path, safety_manager=safety_manager,
-    )
+    alarm, tracker, alarm_mgr, event_bus = _make_alarm(model_dir=tmp_path)
     alarm._model = _fake_model()
     alarm._t_armed = time.monotonic() - 3600
     alarm._state = CooldownState.WATCHING
@@ -320,9 +278,8 @@ async def test_tick_aborts_when_cycle_invalidated_during_publish(tmp_path):
     cdp.predict = MagicMock(return_value=MagicMock(progress=0.1, t_remaining_hours=10.0))
 
     result = await alarm.tick()
-    # Tick must return None (aborted) and never call latch_fault or process
+    # Tick must return None (aborted) and never call process
     assert result is None
-    safety_manager.latch_fault.assert_not_awaited()
     # alarm_state_mgr.process was not called for the CRITICAL event because
     # the cycle check fired before it.
     assert not any(

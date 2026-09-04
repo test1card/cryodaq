@@ -61,7 +61,6 @@ class CooldownAlarm:
         alarm_state_mgr: AlarmStateManager,
         event_bus: EventBus,
         steady_state_predictor: Any = None,
-        safety_manager: Any = None,
     ) -> None:
         self._state_tracker = state_tracker
         self._alarm_state_mgr = alarm_state_mgr
@@ -72,11 +71,11 @@ class CooldownAlarm:
         # gas-desorption drift would otherwise look like trajectory
         # divergence to the curve-fit predictor.
         self._steady_state_predictor = steady_state_predictor
-        # v0.55.12 — public SafetyManager handle for CRITICAL escalation
-        # via latch_fault() (audit SCOPE 1 finding 1.1). Optional
-        # so unit tests that don't care about the safety wiring can
-        # construct the alarm without a SafetyManager mock.
-        self._safety_manager = safety_manager
+        # No SafetyManager handle, and no parameter that could carry one. This
+        # alarm reports how a cooldown compares to the curve ensemble; a
+        # trajectory that deviates is information, not grounds to de-energise.
+        # Source state belongs to SafetyManager — hard limits, interlocks,
+        # source faults, persistence and safety shutdowns, operator E-stop.
 
         self._cold_ch: str = cfg.get("cold_channel", "Т12")
         self._warm_ch: str = cfg.get("warm_channel", "Т11")
@@ -335,9 +334,9 @@ class CooldownAlarm:
 
     async def tick(self) -> None:
         """Evaluate trajectory. Called every eval_interval_s by engine."""
-        # v0.55.12 — capture cycle generation; re-checked before any
-        # destructive emit (alarm-state publish, latch_fault) to detect
-        # mid-tick disarm/phase-change. audit SCOPE 1 finding 1.3.
+        # v0.55.12 — capture cycle generation; re-checked before the
+        # alarm-state publish to detect a mid-tick disarm or phase change.
+        # audit SCOPE 1 finding 1.3.
         cycle = self._cycle_generation
 
         # Handle finalize notification — single flag, safe in asyncio single-thread
@@ -484,7 +483,6 @@ class CooldownAlarm:
 
         from cryodaq.core.alarm_v2 import AlarmEvent
 
-        just_fired = False
         if self._sustained_count >= self._sustained_min:
             slip_msg = ""
             if eta_slip_h is not None and eta_slip_h > self._eta_slip_threshold_h:
@@ -506,7 +504,6 @@ class CooldownAlarm:
                 values={self._cold_ch: T_cold, self._warm_ch: T_warm},
             )
             if self._state != CooldownState.FIRED:
-                just_fired = True
                 self._state = CooldownState.FIRED
                 await self._publish_state_event()
         else:
@@ -532,34 +529,11 @@ class CooldownAlarm:
             ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
         )
 
-        # v0.55.12 — escalate CRITICAL to SafetyManager via the public
-        # latch_fault() entry point (audit SCOPE 1 finding 1.1).
-        # Gated on the FIRED-edge so we fire the safety latch once per
-        # cycle, not on every WATCHING tick after the alarm clears or
-        # repeats.
-        if (
-            just_fired
-            and event is not None
-            and event.level == "CRITICAL"
-            and cycle == self._cycle_generation
-            and self._safety_manager is not None
-        ):
-            try:
-                await self._safety_manager.latch_fault(
-                    reason=event.message,
-                    source="cooldown_alarm",
-                )
-            except Exception as exc:
-                # Latch failure is logged but never re-raised — the
-                # tick task must keep running so the alarm-state manager
-                # path still surfaces the CRITICAL via Telegram /
-                # operator log.
-                logger.error(
-                    "CooldownAlarm: latch_fault failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-
+        # A CRITICAL used to latch a SafetyManager fault here, unconditionally —
+        # there was never a config key that could switch it off. A cooldown
+        # started from a poor vacuum deviates from the ensemble by design, which
+        # made "the trajectory is not what we predicted" sufficient to kill the
+        # heater. The CRITICAL still reaches Telegram and the operator log.
         return transition
 
     async def _watchdog_tick(self) -> None:
