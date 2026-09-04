@@ -837,7 +837,15 @@ class TopWatchBar(QWidget):
         # The counter publishes every 60 s; three missed cycles is silence. The
         # chrome kept the last number and arrow indefinitely when the producer
         # stopped, which is exactly the condition an operator must not miss.
+        # Freshness anchor for the DISPLAYED value: None whenever nothing is
+        # being shown. The 0.5 s flush ages the visible number from this.
         self._gas_last_ts: float | None = None
+        # Ordering position: the newest source time this cell has been able
+        # to PLACE IN TIME, shown or not. Kept separate because the two ask
+        # different questions — "how old is what I am showing?" versus
+        # "has this reading already been superseded?" — and one field
+        # answering both is what let an older replay take the display back.
+        self._gas_ordering_ts: float | None = None
         self._ctx_gas_arrow = QLabel("")
         self._ctx_gas_arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;")
         ctx.addWidget(self._ctx_gas_label)
@@ -923,29 +931,44 @@ class TopWatchBar(QWidget):
             ts = None
         now = time.time()
         if ts is None or not math.isfinite(ts) or ts > now + MAX_FUTURE_SKEW_S:
-            # Fail closed rather than treating an undateable sample as current —
-            # and a future-dated one would never age out of freshness at all.
+            # Undateable, or dated too far ahead to be believed. Blank the
+            # display and stop showing an age for it — but KEEP the ordering
+            # position, because a reading that cannot be placed in time says
+            # nothing about what is newest.
+            #
+            # Clearing that position meant the next older replay had nothing to
+            # be compared against: fresh 82%, invalid, then a stale 55% painted
+            # as current, while AnalyticsView — which holds its position —
+            # correctly stayed unavailable. Two consumers of one quantity
+            # disagreeing about which reading wins is the failure the shared
+            # module exists to prevent.
             self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
             self._gas_last_ts = None
             return
 
         # Supersession first — see the note in GasInventoryWidget. A reading
-        # older than the one already shown is a late replay and says nothing
-        # about now; testing its staleness first let it blank a NEWER value.
+        # older than the newest one PLACED is a late replay and says nothing
+        # about now; testing its staleness first let it blank a newer value.
         # Returning here mutates nothing.
-        if self._gas_last_ts is not None and ts <= self._gas_last_ts:
+        if self._gas_ordering_ts is not None and ts <= self._gas_ordering_ts:
             return
 
+        # Orderable and newest, so it takes the ordering position whether or not
+        # it turns out to be fit to display.
+        self._gas_ordering_ts = ts
+
         # Only the newest reading may be judged stale, and it is judged at
-        # ingestion rather than on the 0.5 s flush.
+        # ingestion rather than on the 0.5 s flush. A stale one is not shown, so
+        # it leaves no freshness anchor behind.
         if (now - ts) > self._GAS_STALE_AFTER_S:
             self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
             self._gas_last_ts = None
             return
 
-        # Measurement time, not arrival — see the note in GasInventoryWidget.
+        # Accepted and fit to show: this becomes the freshness anchor the 0.5 s
+        # flush ages the visible number from. Measurement time, not arrival.
         self._gas_last_ts = ts
         self._ctx_gas_value.setText(format_inventory(float(value)))
         if rate is None or abs(rate) < 0.2:

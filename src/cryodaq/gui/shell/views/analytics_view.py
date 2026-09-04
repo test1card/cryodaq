@@ -300,9 +300,11 @@ class AnalyticsView(QWidget):
         at every remount.
 
         The same skew boundary the consumers use decides this. A reading beyond
-        it may still be cached and forwarded — it is fail-closed state, and the
-        consumers know how to refuse it — but it must never anchor ordering,
-        because recovery has to stay possible.
+        it is FORWARDED to the consumers, which know how to refuse it, and then
+        retained as nothing — see `set_gas_inventory`. It never anchors
+        ordering, because recovery has to stay possible, and it is never kept
+        for replay, because a reading that cannot be placed in time must not be
+        handed to a freshly mounted card.
         """
 
         ts = cls._reading_epoch(reading)

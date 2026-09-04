@@ -408,3 +408,98 @@ def test_bar_still_refuses_a_stale_reading_when_nothing_newer_is_held(app) -> No
     bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 120.0))
     assert bar._ctx_gas_value.text() == ABSENT
     assert bar._gas_last_ts is None
+
+
+# ---------------------------------------------------------------------------
+# The top bar's ordering position must survive invalid input
+#
+# The bar receives readings independently of AnalyticsView, and cleared its
+# anchor whenever it refused one. So after fresh 82% → invalid, an older 55%
+# had nothing to be compared against and was painted as current — while the
+# view, holding its anchor, correctly stayed unavailable. Two consumers of one
+# quantity disagreeing about which reading wins is the exact failure the shared
+# module exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_bar_keeps_its_ordering_position_through_an_invalid_reading(app) -> None:
+    """The reviewer's reproduction: fresh 82% → invalid → older 55%."""
+
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=1.0, pct=82.0))
+    anchor = bar._gas_ordering_ts
+    assert bar._ctx_gas_value.text() == "82%"
+
+    # Dated too far ahead to be believed: display fails closed...
+    bar.on_reading(_reading(age_s=-(MAX_FUTURE_SKEW_S + 60.0), pct=44.0))
+    assert bar._ctx_gas_value.text() == ABSENT
+    # ...but the ordering position is untouched, because that reading could not
+    # be placed in time and so says nothing about what is newest.
+    assert bar._gas_ordering_ts == anchor, "an unplaceable reading erased the ordering position"
+
+    # An older reading must therefore still be refused, not displayed.
+    bar.on_reading(_reading(age_s=100.0, pct=55.0))
+    assert bar._ctx_gas_value.text() == ABSENT, (
+        "an older replay was displayed after an invalid reading cleared the anchor"
+    )
+    assert bar._gas_ordering_ts == anchor
+
+
+def test_bar_keeps_its_ordering_position_through_a_stale_reading(app) -> None:
+    """Same hole, the other branch: a stale blank must not be displaceable.
+
+    "Stale but newest" needs the previous reading to be older still — anything
+    newer than a one-second-old sample is necessarily fresh. So this starts from
+    nothing and feeds a stale reading, then an even older one.
+    """
+
+    bar = twb.TopWatchBar()
+
+    bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 60.0, pct=44.0))
+    assert bar._ctx_gas_value.text() == ABSENT
+    assert bar._gas_last_ts is None, "a stale reading must leave no freshness anchor"
+    ordering = bar._gas_ordering_ts
+    assert ordering is not None, "a stale-but-newest reading dropped the ordering position"
+
+    # Older than that one: it cannot take the display back.
+    bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 120.0, pct=55.0))
+    assert bar._ctx_gas_value.text() == ABSENT
+    assert bar._gas_ordering_ts == ordering
+
+
+def test_bar_still_recovers_on_a_genuinely_newer_reading(app) -> None:
+    """Holding the anchor must not wedge the bar permanently blank."""
+
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=1.0, pct=82.0))
+    bar.on_reading(_reading(age_s=-(MAX_FUTURE_SKEW_S + 60.0), pct=44.0))
+    assert bar._ctx_gas_value.text() == ABSENT
+
+    bar.on_reading(_reading(age_s=0.0, pct=77.0))
+    assert bar._ctx_gas_value.text() == "77%", "the bar could not recover from an invalid reading"
+
+
+def test_both_consumers_agree_on_which_reading_wins(app) -> None:
+    """The property the two follow-ups exist to restore.
+
+    Fed the identical sequence, the bar and the view must reach the same verdict
+    about the older reading — the chrome and the card disagreeing about one
+    quantity is what the shared module was created to stop.
+    """
+
+    from cryodaq.gui.shell.views.analytics_view import AnalyticsView
+
+    bar = twb.TopWatchBar()
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+
+    fresh = _reading(age_s=1.0, pct=82.0)
+    invalid = _reading(age_s=-(MAX_FUTURE_SKEW_S + 60.0), pct=44.0)
+    older = _reading(age_s=100.0, pct=55.0)
+
+    for r in (fresh, invalid, older):
+        bar.on_reading(r)
+        view.set_gas_inventory(r)
+
+    assert bar._ctx_gas_value.text() == ABSENT
+    assert view._last_gas_inventory is None, "the view admitted the older replay"
