@@ -373,3 +373,91 @@ def test_phase_swap_replays_cached_cooldown(app):
     assert list(ly) == [198.0, 95.0]
     _, uy = main._inner._upper_curve.getData()
     assert list(uy) == [202.0, 105.0]
+
+
+# ----------------------------------------------------------------------
+# The retained gas reading must be ordered by source time
+#
+# AnalyticsView replays its cached reading into every freshly mounted widget on
+# a phase or layout swap. A stale replay that overwrote that cache would keep
+# displacing the live value long after the replay itself was forgotten — each
+# widget correct in isolation, while the thing that re-feeds them holds a
+# superseded reading. Fixing the two visible consumers is therefore not
+# sufficient on its own: they would reject the stale reading and then be handed
+# it again at the next remount.
+# ----------------------------------------------------------------------
+
+
+def _gas_reading(pct: float, *, age_s: float):
+    from datetime import UTC, datetime, timedelta
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    return Reading(
+        timestamp=datetime.now(UTC) - timedelta(seconds=age_s),
+        instrument_id="molecular_counter",
+        channel="analytics/molecular_counter/gas_inventory",
+        value=pct,
+        unit="%",
+        status=ChannelStatus.OK,
+        metadata={"rate_pct_per_h": -1.2},
+    )
+
+
+def test_a_stale_replay_does_not_poison_the_cache_replayed_on_remount(app) -> None:
+    """The full production path: ingest → stale replay → phase remount → replay."""
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+
+    fresh = _gas_reading(82.0, age_s=1.0)
+    view.set_gas_inventory(fresh)
+    assert view._last_gas_inventory is fresh
+
+    # A late replay, older than the fresh one and past any freshness window.
+    view.set_gas_inventory(_gas_reading(44.0, age_s=3600.0))
+    assert view._last_gas_inventory is fresh, (
+        "a superseded replay overwrote the cache that gets replayed on every remount"
+    )
+
+    # The remount that would have handed the stale value to a brand-new card.
+    view.set_phase("cooldown")
+    assert view._last_gas_inventory is fresh
+
+    card = next(
+        (w for w in view._active.values() if hasattr(w, "_last_value_ts")),
+        None,
+    )
+    if card is not None:
+        assert card._last_value_ts is not None, "the remounted card was left with no value"
+        assert card._value_label.text() == "82%", "the remounted card showed the stale replay instead of the live value"
+
+
+def test_a_genuinely_newer_reading_still_replaces_the_cache(app) -> None:
+    """Ordering must not freeze the cache at the first value it ever saw."""
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+
+    view.set_gas_inventory(_gas_reading(82.0, age_s=60.0))
+    newer = _gas_reading(77.0, age_s=1.0)
+    view.set_gas_inventory(newer)
+
+    assert view._last_gas_inventory is newer
+
+
+def test_an_undateable_reading_is_not_silently_dropped(app) -> None:
+    """Ordering needs two timestamps; without them the reading still gets through.
+
+    Refusing an undateable reading here would hide it from consumers that have
+    their own fail-closed handling for exactly that case.
+    """
+
+    from types import SimpleNamespace
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+
+    undateable = SimpleNamespace(value=50.0, timestamp=None, metadata={}, channel="x")
+    view.set_gas_inventory(undateable)
+    assert view._last_gas_inventory is undateable

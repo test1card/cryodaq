@@ -2331,25 +2331,28 @@ class GasInventoryWidget(QWidget):
             self._render_absent("время измерения в будущем")
             return
 
-        # Staleness is decided HERE, before anything is stored, plotted or
-        # displayed. Judging it only on the next timer meant an already-stale
-        # replay was rendered as an ordinary current value and stayed on screen
-        # until the tick — up to a second, and unbounded whenever the GUI loop
-        # is blocked, which is exactly when the operator most needs the readout
-        # to be honest. A value that was never fresh must never be shown as if
-        # it were.
+        # SUPERSESSION IS TESTED FIRST, and the order is the whole point.
+        #
+        # A reading older than the one already accepted says nothing about the
+        # present: it is a replay or a backlog drain arriving late. Judging its
+        # staleness before noticing it is superseded meant a stale replay took
+        # the "already stale" branch and wiped a NEWER value off the screen —
+        # blanking the readout, clearing the plotted series and latching
+        # expiry, on the strength of a message that had already been overtaken.
+        # Returning here mutates nothing at all.
+        if self._last_value_ts is not None and ts <= self._last_value_ts:
+            return
+
+        # Only a reading that is genuinely the newest may be judged stale. This
+        # is decided at ingestion, before anything is stored, plotted or shown:
+        # judging it on the next timer let an already-stale value be rendered as
+        # ordinary and current until the tick — unbounded whenever the GUI loop
+        # is blocked, which is exactly when the readout most needs to be honest.
         age = now - ts
         if age > self._STALE_AFTER_S:
             self._expired = True
             self._series.clear()
             self._render_absent(f"данные устарели ({int(age)} с)")
-            return
-
-        # An older replay must not displace a newer value already on screen.
-        # Ordering is not guaranteed across a replay or a backlog drain, and
-        # overwriting a current reading with a superseded one is a regression
-        # the operator cannot see happening.
-        if self._last_value_ts is not None and ts < self._last_value_ts:
             return
 
         if self._expired:

@@ -28,6 +28,7 @@ Public API preserved for existing wiring tests; new setters additive.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -270,8 +271,36 @@ class AnalyticsView(QWidget):
         self._last_r_thermal = data
         self._forward("set_r_thermal_data", data)
 
+    @staticmethod
+    def _reading_epoch(reading) -> float | None:
+        """Source time of a reading, or None when it cannot be established."""
+
+        try:
+            ts = float(reading.timestamp.timestamp())
+        except (TypeError, ValueError, OSError, AttributeError):
+            return None
+        return ts if math.isfinite(ts) else None
+
     def set_gas_inventory(self, reading) -> None:
-        """Latest molecular-counter reading. Retained for replay on phase swap."""
+        """Latest molecular-counter reading. Retained for replay on phase swap.
+
+        The cache is ordered by SOURCE TIME, not by arrival. It is replayed into
+        a freshly mounted card on every phase or layout swap, so a stale replay
+        that overwrote it would keep displacing the live value long after the
+        replay itself was forgotten — the widgets would each be correct while
+        the thing that re-feeds them held a superseded reading.
+
+        Fixing the two visible consumers is therefore not enough on its own:
+        they would reject the stale reading, and then be handed it again by this
+        cache at the next remount.
+        """
+
+        incoming = self._reading_epoch(reading)
+        held = self._reading_epoch(self._last_gas_inventory)
+        if incoming is not None and held is not None and incoming <= held:
+            # Superseded: neither cached nor forwarded. Both consumers would
+            # reject it anyway; forwarding it would only rely on that.
+            return
 
         self._last_gas_inventory = reading
         self._forward("set_gas_inventory", reading)

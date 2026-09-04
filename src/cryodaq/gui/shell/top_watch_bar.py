@@ -930,18 +930,19 @@ class TopWatchBar(QWidget):
             self._gas_last_ts = None
             return
 
-        # Decided at ingestion, not on the next flush. Judging staleness only on
-        # the 0.5 s tick meant an already-stale replay was painted as a normal
-        # current value first, and stayed until the flush — unbounded if the GUI
-        # loop is blocked. A value that was never fresh must never be shown.
+        # Supersession first — see the note in GasInventoryWidget. A reading
+        # older than the one already shown is a late replay and says nothing
+        # about now; testing its staleness first let it blank a NEWER value.
+        # Returning here mutates nothing.
+        if self._gas_last_ts is not None and ts <= self._gas_last_ts:
+            return
+
+        # Only the newest reading may be judged stale, and it is judged at
+        # ingestion rather than on the 0.5 s flush.
         if (now - ts) > self._GAS_STALE_AFTER_S:
             self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
             self._gas_last_ts = None
-            return
-
-        # An older replay must not displace a newer value already displayed.
-        if self._gas_last_ts is not None and ts < self._gas_last_ts:
             return
 
         # Measurement time, not arrival — see the note in GasInventoryWidget.

@@ -347,3 +347,64 @@ def test_bar_still_expires_a_formerly_fresh_value_through_the_timer(app) -> None
     bar._flush_persistent_context()
 
     assert bar._ctx_gas_value.text() == ABSENT
+
+
+# ---------------------------------------------------------------------------
+# Supersession must be decided BEFORE staleness
+#
+# The previous correction tested staleness first, so a replay that was both
+# older than the accepted value AND past the freshness cutoff took the "already
+# stale" branch and erased a newer, live value: blanked the readout, cleared the
+# plotted series, latched expiry.
+#
+# The earlier anti-regression tests used a 100 s replay — inside the 180 s
+# window — so they never reached the crossing case. These deliberately use a
+# replay older than the cutoff, which is where the two rules collide.
+# ---------------------------------------------------------------------------
+
+
+def test_card_survives_a_replay_that_is_both_older_and_stale(app) -> None:
+    widget = GasInventoryWidget()
+    widget.set_gas_inventory(_reading(age_s=1.0, pct=82.0))
+
+    anchor = widget._last_value_ts
+    series_len = len(widget._series)
+    assert widget._value_label.text() == "82%"
+
+    widget.set_gas_inventory(_reading(age_s=widget._STALE_AFTER_S + 120.0, pct=44.0))
+
+    assert widget._value_label.text() == "82%", "a stale replay erased a newer live value"
+    assert widget._last_value_ts == anchor, "the freshness anchor was moved by a superseded reading"
+    assert widget._expired is False, "a superseded reading latched expiry on a fresh card"
+    assert len(widget._series) == series_len, "a superseded reading cleared the plotted series"
+
+
+def test_bar_survives_a_replay_that_is_both_older_and_stale(app) -> None:
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=1.0, pct=82.0))
+
+    anchor = bar._gas_last_ts
+    arrow = bar._ctx_gas_arrow.text()
+    assert bar._ctx_gas_value.text() == "82%"
+
+    bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 120.0, pct=44.0))
+
+    assert bar._ctx_gas_value.text() == "82%"
+    assert bar._gas_last_ts == anchor
+    assert bar._ctx_gas_arrow.text() == arrow, "the arrow was changed by a superseded reading"
+
+
+def test_card_still_refuses_a_stale_reading_when_nothing_newer_is_held(app) -> None:
+    """Supersession-first must not smuggle a genuinely stale value through."""
+
+    widget = GasInventoryWidget()
+    widget.set_gas_inventory(_reading(age_s=widget._STALE_AFTER_S + 120.0))
+    assert widget._value_label.text() == ABSENT
+    assert widget._last_value_ts is None
+
+
+def test_bar_still_refuses_a_stale_reading_when_nothing_newer_is_held(app) -> None:
+    bar = twb.TopWatchBar()
+    bar.on_reading(_reading(age_s=bar._GAS_STALE_AFTER_S + 120.0))
+    assert bar._ctx_gas_value.text() == ABSENT
+    assert bar._gas_last_ts is None
