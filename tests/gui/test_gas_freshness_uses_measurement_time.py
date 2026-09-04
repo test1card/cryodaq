@@ -162,3 +162,91 @@ def test_both_consumers_share_one_skew_bound() -> None:
 
     assert bar_module.MAX_FUTURE_SKEW_S is MAX_FUTURE_SKEW_S
     assert card_module.MAX_FUTURE_SKEW_S is MAX_FUTURE_SKEW_S
+
+
+# ---------------------------------------------------------------------------
+# The caption must be timed by the thing it names
+#
+# It read `100% = начало захолаживания, <baseline_epoch>` — but baseline_epoch
+# is the timestamp of the SAMPLE that became the baseline, not the phase entry.
+# The counter requires a complete sensor set, so if a configured sensor is
+# briefly absent at the transition the baseline lands minutes later, and the
+# caption then attributes a sample time to the start of a cooldown.
+# ---------------------------------------------------------------------------
+
+
+def _caption(**meta) -> str:
+    return GasInventoryWidget._baseline_caption(meta)
+
+
+def _clock(epoch: float) -> str:
+    """Render an epoch the way the caption does — in LOCAL time.
+
+    Hardcoding "15:02" would only pass in the timezone the test was written in;
+    the widget uses datetime.fromtimestamp, which is local.
+    """
+
+    return datetime.fromtimestamp(epoch).strftime("%d.%m %H:%M")
+
+
+def test_the_caption_is_timed_by_the_phase_entry_not_the_first_sample() -> None:
+    phase_entry = datetime(2026, 9, 3, 15, 2, tzinfo=UTC).timestamp()
+    first_sample = datetime(2026, 9, 3, 15, 19, tzinfo=UTC).timestamp()
+
+    caption = _caption(
+        baseline_reason="начало захолаживания",
+        phase_entry_epoch=phase_entry,
+        baseline_epoch=first_sample,
+    )
+
+    assert "начало захолаживания" in caption
+    assert _clock(phase_entry) in caption, f"the caption names the phase but is timed by the sample: {caption!r}"
+    assert _clock(first_sample) != _clock(phase_entry), "fixture must make the two differ"
+
+
+def test_a_late_first_sample_is_shown_rather_than_hidden() -> None:
+    """The gap says the counter had no complete sensor set at the transition."""
+
+    phase_entry = datetime(2026, 9, 3, 15, 2, tzinfo=UTC).timestamp()
+    caption = _caption(
+        baseline_reason="начало захолаживания",
+        phase_entry_epoch=phase_entry,
+        baseline_epoch=phase_entry + 1020.0,
+    )
+
+    assert "первый замер" in caption
+    assert _clock(phase_entry + 1020.0) in caption
+
+
+def test_an_ordinary_one_interval_lag_is_not_announced() -> None:
+    """The counter publishes once a minute; saying so every time is noise."""
+
+    phase_entry = datetime(2026, 9, 3, 15, 2, tzinfo=UTC).timestamp()
+    caption = _caption(
+        baseline_reason="начало захолаживания",
+        phase_entry_epoch=phase_entry,
+        baseline_epoch=phase_entry + 60.0,
+    )
+
+    assert "первый замер" not in caption
+    assert _clock(phase_entry) in caption
+
+
+def test_without_a_phase_entry_the_baseline_sample_still_times_it() -> None:
+    """An operator reset has no phase entry; the zero is the sample itself."""
+
+    sample = datetime(2026, 9, 3, 9, 30, tzinfo=UTC).timestamp()
+    caption = _caption(baseline_reason="сброс оператором", baseline_epoch=sample)
+
+    assert "сброс оператором" in caption
+    assert _clock(sample) in caption
+    assert "первый замер" not in caption
+
+
+def test_a_reason_without_any_usable_time_still_names_the_zero() -> None:
+    caption = _caption(baseline_reason="новая сессия наблюдения", baseline_epoch=float("nan"))
+    assert caption == "100% = новая сессия наблюдения"
+
+
+def test_no_reason_yields_no_caption() -> None:
+    assert _caption(baseline_epoch=1_000.0) == ""

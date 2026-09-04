@@ -2162,6 +2162,16 @@ class TemperatureSteadyStateWidget(QWidget):
 # Registration (module load time)
 # ---------------------------------------------------------------------------
 
+_BASELINE_LAG_VISIBLE_S = 120.0
+"""How far the baseline sample may trail the phase entry before it is shown.
+
+The counter publishes once a minute, so one interval of lag is ordinary and
+saying so would be noise. Beyond two, the counter had no complete sensor set
+at the transition, and the operator is better off seeing that than reading a
+phase time that quietly stands in for a later measurement.
+"""
+
+
 class GasInventoryWidget(QWidget):
     """Кажущийся запас газа — N/N₀ с поправкой на температуру.
 
@@ -2393,18 +2403,49 @@ class GasInventoryWidget(QWidget):
 
     @staticmethod
     def _baseline_caption(meta: dict) -> str:
+        """Name the zero, and time it by the thing the name refers to.
+
+        The caption read `100% = начало захолаживания, <baseline_epoch>`, but
+        `baseline_epoch` is the timestamp of the SAMPLE that became the
+        baseline, not the phase entry. Those are not the same moment: the
+        counter requires a complete sensor set, so if any configured sensor is
+        briefly absent at the transition the baseline lands minutes later. The
+        label named the phase while the time named the sample.
+
+        So the time now comes from `phase_entry_epoch` whenever a phase drove
+        the baseline. When the baseline sample was taken meaningfully later, the
+        gap is shown rather than hidden — it says the counter had no usable
+        reading at the transition, which is worth knowing and is invisible
+        otherwise.
+        """
+
         from datetime import datetime as _dt
 
-        reason = str(meta.get("baseline_reason") or "").strip()
-        epoch = meta.get("baseline_epoch")
-        when = ""
-        if isinstance(epoch, (int, float)) and math.isfinite(float(epoch)):
+        def _clock(value: object) -> str:
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                return ""
             try:
-                when = _dt.fromtimestamp(float(epoch)).strftime("%d.%m %H:%M")
+                return _dt.fromtimestamp(float(value)).strftime("%d.%m %H:%M")
             except (ValueError, OSError, OverflowError):
-                when = ""
+                return ""
+
+        reason = str(meta.get("baseline_reason") or "").strip()
+        phase_epoch = meta.get("phase_entry_epoch")
+        baseline_epoch = meta.get("baseline_epoch")
+
+        anchor = phase_epoch if _clock(phase_epoch) else baseline_epoch
+        when = _clock(anchor)
+
+        lag = ""
+        if (
+            _clock(phase_epoch)
+            and _clock(baseline_epoch)
+            and abs(float(baseline_epoch) - float(phase_epoch)) > _BASELINE_LAG_VISIBLE_S
+        ):
+            lag = f" (первый замер {_clock(baseline_epoch)})"
+
         if reason and when:
-            return f"100% = {reason}, {when}"
+            return f"100% = {reason}, {when}{lag}"
         if reason:
             return f"100% = {reason}"
         return ""
