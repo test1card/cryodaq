@@ -30,11 +30,17 @@ StartLimitBurst=3
 [Service]
 Type=simple
 WorkingDirectory=/home/lab53/cryodaq
-ExecStart=/home/lab53/cryodaq/start.sh
+# --tray is the mode launcher.py documents for exactly this purpose
+# ("Только иконка в трее (без полного GUI). Полезно для автозагрузки").
+# It also DEFERS first-run setup instead of opening a modal wizard, which a
+# bare start.sh would do on a first-run condition — blocking acquisition on
+# a dialog nobody is there to click.
+ExecStart=/home/lab53/cryodaq/start.sh --tray
 
-# A second launcher exits 0 after telling the operator one is already running
-# (launcher.py, .launcher.lock), so starting this while the stack is already up
-# is harmless and will NOT trigger a restart loop.
+# NOT YET SAFE FOR UNATTENDED USE. A second launcher opens a MODAL
+# QMessageBox before exiting 0 (launcher.py ~8865), so a lock collision under
+# systemd blocks on a dialog nobody is there to dismiss. Until that path is
+# non-modal this unit stays disabled — see README-autostart.md.
 Restart=on-failure
 RestartSec=20
 

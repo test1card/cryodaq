@@ -120,34 +120,62 @@ async def test_telegram_ask_command_empty_query_sends_usage() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_telegram_imposes_no_deadline_of_its_own() -> None:
-    """A negative control: the query path must not call asyncio.wait_for.
+class _DeadlineSpy:
+    """Records every deadline primitive the query path could reach for.
 
-    The previous version of this test released the query after milliseconds and
-    asserted the answer arrived. That was FALSE GREEN — restoring the old 60 s
-    or 120 s `asyncio.wait_for` would have passed it just as happily, because a
-    millisecond never reaches any deadline. It tested nothing it claimed to.
-
-    This asserts the absence directly. `asyncio.wait_for` and `asyncio.timeout`
-    appear nowhere in telegram_commands, so any Telegram-side deadline would
-    have to reintroduce one, and the spy records it. The background task is
-    awaited directly rather than through wait_for, so the control cannot trip
-    on the test's own machinery.
-
-    Why the absence matters and not just the number: the assistant's command
-    pipeline is intent 30 s + generation 300 s + format 30 s = 360 s, so ANY
-    Telegram-side deadline short of that discards an answer still being
-    produced — and cancelling here never stops the assistant anyway, whose REP
-    handler stays occupied to its own deadline. There is no correct number for
-    Telegram to hold, which is why it holds none.
+    Guarding only `asyncio.wait_for` was itself false-green: a deadline
+    restored as `async with asyncio.timeout(120):` would have left the test
+    passing. Both forms are recorded, and both are proven to fail the control
+    independently — see test_the_deadline_control_detects_each_form.
     """
 
-    recorded: list[object] = []
-    real_wait_for = asyncio.wait_for
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self._real_wait_for = asyncio.wait_for
+        self._real_timeout = asyncio.timeout
 
-    def spy(awaitable, timeout=None, **kwargs):
-        recorded.append(timeout)
-        return real_wait_for(awaitable, timeout=timeout, **kwargs)
+    def wait_for(self, awaitable, timeout=None, **kwargs):
+        self.calls.append(("wait_for", timeout))
+        return self._real_wait_for(awaitable, timeout=timeout, **kwargs)
+
+    def timeout(self, delay):
+        self.calls.append(("timeout", delay))
+        return self._real_timeout(delay)
+
+    def patches(self):
+        module = "cryodaq.notifications.telegram_commands.asyncio"
+        return (
+            patch(f"{module}.wait_for", self.wait_for),
+            patch(f"{module}.timeout", self.timeout),
+        )
+
+
+async def _run_query_under_spy(bot, spy: _DeadlineSpy, text: str = "что сейчас?") -> None:
+    """Drive one query with both deadline primitives observed."""
+
+    wait_for_patch, timeout_patch = spy.patches()
+    with wait_for_patch, timeout_patch:
+        await bot._handle_text(_msg(text))
+        task = bot._query_task
+        assert task is not None, "the query must be dispatched as a task"
+        await task  # direct await — deliberately not through wait_for
+
+
+async def test_telegram_imposes_no_deadline_of_its_own() -> None:
+    """A negative control: the query path must reach for no deadline at all.
+
+    An earlier version released the query after milliseconds and asserted the
+    answer arrived. That was FALSE GREEN — a millisecond never reaches any
+    deadline, so restoring the old 60 s or 120 s limit would have passed it. It
+    stood where a guard was supposed to be.
+
+    Why the ABSENCE and not a number: the assistant's command pipeline is
+    intent 30 s + generation 300 s + format 30 s = 360 s, so any Telegram-side
+    deadline short of that discards an answer still being produced — and
+    cancelling here never stops the assistant anyway, whose REP handler stays
+    occupied to its own deadline. There is no correct number for Telegram to
+    hold, which is why it holds none.
+    """
 
     qa = MagicMock()
     qa.handle_query = AsyncMock(return_value="ответ на долгую генерацию")
@@ -155,21 +183,55 @@ async def test_telegram_imposes_no_deadline_of_its_own() -> None:
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", spy):
-        await bot._handle_text(_msg("что сейчас?"))
-        task = bot._query_task
-        assert task is not None, "the query must be dispatched as a task"
-        await task  # direct await — deliberately not wait_for
+    spy = _DeadlineSpy()
+    await _run_query_under_spy(bot, spy)
 
-    assert recorded == [], (
-        "the Telegram query path called asyncio.wait_for with timeout(s) "
-        f"{recorded!r} — a Telegram-side deadline has been reintroduced. The "
+    assert spy.calls == [], (
+        f"the Telegram query path reached for a deadline: {spy.calls!r}. The "
         "assistant owns the computation deadline; the proxy owns the transport "
-        "cap."
+        "cap; Telegram owns only concurrency."
     )
 
     bot._send.assert_awaited_once()
     assert bot._send.call_args.args[1] == "ответ на долгую генерацию"
+
+
+@pytest.mark.parametrize("form", ["wait_for", "timeout"])
+async def test_the_deadline_control_detects_each_form(form: str) -> None:
+    """The control must be able to FAIL, once per primitive it claims to guard.
+
+    A negative control nobody has seen fail is indistinguishable from the
+    false-green it replaced. This restores a deadline in each shape the
+    production path could plausibly use and asserts the spy notices, so the
+    guard above is known to be load-bearing rather than assumed to be.
+    """
+
+    async def answer(text: str, *, chat_id):
+        return "ответ"
+
+    qa = MagicMock()
+    if form == "wait_for":
+
+        async def handle_query(text: str, *, chat_id):
+            return await asyncio.wait_for(answer(text, chat_id=chat_id), timeout=120.0)
+
+    else:
+
+        async def handle_query(text: str, *, chat_id):
+            async with asyncio.timeout(120.0):
+                return await answer(text, chat_id=chat_id)
+
+    qa.handle_query = handle_query
+
+    bot = _make_bot(query_agent=qa)
+    bot._send = AsyncMock()
+
+    spy = _DeadlineSpy()
+    await _run_query_under_spy(bot, spy)
+
+    assert spy.calls, f"the {form} form went unnoticed — the control is blind to it"
+    assert spy.calls[0][0] == form
+    assert spy.calls[0][1] == 120.0
 
 
 async def test_telegram_query_error_user_message() -> None:
