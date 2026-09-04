@@ -54,6 +54,23 @@ def _batch(p: float, t: float, *, age_s: float = 0.0) -> list[Reading]:
     return [_reading(_P, p, age_s=age_s)] + [_reading(ch, t, age_s=age_s) for ch in _BULK]
 
 
+# The pipeline delivers an authoritative PhaseEntry by plain attribute
+# assignment and the plugin consumes it inside process(); there is no hook to
+# call. These helpers drive that real path.
+_PHASE_SEQ = [0]
+
+
+def _enter_phase(counter, phase: str, *, started_at: float | None = None):
+    from cryodaq.core.phase_event import PhaseEntry
+
+    _PHASE_SEQ[0] += 1
+    counter.pending_phase_event = PhaseEntry(
+        experiment_id="exp-test",
+        phase=phase,
+        started_at=(datetime.now(UTC).timestamp() - 1.0) if started_at is None else started_at,
+    )
+
+
 def _run(counter: MolecularCounter, batch: list[Reading]):
     return asyncio.run(counter.process(batch))
 
@@ -238,9 +255,11 @@ def test_the_no_reading_sentinel_is_not_a_temperature() -> None:
     batch += [_reading(ch, 211.8) for ch in _BULK[1:]]
     out = _run(c, batch)
 
-    assert out
-    assert out[0].metadata["sensors_used"] == 3, "the sentinel channel is excluded"
-    assert out[0].value == pytest.approx(96.3, abs=0.6), "and does not distort the mean"
+    # Stronger than "excluded from the mean": since the 47b6c9ca review the
+    # COMPLETE configured set is required, because averaging whichever subset
+    # happens to be valid moves the denominator underneath a fixed baseline.
+    # A sentinel on one sensor therefore produces no value at all.
+    assert out == [], "an incomplete sensor set must produce nothing, not a subset mean"
 
 
 def test_a_non_ok_reading_never_enters_the_calculation() -> None:
@@ -360,7 +379,7 @@ def test_entering_a_phase_rezeros_the_counter() -> None:
     _run(c, _batch(0.10, 295.0))
     assert _run(c, _batch(0.05, 295.0))[0].value == pytest.approx(50.0, abs=0.1)
 
-    c.notify_phase_change("cooldown")
+    _enter_phase(c, "cooldown")
 
     out = _run(c, _batch(0.05, 295.0))
     assert out[0].value == pytest.approx(100.0), "the phase change is the new zero"
@@ -384,7 +403,7 @@ def test_an_unknown_phase_leaves_a_good_baseline_alone() -> None:
     epoch = c.baseline_epoch
 
     for phase in ("preparation", "teardown", "", None, "нечто"):
-        c.notify_phase_change(phase)
+        _enter_phase(c, phase)
     assert c.baseline_epoch == epoch, "an irrelevant phase is not a reason to discard a measurement"
 
 
@@ -392,7 +411,7 @@ def test_every_value_says_what_its_hundred_percent_was() -> None:
     """A percentage against a forgotten reference is not a measurement."""
 
     c = _counter()
-    c.notify_phase_change("vacuum")
+    _enter_phase(c, "vacuum")
     meta = _run(c, _batch(0.10, 295.0))[0].metadata
 
     assert meta["baseline_reason"] == "начало откачки"
@@ -407,7 +426,7 @@ def test_each_phase_carries_its_own_meaning() -> None:
         ("measurement", "начало измерения"),
         ("warmup", "начало отогрева"),
     ):
-        c.notify_phase_change(phase)
+        _enter_phase(c, phase)
         assert _run(c, _batch(0.05, 250.0))[0].metadata["baseline_reason"] == label
 
 

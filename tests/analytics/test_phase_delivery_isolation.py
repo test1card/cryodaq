@@ -1,36 +1,46 @@
-"""Phase delivery must not run plugin code on the engine's command handler.
+"""No plugin code runs on any path the phase change introduced.
 
-From the 47b6c9ca review: notify_phase_change executed arbitrary duck-typed
-plugin code synchronously from the experiment-phase command handler, on the
-engine event loop. A slow or blocking hook could stall acquisition, persistence
-and safety scheduling. A try/except isolates exceptions; it does not isolate
-blocking work.
+The first attempt executed plugin hooks directly in the experiment-phase command
+handler. The correction moved them to the analytics task — which is the SAME
+asyncio event loop, so a `time.sleep(0.15)` hook still blocked it for 0.15 s.
+Moving blocking work between asyncio tasks is not isolation.
+
+So the hook is gone. The pipeline stores one immutable `PhaseEntry` and hands it
+over by plain attribute assignment; plugins that care consume it inside their own
+`process()`, which is plugin code the pipeline already runs and already accounts
+for. These tests hold that line: no method on a plugin is called by either step.
 """
 
 from __future__ import annotations
 
 from cryodaq.analytics.plugin_loader import PluginPipeline
+from cryodaq.core.phase_event import PhaseEntry
 
 
-class _Recorder:
-    plugin_id = "recorder"
+class _Landmine:
+    """Every callable on it fails the test if the pipeline touches it."""
 
-    def __init__(self) -> None:
-        self.seen: list[str | None] = []
-
-    def notify_phase_change(self, phase):
-        self.seen.append(phase)
-
-
-class _Blocking:
-    plugin_id = "blocking"
+    plugin_id = "landmine"
 
     def __init__(self) -> None:
-        self.entered = False
+        self.pending_phase_event = None
 
-    def notify_phase_change(self, phase):
-        self.entered = True
-        raise RuntimeError("slow or broken hook")
+    def notify_phase_change(self, *_a, **_k):
+        raise AssertionError("the pipeline must not call plugin methods to deliver a phase")
+
+    def process(self, *_a, **_k):
+        raise AssertionError("process() must only be called by the batch loop")
+
+
+class _Opted:
+    plugin_id = "opted"
+
+    def __init__(self) -> None:
+        self.pending_phase_event = None
+
+
+class _NotOpted:
+    plugin_id = "not_opted"
 
 
 def _pipeline() -> PluginPipeline:
@@ -40,76 +50,80 @@ def _pipeline() -> PluginPipeline:
     return PluginPipeline(MagicMock(), Path("plugins"))
 
 
-def test_the_command_handler_call_runs_no_plugin_code() -> None:
-    """This is the blocker: the sync call must be O(1)."""
+def _entry(phase: str = "cooldown", started_at: float = 1000.0) -> PhaseEntry:
+    return PhaseEntry(experiment_id="exp", phase=phase, started_at=started_at)
+
+
+def test_the_command_handler_call_touches_no_plugin() -> None:
+    """This is the blocker: the sync call must do nothing but store a value."""
 
     pipe = _pipeline()
-    rec = _Recorder()
-    pipe._plugins = {"recorder": rec}
+    mine = _Landmine()
+    pipe._plugins = {"landmine": mine}
 
-    pipe.notify_phase_change("cooldown")
+    pipe.notify_phase_change(_entry())
 
-    assert rec.seen == [], "no plugin may run on the command handler's loop"
-    assert pipe._pending_phase == "cooldown"
-    assert pipe._pending_phase_set is True
+    assert mine.pending_phase_event is None, "not even the attribute is written yet"
 
 
-def test_delivery_happens_on_the_analytics_task() -> None:
-    pipe = _pipeline()
-    rec = _Recorder()
-    pipe._plugins = {"recorder": rec}
-
-    pipe.notify_phase_change("vacuum")
-    pipe._deliver_pending_phase()
-
-    assert rec.seen == ["vacuum"]
-    assert pipe._pending_phase_set is False, "delivered once, not repeatedly"
-
-
-def test_a_second_delivery_without_a_new_phase_does_nothing() -> None:
-    pipe = _pipeline()
-    rec = _Recorder()
-    pipe._plugins = {"recorder": rec}
-
-    pipe.notify_phase_change("vacuum")
-    pipe._deliver_pending_phase()
-    pipe._deliver_pending_phase()
-
-    assert rec.seen == ["vacuum"]
-
-
-def test_one_raising_plugin_does_not_stop_the_others() -> None:
-    pipe = _pipeline()
-    bad, good = _Blocking(), _Recorder()
-    pipe._plugins = {"blocking": bad, "recorder": good}
-
-    pipe.notify_phase_change("cooldown")
-    pipe._deliver_pending_phase()
-
-    assert bad.entered is True
-    assert good.seen == ["cooldown"], "a raising hook must not swallow the fanout"
-
-
-def test_only_the_latest_phase_is_delivered() -> None:
-    """Rapid transitions collapse: the plugin needs the current phase, not a log."""
+def test_publishing_calls_no_plugin_method_either() -> None:
+    """Plain attribute assignment. A hook could block; an assignment cannot."""
 
     pipe = _pipeline()
-    rec = _Recorder()
-    pipe._plugins = {"recorder": rec}
+    mine = _Landmine()
+    pipe._plugins = {"landmine": mine}
 
-    pipe.notify_phase_change("vacuum")
-    pipe.notify_phase_change("cooldown")
-    pipe._deliver_pending_phase()
+    pipe.notify_phase_change(_entry())
+    pipe._publish_phase_entry()
 
-    assert rec.seen == ["cooldown"]
+    assert mine.pending_phase_event is not None, "delivered without calling anything"
 
 
-def test_a_plugin_without_the_hook_is_skipped() -> None:
-    class _Plain:
-        plugin_id = "plain"
+def test_a_plugin_that_does_not_opt_in_is_left_alone() -> None:
+    pipe = _pipeline()
+    plain = _NotOpted()
+    opted = _Opted()
+    pipe._plugins = {"plain": plain, "opted": opted}
+
+    pipe.notify_phase_change(_entry())
+    pipe._publish_phase_entry()
+
+    assert not hasattr(plain, "pending_phase_event")
+    assert opted.pending_phase_event is not None
+
+
+def test_only_the_latest_entry_is_published() -> None:
+    """Latest-only is sufficient BECAUSE the entry carries its own identity."""
 
     pipe = _pipeline()
-    pipe._plugins = {"plain": _Plain(), "recorder": (rec := _Recorder())}
-    pipe.notify_phase_change("warmup")
-    pipe._deliver_pending_phase()
-    assert rec.seen == ["warmup"]
+    opted = _Opted()
+    pipe._plugins = {"opted": opted}
+
+    pipe.notify_phase_change(_entry("vacuum", 1000.0))
+    pipe.notify_phase_change(_entry("cooldown", 2000.0))
+    pipe._publish_phase_entry()
+
+    assert opted.pending_phase_event.phase == "cooldown"
+
+
+def test_a_re_entry_is_distinguishable_from_a_duplicate() -> None:
+    """`vacuum -> cooldown -> vacuum` must not collapse into "no change".
+
+    A bare latest-only string lost this; the identity triple keeps it.
+    """
+
+    first = _entry("vacuum", 1000.0)
+    again = _entry("vacuum", 3000.0)
+
+    assert first.identity() != again.identity()
+    assert first.phase == again.phase
+
+
+def test_publishing_before_any_entry_does_nothing() -> None:
+    pipe = _pipeline()
+    opted = _Opted()
+    pipe._plugins = {"opted": opted}
+
+    pipe._publish_phase_entry()
+
+    assert opted.pending_phase_event is None

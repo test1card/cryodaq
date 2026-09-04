@@ -65,6 +65,14 @@ _RATE_WINDOW_S = 1800.0
 # Five minutes is the shortest span over which this quantity moves detectably.
 _MIN_RATE_SPAN_S = 300.0
 
+# A silent interval is a discontinuity even though nothing was appended to
+# record it. When an input is missing or unusable the plugin returns without
+# emitting, so the history simply has no point for that time — and the next good
+# sample sits next to the previous one looking perfectly contiguous. Fitting
+# across that hole bridges an outage of arbitrary length. Any inter-sample gap
+# beyond this breaks the trailing run.
+_MAX_SAMPLE_GAP_S = 300.0
+
 # Which phases re-zero the counter, and what 100% then means to the operator.
 # Phases absent here (preparation, teardown) leave a good baseline alone: an
 # unknown or irrelevant phase is not a reason to discard a measurement in
@@ -110,7 +118,12 @@ class MolecularCounter(AnalyticsPlugin):
         # Readings older than this are refused when establishing a baseline, so
         # a cached pre-transition sample cannot become the new zero.
         self._baseline_fence_ts: float | None = None
-        self._phase: str | None = None
+        self._phase_identity: tuple[str, str, float] | None = None
+        # Written by the pipeline via plain attribute assignment; consumed in
+        # process(). Declaring it is how this plugin opts in — the pipeline
+        # never calls a method to deliver it, so no plugin code runs outside
+        # process() on any path.
+        self.pending_phase_event = None
         self._history: list[tuple[float, float]] = []  # (ts, n_rel_pct)
         self._last_emit_ts: float = 0.0
         self._binding_error: str | None = None
@@ -144,7 +157,8 @@ class MolecularCounter(AnalyticsPlugin):
         # letting a new zero inherit the previous phase's wording and look
         # authoritative. `_phase` is cleared too, so the next genuine phase
         # notification is treated as an entry rather than a duplicate.
-        self._phase = None
+        self._phase_identity = None
+        self.pending_phase_event = None
         self.reset_baseline(reason="новая сессия наблюдения")
         self._last.clear()
         self._runtime_label.clear()
@@ -221,44 +235,44 @@ class MolecularCounter(AnalyticsPlugin):
 
         return self._baseline_reason
 
-    def notify_phase_change(self, phase: str | None) -> None:
-        """Re-zero when the operator advances the phase.
+    def _consume_phase_event(self) -> None:
+        """Apply the latest authoritative phase entry, if it is a new one.
 
-        What "100%" means is a property of the phase, and one fixed zero cannot
-        serve both questions. During `vacuum` the useful zero is the start of
-        pumping — "how much of the load have I removed?", which is the number
-        for drying the MLI. During `cooldown` it is the start of cooling — "is
-        the chamber holding what it had?", which is what made 2026-09-03
-        legible: 100% → 80% → 118%, crossing back above its own start. Zeroed at
-        pump-down instead, that same run would have read 3% → 3.5% and the
-        crossing would have been invisible.
+        Runs inside `process()`, so this is the plugin's own already-accounted-
+        for execution — the pipeline never calls into plugin code to deliver it,
+        it only assigns `pending_phase_event`.
 
-        This does not violate the rule that the counter never re-zeros itself. A
-        phase change is an operator action; the zero moves because someone moved
-        it, indirectly but deliberately. It is never moved by the data.
+        What "100%" means is a property of the phase. During `vacuum` the useful
+        zero is the start of pumping; during `cooldown` it is the start of
+        cooling, which is what made 2026-09-03 legible at 100 -> 80 -> 118%.
+        Zeroed at pump-down that run reads 3% -> 3.5% and the crossing vanishes.
+
+        Identity is the whole (experiment, phase, started_at) triple, so
+        re-entering a phase is a NEW entry rather than a duplicate, and the
+        baseline is anchored to the manager's own `started_at` rather than to
+        whenever this happened to run.
         """
 
-        key = str(phase or "")
-        label = _PHASE_BASELINE_LABELS.get(key, None)
+        entry = self.pending_phase_event
+        if entry is None:
+            return
+        try:
+            identity = entry.identity()
+            phase = str(entry.phase)
+            started_at = float(entry.started_at)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if identity == self._phase_identity:
+            return
+        label = _PHASE_BASELINE_LABELS.get(phase)
         if label is None:
-            # An unknown phase is not a reason to discard a good baseline.
+            # An unrecognised phase is not a reason to discard a measurement.
             return
-        if key == self._phase:
-            # Idempotent. A duplicate notification of the SAME phase is not a
-            # new entry, and re-zeroing on it would silently discard a
-            # measurement in progress on nothing but a repeated command.
+        if not math.isfinite(started_at):
             return
-        self._phase = key
-        entry = datetime.now(UTC).timestamp()
-        # `entry` fences the baseline: readings cached from before the operator
-        # advanced the phase must not become the new zero. Without this the hook
-        # only cleared, and the next batch could rebuild the baseline from a
-        # pre-transition sample and stamp it with a post-transition time.
-        self.reset_baseline(reason=label, fence_ts=entry, phase_entry_epoch=entry)
+        self._phase_identity = identity
+        self.reset_baseline(reason=label, fence_ts=started_at, phase_entry_epoch=started_at)
 
-    # ------------------------------------------------------------------
-    # processing
-    # ------------------------------------------------------------------
     async def process(self, readings: list[Reading]) -> list[DerivedMetric]:
         if self._binding_error is not None:
             return []
@@ -267,6 +281,7 @@ class MolecularCounter(AnalyticsPlugin):
         # the cache as it is written would let an old value look fresh simply
         # because a newer one arrived beside it.
         now = datetime.now(UTC).timestamp()
+        self._consume_phase_event()
         self._absorb(readings, now)
 
         if now - self._last_emit_ts < self._update_interval_s:
@@ -276,8 +291,17 @@ class MolecularCounter(AnalyticsPlugin):
         if pressure is None or pressure <= 0.0:
             return []
 
-        temps = [t for t in (self._current(s, now) for s in self._bulk_sensors) if t is not None]
-        temps = [t for t in temps if t >= _MIN_PHYSICAL_K]
+        # EVERY configured sensor, or nothing. Averaging whichever subset
+        # happens to be present changes the denominator underneath a fixed
+        # baseline: with two sensors configured and only the first reporting,
+        # the counter reads 100%, then 50% when the second appears at unchanged
+        # pressure. A moving denominator cannot sit under one zero.
+        temps: list[float] = []
+        for sensor in self._bulk_sensors:
+            value = self._current(sensor, now)
+            if value is None or value < _MIN_PHYSICAL_K:
+                return []
+            temps.append(value)
         if not temps:
             return []
         t_bulk = sum(temps) / len(temps)
@@ -298,8 +322,8 @@ class MolecularCounter(AnalyticsPlugin):
             )
 
         p0, t0, baseline_ts = self._baseline
-        # N ∝ P/T, single zone. Conservative: real cold zones make the true
-        # inventory higher than this, never lower.
+        # N ∝ P/T, single zone. NOT a bound in either direction: the mean of
+        # selected sensors is not the volume-weighted effective gas temperature.
         n_rel_pct = 100.0 * (pressure / p0) * (t0 / t_bulk)
         if not math.isfinite(n_rel_pct):
             return []
@@ -367,7 +391,12 @@ class MolecularCounter(AnalyticsPlugin):
                     try:
                         ts = float(reading.timestamp.timestamp())
                     except (TypeError, ValueError, OSError, AttributeError):
-                        ts = now
+                        # Fail closed. Substituting `now` for an unreadable
+                        # timestamp makes an undateable reading look fresh, and
+                        # freshness is the entire basis for using it.
+                        break
+                    if not math.isfinite(ts):
+                        break
                     self._last[configured] = (float(value), ts)
                     self._runtime_label[configured] = runtime
                     break
@@ -427,6 +456,11 @@ class MolecularCounter(AnalyticsPlugin):
                 break
             if points and ts >= points[-1][0]:
                 # Non-monotonic time: the run is not contiguous either.
+                break
+            if points and (points[-1][0] - ts) > _MAX_SAMPLE_GAP_S:
+                # Silence longer than one sampling interval. Nothing was written
+                # to mark it, so the gap itself is the only evidence that the
+                # series was interrupted.
                 break
             points.append((float(ts), float(value)))
         points.reverse()

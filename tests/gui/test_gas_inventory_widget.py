@@ -61,7 +61,7 @@ def test_pumping_reads_green_with_a_down_arrow(app) -> None:
     assert theme.STATUS_OK in w._arrow_label.styleSheet(), "the glyph carries the colour"
     assert theme.STATUS_OK in w._card.styleSheet(), "and so does the left border"
     assert "3.5" in w._rate_label.text()
-    assert w._note_label.text() == "откачка идёт"
+    assert w._note_label.text() == "показатель убывает"
 
 
 def test_filling_reads_red_with_an_up_arrow(app) -> None:
@@ -78,7 +78,7 @@ def test_filling_reads_red_with_an_up_arrow(app) -> None:
     assert w._arrow_label.text() == "↑"
     assert theme.STATUS_FAULT in w._arrow_label.styleSheet(), "the glyph carries it instead"
     assert theme.STATUS_FAULT in w._card.styleSheet(), "with the border-left as the second channel"
-    assert w._note_label.text() == "газ прибывает"
+    assert w._note_label.text() == "показатель растёт"
 
 
 def test_a_high_level_with_no_motion_is_not_painted_red(app) -> None:
@@ -93,7 +93,7 @@ def test_a_high_level_with_no_motion_is_not_painted_red(app) -> None:
 
     assert theme.STATUS_FAULT not in w._card.styleSheet()
     assert theme.STATUS_OK not in w._card.styleSheet()
-    assert w._note_label.text() == "держится"
+    assert w._note_label.text() == "показатель держится"
 
 
 def test_the_sign_alone_decides_the_colour(app) -> None:

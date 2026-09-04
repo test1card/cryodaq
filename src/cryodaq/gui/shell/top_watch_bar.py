@@ -830,6 +830,10 @@ class TopWatchBar(QWidget):
         # DESIGN: RULE-A11Y-003. STATUS_FAULT is 3.94:1 and fails AA body
         # contrast, so it never colours the value. The arrow carries the colour;
         # the digits stay TEXT_PRIMARY whatever the direction.
+        # The counter publishes every 60 s; three missed cycles is silence. The
+        # chrome kept the last number and arrow indefinitely when the producer
+        # stopped, which is exactly the condition an operator must not miss.
+        self._gas_last_ts: float | None = None
         self._ctx_gas_arrow = QLabel("")
         self._ctx_gas_arrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;")
         ctx.addWidget(self._ctx_gas_label)
@@ -880,6 +884,19 @@ class TopWatchBar(QWidget):
         for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
             self._render_vital(key)
 
+    _GAS_STALE_AFTER_S = 180.0
+
+    def _expire_gas_inventory_if_silent(self) -> None:
+        """Called from the bar's existing periodic tick — no new timer."""
+
+        if self._gas_last_ts is None:
+            return
+        if (time.time() - self._gas_last_ts) <= self._GAS_STALE_AFTER_S:
+            return
+        self._ctx_gas_value.setText(ABSENT)
+        self._ctx_gas_arrow.setText("")
+        self._gas_last_ts = None
+
     def _render_gas_inventory(self, reading) -> None:
         """Show N/N₀ and its direction. Refuses rather than guessing."""
 
@@ -896,6 +913,16 @@ class TopWatchBar(QWidget):
         # Shared formatter: the chrome rendered a deep pump-down as "0%" while
         # the analytics card said "-5.0 дек" for the same instant. Two places
         # showing one quantity must not be able to disagree.
+        try:
+            ts = float(reading.timestamp.timestamp())
+        except (TypeError, ValueError, OSError, AttributeError):
+            ts = None
+        if ts is None or not math.isfinite(ts):
+            # Fail closed rather than treating an undateable sample as current.
+            self._ctx_gas_value.setText(ABSENT)
+            self._ctx_gas_arrow.setText("")
+            return
+        self._gas_last_ts = time.time()
         self._ctx_gas_value.setText(format_inventory(float(value)))
         if rate is None or abs(rate) < 0.2:
             self._ctx_gas_arrow.setText("")
@@ -1095,6 +1122,9 @@ class TopWatchBar(QWidget):
 
     def _flush_persistent_context(self) -> None:
         """Render one latest-value cut at no more than two ticks per second."""
+        # The derived gas cell ages on this existing tick — no new timer, and it
+        # is the only place in the bar that already runs on a schedule.
+        self._expire_gas_inventory_if_silent()
         pending, self._pending_vital_cuts = self._pending_vital_cuts, {}
         for key, cut in pending.items():
             previous = self._last_interval_cuts.get(key)

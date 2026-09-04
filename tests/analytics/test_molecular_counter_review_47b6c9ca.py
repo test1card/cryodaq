@@ -44,6 +44,23 @@ def _counter() -> MolecularCounter:
     return c
 
 
+# The pipeline delivers an authoritative PhaseEntry by plain attribute
+# assignment and the plugin consumes it inside process(); there is no hook to
+# call. These helpers drive that real path.
+_PHASE_SEQ = [0]
+
+
+def _enter_phase(counter, phase: str, *, started_at: float | None = None):
+    from cryodaq.core.phase_event import PhaseEntry
+
+    _PHASE_SEQ[0] += 1
+    counter.pending_phase_event = PhaseEntry(
+        experiment_id="exp-test",
+        phase=phase,
+        started_at=(datetime.now(UTC).timestamp() - 1.0) if started_at is None else started_at,
+    )
+
+
 def _run(c, batch):
     return asyncio.run(c.process(batch))
 
@@ -58,16 +75,45 @@ def test_duplicate_notification_of_the_same_phase_is_idempotent() -> None:
     duplicated message.
     """
 
+    from cryodaq.core.phase_event import PhaseEntry
+
+    started = datetime.now(UTC).timestamp() - 1.0
+    entry = PhaseEntry(experiment_id="exp-test", phase="cooldown", started_at=started)
+
     c = _counter()
-    c.notify_phase_change("cooldown")
+    c.pending_phase_event = entry
     _run(c, _batch(0.10, 300.0))
     epoch = c.baseline_epoch
     assert epoch is not None
 
-    c.notify_phase_change("cooldown")
+    # The pipeline holds a latest-only value, so the SAME entry is republished
+    # on every batch. Re-zeroing on that would discard a measurement in
+    # progress on nothing but a repeated assignment.
+    c.pending_phase_event = entry
     _run(c, _batch(0.05, 300.0))
 
-    assert c.baseline_epoch == epoch, "the same phase twice must not move the zero"
+    assert c.baseline_epoch == epoch, "the same entry twice must not move the zero"
+
+
+def test_re_entering_a_phase_is_a_new_entry() -> None:
+    """vacuum -> cooldown -> vacuum must not read as no change.
+
+    A bare latest-only STRING collapses that sequence; the identity triple
+    carries started_at, so the second vacuum is distinct.
+    """
+
+    from cryodaq.core.phase_event import PhaseEntry
+
+    c = _counter()
+    base = datetime.now(UTC).timestamp() - 100.0
+    c.pending_phase_event = PhaseEntry("exp", "vacuum", base)
+    _run(c, _batch(0.10, 300.0))
+    first = c.baseline_epoch
+
+    c.pending_phase_event = PhaseEntry("exp", "vacuum", base + 50.0)
+    _run(c, _batch(0.05, 300.0))
+
+    assert c.baseline_epoch != first, "a later started_at is a different entry"
 
 
 def test_a_pre_transition_reading_cannot_become_the_new_zero() -> None:
@@ -79,7 +125,7 @@ def test_a_pre_transition_reading_cannot_become_the_new_zero() -> None:
 
     c = _counter()
     _run(c, _batch(0.10, 300.0))            # cache is warm, pre-transition
-    c.notify_phase_change("vacuum")
+    _enter_phase(c, "vacuum")
 
     # Only stale (pre-fence) readings available: no baseline may be taken.
     assert _run(c, _batch(0.05, 300.0, age_s=120.0)) == []
@@ -94,7 +140,7 @@ def test_phase_entry_time_is_distinct_from_the_first_sample_time() -> None:
     """Conflating them overstates what the baseline is anchored to."""
 
     c = _counter()
-    c.notify_phase_change("cooldown")
+    _enter_phase(c, "cooldown")
     meta = _run(c, _batch(0.10, 300.0))[0].metadata
 
     assert meta["phase_entry_epoch"] is not None
@@ -106,7 +152,7 @@ def test_a_reload_reports_a_session_baseline_not_a_phase_one() -> None:
     """No durable reconstruction exists, so the wording must not imply one."""
 
     c = _counter()
-    c.notify_phase_change("cooldown")
+    _enter_phase(c, "cooldown")
     _run(c, _batch(0.10, 300.0))
     assert "захолаживания" in c.baseline_reason
 

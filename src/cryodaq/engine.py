@@ -107,6 +107,7 @@ from cryodaq.core.operator_log import (
     OperatorLogIdempotencyUnavailableError,
 )
 from cryodaq.core.path_jail import resolve_within
+from cryodaq.core.phase_event import PhaseEntry
 from cryodaq.core.physical_alarms_config import (
     load_production_physical_alarms_config,
 )
@@ -5577,11 +5578,30 @@ async def _execute_owned_experiment_command(
                 )
             plugin_pipeline = getattr(context, "plugin_pipeline", None)
             if plugin_pipeline is not None:
-                _attempt_experiment_reconciliation_sync(
-                    reconciliation_failures,
-                    "analytics_plugin_phase_change",
-                    lambda: plugin_pipeline.notify_phase_change(phase),
-                )
+                # Carry the AUTHORITATIVE entry, not a bare string: the manager
+                # has already committed the experiment id and started_at, and a
+                # consumer that has to know WHEN the transition happened must
+                # not invent it at delivery time. Built here, where both facts
+                # are in scope; malformed metadata degrades to no notification
+                # rather than a fabricated timestamp.
+                _committed = result.get("phase", {}) if isinstance(result, dict) else {}
+                _started_raw = _committed.get("started_at") if isinstance(_committed, dict) else None
+                _phase_entry = None
+                if active is not None and isinstance(_started_raw, str):
+                    try:
+                        _phase_entry = PhaseEntry(
+                            experiment_id=active.experiment_id,
+                            phase=str(phase),
+                            started_at=datetime.fromisoformat(_started_raw).timestamp(),
+                        )
+                    except (TypeError, ValueError, OSError):
+                        _phase_entry = None
+                if _phase_entry is not None:
+                    _attempt_experiment_reconciliation_sync(
+                        reconciliation_failures,
+                        "analytics_plugin_phase_change",
+                        lambda e=_phase_entry: plugin_pipeline.notify_phase_change(e),
+                    )
             if phase == "cooldown" and cooldown_alarm is not None and cooldown_alarm.is_auto_arm_enabled:
                 armed = _attempt_experiment_reconciliation_sync(
                     reconciliation_failures,

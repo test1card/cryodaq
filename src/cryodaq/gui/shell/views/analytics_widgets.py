@@ -1292,11 +1292,6 @@ class PressureCurrentWidget(QWidget):
         self._window_selector.window_changed.connect(lambda w: self._maybe_refetch_history(w))
         lay.addWidget(self._plot, stretch=1)
         self._series: list[tuple[float, float]] = []
-        # Samples are normalised against a baseline. Joining points taken across
-        # a baseline change draws a curve whose y-axis means two different
-        # things, with the caption silently changing underneath it. The series
-        # is cleared when the baseline moves.
-        self._series_baseline_epoch: float | None = None
         self._history_worker = None
 
         root = QVBoxLayout(self)
@@ -2180,6 +2175,11 @@ class GasInventoryWidget(QWidget):
     """
 
     _MAX_POINTS = 720  # 12 h at the 60 s publish cadence
+    # The counter publishes every 60 s. Three missed cycles is silence, not a
+    # hiccup. Without this the card kept the last number and arrow forever when
+    # the producer stopped, and then joined the series straight across the gap.
+    _STALE_AFTER_S = 180.0
+    _FRESHNESS_TICK_MS = 1000
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2191,7 +2191,7 @@ class GasInventoryWidget(QWidget):
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(_title_label("Газ в камере"))
+        header.addWidget(_title_label("Газ (оценка)"))
         header.addStretch()
         lay.addLayout(header)
 
@@ -2273,6 +2273,14 @@ class GasInventoryWidget(QWidget):
         # things, with the caption silently changing underneath it. The series
         # is cleared when the baseline moves.
         self._series_baseline_epoch: float | None = None
+        self._last_value_ts: float | None = None
+        self._expired: bool = False
+
+        # One parented timer, connected once. Qt parent teardown owns it.
+        self._freshness_timer = QTimer(self)
+        self._freshness_timer.setInterval(self._FRESHNESS_TICK_MS)
+        self._freshness_timer.timeout.connect(self._on_freshness_tick)
+        self._freshness_timer.start()
 
     def set_gas_inventory(self, reading) -> None:
         """Ingest one analytics/molecular_counter/gas_inventory reading."""
@@ -2292,7 +2300,20 @@ class GasInventoryWidget(QWidget):
         try:
             ts = float(reading.timestamp.timestamp())
         except (TypeError, ValueError, OSError, AttributeError):
-            ts = time.time()
+            # Fail closed: an undateable sample cannot be placed on a time axis
+            # and must not be given `now`, which would make it look current.
+            self._render_absent("время измерения неизвестно")
+            return
+        if not math.isfinite(ts):
+            self._render_absent("время измерения нечитаемо")
+            return
+
+        if self._expired:
+            # Recovery after silence: the outage is a discontinuity, and joining
+            # across it would draw a line through time in which nothing is known.
+            self._series.clear()
+            self._expired = False
+        self._last_value_ts = time.time()
 
         epoch = meta.get("baseline_epoch")
         epoch = float(epoch) if isinstance(epoch, (int, float)) and math.isfinite(float(epoch)) else None
@@ -2341,6 +2362,18 @@ class GasInventoryWidget(QWidget):
         self._note_label.setText(str(reason))
         self._apply_status_edge(None)
 
+    @Slot()
+    def _on_freshness_tick(self) -> None:
+        """Make silence visible. Cheap and latching."""
+
+        if self._last_value_ts is None or self._expired:
+            return
+        if (time.time() - self._last_value_ts) <= self._STALE_AFTER_S:
+            return
+        self._expired = True
+        age = int(time.time() - self._last_value_ts)
+        self._render_absent(f"нет обновления ({age} с)")
+
     @staticmethod
     def _baseline_caption(meta: dict) -> str:
         from datetime import datetime as _dt
@@ -2388,9 +2421,12 @@ class GasInventoryWidget(QWidget):
     @staticmethod
     def _verdict_word(rate: float) -> str:
         # Describes the measurement, never what to do about it.
+        # Describes the measured quantity, not a conclusion about the pump or
+        # the chamber: this is a Pirani-equivalent proxy against an
+        # operator-chosen sensor set.
         if abs(rate) < 0.2:
-            return "держится"
-        return "откачка идёт" if rate < 0 else "газ прибывает"
+            return "показатель держится"
+        return "показатель убывает" if rate < 0 else "показатель растёт"
 
 
 

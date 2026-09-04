@@ -22,6 +22,7 @@ import yaml
 
 from cryodaq.analytics.base_plugin import AnalyticsPlugin, DerivedMetric
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.phase_event import PhaseEntry
 from cryodaq.core.shutdown_settlement import (
     ShutdownOwnerSettledError,
     cancel_and_settle_tasks,
@@ -114,8 +115,7 @@ class PluginPipeline:
         # Phase delivery is decoupled from the command handler that sets it —
         # see notify_phase_change. A plain slot assignment is the only work done
         # on the engine loop.
-        self._pending_phase: str | None = None
-        self._pending_phase_set: bool = False
+        self._latest_phase_entry: PhaseEntry | None = None
         self._batch_interval_s = batch_interval_s
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
@@ -133,48 +133,42 @@ class PluginPipeline:
     # Публичный API
     # ------------------------------------------------------------------
 
-    def notify_phase_change(self, phase: str | None) -> None:
-        """Record that the operator advanced the phase. Does NOT run plugins.
+    def notify_phase_change(self, entry: PhaseEntry | None) -> None:
+        """Record the latest authoritative phase entry. Runs NO plugin code.
 
-        This is called from the experiment-phase COMMAND HANDLER, on the engine
-        event loop. Executing arbitrary duck-typed plugin code there would let a
-        slow or blocking hook stall acquisition, persistence and safety
-        scheduling — the exact failure class this work exists to remove. A
-        try/except isolates exceptions; it does not isolate blocking work.
+        Called from the experiment-phase command handler, on the engine event
+        loop. The previous design called plugin hooks here; the correction after
+        that moved the hooks to the analytics task — which was still the SAME
+        event loop, so a blocking hook still stalled acquisition. Moving
+        blocking work between asyncio tasks is not isolation.
 
-        So this method does one O(1), non-blocking thing: it stores the pending
-        phase. Delivery happens in the analytics process loop
-        (:meth:`_deliver_pending_phase`), which is a separate task that already
-        owns the cost of running plugin code and is already the place where a
-        slow plugin delays analytics rather than acquisition.
+        So there is no hook any more. This stores one immutable value. Plugins
+        that care read it during their OWN `process()` call, which is plugin
+        code the pipeline already runs and already accounts for; no new
+        execution path into plugin code exists at any point.
+
+        Latest-only is sufficient because `PhaseEntry` carries identity and the
+        manager's `started_at`: a consumer can tell a re-entry from a duplicate
+        without needing the intermediate events.
         """
 
-        self._pending_phase = phase
-        self._pending_phase_set = True
+        self._latest_phase_entry = entry
 
-    def _deliver_pending_phase(self) -> None:
-        """Hand any pending phase to plugins, on the analytics task.
+    def _publish_phase_entry(self) -> None:
+        """Hand the latest entry to plugins by plain attribute assignment.
 
-        Duck-typed and individually guarded: a plugin that does not care omits
-        the method, and one that raises must not stop the others being told.
+        `hasattr` + `setattr` on a plugin instance executes no plugin logic. A
+        plugin opts in by declaring `pending_phase_event`; it consumes and
+        clears the value inside its own `process()`.
         """
 
-        if not self._pending_phase_set:
+        entry = self._latest_phase_entry
+        if entry is None:
             return
-        phase = self._pending_phase
-        self._pending_phase_set = False
         for plugin in list(self._plugins.values()):
-            hook = getattr(plugin, "notify_phase_change", None)
-            if not callable(hook):
-                continue
-            try:
-                hook(phase)
-            except Exception:
-                logger.warning(
-                    "плагин '%s': notify_phase_change завершился ошибкой",
-                    plugin.plugin_id,
-                    exc_info=True,
-                )
+            if hasattr(plugin, "pending_phase_event"):
+                plugin.pending_phase_event = entry
+
 
     async def start(self) -> None:
         """Запустить пайплайн.
@@ -726,9 +720,8 @@ class PluginPipeline:
             if not batch:
                 continue
 
-            # Any phase the operator advanced since the last batch is applied
-            # here, on THIS task, not on the command handler's loop.
-            self._deliver_pending_phase()
+            # Plain attribute assignment — no plugin code runs here.
+            self._publish_phase_entry()
 
             # Передаём пакет каждому плагину
             for plugin in list(self._plugins.values()):
