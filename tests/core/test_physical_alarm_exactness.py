@@ -140,3 +140,67 @@ def test_canonical_binding_collision_is_rejected() -> None:
 
     with pytest.raises(HousekeepingConfigError, match="exactly one"):
         resolve_canonical_temperature_bindings(_Catalog(), {"Т11"})
+
+
+def test_production_loader_accepts_escalate_to_safety_true_and_says_it_grants_nothing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The key is inert, and production must SAY so rather than accept it mutely.
+
+    `escalate_to_safety` is retained only so existing configurations keep
+    loading — the vacuum guard has no SafetyManager parameter, so no value here
+    can grant an alarm authority over the source. A configuration that sets it
+    true is stating an intent the software will not honour, and the operator has
+    to hear that. The warning previously existed only in the legacy loader,
+    while the engine uses THIS one, so production accepted the setting in
+    silence.
+
+    Three things are asserted together on purpose: that loading still succeeds
+    (rejecting startup over an inert key would take the stand down for nothing),
+    that the value survives unchanged (silently coercing it would hide the
+    operator's stated intent from them), and that the warning names the actual
+    consequence rather than merely mentioning the key.
+    """
+
+    import logging
+
+    import yaml
+
+    document = yaml.safe_load((_ROOT / "config" / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    assert document["vacuum"]["escalate_to_safety"] is False, "fixture drifted from the shipped default"
+    document["vacuum"]["escalate_to_safety"] = True
+
+    path = tmp_path / "physical_alarms.yaml"
+    path.write_text(yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="cryodaq.core.physical_alarms_config"):
+        cooldown, vacuum, landmarks = load_production_physical_alarms_config(path)
+
+    assert vacuum["escalate_to_safety"] is True, "the operator's value must survive, not be coerced"
+    assert cooldown and landmarks, "the rest of the document must still load"
+
+    warning = caplog.text
+    assert "escalate_to_safety" in warning
+    assert "grants no authority over the source" in warning, (
+        "the warning must name the consequence, not just mention the key; an "
+        f"operator reading it has to learn that nothing will happen. Got: {warning!r}"
+    )
+
+
+def test_the_shipped_production_document_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The warning must fire on the setting, not on every boot.
+
+    A diagnostic that appears unconditionally is one operators learn to ignore,
+    which is how the qualification CRITICALs and the H3 banner both ended up
+    invisible in practice.
+    """
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="cryodaq.core.physical_alarms_config"):
+        load_production_physical_alarms_config(_ROOT / "config" / "physical_alarms.yaml")
+
+    assert "escalate_to_safety" not in caplog.text
