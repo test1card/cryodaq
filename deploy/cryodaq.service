@@ -1,0 +1,60 @@
+[Unit]
+# CryoDAQ acquisition stack, started with the operator's graphical session.
+#
+# Why this exists: on 2026-09-04 the stand had NO autostart of any kind — no
+# systemd unit, no @reboot crontab, no XDG autostart entry. A power cut or a
+# reboot therefore cost hours of acquisition, silently, until somebody noticed
+# and ran ./start.sh by hand. That is a far larger data loss than anything the
+# SQLite durability settings protect against.
+#
+# Why a USER unit and not a system one: the launcher is a Qt application that
+# needs a real X session. It cannot run before somebody is logged in, because
+# there is no display to draw on. graphical-session.target is exactly the
+# moment that becomes true, and the user manager already carries DISPLAY and
+# XAUTHORITY by then (verified: DISPLAY=:1, XAUTHORITY=/run/user/1000/gdm/...).
+#
+# CONSEQUENCE WORTH KNOWING: this starts CryoDAQ when a graphical session
+# starts. It does not, by itself, make a rebooted machine log in. Without GDM
+# autologin the machine still stops at the login screen and nothing runs. See
+# deploy/README-autostart.md.
+Description=CryoDAQ acquisition stack
+Documentation=file:///home/lab53/cryodaq/deploy/README-autostart.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+# Do not hammer the instruments if something is persistently wrong. Three
+# attempts inside ten minutes, then stop and stay stopped so a human looks.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lab53/cryodaq
+ExecStart=/home/lab53/cryodaq/start.sh
+
+# A second launcher exits 0 after telling the operator one is already running
+# (launcher.py, .launcher.lock), so starting this while the stack is already up
+# is harmless and will NOT trigger a restart loop.
+Restart=on-failure
+RestartSec=20
+
+# Shutdown must follow the path that is known to work: SIGTERM to the LAUNCHER
+# only, which runs the full launcher_shutdown round-trip and brings the engine
+# and assistant down in order. KillMode=mixed sends the signal to the main
+# process alone rather than to the whole cgroup at once.
+#
+# The generous stop timeout is deliberate: a SIGKILL mid-shutdown is what
+# latches a permanent HOLD, so the clean path is given two full minutes before
+# systemd resorts to force.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Journal, not a nohup file. `journalctl --user -u cryodaq` beats hunting for
+# the right logs/deploy_start_<date>.log, and it survives rotation properly.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryodaq
+
+[Install]
+WantedBy=graphical-session.target
