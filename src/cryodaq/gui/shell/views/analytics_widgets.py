@@ -2158,17 +2158,20 @@ class TemperatureSteadyStateWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 class GasInventoryWidget(QWidget):
-    """Сколько газа реально в камере — N/N₀ с поправкой на температуру.
+    """Кажущийся запас газа — N/N₀ с поправкой на температуру.
 
     Occupies the quarter that held an "awaiting F8" placeholder through every
-    cooldown. The number answers one question the pressure gauge cannot: is the
-    pump winning? On 2026-09-03 the gauge fell 31% over ten hours while this
-    quantity went 100% → 80% → 118%, and the run was stopped on that reading,
+    cooldown. The quantity is pressure divided by a mean of operator-selected
+    sensor temperatures — a temperature-corrected Pirani-equivalent proxy, not
+    a molecule count and not a statement about the pump. It moves where the raw
+    gauge cannot: on 2026-09-03 the gauge fell 31% over ten hours while this
+    indicator went 100% → 80% → 118%, and the run was stopped on that reading,
     worked out by hand at hour nine.
 
-    Colour follows the RATE, not the level: falling is green (откачка), rising
-    is red (набор газа). A level of 118% is not itself bad — the operator
-    decides what it means. The direction is what the readout is for.
+    Colour follows the RATE, not the level: a falling indicator is green, a
+    rising one red. Neither says what the pump or the chamber is doing — the
+    proxy cannot establish that. A level of 118% is not itself bad, and the
+    operator decides what it means. The direction is what the readout is for.
 
     Reports nothing rather than guessing: no baseline, stale data, or too little
     history for a slope each produce an explicit absence.

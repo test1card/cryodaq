@@ -1,4 +1,4 @@
-"""Счётчик молекул: сколько газа реально осталось в камере.
+"""Счётчик молекул: кажущийся запас газа в камере (оценка по P и T).
 
 Pressure alone misleads during a cooldown. On 2026-09-03 the gauge fell from
 0.0758 to 0.0523 mbar over ten hours and looked like steady progress. It was
