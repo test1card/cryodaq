@@ -8072,6 +8072,11 @@ async def _run_engine(
                         command_handler=handle_gui_command,
                         channel_descriptor_catalog=live_descriptor_catalog,
                         verify_ssl=verify_ssl,
+                        # Match the budget the assistant is actually started
+                        # with (config/agent.yaml `timeout_s`), rather than a
+                        # second, tighter number hardcoded here. See the note
+                        # in TelegramCommandBot.__init__.
+                        query_timeout_s=float(cmd_cfg.get("query_timeout_s", 120.0)),
                     )
                     logger.info(
                         "TelegramCommandBot создан (allowed=%d chat ids)",

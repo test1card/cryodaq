@@ -124,6 +124,7 @@ class TelegramCommandBot:
         channel_descriptor_catalog: LiveChannelDescriptorCatalog | None = None,
         alarm_chat_id: int | str | None = None,
         verify_ssl: bool = True,
+        query_timeout_s: float = 120.0,
     ) -> None:
         # Phase 2b K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
@@ -139,6 +140,21 @@ class TelegramCommandBot:
         self._broker = broker
         self._alarm_engine = alarm_engine
         self._query_agent = query_agent
+        # How long a free-text query may take before the operator is told it
+        # timed out. This was hardcoded at 60 s, which contradicted
+        # config/agent.yaml `timeout_s: 120` — the budget the assistant is
+        # actually started with and logs at boot. The two measured live
+        # latencies on this stand were 58.7 s and 58.0 s, so the hardcoded
+        # limit sat two seconds above the model's normal working time and any
+        # slightly heavier question (one that builds a full state context)
+        # crossed it. The operator saw "запрос обрабатывался слишком долго"
+        # for «ETA вакуума» and «Что сейчас?» while the model was still
+        # working and would have answered.
+        #
+        # The outer proxy deliberately waits far longer (450 s) so that THIS
+        # timeout is the one that produces the plain-Russian message; that
+        # design is right, only the number was wrong.
+        self._query_timeout_s = float(query_timeout_s)
         self._photo_handler = photo_handler
         # Who receives ALARMS. Deliberately separate from _allowed_ids, which
         # is a COMMAND-PERMISSION list: being trusted to run /status is not
@@ -451,13 +467,14 @@ class TelegramCommandBot:
         try:
             response = await asyncio.wait_for(
                 self._query_agent.handle_query(text, chat_id=chat_id),
-                timeout=60.0,
+                timeout=self._query_timeout_s,
             )
             await self._send(chat_id, response)
         except TimeoutError:
             await self._send(
                 chat_id,
-                "🤖 Гемма: запрос обрабатывался слишком долго (>60s). Попробуй короче.",
+                f"🤖 Гемма: запрос обрабатывался слишком долго "
+                f"(>{self._query_timeout_s:g} с). Попробуй короче.",
             )
         except Exception as exc:
             logger.error("Query agent error: %s", exc, exc_info=True)
