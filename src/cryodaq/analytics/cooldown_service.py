@@ -72,8 +72,20 @@ class CooldownDetector:
     Переходы состояний:
         IDLE -> COOLING: dT_cold/dt < start_rate_threshold в течение confirm_minutes
         COOLING -> STABILIZING: T_cold < end_T_threshold
+        COOLING -> IDLE: dT_cold/dt > warm_rate_threshold в течение warm_confirm_minutes
+        STABILIZING -> IDLE: то же самое
         STABILIZING -> COMPLETE: |dT/dt| < end_rate_threshold в течение confirm_minutes
         COMPLETE -> IDLE: после вызова reset() (auto-ingest завершён)
+
+    Обнаружение ОТОГРЕВА симметрично обнаружению начала. Без него COOLING имел
+    единственный выход — падение ниже end_T_threshold, поэтому остановленное
+    охлаждение оставляло детектор в COOLING навсегда. 03.09.2026 оператор
+    остановил криокулер в 22:04; в 23:16, при Т12, растущей на +48.6 K/ч,
+    сервис по-прежнему публиковал «осталось 15.6 ч», а прогресс шёл НАЗАД
+    (75.1% -> 54.1%) по мере отогрева стенда.
+
+    Это не «решение за оператора»: детектор не останавливает и не запрещает
+    ничего. Он лишь перестаёт утверждать то, что заведомо неверно.
     """
 
     def __init__(
@@ -83,16 +95,25 @@ class CooldownDetector:
         end_T_cold_threshold: float = 6.0,
         end_rate_threshold: float = 0.1,
         end_confirm_minutes: float = 30.0,
+        warm_rate_threshold: float = 5.0,
+        warm_confirm_minutes: float = 10.0,
     ) -> None:
         self._start_rate_thr = start_rate_threshold
         self._start_confirm_s = start_confirm_minutes * 60.0
         self._end_T_thr = end_T_cold_threshold
         self._end_rate_thr = end_rate_threshold
         self._end_confirm_s = end_confirm_minutes * 60.0
+        # Symmetric with the start detection: +5 K/h sustained for 10 minutes is
+        # the mirror of -5 K/h sustained for 10 minutes. Sustained, so a brief
+        # excursion — a heater test, a sensor glitch, the small rise as a stage
+        # crosses a load — cannot abort a genuine cooldown.
+        self._warm_rate_thr = warm_rate_threshold
+        self._warm_confirm_s = warm_confirm_minutes * 60.0
 
         self._phase = CooldownPhase.IDLE
         self._confirm_start_ts: float | None = None
         self._confirm_end_ts: float | None = None
+        self._confirm_warm_ts: float | None = None
         self._cooldown_start_ts: float | None = None
 
         # Sliding window for dT/dt estimation (last 5 min)
@@ -148,13 +169,18 @@ class CooldownDetector:
         elif self._phase == CooldownPhase.COOLING:
             if T_cold < self._end_T_thr:
                 self._phase = CooldownPhase.STABILIZING
+                self._confirm_warm_ts = None
                 logger.info(
                     "Охлаждение -> стабилизация: T_cold=%.2f K < %.1f K",
                     T_cold,
                     self._end_T_thr,
                 )
+            elif self._detect_warming(ts, dT_dt, T_cold):
+                return self._phase
 
         elif self._phase == CooldownPhase.STABILIZING:
+            if self._detect_warming(ts, dT_dt, T_cold):
+                return self._phase
             if dT_dt is not None and abs(dT_dt) < self._end_rate_thr:
                 if self._confirm_end_ts is None:
                     self._confirm_end_ts = ts
@@ -170,6 +196,63 @@ class CooldownDetector:
                 self._confirm_end_ts = None
 
         return self._phase
+
+    def _detect_warming(self, ts: float, _dT_dt: float | None, T_cold: float) -> bool:
+        """Sustained warming ends the cooldown. Returns True if it just did.
+
+        The detector stops asserting a forecast; it does not stop, gate or
+        forbid anything. Refusing to state something false is not deciding for
+        the operator.
+        """
+
+        dT_dt = self._estimate_recent_rate()
+        if dT_dt is None or dT_dt <= self._warm_rate_thr:
+            self._confirm_warm_ts = None
+            return False
+        if self._confirm_warm_ts is None:
+            self._confirm_warm_ts = ts
+            return False
+        if ts - self._confirm_warm_ts < self._warm_confirm_s:
+            return False
+
+        previous = self._phase
+        self._phase = CooldownPhase.IDLE
+        self._confirm_warm_ts = None
+        self._confirm_start_ts = None
+        self._confirm_end_ts = None
+        self._cooldown_start_ts = None
+        logger.info(
+            "Обнаружен отогрев: dT/dt=%+.1f K/ч в течение %.0f мин, T_cold=%.1f K — "
+            "цикл охлаждения больше не идёт (%s -> idle)",
+            dT_dt,
+            self._warm_confirm_s / 60.0,
+            T_cold,
+            previous.value,
+        )
+        return True
+
+    def _estimate_recent_rate(self, samples: int = 10) -> float | None:
+        """dT/dt [K/ч] over the LAST `samples` points only.
+
+        `_estimate_rate` is an endpoint difference across the whole 60-sample
+        deque, which is right for confirming a slow start but wrong for noticing
+        a CHANGE of regime: after half an hour of cooling the window's first
+        point is still the cooling start, so warming cannot dominate the
+        estimate until the deque flushes — about an hour of latency.
+
+        A short window sees the turn in minutes. Used only for the warming exit;
+        start and end detection keep the long window they were tuned against.
+        """
+
+        if len(self._recent) < 5:
+            return None
+        recent = list(self._recent)[-samples:]
+        if len(recent) < 5:
+            return None
+        dt_s = recent[-1][0] - recent[0][0]
+        if dt_s < 30.0:
+            return None
+        return (recent[-1][1] - recent[0][1]) / (dt_s / 3600.0)
 
     def _estimate_rate(self) -> float | None:
         """Оценить dT/dt [K/ч] по скользящему окну."""
