@@ -111,6 +111,11 @@ class PluginPipeline:
         self._broker = broker
         self._plugins_dir = plugins_dir
         self._plugins: dict[str, AnalyticsPlugin] = {}
+        # Phase delivery is decoupled from the command handler that sets it —
+        # see notify_phase_change. A plain slot assignment is the only work done
+        # on the engine loop.
+        self._pending_phase: str | None = None
+        self._pending_phase_set: bool = False
         self._batch_interval_s = batch_interval_s
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
@@ -129,19 +134,35 @@ class PluginPipeline:
     # ------------------------------------------------------------------
 
     def notify_phase_change(self, phase: str | None) -> None:
-        """Tell plugins the operator advanced the experiment phase.
+        """Record that the operator advanced the phase. Does NOT run plugins.
 
-        Plugins had no phase awareness at all: the analytics *view* is phase
-        dependent via config/analytics_layout.yaml, but the pipeline was not.
-        The molecular counter needs it, because what "100%" means is a property
-        of the phase — during vacuum the useful zero is the start of pumping,
-        during cooldown it is the start of cooling, and one fixed zero cannot
-        answer both.
+        This is called from the experiment-phase COMMAND HANDLER, on the engine
+        event loop. Executing arbitrary duck-typed plugin code there would let a
+        slow or blocking hook stall acquisition, persistence and safety
+        scheduling — the exact failure class this work exists to remove. A
+        try/except isolates exceptions; it does not isolate blocking work.
+
+        So this method does one O(1), non-blocking thing: it stores the pending
+        phase. Delivery happens in the analytics process loop
+        (:meth:`_deliver_pending_phase`), which is a separate task that already
+        owns the cost of running plugin code and is already the place where a
+        slow plugin delays analytics rather than acquisition.
+        """
+
+        self._pending_phase = phase
+        self._pending_phase_set = True
+
+    def _deliver_pending_phase(self) -> None:
+        """Hand any pending phase to plugins, on the analytics task.
 
         Duck-typed and individually guarded: a plugin that does not care omits
         the method, and one that raises must not stop the others being told.
         """
 
+        if not self._pending_phase_set:
+            return
+        phase = self._pending_phase
+        self._pending_phase_set = False
         for plugin in list(self._plugins.values()):
             hook = getattr(plugin, "notify_phase_change", None)
             if not callable(hook):
@@ -704,6 +725,10 @@ class PluginPipeline:
 
             if not batch:
                 continue
+
+            # Any phase the operator advanced since the last batch is applied
+            # here, on THIS task, not on the command handler's loop.
+            self._deliver_pending_phase()
 
             # Передаём пакет каждому плагину
             for plugin in list(self._plugins.values()):

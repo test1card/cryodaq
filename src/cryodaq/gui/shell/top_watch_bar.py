@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.gas_inventory_format import ABSENT, format_inventory
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
@@ -884,7 +885,7 @@ class TopWatchBar(QWidget):
 
         value = getattr(reading, "value", None)
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-            self._ctx_gas_value.setText("\u2014")
+            self._ctx_gas_value.setText(ABSENT)
             self._ctx_gas_arrow.setText("")
             return
 
@@ -892,7 +893,10 @@ class TopWatchBar(QWidget):
         rate = meta.get("rate_pct_per_h")
         rate = float(rate) if isinstance(rate, (int, float)) and math.isfinite(float(rate)) else None
 
-        self._ctx_gas_value.setText(f"{float(value):.0f}%")
+        # Shared formatter: the chrome rendered a deep pump-down as "0%" while
+        # the analytics card said "-5.0 дек" for the same instant. Two places
+        # showing one quantity must not be able to disagree.
+        self._ctx_gas_value.setText(format_inventory(float(value)))
         if rate is None or abs(rate) < 0.2:
             self._ctx_gas_arrow.setText("")
             self._ctx_gas_arrow.setStyleSheet(

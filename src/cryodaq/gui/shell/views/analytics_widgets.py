@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.core.gas_inventory_format import ABSENT, format_inventory, format_rate
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
@@ -1291,6 +1292,11 @@ class PressureCurrentWidget(QWidget):
         self._window_selector.window_changed.connect(lambda w: self._maybe_refetch_history(w))
         lay.addWidget(self._plot, stretch=1)
         self._series: list[tuple[float, float]] = []
+        # Samples are normalised against a baseline. Joining points taken across
+        # a baseline change draws a curve whose y-axis means two different
+        # things, with the caption silently changing underneath it. The series
+        # is cleared when the baseline moves.
+        self._series_baseline_epoch: float | None = None
         self._history_worker = None
 
         root = QVBoxLayout(self)
@@ -2246,9 +2252,12 @@ class GasInventoryWidget(QWidget):
         self._plot.setMenuEnabled(False)
         self._curve = self._plot.plot([], [], pen=series_pen(0))
         # 100% is the baseline the operator set; the line makes crossing it visible.
+        # The plot is log-Y, so an InfiniteLine's position is in PLOT
+        # coordinates: 100% sits at log10(100) == 2.0, not at 100. At 100 the
+        # reference line was drawn at 10^100 and was never visible.
         self._baseline_line = pg.InfiniteLine(
             angle=0,
-            pos=100.0,
+            pos=math.log10(100.0),
             pen=pg.mkPen(color=QColor(theme.MUTED_FOREGROUND), width=1, style=Qt.DashLine),
         )
         self._plot.addItem(self._baseline_line)
@@ -2259,6 +2268,11 @@ class GasInventoryWidget(QWidget):
         root.addWidget(card)
 
         self._series: list[tuple[float, float]] = []
+        # Samples are normalised against a baseline. Joining points taken across
+        # a baseline change draws a curve whose y-axis means two different
+        # things, with the caption silently changing underneath it. The series
+        # is cleared when the baseline moves.
+        self._series_baseline_epoch: float | None = None
 
     def set_gas_inventory(self, reading) -> None:
         """Ingest one analytics/molecular_counter/gas_inventory reading."""
@@ -2280,13 +2294,21 @@ class GasInventoryWidget(QWidget):
         except (TypeError, ValueError, OSError, AttributeError):
             ts = time.time()
 
+        epoch = meta.get("baseline_epoch")
+        epoch = float(epoch) if isinstance(epoch, (int, float)) and math.isfinite(float(epoch)) else None
+        if epoch != self._series_baseline_epoch:
+            # New zero: everything before it is normalised against a different
+            # reference and cannot share this axis.
+            self._series.clear()
+            self._series_baseline_epoch = epoch
+
         self._series.append((ts, float(value)))
         if len(self._series) > self._MAX_POINTS:
             del self._series[: len(self._series) - self._MAX_POINTS]
         self._curve.setData([t for t, _ in self._series], [v for _, v in self._series])
 
         # Value text stays FOREGROUND whatever the direction (RULE-A11Y-003).
-        self._value_label.setText(self._format_inventory(float(value)))
+        self._value_label.setText(format_inventory(float(value)))
         self._value_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
 
         colour = self._colour_for(rate)
@@ -2298,7 +2320,7 @@ class GasInventoryWidget(QWidget):
         else:
             self._arrow_label.setText(self._arrow_for(rate))
             self._arrow_label.setStyleSheet(f"color: {colour}; background: transparent;")
-            self._rate_label.setText(f"{abs(rate):.1f} %/ч")
+            self._rate_label.setText(format_rate(rate))
             self._note_label.setText(self._verdict_word(rate))
 
         # 100% is stated, never implied. Without this the operator has to
@@ -2311,34 +2333,13 @@ class GasInventoryWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _render_absent(self, reason: str) -> None:
-        self._value_label.setText("—")
+        self._value_label.setText(ABSENT)
         self._value_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent;")
         self._arrow_label.setText("")
         self._rate_label.setText("")
         self._baseline_label.setText("")
         self._note_label.setText(str(reason))
         self._apply_status_edge(None)
-
-    @staticmethod
-    def _format_inventory(pct: float) -> str:
-        """Percent near the baseline, decades far from it.
-
-        A pump-down legitimately crosses five decades: zero at 1 bar and 1e-2
-        mbar is 0.001% of baseline, where a further full decade of pumping is
-        invisible on a linear percent. A cooldown moves 80 -> 118%, where percent
-        reads perfectly. One format cannot serve both, so the format follows the
-        value.
-        """
-
-        if pct <= 0.0 or not math.isfinite(pct):
-            return "—"
-        if 10.0 <= pct <= 1000.0:
-            return f"{pct:.0f}%"
-        if 1.0 <= pct < 10.0:
-            return f"{pct:.1f}%"
-        # Far from the zero: decades say what percent cannot.
-        decades = math.log10(pct / 100.0)
-        return f"{decades:+.1f} дек"
 
     @staticmethod
     def _baseline_caption(meta: dict) -> str:

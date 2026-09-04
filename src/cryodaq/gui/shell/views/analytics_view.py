@@ -417,6 +417,10 @@ class AnalyticsView(QWidget):
             return
         if self._last_cooldown is not None:
             self._forward_to(widgets, "set_cooldown_data", self._last_cooldown)
+        # Independent of cooldown data: the gas card is mounted in `vacuum` too,
+        # where there is no cooldown at all. Nested under that guard it would
+        # never replay in the phase it was added for.
+        if self._last_gas_inventory is not None:
             self._forward_to(widgets, "set_gas_inventory", self._last_gas_inventory)
         if self._last_r_thermal is not None:
             self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)

@@ -13,18 +13,19 @@ what to do with it.
     Ideal gas at one temperature:   N ∝ P / T
     Relative to a baseline:         N/N₀ = (P/P₀) · (T₀/T)
 
-Единственная модель — однозонная: весь газ считается при средней температуре
-выбранных датчиков. Это НАМЕРЕННО консервативная оценка. Реальная камера имеет
-холодные зоны, которые дают ещё меньшее P при том же N, поэтому истинное
-значение N/N₀ всегда НЕ МЕНЬШЕ показанного. Проверено на данных 03.09: при
-однозонном расчёте 96.3% на h=7, при правдоподобных долях холодного объёма —
-111–124%. Показываем нижнюю границу, а не выдуманную точность.
+Что это НЕ. Величина — «кажущийся» (apparent) запас газа: давление, делённое на
+СРЕДНЕЕ АРИФМЕТИЧЕСКОЕ температур выбранных оператором датчиков. Это среднее не
+является объёмно-взвешенной эффективной температурой газа, а VSP63D — Pirani,
+откалиброванный по N₂. Поэтому:
 
-Замечания к интерпретации, которые счётчик не может исправить сам:
-
-* Pirani VSP63D откалиброван по N₂. Сдвиг состава к лёгким газам (H₂, He)
-  смещает МАСШТАБ; НАПРАВЛЕНИЕ остаётся верным, а направление и есть то, по
-  чему принимают решение.
+* это НЕ буквальный счёт молекул, а температурно-скорректированный
+  Pirani-эквивалентный прокси;
+* НЕТ гарантии, что истинное значение не ниже показанного. Однозонная модель
+  даёт 96.3% на h=7 03.09, правдоподобные доли холодного объёма — 111–124%;
+  это разброс модели, а не доказанная нижняя граница;
+* меняющийся состав газа смещает и МАСШТАБ, и потенциально НАПРАВЛЕНИЕ тренда,
+  выведенного из показаний Pirani. Прежняя формулировка «направление всегда
+  верно» снята как недоказанная.
 * Датчики выбирает оператор. Какие каналы представляют объём газа — вопрос
   конкретной сборки, а не свойство стенда.
 """
@@ -101,7 +102,15 @@ class MolecularCounter(AnalyticsPlugin):
         self._runtime_label: dict[str, str] = {}
 
         self._baseline: tuple[float, float, float] | None = None  # (p, t, ts)
-        self._baseline_reason: str = "начало наблюдения"
+        self._baseline_reason: str = "новая сессия наблюдения"
+        # The authoritative moment the operator entered the phase, distinct from
+        # the timestamp of the first sample that could actually be measured
+        # after it. Conflating them overstates what the baseline is anchored to.
+        self._phase_entry_epoch: float | None = None
+        # Readings older than this are refused when establishing a baseline, so
+        # a cached pre-transition sample cannot become the new zero.
+        self._baseline_fence_ts: float | None = None
+        self._phase: str | None = None
         self._history: list[tuple[float, float]] = []  # (ts, n_rel_pct)
         self._last_emit_ts: float = 0.0
         self._binding_error: str | None = None
@@ -130,7 +139,13 @@ class MolecularCounter(AnalyticsPlugin):
         # Rebinding starts a new measurement. A baseline captured against one set
         # of sensors means nothing against another, and carrying it across would
         # silently rescale every subsequent reading.
-        self.reset_baseline(reason="configure")
+        # A restart or a plugin reload loses the phase baseline: nothing is
+        # persisted and no durable reconstruction exists. Say so, rather than
+        # letting a new zero inherit the previous phase's wording and look
+        # authoritative. `_phase` is cleared too, so the next genuine phase
+        # notification is treated as an entry rather than a duplicate.
+        self._phase = None
+        self.reset_baseline(reason="новая сессия наблюдения")
         self._last.clear()
         self._runtime_label.clear()
 
@@ -174,7 +189,13 @@ class MolecularCounter(AnalyticsPlugin):
     # ------------------------------------------------------------------
     # baseline
     # ------------------------------------------------------------------
-    def reset_baseline(self, *, reason: str = "сброс оператором") -> None:
+    def reset_baseline(
+        self,
+        *,
+        reason: str = "сброс оператором",
+        fence_ts: float | None = None,
+        phase_entry_epoch: float | None = None,
+    ) -> None:
         """Drop the baseline; the next valid sample becomes the new 100%.
 
         The operator owns what "100%" means — normally the start of a cooldown.
@@ -186,6 +207,8 @@ class MolecularCounter(AnalyticsPlugin):
             _log.info("MolecularCounter: базовая линия сброшена (%s)", reason)
         self._baseline = None
         self._baseline_reason = reason
+        self._baseline_fence_ts = fence_ts
+        self._phase_entry_epoch = phase_entry_epoch
         self._history.clear()
 
     @property
@@ -215,11 +238,23 @@ class MolecularCounter(AnalyticsPlugin):
         it, indirectly but deliberately. It is never moved by the data.
         """
 
-        label = _PHASE_BASELINE_LABELS.get(str(phase or ""), None)
+        key = str(phase or "")
+        label = _PHASE_BASELINE_LABELS.get(key, None)
         if label is None:
             # An unknown phase is not a reason to discard a good baseline.
             return
-        self.reset_baseline(reason=label)
+        if key == self._phase:
+            # Idempotent. A duplicate notification of the SAME phase is not a
+            # new entry, and re-zeroing on it would silently discard a
+            # measurement in progress on nothing but a repeated command.
+            return
+        self._phase = key
+        entry = datetime.now(UTC).timestamp()
+        # `entry` fences the baseline: readings cached from before the operator
+        # advanced the phase must not become the new zero. Without this the hook
+        # only cleared, and the next batch could rebuild the baseline from a
+        # pre-transition sample and stamp it with a post-transition time.
+        self.reset_baseline(reason=label, fence_ts=entry, phase_entry_epoch=entry)
 
     # ------------------------------------------------------------------
     # processing
@@ -248,12 +283,18 @@ class MolecularCounter(AnalyticsPlugin):
         t_bulk = sum(temps) / len(temps)
 
         if self._baseline is None:
+            if not self._inputs_pass_fence(now):
+                # Still waiting for readings acquired AFTER the phase entry.
+                return []
             self._baseline = (pressure, t_bulk, now)
             _log.info(
-                "MolecularCounter: базовая линия — P=%.5g мбар, T=%.1f K, %d датчиков",
+                "MolecularCounter: базовая линия — P=%.5g мбар, T=%.1f K, %d датчиков "
+                "(%s; вход в фазу %s)",
                 pressure,
                 t_bulk,
                 len(temps),
+                self._baseline_reason,
+                "—" if self._phase_entry_epoch is None else f"{now - self._phase_entry_epoch:.0f} с назад",
             )
 
         p0, t0, baseline_ts = self._baseline
@@ -290,13 +331,21 @@ class MolecularCounter(AnalyticsPlugin):
                     "baseline_pressure_mbar": p0,
                     "baseline_t_bulk_k": round(t0, 2),
                     "baseline_age_s": round(now - baseline_ts, 1),
+                    # The operator action, distinct from the first sample that
+                    # could be measured after it.
+                    "phase_entry_epoch": self._phase_entry_epoch,
                     # 100% is never implied. Every value carries what its zero
                     # was and when it was taken, so the number is unambiguous
                     # even hours later in a log or a report.
                     "baseline_reason": self._baseline_reason,
                     # The one-zone assumption, stated with every value it produces.
-                    "model": "single_zone",
-                    "is_lower_bound": True,
+                    "model": "single_zone_apparent",
+                    # No lower-bound or direction guarantee is claimed: the mean
+                    # of selected sensors is not the volume-weighted effective
+                    # gas temperature, and a Pirani reading is composition
+                    # dependent.
+                    "quantity": "apparent_temperature_corrected_pirani_equivalent",
+                    "rate_definition": "100*d(ln N)/dt",
                 },
             )
         ]
@@ -323,6 +372,18 @@ class MolecularCounter(AnalyticsPlugin):
                     self._runtime_label[configured] = runtime
                     break
 
+    def _inputs_pass_fence(self, now: float) -> bool:
+        """True when every input in use was acquired after the fence."""
+
+        fence = self._baseline_fence_ts
+        if fence is None:
+            return True
+        for configured in (self._pressure_channel, *self._bulk_sensors):
+            entry = self._last.get(configured)
+            if entry is not None and entry[1] < fence:
+                return False
+        return True
+
     def _current(self, configured: str, now: float) -> float | None:
         """Value only if it still describes now. Fails closed."""
 
@@ -335,7 +396,11 @@ class MolecularCounter(AnalyticsPlugin):
         return value
 
     def _rate_pct_per_h(self) -> float | None:
-        """Fractional change per hour: 100·d(ln N)/dt.
+        """Apparent logarithmic inventory rate: 100·d(ln N)/dt, in %/h.
+
+        NOT a bounded fractional loss. -69.3 %/h is a halving per hour, not
+        "69.3% of the contents gone"; the unit is a continuous log slope and its
+        magnitude can exceed 100.
 
         Relative to what is in the chamber NOW, not to the baseline. A slope of
         `n_rel_pct` answers "percent of the ORIGINAL load per hour", which is
@@ -349,15 +414,30 @@ class MolecularCounter(AnalyticsPlugin):
         five-decade pump-down and a sub-decade cooldown alike.
         """
 
-        if len(self._history) < 3:
+        # A CONTIGUOUS TRAILING RUN only. Filtering invalid points out of the
+        # middle and fitting across the hole silently bridges a gap: a
+        # zero/NaN/inf sample, or one with an unusable timestamp, means the
+        # series was interrupted, and a slope drawn across that interruption is
+        # an invention. Walk backwards and stop at the first bad point.
+        points: list[tuple[float, float]] = []
+        for ts, value in reversed(self._history):
+            if not isinstance(ts, (int, float)) or not math.isfinite(ts):
+                break
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0.0:
+                break
+            if points and ts >= points[-1][0]:
+                # Non-monotonic time: the run is not contiguous either.
+                break
+            points.append((float(ts), float(value)))
+        points.reverse()
+
+        if len(points) < 3:
             return None
-        span = self._history[-1][0] - self._history[0][0]
+        span = points[-1][0] - points[0][0]
         if span < _MIN_RATE_SPAN_S:
             # Not enough elapsed time to speak about a rate. Reporting None is
-            # the honest answer; the value itself is still published.
-            return None
-        points = [(ts, v) for ts, v in self._history if v > 0.0]
-        if len(points) < 3:
+            # the honest answer; the value itself is still published. The span
+            # is measured on the RETAINED run, not on the whole buffer.
             return None
         t0 = points[0][0]
         xs = [(ts - t0) / 3600.0 for ts, _ in points]

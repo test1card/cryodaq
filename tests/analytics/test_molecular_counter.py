@@ -283,8 +283,11 @@ def test_every_value_carries_the_baseline_it_is_relative_to() -> None:
     assert meta["baseline_epoch"] is not None
     assert meta["baseline_pressure_mbar"] == pytest.approx(0.0758)
     assert meta["baseline_t_bulk_k"] == pytest.approx(295.4, abs=0.1)
-    assert meta["model"] == "single_zone"
-    assert meta["is_lower_bound"] is True, "the true inventory is never below this"
+    assert meta["model"] == "single_zone_apparent"
+    # No lower-bound guarantee is claimed any more: the mean of selected sensors
+    # is not the volume-weighted effective gas temperature, and a Pirani reading
+    # is composition dependent. See the 47b6c9ca review.
+    assert "is_lower_bound" not in meta
 
 
 def test_rebinding_the_sensors_drops_the_baseline() -> None:
