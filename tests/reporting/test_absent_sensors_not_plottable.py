@@ -37,12 +37,23 @@ _PHYSICALLY_ABSENT = ("Т8", "Т16")
 
 _BASE_CATALOGUE = _ROOT / "config" / "channel_descriptors.yaml"
 _LOCAL_CATALOGUE = _ROOT / "config" / "channel_descriptors.local.yaml"
+_EXAMPLE_CATALOGUE = _ROOT / "config" / "channel_descriptors.local.yaml.example"
 
 
 def _catalogues() -> list[tuple[str, Path]]:
-    """The tracked base always; the per-stand override when it exists."""
+    """Every catalogue a stand can end up running.
 
-    found = [("channel_descriptors.yaml", _BASE_CATALOGUE)]
+    The tracked base is what a fresh checkout has. The `.example` is the
+    template an operator copies to create a lab-local catalogue — leaving the
+    defect there means the next stand that follows the documented procedure
+    recreates it exactly. The lab-local file itself is gitignored, so it is
+    checked only where it exists.
+    """
+
+    found = [
+        ("channel_descriptors.yaml", _BASE_CATALOGUE),
+        ("channel_descriptors.local.yaml.example", _EXAMPLE_CATALOGUE),
+    ]
     if _LOCAL_CATALOGUE.exists():
         found.append(("channel_descriptors.local.yaml", _LOCAL_CATALOGUE))
     return found

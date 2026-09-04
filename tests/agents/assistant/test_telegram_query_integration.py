@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -121,49 +121,55 @@ async def test_telegram_ask_command_empty_query_sends_usage() -> None:
 
 
 async def test_telegram_imposes_no_deadline_of_its_own() -> None:
-    """The replacement for the old timeout test, inverted on purpose.
+    """A negative control: the query path must not call asyncio.wait_for.
 
-    Telegram used to cancel at a hardcoded 60 s and report "слишком долго".
-    That discarded answers the assistant was still producing — its command
-    pipeline is intent 30 s + generation 300 s + format 30 s = 360 s — and
-    cancelling here never stopped that work anyway: the assistant's REP handler
-    stays occupied to its own deadline, so the cancellation lost the reply and
-    freed nothing.
+    The previous version of this test released the query after milliseconds and
+    asserted the answer arrived. That was FALSE GREEN — restoring the old 60 s
+    or 120 s `asyncio.wait_for` would have passed it just as happily, because a
+    millisecond never reaches any deadline. It tested nothing it claimed to.
 
-    So the assistant owns the computation deadline and the proxy's 450 s is the
-    transport cap. A query far exceeding every timeout Telegram ever imposed
-    must still deliver its answer.
+    This asserts the absence directly. `asyncio.wait_for` and `asyncio.timeout`
+    appear nowhere in telegram_commands, so any Telegram-side deadline would
+    have to reintroduce one, and the spy records it. The background task is
+    awaited directly rather than through wait_for, so the control cannot trip
+    on the test's own machinery.
+
+    Why the absence matters and not just the number: the assistant's command
+    pipeline is intent 30 s + generation 300 s + format 30 s = 360 s, so ANY
+    Telegram-side deadline short of that discards an answer still being
+    produced — and cancelling here never stops the assistant anyway, whose REP
+    handler stays occupied to its own deadline. There is no correct number for
+    Telegram to hold, which is why it holds none.
     """
 
-    started = asyncio.Event()
-    release = asyncio.Event()
+    recorded: list[object] = []
+    real_wait_for = asyncio.wait_for
 
-    async def slow(text: str, *, chat_id):
-        started.set()
-        await release.wait()
-        return "ответ после долгой генерации"
+    def spy(awaitable, timeout=None, **kwargs):
+        recorded.append(timeout)
+        return real_wait_for(awaitable, timeout=timeout, **kwargs)
 
     qa = MagicMock()
-    qa.handle_query = slow
+    qa.handle_query = AsyncMock(return_value="ответ на долгую генерацию")
 
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    await bot._handle_text(_msg("что сейчас?"))
-    await asyncio.wait_for(started.wait(), timeout=1.0)
+    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", spy):
+        await bot._handle_text(_msg("что сейчас?"))
+        task = bot._query_task
+        assert task is not None, "the query must be dispatched as a task"
+        await task  # direct await — deliberately not wait_for
 
-    # Well past the old 60 s and the later 120 s: nothing here may cancel it.
-    assert not bot._query_task.done()
-    bot._send.assert_not_awaited()
-
-    release.set()
-    await _settle_query(bot)
+    assert recorded == [], (
+        "the Telegram query path called asyncio.wait_for with timeout(s) "
+        f"{recorded!r} — a Telegram-side deadline has been reintroduced. The "
+        "assistant owns the computation deadline; the proxy owns the transport "
+        "cap."
+    )
 
     bot._send.assert_awaited_once()
-    assert bot._send.call_args.args[1] == "ответ после долгой генерации"
-    assert "слишком долго" not in bot._send.call_args.args[1], (
-        "the operator must get the answer, not a timeout notice"
-    )
+    assert bot._send.call_args.args[1] == "ответ на долгую генерацию"
 
 
 async def test_telegram_query_error_user_message() -> None:
