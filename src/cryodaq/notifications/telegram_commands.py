@@ -124,7 +124,6 @@ class TelegramCommandBot:
         channel_descriptor_catalog: LiveChannelDescriptorCatalog | None = None,
         alarm_chat_id: int | str | None = None,
         verify_ssl: bool = True,
-        query_timeout_s: float = 120.0,
     ) -> None:
         # Phase 2b K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
@@ -140,21 +139,23 @@ class TelegramCommandBot:
         self._broker = broker
         self._alarm_engine = alarm_engine
         self._query_agent = query_agent
-        # How long a free-text query may take before the operator is told it
-        # timed out. This was hardcoded at 60 s, which contradicted
-        # config/agent.yaml `timeout_s: 120` — the budget the assistant is
-        # actually started with and logs at boot. The two measured live
-        # latencies on this stand were 58.7 s and 58.0 s, so the hardcoded
-        # limit sat two seconds above the model's normal working time and any
-        # slightly heavier question (one that builds a full state context)
-        # crossed it. The operator saw "запрос обрабатывался слишком долго"
-        # for «ETA вакуума» and «Что сейчас?» while the model was still
-        # working and would have answered.
+        # Telegram owns NO computation deadline for a free-text query.
         #
-        # The outer proxy deliberately waits far longer (450 s) so that THIS
-        # timeout is the one that produces the plain-Russian message; that
-        # design is right, only the number was wrong.
-        self._query_timeout_s = float(query_timeout_s)
+        # It used to cancel at a hardcoded 60 s. Raising that to match
+        # config/agent.yaml was still wrong: `ollama.timeout_s: 120` is the
+        # per-call budget, while the live command pipeline is intent (30 s) +
+        # generation (300 s) + format (30 s) = 360 s. Any Telegram-side number
+        # below that discards a valid answer the assistant is still producing,
+        # and cancelling here does not stop the assistant anyway — its REP
+        # handler stays occupied until its own deadline, so the cancellation
+        # buys nothing and loses the reply.
+        #
+        # So the assistant process is the sole owner of the computation
+        # deadline, and _RemoteAssistantQueryProxy's 450 s remains the
+        # transport cap. What Telegram owns instead is CONCURRENCY: exactly one
+        # in-flight query, tracked here so it can be refused fast and settled
+        # at shutdown.
+        self._query_task: asyncio.Task[None] | None = None
         self._photo_handler = photo_handler
         # Who receives ALARMS. Deliberately separate from _allowed_ids, which
         # is a COMMAND-PERMISSION list: being trusted to run /status is not
@@ -227,6 +228,10 @@ class TelegramCommandBot:
                 self._collect_task,
                 self._poll_task,
                 self._mutation_discovery_task,
+                # An in-flight LLM answer is settled like any other owned task.
+                # Left out, a shutdown during the ~58 s generation would orphan
+                # it and let a _send() run against a closing session.
+                self._query_task,
             )
             if task is not None
         )
@@ -234,6 +239,7 @@ class TelegramCommandBot:
         self._collect_task = None
         self._poll_task = None
         self._mutation_discovery_task = None
+        self._query_task = None
         self._mutation_envelope = None
         dependency_failures: list[BaseException] = []
         session = self._session
@@ -464,21 +470,51 @@ class TelegramCommandBot:
             await self._send(chat_id, "Я понимаю только команды с косой чертой. /help для списка.")
             return
 
-        try:
-            response = await asyncio.wait_for(
-                self._query_agent.handle_query(text, chat_id=chat_id),
-                timeout=self._query_timeout_s,
-            )
-            await self._send(chat_id, response)
-        except TimeoutError:
+        # Single-flight. The model occupies one GPU and answers in ~58 s here;
+        # a second concurrent query would queue behind it inside the assistant
+        # anyway, so refusing immediately tells the operator the truth now
+        # instead of leaving them watching an empty chat.
+        existing = self._query_task
+        if existing is not None and not existing.done():
             await self._send(
                 chat_id,
-                f"🤖 Гемма: запрос обрабатывался слишком долго "
-                f"(>{self._query_timeout_s:g} с). Попробуй короче.",
+                "🤖 Гемма: уже думаю над предыдущим вопросом. "
+                "Ответ придёт сюда — дождись его и спроси снова.",
             )
+            return
+
+        # Dispatched, NOT awaited. Awaiting here blocked the collect loop for
+        # the whole generation, so /status, /alarms, /report, /log and /phase
+        # could not be served while the model was working — head-of-line
+        # blocking on the operator's only remote control surface. The answer
+        # arrives in the same chat whenever it is ready.
+        self._query_task = asyncio.create_task(
+            self._run_query(text, chat_id), name="tg_llm_query"
+        )
+
+    async def _run_query(self, text: str, chat_id: int | str) -> None:
+        """Await one assistant answer and deliver it, off the collect loop.
+
+        No timeout of its own: the assistant process owns the computation
+        deadline and the proxy owns the transport cap. Cancellation is
+        propagated so `stop()` can settle this task rather than orphan it.
+        """
+
+        try:
+            response = await self._query_agent.handle_query(text, chat_id=chat_id)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error("Query agent error: %s", exc, exc_info=True)
-            await self._send(chat_id, "🤖 Гемма: внутренняя ошибка. См. логи.")
+            try:
+                await self._send(chat_id, "🤖 Гемма: внутренняя ошибка. См. логи.")
+            except Exception:
+                logger.error("Query agent error notice could not be delivered", exc_info=True)
+            return
+        try:
+            await self._send(chat_id, response)
+        except Exception:
+            logger.error("Query agent answer could not be delivered", exc_info=True)
 
     # ------------------------------------------------------------------
     # Command handlers
