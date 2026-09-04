@@ -6544,20 +6544,52 @@ class LauncherWindow(QMainWindow):
         if refreshed:
             self._clear_periodic_reporting_fault()
         elif observation.deadline_expired(now):
-            self._set_periodic_reporting_fault()
+            self._set_periodic_reporting_fault(status=status)
 
-    def _set_periodic_reporting_fault(self) -> None:
-        """Show one persistent non-safety H3 operator status."""
+    # Health statuses that mean "reports ARE being produced, but the outcome of a
+    # past DELIVERY is uncertain". Distinct from a runtime that cannot render.
+    # 2026-09-04: one Telegram send from 31.08 timed out with unknown outcome and
+    # was durably recorded. `periodic_png` correctly lifts `ready` to
+    # `degraded_delivery_unknown` while any such record stands, `observe()`
+    # accepts only `ready`, and the operator was consequently told for six hours
+    # that periodic reports were unavailable while six of them were written on
+    # time. The signal was honest; the sentence was not.
+    _PERIODIC_DELIVERY_ONLY_STATUSES = frozenset({"degraded_delivery_unknown", "degraded_tls"})
+
+    def _set_periodic_reporting_fault(self, *, status: str | None = None) -> None:
+        """Show one persistent non-safety H3 operator status.
+
+        The message distinguishes a runtime that cannot render from a past
+        delivery whose outcome is unknown. Both leave equipment control
+        untouched, but only one means the operator has stopped receiving reports.
+        """
         if self._periodic_reporting_fault is True:
             return
         self._periodic_reporting_fault = True
-        logger.error("Periodic PNG runtime unavailable: %s", _PERIODIC_RUNTIME_UNAVAILABLE_CODE)
+        delivery_only = isinstance(status, str) and status in self._PERIODIC_DELIVERY_ONLY_STATUSES
+        if delivery_only:
+            logger.error(
+                "Periodic PNG delivery outcome unresolved (%s); rendering is unaffected: %s",
+                status,
+                _PERIODIC_RUNTIME_UNAVAILABLE_CODE,
+            )
+            operator_text = (
+                "Отчёт сформирован, но исход одной прошлой отправки неизвестен. "
+                "Формирование отчётов и управление оборудованием не затронуты."
+            )
+        else:
+            logger.error(
+                "Periodic PNG runtime unavailable (%s): %s",
+                status or "unknown",
+                _PERIODIC_RUNTIME_UNAVAILABLE_CODE,
+            )
+            operator_text = "Периодические PNG-отчёты недоступны. Управление оборудованием не затронуто."
         if self._periodic_status_banner is not None and not getattr(self, "_periodic_status_banner_dismissed", False):
             self._periodic_status_banner.show()
         if hasattr(self, "_tray") and self._tray is not None:
             self._tray.showMessage(
                 "CryoDAQ",
-                "Периодические PNG-отчёты недоступны. Управление оборудованием не затронуто.",
+                operator_text,
                 QSystemTrayIcon.MessageIcon.Warning,
                 5000,
             )

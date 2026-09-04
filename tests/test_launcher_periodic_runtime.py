@@ -671,3 +671,68 @@ def test_windows_assistant_shutdown_rejects_runtime_identity_swap_during_create(
     assert events == ["assistant.terminate", "assistant.wait:10"]
     assert window._assistant_proc is None
     assert window._assistant_shutdown_path is None
+
+
+# ---------------------------------------------------------------------------
+# The H3 banner must say which of two very different things is true.
+#
+# 2026-09-04: one Telegram send from 31.08 timed out with unknown outcome and was
+# durably recorded. periodic_png correctly lifts `ready` to
+# `degraded_delivery_unknown` while any such record stands, and observe() accepts
+# only `ready`, so the fault latched at 00:02:37 and the operator was told for
+# six hours that periodic reports were unavailable — while six of them were
+# rendered on time. Every component behaved as written; the composed sentence was
+# false.
+# ---------------------------------------------------------------------------
+
+
+def _banner_window():
+    """A launcher window stub with only what the fault setter touches."""
+
+    from unittest.mock import MagicMock
+
+    from cryodaq.launcher import LauncherWindow
+
+    win = LauncherWindow.__new__(LauncherWindow)
+    win._periodic_reporting_fault = False
+    win._periodic_status_banner = None
+    win._periodic_status_banner_dismissed = True
+    win._tray = MagicMock()
+    return win
+
+
+def test_delivery_ambiguity_does_not_claim_reports_are_unavailable() -> None:
+    win = _banner_window()
+    win._set_periodic_reporting_fault(status="degraded_delivery_unknown")
+
+    text = win._tray.showMessage.call_args[0][1]
+    assert "недоступны" not in text, "rendering is fine; saying otherwise is false"
+    assert "не затронут" in text
+    assert "неизвестен" in text, "the actual condition is an unknown delivery outcome"
+
+
+def test_a_genuinely_unavailable_runtime_still_says_so() -> None:
+    win = _banner_window()
+    win._set_periodic_reporting_fault(status="degraded_source")
+
+    text = win._tray.showMessage.call_args[0][1]
+    assert "Периодические PNG-отчёты недоступны" in text
+
+
+def test_an_unknown_status_fails_towards_the_louder_message() -> None:
+    """Without evidence that only delivery is affected, assume the worse case."""
+
+    win = _banner_window()
+    win._set_periodic_reporting_fault(status=None)
+
+    text = win._tray.showMessage.call_args[0][1]
+    assert "Периодические PNG-отчёты недоступны" in text
+
+
+def test_the_banner_still_latches_once() -> None:
+    """Unchanged behaviour: one persistent status, not a repeating toast."""
+
+    win = _banner_window()
+    win._set_periodic_reporting_fault(status="degraded_delivery_unknown")
+    win._set_periodic_reporting_fault(status="degraded_source")
+    assert win._tray.showMessage.call_count == 1
