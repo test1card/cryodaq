@@ -300,8 +300,18 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
 
     Returns ``(cooldown_cfg, vacuum_cfg)`` and never raises. A genuinely
     missing file retains the documented defaults. An existing unreadable,
-    corrupt, or safety-incomplete file instead enables fail-safe vacuum
-    escalation and emits a CRITICAL diagnostic.
+    corrupt, or safety-incomplete file also falls back to those defaults and
+    emits a CRITICAL diagnostic.
+
+    This used to say the corrupt-input path "enables fail-safe vacuum
+    escalation". It no longer does, and saying so was worse than saying
+    nothing: no code has read ``escalate_to_safety`` since the vacuum guard
+    lost its SafetyManager parameter, so the sentence promised a
+    de-energisation the system could not perform.
+
+    Note also that this is NOT the loader the engine uses — see
+    ``load_production_physical_alarms_config``, which rejects a malformed
+    document outright rather than degrading to defaults.
     """
     try:
         path.stat()
@@ -422,6 +432,19 @@ def load_production_physical_alarms_config(
     landmarks = load_channel_landmarks_from_document(raw)
     if set(landmarks) != {"Т11", "Т12"} or any(not entry["aliases"] for entry in landmarks.values()):
         raise PhysicalAlarmsConfigError("landmarks must have non-empty canonical alias lists")
+    # THIS is the loader the engine uses. The same warning previously existed
+    # only in the legacy loader below, so a production configuration could set
+    # escalate_to_safety: true and hear nothing at all — a setting that reads as
+    # protective, is accepted without complaint, and grants no authority over
+    # anything. Warn rather than reject: refusing startup over an inert key
+    # would take the stand down for a setting that cannot hurt it, and silently
+    # rewriting it would hide the operator's stated intent from them.
+    if vacuum.get("escalate_to_safety"):
+        logger.warning(
+            "physical_alarms.yaml: vacuum.escalate_to_safety is true, but the key is "
+            "retained for backward compatibility only and grants no authority over "
+            "the source. The vacuum guard annunciates; it does not de-energise."
+        )
     return cooldown, vacuum, landmarks
 
 

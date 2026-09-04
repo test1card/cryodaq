@@ -78,17 +78,30 @@ def test_no_advisory_alarm_can_accept_a_safety_manager(alarm: str) -> None:
     """
 
     import importlib
-    import inspect
+    from unittest.mock import AsyncMock, MagicMock
 
     module = {
         "CooldownAlarm": "cryodaq.core.cooldown_alarm",
         "VacuumGuard": "cryodaq.core.vacuum_guard",
     }[alarm]
     cls = getattr(importlib.import_module(module), alarm)
-    params = inspect.signature(cls.__init__).parameters
-    assert "safety_manager" not in params, (
-        f"{alarm}.__init__ still accepts safety_manager; an advisory alarm must "
-        "not be able to hold authority over the source at all"
+
+    bus = MagicMock()
+    bus.publish = AsyncMock()
+    cfg: dict[str, object] = {}
+
+    # Prove the boundary by trying to cross it, not by reading the signature.
+    # A signature check passes just as happily against a **kwargs that swallows
+    # the argument and stores it anyway; only construction settles what the
+    # class actually accepts.
+    with pytest.raises(TypeError):
+        cls(cfg, MagicMock(), MagicMock(), bus, safety_manager=object())
+
+    # ...and the ordinary construction it replaces must still work, so the
+    # test cannot pass merely because the class is broken.
+    instance = cls(cfg, MagicMock(), MagicMock(), bus)
+    assert not hasattr(instance, "_safety_manager"), (
+        f"{alarm} constructed without a SafetyManager still grew the attribute"
     )
 
 
