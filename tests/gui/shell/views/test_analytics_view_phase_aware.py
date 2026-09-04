@@ -499,11 +499,16 @@ def test_a_genuinely_newer_reading_still_replaces_the_cache(app) -> None:
     assert view._last_gas_inventory is newer
 
 
-def test_an_undateable_reading_is_not_silently_dropped(app) -> None:
-    """Ordering needs two timestamps; without them the reading still gets through.
+def test_an_undateable_reading_is_forwarded_but_never_retained(app) -> None:
+    """It must reach the consumers, and must not survive to be replayed.
 
-    Refusing an undateable reading here would hide it from consumers that have
-    their own fail-closed handling for exactly that case.
+    Two separate obligations, and an earlier version of this test conflated
+    them. Forwarding matters: the consumers have their own fail-closed handling
+    for a reading whose time cannot be established, and swallowing it here would
+    hide that case from them. Retaining it does NOT matter and is actively
+    harmful — a reading that could not be placed in time cannot be ordered
+    against anything, so keeping it as replayable state would hand an
+    unplaceable value to every freshly mounted card.
     """
 
     from types import SimpleNamespace
@@ -511,6 +516,127 @@ def test_an_undateable_reading_is_not_silently_dropped(app) -> None:
     view = AnalyticsView()
     view.set_phase("vacuum")
 
+    fresh = _gas_reading(82.0, age_s=1.0)
+    view.set_gas_inventory(fresh)
+    anchor = view._last_gas_ordering_epoch
+
     undateable = SimpleNamespace(value=50.0, timestamp=None, metadata={}, channel="x")
     view.set_gas_inventory(undateable)
-    assert view._last_gas_inventory is undateable
+
+    assert view._last_gas_inventory is None, "an unplaceable reading was kept for replay"
+    assert view._last_gas_ordering_epoch == anchor, "an unplaceable reading moved the anchor"
+
+    # Forwarded: the card was told, and refused it on its own terms.
+    assert _gas_card(view)._value_label.text() != "82%", "the consumer was never told about the unplaceable reading"
+
+
+# ----------------------------------------------------------------------
+# Invalidity decided at admission must be DURABLE
+#
+# Deriving cache trust from the retained object re-ran the future-skew test on
+# every call, so a reading refused at T0 for being 360 s ahead became admissible
+# at T0+61 — only 299 s ahead — under a 300 s bound. It would then anchor
+# ordering, discard genuine current readings, and be replayed into a freshly
+# mounted card as if it were live. Validity must not improve because time
+# passed.
+# ----------------------------------------------------------------------
+
+
+class _Clock:
+    """A controlled `time.time` for the view module under test."""
+
+    def __init__(self, start: float) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _at(epoch: float, pct: float):
+    """A gas reading stamped at an exact epoch, not relative to wall time."""
+
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    return Reading(
+        timestamp=datetime.fromtimestamp(epoch, UTC),
+        instrument_id="molecular_counter",
+        channel="analytics/molecular_counter/gas_inventory",
+        value=pct,
+        unit="%",
+        status=ChannelStatus.OK,
+        metadata={"rate_pct_per_h": -1.2},
+    )
+
+
+def test_a_future_refusal_does_not_expire_into_admission(app, monkeypatch) -> None:
+    """Control 1: T0+360 invalid → advance 61 s → T0+61 valid → real remount."""
+
+    import cryodaq.gui.shell.views.analytics_view as view_module
+
+    t0 = 1_800_000_000.0
+    clock = _Clock(t0)
+    monkeypatch.setattr(view_module.time, "time", clock)
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+    first_card = _gas_card(view)
+
+    # Dated beyond the skew bound: refused, and nothing replayable is kept.
+    view.set_gas_inventory(_at(t0 + MAX_FUTURE_SKEW_S + 60.0, 44.0))
+    assert view._last_gas_ordering_epoch is None
+    assert view._last_gas_inventory is None, "an invalid reading was kept as replayable"
+
+    # Wall time advances past the point where that stamp would look admissible.
+    clock.t = t0 + 61.0
+    assert view._last_gas_ordering_epoch is None, (
+        "the refusal expired: a stale verdict was recomputed against a newer clock"
+    )
+
+    valid = _at(t0 + 61.0, 82.0)
+    view.set_gas_inventory(valid)
+    assert view._last_gas_inventory is valid, "a genuine current reading was discarded"
+    assert _gas_card(view)._value_label.text() == "82%"
+
+    view.set_phase("preparation")
+    view.set_phase("vacuum")
+    second_card = _gas_card(view)
+    assert second_card is not first_card, "not a real remount"
+    assert second_card._value_label.text() == "82%"
+    assert "44" not in second_card._value_label.text(), (
+        "the remount displayed a reading that was invalid when it arrived"
+    )
+
+
+def test_an_invalid_reading_does_not_disturb_the_last_valid_ordering_position(app, monkeypatch) -> None:
+    """Control 2: fresh valid → future-invalid → older replay → newer valid."""
+
+    import cryodaq.gui.shell.views.analytics_view as view_module
+
+    t0 = 1_800_000_000.0
+    clock = _Clock(t0)
+    monkeypatch.setattr(view_module.time, "time", clock)
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+
+    fresh = _at(t0, 82.0)
+    view.set_gas_inventory(fresh)
+    assert view._last_gas_ordering_epoch == t0
+
+    # An invalid reading must not move the ordering position...
+    view.set_gas_inventory(_at(t0 + MAX_FUTURE_SKEW_S + 60.0, 44.0))
+    assert view._last_gas_ordering_epoch == t0, "an invalid reading moved the anchor"
+    assert view._last_gas_inventory is None
+
+    # ...so an older-but-still-fresh replay is still rejected as superseded.
+    view.set_gas_inventory(_at(t0 - 30.0, 55.0))
+    assert view._last_gas_ordering_epoch == t0
+    assert view._last_gas_inventory is None, "an older replay was admitted after an invalid one"
+
+    # ...and a genuinely newer reading recovers normally.
+    newer = _at(t0 + 10.0, 77.0)
+    view.set_gas_inventory(newer)
+    assert view._last_gas_inventory is newer
+    assert view._last_gas_ordering_epoch == t0 + 10.0

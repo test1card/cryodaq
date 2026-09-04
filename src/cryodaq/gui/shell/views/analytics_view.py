@@ -196,6 +196,10 @@ class AnalyticsView(QWidget):
         self._last_cooldown: CooldownData | None = None
         self._last_r_thermal: RThermalData | None = None
         self._last_gas_inventory = None
+        # Captured ONCE, when a reading is admitted. Deliberately separate
+        # from the retained reading: the reading may be dropped as
+        # unreplayable while this still guards against older replays.
+        self._last_gas_ordering_epoch: float | None = None
         self._last_temperature_readings: dict[str, Reading] = {}
         self._last_pressure_reading: Reading | None = None
         self._last_keithley_readings: dict[str, Reading] = {}
@@ -321,12 +325,35 @@ class AnalyticsView(QWidget):
         """
 
         incoming = self._ordering_epoch(reading)
-        held = self._ordering_epoch(self._last_gas_inventory)
-        if incoming is not None and held is not None and incoming <= held:
+
+        if incoming is None:
+            # Undateable, or dated too far ahead to be believed. That verdict is
+            # DURABLE: it was reached against the clock at admission and is
+            # never revisited.
+            #
+            # Recomputing it from the retained object was a time-of-check /
+            # time-of-use defect. A reading 360 s in the future is refused under
+            # a 300 s bound — and then, sixty-one seconds later, the very same
+            # object is only 299 s ahead and silently becomes admissible. It
+            # would anchor ordering, discard genuine current readings, and be
+            # replayed into a freshly mounted card as though it were live.
+            # Validity cannot improve merely because time passed.
+            #
+            # So: tell the consumers, which know how to fail closed; keep
+            # nothing replayable; and leave the last valid ordering position
+            # alone, so protection against older replays survives and a remount
+            # stays unavailable until something genuinely valid arrives.
+            self._last_gas_inventory = None
+            self._forward("set_gas_inventory", reading)
+            return
+
+        held = self._last_gas_ordering_epoch
+        if held is not None and incoming <= held:
             # Superseded: neither cached nor forwarded. Both consumers would
             # reject it anyway; forwarding it would only rely on that.
             return
 
+        self._last_gas_ordering_epoch = incoming
         self._last_gas_inventory = reading
         self._forward("set_gas_inventory", reading)
 
