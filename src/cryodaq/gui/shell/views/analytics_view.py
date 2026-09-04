@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +37,7 @@ import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
+from cryodaq.core.gas_inventory_format import MAX_FUTURE_SKEW_S
 from cryodaq.core.reading_freshness import PREDICTION_STALE_AFTER_S
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -281,6 +283,29 @@ class AnalyticsView(QWidget):
             return None
         return ts if math.isfinite(ts) else None
 
+    @classmethod
+    def _ordering_epoch(cls, reading) -> float | None:
+        """Source time usable as an ORDERING ANCHOR, or None.
+
+        A future-dated reading is finite and parses perfectly, so it made a
+        valid-looking anchor — and then nothing could ever beat it. One sample
+        stamped `now + 360 s` became the cache, every genuine reading afterwards
+        compared older and was discarded, and the cache stayed pinned to a value
+        the consumers were simultaneously refusing to display. The readout was
+        blank and unrecoverable, with a poisoned cache re-serving the bad value
+        at every remount.
+
+        The same skew boundary the consumers use decides this. A reading beyond
+        it may still be cached and forwarded — it is fail-closed state, and the
+        consumers know how to refuse it — but it must never anchor ordering,
+        because recovery has to stay possible.
+        """
+
+        ts = cls._reading_epoch(reading)
+        if ts is None:
+            return None
+        return None if ts > time.time() + MAX_FUTURE_SKEW_S else ts
+
     def set_gas_inventory(self, reading) -> None:
         """Latest molecular-counter reading. Retained for replay on phase swap.
 
@@ -295,8 +320,8 @@ class AnalyticsView(QWidget):
         cache at the next remount.
         """
 
-        incoming = self._reading_epoch(reading)
-        held = self._reading_epoch(self._last_gas_inventory)
+        incoming = self._ordering_epoch(reading)
+        held = self._ordering_epoch(self._last_gas_inventory)
         if incoming is not None and held is not None and incoming <= held:
             # Superseded: neither cached nor forwarded. Both consumers would
             # reject it anyway; forwarding it would only rely on that.

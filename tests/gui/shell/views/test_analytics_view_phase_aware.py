@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.gas_inventory_format import MAX_FUTURE_SKEW_S
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.views import analytics_widgets
 from cryodaq.gui.shell.views.analytics_view import (
@@ -404,33 +405,85 @@ def _gas_reading(pct: float, *, age_s: float):
     )
 
 
+def _gas_card(view):
+    """The mounted GasInventoryWidget, or None."""
+
+    from cryodaq.gui.shell.views.analytics_widgets import GasInventoryWidget
+
+    return next(
+        (w for w in view._active.values() if isinstance(w, GasInventoryWidget)),
+        None,
+    )
+
+
 def test_a_stale_replay_does_not_poison_the_cache_replayed_on_remount(app) -> None:
-    """The full production path: ingest → stale replay → phase remount → replay."""
+    """The full production path, through a REAL remount.
+
+    The previous version of this test went vacuum -> cooldown. Both layouts
+    mount `gas_inventory` in bottom_right, so `_apply_layout` preserved the very
+    same widget and `_replay_cached_into` never ran — it asserted on a remount
+    that did not happen. It also guarded the card assertions behind
+    `if card is not None`, so it would have passed with no gas card at all.
+
+    `preparation` mounts `sensor_health_summary` instead, so
+    vacuum -> preparation -> vacuum genuinely destroys the card and builds a new
+    one, which is the only path on which the cache is replayed.
+    """
 
     view = AnalyticsView()
     view.set_phase("vacuum")
+
+    first_card = _gas_card(view)
+    assert first_card is not None, "the vacuum layout must mount a gas card"
 
     fresh = _gas_reading(82.0, age_s=1.0)
     view.set_gas_inventory(fresh)
     assert view._last_gas_inventory is fresh
 
-    # A late replay, older than the fresh one and past any freshness window.
     view.set_gas_inventory(_gas_reading(44.0, age_s=3600.0))
-    assert view._last_gas_inventory is fresh, (
-        "a superseded replay overwrote the cache that gets replayed on every remount"
-    )
+    assert view._last_gas_inventory is fresh, "a superseded replay overwrote the cache"
 
-    # The remount that would have handed the stale value to a brand-new card.
-    view.set_phase("cooldown")
+    # A real unmount: preparation has no gas card at all.
+    view.set_phase("preparation")
+    assert _gas_card(view) is None, "preparation must not mount a gas card"
+
+    # ...and a real remount, which is what replays the cache.
+    view.set_phase("vacuum")
+    second_card = _gas_card(view)
+    assert second_card is not None, "returning to vacuum must mount a gas card"
+    assert second_card is not first_card, "the widget was preserved; this is not a remount"
+
     assert view._last_gas_inventory is fresh
-
-    card = next(
-        (w for w in view._active.values() if hasattr(w, "_last_value_ts")),
-        None,
+    assert second_card._value_label.text() == "82%", (
+        "the rebuilt card was replayed the stale value instead of the live one"
     )
-    if card is not None:
-        assert card._last_value_ts is not None, "the remounted card was left with no value"
-        assert card._value_label.text() == "82%", "the remounted card showed the stale replay instead of the live value"
+
+
+def test_a_future_dated_reading_does_not_become_an_unbeatable_anchor(app) -> None:
+    """A future timestamp is finite and parses, so it made a valid-looking anchor.
+
+    Nothing could then beat it: every genuine reading compared older and was
+    discarded, while the consumers simultaneously refused to display the future
+    value. The readout went blank and could not recover, and the poisoned cache
+    re-served the bad value at every remount.
+    """
+
+    view = AnalyticsView()
+    view.set_phase("vacuum")
+    first_card = _gas_card(view)
+
+    view.set_gas_inventory(_gas_reading(44.0, age_s=-(MAX_FUTURE_SKEW_S + 60.0)))
+
+    valid = _gas_reading(82.0, age_s=1.0)
+    view.set_gas_inventory(valid)
+    assert view._last_gas_inventory is valid, "a future-dated reading anchored ordering and blocked recovery"
+    assert _gas_card(view)._value_label.text() == "82%"
+
+    view.set_phase("preparation")
+    view.set_phase("vacuum")
+    second_card = _gas_card(view)
+    assert second_card is not first_card
+    assert second_card._value_label.text() == "82%", "the remount replayed the future-invalid value"
 
 
 def test_a_genuinely_newer_reading_still_replaces_the_cache(app) -> None:
