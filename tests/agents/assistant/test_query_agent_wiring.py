@@ -9,6 +9,7 @@ Verifies that:
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cryodaq.agents.assistant.live.agent import AssistantConfig
@@ -93,6 +94,23 @@ def _make_bot_with_agent(query_agent: object | None) -> TelegramCommandBot:
     return bot
 
 
+async def _settle_query(bot) -> None:
+    """Wait for the background query task the bot now dispatches.
+
+    `_handle_text` used to await `handle_query` inline, so a caller could assert
+    on the answer the moment it returned. It no longer does: awaiting inline
+    blocked the collect loop for the whole generation (~58 s on this stand), so
+    /status, /alarms, /report, /log and /phase could not be served while the
+    model worked. The query is dispatched instead, and the answer arrives when
+    it is ready — so a test that wants the answer has to wait for it, exactly
+    as the operator does.
+    """
+
+    task = getattr(bot, "_query_task", None)
+    if task is not None:
+        await asyncio.wait_for(task, timeout=5.0)
+
+
 async def test_handle_text_returns_slash_fallback_when_agent_none() -> None:
     bot = _make_bot_with_agent(None)
     sent: list[tuple] = []
@@ -121,6 +139,7 @@ async def test_handle_text_calls_query_agent_when_wired() -> None:
     with patch.object(bot, "_send", side_effect=fake_send):
         msg = {"text": "Привет!", "chat": {"id": 111}}
         await bot._handle_text(msg)
+        await _settle_query(bot)
 
     agent.handle_query.assert_called_once_with("Привет!", chat_id=111)
     assert sent == ["Привет, оператор!"]
@@ -139,6 +158,7 @@ async def test_ask_command_routes_to_handle_text() -> None:
     with patch.object(bot, "_send", side_effect=fake_send):
         msg = {"text": "/ask что сейчас?", "chat": {"id": 111}}
         await bot._handle_message(msg)
+        await _settle_query(bot)
 
     agent.handle_query.assert_called_once_with("что сейчас?", chat_id=111)
     assert "Статус" in sent[0]
@@ -172,5 +192,6 @@ async def test_free_text_routed_to_handle_text_when_allowed() -> None:
     with patch.object(bot, "_send", side_effect=fake_send):
         # Simulate _fetch_updates processing a free-text message
         await bot._handle_text({"text": "что сейчас?", "chat": {"id": 111}})
+        await _settle_query(bot)
 
     agent.handle_query.assert_called_once()

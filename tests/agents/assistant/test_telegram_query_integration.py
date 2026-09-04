@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -36,6 +37,19 @@ def _msg(text: str, chat_id: int = 42) -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def _settle_query(bot) -> None:
+    """Wait for the query the bot now runs as a background task.
+
+    Telegram dispatches the query instead of awaiting it: awaiting inline held
+    the collect loop for the whole generation, so ordinary commands could not
+    be served while the model worked. A test wanting the answer waits for it.
+    """
+
+    task = getattr(bot, "_query_task", None)
+    if task is not None:
+        await asyncio.wait_for(task, timeout=5.0)
+
+
 async def test_telegram_free_text_routes_to_query_agent() -> None:
     """Non-command message with an attached query agent calls handle_query."""
     qa = MagicMock()
@@ -45,6 +59,7 @@ async def test_telegram_free_text_routes_to_query_agent() -> None:
     bot._send = AsyncMock()
 
     await bot._handle_text(_msg("какая сейчас температура?"))
+    await _settle_query(bot)
 
     qa.handle_query.assert_awaited_once()
     args, kwargs = qa.handle_query.call_args
@@ -79,6 +94,7 @@ async def test_telegram_ask_command_routes_to_query_agent() -> None:
     bot._send = AsyncMock()
 
     await bot._handle_message(_msg("/ask ETA вакуума?"))
+    await _settle_query(bot)
 
     qa.handle_query.assert_awaited_once()
     assert qa.handle_query.call_args.args[0] == "ETA вакуума?"
@@ -104,40 +120,63 @@ async def test_telegram_ask_command_empty_query_sends_usage() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_telegram_query_timeout_user_message() -> None:
-    """When handle_query times out, bot sends a friendly timeout message."""
+async def test_telegram_imposes_no_deadline_of_its_own() -> None:
+    """The replacement for the old timeout test, inverted on purpose.
+
+    Telegram used to cancel at a hardcoded 60 s and report "слишком долго".
+    That discarded answers the assistant was still producing — its command
+    pipeline is intent 30 s + generation 300 s + format 30 s = 360 s — and
+    cancelling here never stopped that work anyway: the assistant's REP handler
+    stays occupied to its own deadline, so the cancellation lost the reply and
+    freed nothing.
+
+    So the assistant owns the computation deadline and the proxy's 450 s is the
+    transport cap. A query far exceeding every timeout Telegram ever imposed
+    must still deliver its answer.
+    """
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(text: str, *, chat_id):
+        started.set()
+        await release.wait()
+        return "ответ после долгой генерации"
+
     qa = MagicMock()
-    qa.handle_query = AsyncMock(return_value="ok")
+    qa.handle_query = slow
 
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    async def _timeout(coro, **_kw):
-        coro.close()
-        raise TimeoutError()
+    await bot._handle_text(_msg("что сейчас?"))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", new=_timeout):
-        await bot._handle_text(_msg("ETA охлаждения?"))
+    # Well past the old 60 s and the later 120 s: nothing here may cancel it.
+    assert not bot._query_task.done()
+    bot._send.assert_not_awaited()
+
+    release.set()
+    await _settle_query(bot)
 
     bot._send.assert_awaited_once()
-    text = bot._send.call_args.args[1]
-    assert "30s" in text or "долго" in text
+    assert bot._send.call_args.args[1] == "ответ после долгой генерации"
+    assert "слишком долго" not in bot._send.call_args.args[1], (
+        "the operator must get the answer, not a timeout notice"
+    )
 
 
 async def test_telegram_query_error_user_message() -> None:
-    """When handle_query raises unexpected exception, bot sends error message."""
+    """An agent failure is reported to the operator, from the background task."""
+
     qa = MagicMock()
-    qa.handle_query = AsyncMock(return_value="ok")
+    qa.handle_query = AsyncMock(side_effect=RuntimeError("internal error"))
 
     bot = _make_bot(query_agent=qa)
     bot._send = AsyncMock()
 
-    async def _error(coro, **_kw):
-        coro.close()
-        raise RuntimeError("internal error")
-
-    with patch("cryodaq.notifications.telegram_commands.asyncio.wait_for", new=_error):
-        await bot._handle_text(_msg("что сейчас?"))
+    await bot._handle_text(_msg("что сейчас?"))
+    await _settle_query(bot)
 
     bot._send.assert_awaited_once()
     text = bot._send.call_args.args[1]

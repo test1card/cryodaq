@@ -476,10 +476,15 @@ class TelegramCommandBot:
         # instead of leaving them watching an empty chat.
         existing = self._query_task
         if existing is not None and not existing.done():
+            # Neutral about WHERE the answer lands. More than one chat may be
+            # allowed, and the in-flight query belongs to whoever asked first —
+            # telling a second operator the answer will arrive "here" would be
+            # a plain falsehood, and the sort that erodes trust in every other
+            # message the bot sends.
             await self._send(
                 chat_id,
-                "🤖 Гемма: уже думаю над предыдущим вопросом. "
-                "Ответ придёт сюда — дождись его и спроси снова.",
+                "🤖 Гемма: уже обрабатываю предыдущий вопрос. "
+                "Подожди, пока он закончится, и спроси снова.",
             )
             return
 
