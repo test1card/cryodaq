@@ -97,12 +97,24 @@ def _status_launcher(*, bridge: object | None = None) -> SimpleNamespace:
         _last_reading_time=10.0,
         _safety_worker=None,
         _annunciation_worker=None,
+        # Read by _invalidate_disconnect_confirmation_on_contrary_evidence,
+        # which _on_safety_result calls on every reply. None is the correct
+        # default for these tests: no operator has declared the source
+        # physically disconnected, so there is no confirmation to invalidate
+        # and the real method returns immediately.
+        _source_disconnect_confirmation=None,
     )
     return _bind_launcher_methods(
         launcher,
         "_invalidate_launcher_status_authority",
         "_reset_periodic_reporting_unknown",
         "_launcher_status_authority_is_current",
+        # Bound as the REAL method, not stubbed away. It guards a safety
+        # statement — an armed "source is unplugged" confirmation is discarded
+        # the moment the source reports energised outputs — and replacing it
+        # with a no-op here would let these status tests pass over a launcher
+        # that had silently lost that guard.
+        "_invalidate_disconnect_confirmation_on_contrary_evidence",
     )
 
 
@@ -4517,3 +4529,36 @@ def test_missing_transport_key_is_hold_evidence_not_keyerror() -> None:
     complete = {**missing_commit_state, "commit_state": "unknown"}
     parsed = _parse_bridge_unknown_outcome_envelope(complete)
     assert parsed == ("c" * 32, 5), "the complete core family must still parse exactly"
+
+
+def test_the_status_double_carries_the_real_disconnect_guard() -> None:
+    """The stub binds the REAL invalidation, and it demonstrably fires.
+
+    This file's launcher double is a SimpleNamespace, so a method production
+    grows can silently go missing from it — that is how these tests came to fail
+    with `AttributeError: ... has no attribute
+    '_invalidate_disconnect_confirmation_on_contrary_evidence'`.
+
+    The repair binds the real method rather than stubbing it away, because it
+    guards a safety statement: an armed "the source is physically unplugged"
+    confirmation must be discarded the moment the source reports energised
+    outputs. A no-op would have made the file green while letting every status
+    test above run against a launcher that had quietly lost that guard.
+
+    So this asserts the guard WORKS through the double, not merely that the
+    attribute exists.
+    """
+
+    launcher = _status_launcher()
+    launcher._source_disconnect_confirmation = "Keithley_1"
+
+    # No safety state yet: nothing contradicts the operator, so it stands.
+    launcher._invalidate_disconnect_confirmation_on_contrary_evidence()
+    assert launcher._source_disconnect_confirmation == "Keithley_1"
+
+    # A reply showing energised outputs is direct physical evidence against it.
+    launcher._last_safety_state = SimpleNamespace(active_channels=["smua"])
+    launcher._invalidate_disconnect_confirmation_on_contrary_evidence()
+    assert launcher._source_disconnect_confirmation is None, (
+        "an armed disconnect confirmation survived evidence that the source is energised"
+    )
