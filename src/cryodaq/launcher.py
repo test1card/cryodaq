@@ -83,6 +83,20 @@ _PERIODIC_HEALTH_FUTURE_SKEW_S = 300.0
 _PERIODIC_CONFIG_REJECTED_CODE = "H3_CONFIG_REJECTED"
 _PERIODIC_HEALTH_READ_FAILED_CODE = "H3_HEALTH_READ_FAILED"
 _PERIODIC_RUNTIME_UNAVAILABLE_CODE = "H3_RUNTIME_UNAVAILABLE"
+# Degradations that concern DELIVERY of a past report, not the runtime's ability
+# to produce one. The banner text has always drawn this distinction; from
+# 2026-09-04 the liveness observation draws it too, on the operator's decision:
+#
+#   "i dont care about runtimes, i see tg reports with sensible data and pics —
+#    everything is okay for me"
+#
+# The signal that matters is whether reports are still being rendered. A single
+# Telegram send that timed out on 2026-08-31 — outcome genuinely unknown, and
+# unreconcilable because Telegram offers no way to ask afterwards — held the H3
+# banner up every day since while 83+ PNGs rendered on time. That is the tail
+# wagging the dog: an unprovable fact about one old message suppressing a true
+# statement about the runtime.
+_PERIODIC_DELIVERY_ONLY_STATUSES = frozenset({"degraded_delivery_unknown", "degraded_tls"})
 _SHUTDOWN_RETRY_DELAYS_MS = (1_000, 3_000, 10_000, 30_000)
 # Bound on how long _stop_engine will wait for the engine process to exit
 # after a verified shutdown receipt. The exit is observed with process.poll()
@@ -449,7 +463,12 @@ class _PeriodicHealthObservation:
         if self.high_water_updated_at is not None and updated_at <= self.high_water_updated_at:
             return False
         self.high_water_updated_at = updated_at
-        if status != "ready":
+        # "Alive" means the runtime is still producing reports — NOT that every
+        # past delivery is accounted for. A delivery-only degradation says
+        # something unprovable about one old message; it says nothing about
+        # whether rendering works, and rendering is what the banner claims to
+        # report. See _PERIODIC_DELIVERY_ONLY_STATUSES.
+        if status != "ready" and status not in _PERIODIC_DELIVERY_ONLY_STATUSES:
             return False
         self.last_ready_observed_at = monotonic_now
         return True
@@ -6554,7 +6573,9 @@ class LauncherWindow(QMainWindow):
     # accepts only `ready`, and the operator was consequently told for six hours
     # that periodic reports were unavailable while six of them were written on
     # time. The signal was honest; the sentence was not.
-    _PERIODIC_DELIVERY_ONLY_STATUSES = frozenset({"degraded_delivery_unknown", "degraded_tls"})
+    # One definition, module level, shared with _PeriodicHealthObservation so the
+    # banner's wording and the liveness gate cannot drift apart.
+    _PERIODIC_DELIVERY_ONLY_STATUSES = _PERIODIC_DELIVERY_ONLY_STATUSES
 
     def _set_periodic_reporting_fault(self, *, status: str | None = None) -> None:
         """Show one persistent non-safety H3 operator status.

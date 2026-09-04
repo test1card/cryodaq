@@ -736,3 +736,76 @@ def test_the_banner_still_latches_once() -> None:
     win._set_periodic_reporting_fault(status="degraded_delivery_unknown")
     win._set_periodic_reporting_fault(status="degraded_source")
     assert win._tray.showMessage.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# A delivery-only degradation is not a dead runtime
+#
+# One Telegram send timed out on 2026-08-31 — outcome genuinely unknown, and
+# unreconcilable, because Telegram offers no way to ask afterwards whether a
+# message was accepted. That single record held the H3 banner up every day
+# since, while 83+ PNGs rendered on time. The operator's decision, 2026-09-04:
+#
+#   "i dont care about runtimes, i see tg reports with sensible data and pics —
+#    everything is okay for me"
+#
+# So liveness now means "still producing reports", not "every past delivery is
+# accounted for". What must NOT change: a real runtime failure still reads as
+# dead. That is the invariant these tests exist to keep separating.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["degraded_delivery_unknown", "degraded_tls"])
+def test_delivery_only_degradation_still_counts_as_a_live_runtime(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    from cryodaq.launcher import LauncherWindow
+
+    window = _monitor_window(tmp_path)
+    window._assistant_periodic_health.baseline_observed = True
+    window._assistant_periodic_health.high_water_updated_at = 100.0
+    with (
+        patch("cryodaq.periodic_state.load_periodic_state", return_value=_health(status, 101.0)),
+        patch("cryodaq.launcher.time.time", return_value=101.0),
+    ):
+        LauncherWindow._check_periodic_health(window, monotonic_now=50.0)  # type: ignore[arg-type]
+
+    window._clear_periodic_reporting_fault.assert_called_once()
+    window._set_periodic_reporting_fault.assert_not_called()
+
+
+def test_a_real_runtime_failure_is_still_not_alive(tmp_path: Path) -> None:
+    """The carve-out is exactly the delivery statuses and nothing wider.
+
+    `degraded_source` means the runtime cannot produce a report. That must keep
+    expiring the deadline and raising the banner, or the widening would have
+    turned the whole signal off rather than narrowing it.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    window = _monitor_window(tmp_path)
+    window._assistant_periodic_health.baseline_observed = True
+    window._assistant_periodic_health.high_water_updated_at = 100.0
+    with (
+        patch("cryodaq.periodic_state.load_periodic_state", return_value=_health("degraded_source", 101.0)),
+        patch("cryodaq.launcher.time.time", return_value=101.0),
+    ):
+        LauncherWindow._check_periodic_health(window, monotonic_now=50.0)  # type: ignore[arg-type]
+
+    window._clear_periodic_reporting_fault.assert_not_called()
+
+
+def test_the_banner_wording_and_the_liveness_gate_share_one_definition() -> None:
+    """They disagreed once already; one definition is why they cannot again.
+
+    The banner text distinguished delivery-only degradations from a dead
+    runtime long before the liveness observation did, which is precisely how
+    the operator ended up reading an accurate sentence under a banner that
+    should never have been raised.
+    """
+
+    from cryodaq.launcher import _PERIODIC_DELIVERY_ONLY_STATUSES, LauncherWindow
+
+    assert LauncherWindow._PERIODIC_DELIVERY_ONLY_STATUSES is _PERIODIC_DELIVERY_ONLY_STATUSES
