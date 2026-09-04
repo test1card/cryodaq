@@ -8,6 +8,7 @@ problems were semantic, not arithmetic.
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -124,7 +125,7 @@ def test_a_pre_transition_reading_cannot_become_the_new_zero() -> None:
     """
 
     c = _counter()
-    _run(c, _batch(0.10, 300.0))            # cache is warm, pre-transition
+    _run(c, _batch(0.10, 300.0))  # cache is warm, pre-transition
     _enter_phase(c, "vacuum")
 
     # Only stale (pre-fence) readings available: no baseline may be taken.
@@ -189,8 +190,11 @@ def test_the_rate_definition_travels_with_the_value() -> None:
 # BLOCKER 5 — rate validity
 # ==========================================================================
 class _Clock:
-    def __init__(self, start): self.t = start
-    def now(self, tz=None): return self.t
+    def __init__(self, start):
+        self.t = start
+
+    def now(self, tz=None):
+        return self.t
 
 
 def _spaced(counter, samples, *, step_s: float):
@@ -203,8 +207,15 @@ def _spaced(counter, samples, *, step_s: float):
         out = []
         for p, t in samples:
             batch = [
-                Reading(timestamp=clock.t, instrument_id="t", channel=ch, value=v,
-                        unit="", status=ChannelStatus.OK, metadata={})
+                Reading(
+                    timestamp=clock.t,
+                    instrument_id="t",
+                    channel=ch,
+                    value=v,
+                    unit="",
+                    status=ChannelStatus.OK,
+                    metadata={},
+                )
                 for ch, v in [(_P, p)] + [(s, t) for s in _BULK]
             ]
             out = asyncio.run(counter.process(batch))
@@ -214,19 +225,117 @@ def _spaced(counter, samples, *, step_s: float):
         mod.datetime = original
 
 
-def test_a_gap_is_not_bridged_by_the_regression() -> None:
-    """Filtering bad points out of the middle and fitting across the hole
-    invents a slope. The run must be contiguous and trailing."""
+def _drive(counter, script, *, step_s: float):
+    """Feed real batches through process() on ONE controlled timeline.
+
+    `script` entries are either `(pressure, temperature)` for a good sample or
+    `None` for an interval in which a configured sensor simply does not arrive
+    — the production shape of an unavailable input, which appends no point at
+    all. The whole sequence runs on a single clock, so an outage in the middle
+    is a real gap rather than a restarted timeline.
+
+    Readings carry `clock.t`, not wall time: the plugin reads its own now from
+    the patched module, and a batch stamped with real time would not sit on the
+    same axis as the history it is extending.
+    """
+
+    import plugins.molecular_counter as mod
+
+    clock = _Clock(datetime.now(UTC))
+    original = mod.datetime
+    mod.datetime = clock
+
+    def _reading(channel: str, value: float) -> Reading:
+        return Reading(
+            timestamp=clock.t,
+            instrument_id="t",
+            channel=channel,
+            value=value,
+            unit="",
+            status=ChannelStatus.OK,
+            metadata={},
+        )
+
+    try:
+        out: list = []
+        for item in script:
+            if item is None:
+                # One configured sensor absent: process() returns [] and
+                # appends nothing. Only the clock moves.
+                asyncio.run(counter.process([_reading(_P, 0.05)]))
+            else:
+                pressure, temperature = item
+                batch = [_reading(_P, pressure)] + [_reading(ch, temperature) for ch in _BULK]
+                produced = asyncio.run(counter.process(batch))
+                if produced:
+                    out = produced
+            clock.t = clock.t + timedelta(seconds=step_s)
+        return out
+    finally:
+        mod.datetime = original
+
+
+def _outage_steps(step_s: float) -> int:
+    from plugins.molecular_counter import _MAX_SAMPLE_GAP_S
+
+    return int(_MAX_SAMPLE_GAP_S // step_s) + 2
+
+
+def test_a_real_outage_breaks_the_run_through_the_production_path() -> None:
+    """good readings -> genuinely unavailable input -> recovery, via process().
+
+    The previous version appended `float("nan")` straight into `_history`.
+    Production cannot do that: an invalid or missing input appends NOTHING, so
+    the point the test relied on never exists. It proved a behaviour the code
+    has no way to reach, which is worse than no test — the real defence went
+    unexercised while the suite looked green.
+
+    The real defence is the inter-sample interval. Silence longer than
+    `_MAX_SAMPLE_GAP_S` breaks the trailing run, because after an outage the
+    GAP is the only evidence the series was interrupted; nothing is left behind
+    to find.
+    """
 
     c = _counter()
-    out = _spaced(c, [(0.05, 250.0)] * 8, step_s=120.0)
-    assert out[0].metadata["rate_pct_per_h"] is not None
+    script = (
+        [(0.05, 250.0)] * 8  # a healthy run, so a rate exists
+        + [None] * _outage_steps(120.0)  # the sensor stops arriving
+        + [(0.05, 250.0)] * 2  # recovery, too short to span a rate
+    )
+    out = _drive(c, script, step_s=120.0)
 
-    # Inject an unusable inventory point, then only two good ones after it.
-    c._history.append((c._history[-1][0] + 120.0, float("nan")))
-    c._history.append((c._history[-1][0] + 120.0, 0.05))
-    c._history.append((c._history[-1][0] + 120.0, 0.05))
-    assert c._rate_pct_per_h() is None, "only 2 points after the break — no rate"
+    assert out, "the counter must resume publishing a value after the outage"
+    assert out[0].metadata["rate_pct_per_h"] is None, (
+        "a rate was fitted across the outage — the gap did not break the run"
+    )
+
+
+def test_the_value_still_publishes_during_and_after_an_outage() -> None:
+    """Breaking the RATE must not silence the level.
+
+    The value and the slope are separate promises: an interrupted series makes
+    the slope unknowable, but the current inventory is still measured and still
+    worth showing. Withholding both would hide a number the operator has.
+    """
+
+    c = _counter()
+    script = [(0.05, 250.0)] * 8 + [None] * _outage_steps(120.0) + [(0.05, 250.0)] * 2
+    out = _drive(c, script, step_s=120.0)
+
+    assert out[0].value is not None
+    assert math.isfinite(float(out[0].value))
+
+
+def test_an_uninterrupted_run_of_the_same_length_does_report_a_rate() -> None:
+    """The control: the same sample count WITHOUT the outage does have a rate.
+
+    Without this, the test above would pass just as happily if the counter had
+    simply stopped producing rates at all.
+    """
+
+    c = _counter()
+    out = _drive(c, [(0.05, 250.0)] * 12, step_s=120.0)
+    assert out[0].metadata["rate_pct_per_h"] is not None
 
 
 def test_the_span_is_measured_on_the_retained_run_not_the_buffer() -> None:
@@ -235,9 +344,9 @@ def test_the_span_is_measured_on_the_retained_run_not_the_buffer() -> None:
     c = _counter()
     _spaced(c, [(0.05, 250.0)] * 8, step_s=120.0)
     base = c._history[-1][0]
-    c._history.append((base + 60.0, -1.0))          # breaks the run
+    c._history.append((base + 60.0, -1.0))  # breaks the run
     for i in range(1, 4):
-        c._history.append((base + 60.0 + i * 10.0, 0.05))   # 3 pts, 20 s span
+        c._history.append((base + 60.0 + i * 10.0, 0.05))  # 3 pts, 20 s span
     assert c._rate_pct_per_h() is None
 
 
