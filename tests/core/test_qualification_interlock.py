@@ -72,7 +72,6 @@ async def _manager(
         SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=qualification_receipt,  # type: ignore[arg-type]
         mock=manager_mock,
     )
     manager._config.critical_channels = []
@@ -95,7 +94,6 @@ async def test_valid_receipt_preserves_the_complete_energizing_path(
     manager, driver = await _manager(
         driver_simulated=False,
         manager_mock=False,
-        qualification_receipt=receipt,
     )
     try:
         run = await manager.request_run(0.1, 10.0, 0.1, channel="smua")
@@ -127,7 +125,6 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
     manager, driver = await _manager(
         driver_simulated=False,
         manager_mock=False,
-        qualification_receipt=receipt,
     )
 
     manager._state = SafetyState.RUNNING

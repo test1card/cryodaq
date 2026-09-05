@@ -30,7 +30,6 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # Helpers shared across sections
@@ -65,7 +64,6 @@ async def _make_manager(*, mock: bool = True, keithley=None, stale: float = 10.0
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     mgr._config.stale_timeout_s = stale

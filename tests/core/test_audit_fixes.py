@@ -11,7 +11,6 @@ import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import SourceOffResult
-from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # BUG-1: Safety state machine race — request_run rejected during _fault()
@@ -31,7 +30,6 @@ async def test_request_run_rejected_during_fault() -> None:
         broker,
         keithley_driver=k,
         mock=True,
-        qualification_receipt=issued_test_qualification_receipt(),
     )
 
     # Start smua

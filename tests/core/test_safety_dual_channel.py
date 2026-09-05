@@ -12,7 +12,6 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
@@ -41,7 +40,6 @@ async def _make_manager(*, mock: bool = True, keithley=None):
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     manager._config.cooldown_before_rearm_s = 0.1

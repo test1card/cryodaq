@@ -28,7 +28,6 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
-from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror test_safety_manager.py conventions)
@@ -61,7 +60,6 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0):
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     mgr._config.stale_timeout_s = stale

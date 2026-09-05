@@ -22,7 +22,6 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 class _ReviewedSource:
@@ -170,7 +169,6 @@ def _configured_manager(
         broker,
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt(),
         mock=False,
     )
     manager.load_config(safety_path)

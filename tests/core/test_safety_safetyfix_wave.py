@@ -29,7 +29,6 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
@@ -59,7 +58,6 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0):
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
         mock=mock,
-        qualification_receipt=issued_test_qualification_receipt(),
     )
     mgr._config.stale_timeout_s = stale
     mgr._config.cooldown_before_rearm_s = 0.1

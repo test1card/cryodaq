@@ -27,7 +27,6 @@ from cryodaq.drivers.contracts import (
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
 from cryodaq.engine_wiring.supervision import TaskSupervisor
 from cryodaq.storage.sqlite_writer import SQLiteWriter
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
@@ -66,7 +65,6 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0, data_broker=Non
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
         data_broker=data_broker,
     )
@@ -322,7 +320,6 @@ async def _l05_started_child_manager(
         SafetyBroker(),
         keithley_driver=source,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt(),
         mock=False,
         fault_log_callback=audit,
     )
@@ -781,7 +778,6 @@ async def test_keithley_required_non_mock():
     mgr = SafetyManager(
         broker,
         keithley_driver=None,
-        qualification_receipt=issued_test_qualification_receipt(),
         mock=False,
     )
     mgr._config.require_keithley_for_run = True

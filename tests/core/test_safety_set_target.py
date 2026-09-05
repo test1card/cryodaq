@@ -5,7 +5,6 @@ from __future__ import annotations
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _manager(broker: SafetyBroker, driver: Keithley2604B) -> SafetyManager:
@@ -13,7 +12,6 @@ def _manager(broker: SafetyBroker, driver: Keithley2604B) -> SafetyManager:
         broker,
         keithley_driver=driver,
         mock=True,
-        qualification_receipt=issued_test_qualification_receipt(),
     )
 
 

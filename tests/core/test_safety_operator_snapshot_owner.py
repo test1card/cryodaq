@@ -36,7 +36,6 @@ from cryodaq.engine_wiring.operator_snapshot_live_authorities import (
     LiveSafetyReadinessAuthority,
 )
 from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
-from tests.qualification_support import issued_test_qualification_receipt
 
 _CREATED_MANAGERS: list[SafetyManager] = []
 
@@ -75,11 +74,6 @@ def _manager(
         safety_broker or SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=(
-            issued_test_qualification_receipt()
-            if not mock or (driver is not None and getattr(driver, "mock", None) is False)
-            else None
-        ),
         mock=mock,
         data_broker=data_broker,
     )

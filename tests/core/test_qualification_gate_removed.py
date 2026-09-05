@@ -85,7 +85,6 @@ async def _manager(*, driver_simulated: bool, manager_mock: bool) -> tuple[Safet
         SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=None,
         mock=manager_mock,
     )
     manager._config.critical_channels = []

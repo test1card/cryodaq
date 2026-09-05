@@ -46,7 +46,6 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 class _AbsentThenPresentSource(InstrumentDriver):
@@ -124,7 +123,6 @@ def _manager(driver: InstrumentDriver, binding):
         SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt(),
         mock=False,
     )
 

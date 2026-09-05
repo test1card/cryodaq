@@ -1,12 +1,17 @@
-"""Expired signed qualification vector for production-path tests only."""
+"""Expired signed qualification vector, now for the ARTIFACT boundary only.
+
+The lab-qualification gate that consumed this from `SafetyManager` is gone. What
+still uses these helpers is the release path — `verify_artifact_qualification_
+receipt` in `build_scripts/artifact_promotion.py`, its ten regressions in
+`tests/test_artifact_promotion.py`, and the receipt-parsing tests — plus
+`issued_simulation_binding`, which was never about qualification at all.
+"""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
-from cryodaq.core.qualification import QualificationContext, QualificationReceipt, verify_qualification_receipt
+from cryodaq.core.qualification import QualificationContext
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverRuntimeBinding,
@@ -56,18 +61,6 @@ def qualification_context(**changes: str) -> QualificationContext:
 
 def qualification_receipt_bytes() -> bytes:
     return (json.dumps(PAYLOAD | {"signature": SIGNATURE}, sort_keys=True) + "\n").encode()
-
-
-def issued_test_qualification_receipt() -> QualificationReceipt:
-    """Issue from an expired vector at its historical clock; never deployable."""
-
-    with TemporaryDirectory() as directory:
-        return verify_qualification_receipt(
-            qualification_receipt_bytes(),
-            expected=qualification_context(),
-            replay_directory=Path(directory),
-            now_unix_s=VALID_AT,
-        )
 
 
 def issued_simulation_binding(driver: object, provenance: str) -> DriverRuntimeBinding:

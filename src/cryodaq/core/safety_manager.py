@@ -20,7 +20,6 @@ import yaml
 
 from cryodaq.core.broker import PublisherAuthority
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
-from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.smu_channel import SMU_CHANNELS, KeithleySourceState, SmuChannel, normalize_smu_channel
@@ -56,12 +55,6 @@ _INTENT_RESUME_MAX_AGE_S = 900.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
 
 
-# Owner-authorised escape from the signed laboratory-qualification gate.
-# Set to exactly "1" in the engine environment to permit energizing while no
-# qualification receipt exists. It covers ONLY the absent-receipt case; a
-# present receipt that is stale or malformed is still refused, and no other
-# safety precondition is affected. Every process that uses it logs CRITICAL
-# once, so an unqualified run is always visible in the log.
 class SafetyConfigError(RuntimeError):
     """Raised when safety.yaml cannot be loaded in a fail-closed manner.
 
@@ -208,17 +201,12 @@ async def _settle_shielded_hardware_task(
 class SafetyManager:
     """Single safety state machine with channel-aware Keithley control."""
 
-    # Set once per process the first time the qualification override is
-    # exercised, so the CRITICAL announcement is not repeated on every
-    # precondition evaluation (they run at _CHECK_INTERVAL_S).
-
     def __init__(
         self,
         safety_broker: SafetyBroker,
         *,
         keithley_driver: Any | None = None,
         reviewed_source_runtime_binding: DriverRuntimeBinding | None = None,
-        qualification_receipt: QualificationReceipt | None = None,
         mock: bool = False,
         data_broker: Any | None = None,
         fault_log_callback: Any | None = None,
@@ -226,9 +214,6 @@ class SafetyManager:
         self._broker = safety_broker
         self._keithley = keithley_driver
         self._mock = mock
-        if qualification_receipt is not None and not is_issued_qualification_receipt(qualification_receipt):
-            raise ValueError("qualification_receipt was not issued by the qualification verifier")
-        self._qualification_receipt = qualification_receipt
         self._reviewed_source_runtime_binding = reviewed_source_runtime_binding
         self._reviewed_source_identity_qualified = bool(
             keithley_driver is not None
