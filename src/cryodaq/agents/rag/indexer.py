@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 _EMBEDDING_DIM = 1024
 
 
+class RagEmbeddingDimensionError(RuntimeError):
+    """The embedding model's output width disagrees with `rag.embedding_dim`.
+
+    Fatal by design: it is a property of the model, not of one chunk, so every
+    subsequent embedding would be wrong in the same way.
+    """
+
+
 class _EmbeddingsLike(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
@@ -209,14 +217,24 @@ async def build_index(
             vec = [0.0] * embedding_dim
             failed_count += 1
         elif len(vec) != embedding_dim:
-            logger.warning(
-                "RAG embedding dim mismatch on chunk %s: got %d, expected %d — using zero vector",
-                chunk.chunk_id,
-                len(vec),
-                embedding_dim,
+            # NOT a per-chunk failure. An empty vector means one embed call
+            # failed and the next may succeed, so a zero vector keeps row
+            # alignment and the corpus degrades by one chunk. A vector of the
+            # WRONG LENGTH means the model and `embedding_dim` disagree, which
+            # is true for every chunk and cannot improve by continuing.
+            #
+            # Zero-filling it turned a one-line config error into 3638 zero
+            # vectors and an index that would have been swapped in reporting
+            # success — observed 2026-09-05, when the CLI silently ignored
+            # `embedding_dim` and asked a 4096-dim model for 1024-dim vectors.
+            # Failing on the first one costs a second; the alternative costs
+            # the index.
+            raise RagEmbeddingDimensionError(
+                f"embedding model returned {len(vec)}-dim vectors but embedding_dim "
+                f"is {embedding_dim} (first seen on chunk {chunk.chunk_id}). "
+                f"Set rag.embedding_dim to {len(vec)} — the corpus must be rebuilt "
+                f"for the new model either way."
             )
-            vec = [0.0] * embedding_dim
-            failed_count += 1
         else:
             embedded_count += 1
         vectors.append(vec)

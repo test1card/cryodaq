@@ -15,7 +15,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaUnavailableError,
 )
 from cryodaq.agents.rag.embeddings import EmbeddingsClient
-from cryodaq.agents.rag.indexer import build_index
+from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, RagEmbeddingDimensionError, build_index
 from cryodaq.agents.rag.searcher import RagSearcher
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 
@@ -153,8 +153,21 @@ def index_main() -> None:
                 pdf_dir=pdf_dir,
                 procedures_dir=procedures_dir,
                 reference_root=reference_root,
+                # `rag.embedding_dim` was documented in rag.yaml.example, read
+                # into rag_cfg here, and never passed on — so the indexer always
+                # used its 1024 default no matter what the config said. Changing
+                # the embedding model therefore could not work through
+                # configuration alone.
+                embedding_dim=int(rag_cfg.get("embedding_dim", _EMBEDDING_DIM)),
             )
         )
+    except RagEmbeddingDimensionError as exc:
+        # Fatal and actionable: the model and the config disagree about vector
+        # width, which is true of every chunk rather than one. The message
+        # already names the value to set, so print it plainly, not as a
+        # traceback.
+        print(f"\nerror: {exc}", file=sys.stderr)
+        sys.exit(6)
     except OllamaModelMissingError as exc:
         # v0.55.14 (audit SCOPE 2 finding 2.2) — friendly message
         # instead of a bare traceback when the embedding model isn't
