@@ -825,6 +825,13 @@ class AssistantLiveAgent:
         # the work in flight rather than by lifetime admissions.
         self._attempt_tasks: dict[int, asyncio.Task] = {}
         self._started_attempts: set[int] = set()
+        # Edge-triggered, not per-event. Until 2026-09-05 the LLM lived on
+        # loopback and could not be unreachable; it now runs on the owner's
+        # server over a NetBird overlay, so "unreachable" is a real state that
+        # can last hours. Telling the operator once per event would turn one
+        # outage into a flood of identical Telegram messages, which is how a
+        # notification stops being read.
+        self._llm_unavailable_announced = False
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
         # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
@@ -1128,10 +1135,26 @@ class AssistantLiveAgent:
                         await self._handle_periodic_report(event)
                     else:
                         await self._handle_alarm_fired(event, dedup_id=dedup_id, attempt=attempt)
+                    # Reached only when a handler returned without raising, so
+                    # inference is answering again. Clearing here rather than in
+                    # an `else:` clause keeps it inside the same try that owns
+                    # the failure, and re-arms the announcement for a LATER
+                    # outage instead of leaving it permanently spent.
+                    if self._llm_unavailable_announced:
+                        self._llm_unavailable_announced = False
+                        logger.info("AssistantLiveAgent: модель снова доступна")
                 except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                     if dedup_id is not None:
                         self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
                     logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
+                    # A log line was the whole response until 2026-09-05, which
+                    # was survivable only because the model was on loopback.
+                    # With inference on a remote server the hourly report simply
+                    # stops arriving and nothing says why — and the operator
+                    # reads those reports rather than the log. Announce it once
+                    # per outage, deterministically: this path must not need the
+                    # very model it is reporting unreachable.
+                    await self._announce_llm_unavailable(event, exc)
                 except Exception:
                     if dedup_id is not None:
                         self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
@@ -1601,6 +1624,36 @@ class AssistantLiveAgent:
             ctx.total_event_count,
             dispatched_pr,
         )
+
+    async def _announce_llm_unavailable(self, event: EngineEvent, exc: Exception) -> None:
+        """Tell the operator once that narration is down, and why.
+
+        Reuses the deterministic dispatch path: `model="deterministic"` sends
+        the text through unchanged and makes no inference call, which is the
+        only thing that can work when inference is what failed.
+
+        Edge-triggered. The flag clears on the next successful handling, so a
+        recovered link is silent rather than announcing itself, and a long
+        outage produces one message instead of one per event.
+        """
+
+        if self._llm_unavailable_announced:
+            return
+        self._llm_unavailable_announced = True
+        try:
+            await self._dispatch_unavailable_context(
+                event=event,
+                audit_id=self._audit.make_audit_id(),
+                payload=event.payload,
+                kind="llm_unavailable",
+                message=(
+                    "Помощник не может формировать отчёты: модель недоступна. "
+                    "Сбор и запись данных продолжаются в обычном режиме. "
+                    f"Причина: {exc}"
+                ),
+            )
+        except Exception:  # pragma: no cover - notification must never mask the outage
+            logger.warning("AssistantLiveAgent: не удалось сообщить о недоступности модели", exc_info=True)
 
     async def _dispatch_unavailable_context(
         self,
