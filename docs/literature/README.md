@@ -28,6 +28,25 @@ directory, `filename<TAB>url`. Rebuild the corpus with:
 
 Reruns skip what is already present, so an interrupted fetch resumes.
 
+## Size, measured
+
+97 of the 99 manifest entries fetch successfully — 322 MB on disk, yielding
+**16,118 chunks** at the indexer's 1000-character window, and about 95 seconds
+of CPU to parse the whole corpus:
+
+| topic | PDFs | chunks |
+|---|---:|---:|
+| cryocoolers | 27 | 1,480 |
+| cryopumps | 14 | 1,096 |
+| measurement | 20 | 6,931 |
+| outgassing | 12 | 928 |
+| vacuum | 24 | 5,683 |
+| **total** | **97** | **16,118** |
+
+For scale: the pre-literature corpus was 3,501 chunks, so this is roughly a
+5.6x index. Budget the rebuild accordingly — every chunk is one embedding call
+to `qwen3-embedding:8b`.
+
 ## Licence, by tier
 
 - **Public domain (US Government):** everything from NIST/NBS
@@ -58,11 +77,22 @@ Reruns skip what is already present, so an interrupted fetch resumes.
 - **CERN Document Server (`cds.cern.ch`) is behind a bot challenge** and
   returns HTML to any scripted client. Every CDS-hosted document here is
   fetched from its arXiv, OSTI or `cas.web.cern.ch` mirror instead.
-- **Several scanned documents carry no text layer** — NBS Monograph 131,
-  NIST Monograph 175, NASA TP-1177, the ORNL molecular-sieve report. `pypdf`
-  extracts nothing from them, so they contribute few or no chunks and are
-  effectively inert until someone OCRs them. They are kept because they are
-  the authoritative citation targets.
+- **Two files yield nothing at all**, measured rather than assumed:
+  `cryocoolers/radebaugh-1986-comparison-of-three-pulse-tube-types.pdf` has no
+  text layer, and `outgassing/ecss-q-st-70-02c-thermal-vacuum-outgassing-test.pdf`
+  is encrypted (the loader skips encrypted PDFs by design — decrypting is the
+  operator's call, not the loader's). Both are kept as citation targets.
+- **Two more are text-sparse and effectively inert**: NBS Monograph 131 yields
+  about 400 words across its first 25 pages and NIST Monograph 175 about 221 —
+  roughly page headers only. They are the two largest files in the corpus and
+  they are exactly the two whose value is in numerical tables, which is what a
+  partial OCR loses first. Treat any answer sourced from them with suspicion
+  until they are re-OCRed. NASA TP-1177 and the ORNL molecular-sieve report,
+  by contrast, do carry good text (7.4k and 4.5k words per 25 pages).
+- **Two documents could not be fetched at all**: both USPAS items
+  (`uspas.fnal.gov`) answer HTTP 403 to any scripted client. They download
+  normally from a browser; drop them into `data/knowledge/literature/outgassing/`
+  under the manifest filename if you want them.
 - Deliberately excluded on licence grounds: manufacturer service bulletins
   re-hosted on third-party servers. Get the equivalent for this lab's own
   machine from the vendor against its serial number; that copy is
