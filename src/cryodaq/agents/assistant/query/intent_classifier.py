@@ -253,6 +253,7 @@ class IntentClassifier:
         max_tokens: int = 2048,
         timeout_s: float | None = None,
         channel_manager: ChannelManager | None = None,
+        release_model_after: bool = True,
     ) -> None:
         self._ollama = ollama_client
         self._model = model
@@ -260,6 +261,13 @@ class IntentClassifier:
         self._max_tokens = max_tokens
         self._timeout_s = timeout_s
         self._channel_manager = channel_manager  # stored by reference, never cached
+        # Releasing the classifier's model exists to hand the GPU to a
+        # DIFFERENT model that writes the answer. When both stages run the same
+        # model — as they do against a server large enough not to need two —
+        # releasing unloads the very weights the next call needs, turning a
+        # 578 ms answer into a 23 s reload. The caller knows both names, so it
+        # decides; the default keeps the small-GPU behaviour unchanged.
+        self._release_model_after = release_model_after
 
     async def classify(self, query: str) -> QueryIntent:
         """Classify query text into a QueryIntent. Never raises.
@@ -281,11 +289,17 @@ class IntentClassifier:
                 system=system_prompt,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
-                # Classification is a one-word decision from a small model.
-                # Releasing it immediately keeps the GPU for the model that
-                # writes the operator's answer; the reload costs ~3.8s and is
-                # far cheaper than pushing the generator onto the CPU.
-                keep_alive=_RELEASE_IMMEDIATELY,
+                # Classification is a one-word decision. Releasing immediately
+                # keeps the GPU for the model that writes the operator's
+                # answer; on the 4 GiB card that reload cost ~3.8 s and was far
+                # cheaper than pushing the generator onto the CPU. It is only
+                # worth doing when the answer comes from a different model.
+                keep_alive=_RELEASE_IMMEDIATELY if self._release_model_after else None,
+                # A reasoning model must not spend its budget thinking about a
+                # single category word. Harmless on models without a thinking
+                # mode — verified 2026-09-05 against qwen2.5:1.5b-instruct,
+                # which returns the same answer with and without the field.
+                think=False,
             )
             if self._timeout_s is None:
                 result = await generation

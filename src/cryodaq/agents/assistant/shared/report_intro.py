@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from cryodaq.agents.assistant.shared.ollama_client import validate_loopback_origin
+from cryodaq.agents.assistant.shared.ollama_client import validate_private_llm_origin
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def generate_report_intro(dataset: Any, config: IntroConfig | None = None) -> st
 
 def _call_ollama_sync(prompt: str, system: str, config: IntroConfig) -> str:
     """Blocking HTTP POST to Ollama /api/generate. Raises on error."""
-    url = validate_loopback_origin(config.base_url) + _OLLAMA_PATH
+    url = validate_private_llm_origin(config.base_url) + _OLLAMA_PATH
     payload: dict[str, Any] = {
         "model": config.model,
         "prompt": prompt,

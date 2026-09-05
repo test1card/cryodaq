@@ -244,7 +244,9 @@ async def test_classifier_concurrent_calls_include_channel_hints() -> None:
 
     call_count = 0
 
-    async def fake_generate(user_prompt, *, model, system, temperature, max_tokens, keep_alive=None):
+    # **kwargs so a new client argument does not fail this double instead of
+    # the behaviour it exists to test — `think` was added on 2026-09-05.
+    async def fake_generate(user_prompt, *, model, system, temperature, max_tokens, **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:

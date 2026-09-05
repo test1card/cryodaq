@@ -15,7 +15,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaClient,
     OllamaModelMissingError,
     OllamaUnavailableError,
-    validate_loopback_origin,
+    validate_private_llm_origin,
 )
 from cryodaq.agents.rag.embeddings import EmbeddingsClient
 
@@ -332,32 +332,85 @@ async def test_embed_returns_vector_on_success() -> None:
         "http://127.0.0.1:11434/api",
         "http://127.0.0.1:11434?redirect=remote",
         "ftp://127.0.0.1:11434",
+        # Private, but NOT the overlay mesh. Widening to 100.64.0.0/10 must not
+        # quietly admit ordinary LAN or public addresses.
+        "http://192.168.1.10:11434",
+        "http://10.90.101.12:11434",
+        "http://8.8.8.8:11434",
     ],
 )
-def test_loopback_origin_rejects_remote_or_ambiguous_urls(base_url: str) -> None:
-    with pytest.raises(ValueError, match="loopback|origin|userinfo"):
-        validate_loopback_origin(base_url)
+def test_origin_rejects_remote_or_ambiguous_urls(base_url: str) -> None:
+    with pytest.raises(ValueError, match="loopback|private-mesh|origin|userinfo"):
+        validate_private_llm_origin(base_url)
 
 
-def test_loopback_origin_rejects_nonliteral_loopback() -> None:
+def test_origin_rejects_nonliteral_host() -> None:
+    """A hostname is repointable by whoever answers DNS; an address is not."""
+
     with pytest.raises(ValueError, match="literal"):
-        validate_loopback_origin("http://localhost:11434")
-    assert validate_loopback_origin("http://[::1]:11434") == "http://[::1]:11434"
+        validate_private_llm_origin("http://localhost:11434")
+    with pytest.raises(ValueError, match="literal"):
+        validate_private_llm_origin("http://work-pc.netbird.cloud:11437")
+    assert validate_private_llm_origin("http://[::1]:11434") == "http://[::1]:11434"
 
 
-def test_shipped_ollama_defaults_are_literal_loopback() -> None:
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://100.64.0.1:11434",
+        "http://100.87.73.25:11437",
+        "http://100.127.255.254:11434",
+    ],
+)
+def test_origin_admits_the_private_overlay_mesh(base_url: str) -> None:
+    """100.64.0.0/10 is where NetBird and Tailscale put overlay peers.
+
+    Not routable on the public internet, so an address in it is reachable only
+    from inside the authenticated WireGuard mesh. That is the whole reason the
+    rule was widened here and nowhere else.
+    """
+
+    assert validate_private_llm_origin(base_url) == base_url
+
+
+def test_the_range_boundary_is_exact() -> None:
+    """100.64.0.0/10 ends at 100.127.255.255 — 100.128.x is public space."""
+
+    assert validate_private_llm_origin("http://100.64.0.0:11434") == "http://100.64.0.0:11434"
+    with pytest.raises(ValueError, match="private-mesh"):
+        validate_private_llm_origin("http://100.128.0.1:11434")
+    with pytest.raises(ValueError, match="private-mesh"):
+        validate_private_llm_origin("http://100.63.255.255:11434")
+
+
+def test_shipped_code_defaults_stay_loopback() -> None:
+    """A deployment may opt into a mesh peer; the shipped defaults may not.
+
+    `config/agent.yaml` is this stand's deployment and points at the owner's
+    server since 2026-09-05. The CODE defaults are what a fresh checkout gets
+    with no configuration, and those stay on loopback so that inference never
+    leaves the machine by accident.
+    """
+
     root = Path(__file__).resolve().parents[3]
-    agent_config = yaml.safe_load((root / "config/agent.yaml").read_text(encoding="utf-8"))
     rag_config = yaml.safe_load((root / "config/rag.yaml.example").read_text(encoding="utf-8"))
-    defaults = (
+    code_defaults = (
         AssistantConfig().ollama_base_url,
         inspect.signature(EmbeddingsClient).parameters["base_url"].default,
-        agent_config["agent"]["ollama"]["base_url"],
         rag_config["rag"]["ollama_base_url"],
     )
 
-    assert defaults == ("http://127.0.0.1:11434",) * len(defaults)
-    assert all(validate_loopback_origin(value) == value for value in defaults)
+    assert code_defaults == ("http://127.0.0.1:11434",) * len(code_defaults)
+    assert all(validate_private_llm_origin(value) == value for value in code_defaults)
+
+
+def test_the_deployed_agent_config_is_a_valid_private_origin() -> None:
+    """Whatever this stand points at must still pass the rule."""
+
+    root = Path(__file__).resolve().parents[3]
+    agent_config = yaml.safe_load((root / "config/agent.yaml").read_text(encoding="utf-8"))
+    configured = agent_config["agent"]["ollama"]["base_url"]
+    assert validate_private_llm_origin(configured) == configured
 
 
 def test_redirect_and_nonliteral_loopback_are_rejected_before_egress() -> None:

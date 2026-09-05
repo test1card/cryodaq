@@ -39,6 +39,11 @@ _REASONING_BLOCK = re.compile(
 )
 _REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
 
+# RFC 6598 shared address space. NetBird and Tailscale assign overlay peers
+# from it; it is not routable on the public internet, so an address here is
+# only reachable from inside the authenticated WireGuard mesh.
+_PRIVATE_MESH_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
 
 def strip_reasoning(text: str) -> str:
     """Drop a thinking-first model's chain of thought, keeping only the answer.
@@ -63,8 +68,28 @@ def strip_reasoning(text: str) -> str:
     return stripped if stripped else text.strip()
 
 
-def validate_loopback_origin(base_url: str) -> str:
-    """Return a normalized local HTTP origin or reject it before I/O."""
+def validate_private_llm_origin(base_url: str) -> str:
+    """Return a normalized private HTTP origin, or reject it before any I/O.
+
+    The assistant sends lab material to this endpoint — readings, alarm text,
+    operator-log lines. Until 2026-09-05 the only address it would accept was a
+    literal loopback IP, which made "the data never leaves this machine" an
+    enforced fact rather than a promise.
+
+    The owner moved inference to their own server, so loopback alone no longer
+    covers the deployment. The rule is widened by exactly one range and no
+    further: 100.64.0.0/10, the shared address space of RFC 6598, which
+    NetBird and Tailscale use for overlay peers.
+
+    That range is chosen because it is not routable on the public internet.
+    Reaching an address inside it requires membership of the authenticated
+    WireGuard mesh, so the invariant becomes "loopback, or a peer on the
+    private mesh" — never a public host, and never DNS-resolved.
+
+    Everything else the original check enforced is kept deliberately: http
+    only, a LITERAL address rather than a hostname (a name can be repointed by
+    whoever answers DNS), no userinfo, and no path, query or fragment.
+    """
 
     if type(base_url) is not str or not base_url.strip():
         raise ValueError("Ollama base URL must be a non-empty loopback HTTP origin")
@@ -78,17 +103,20 @@ def validate_loopback_origin(base_url: str) -> str:
     except ValueError as exc:
         raise ValueError("Ollama base URL is malformed") from exc
     if parsed.scheme.casefold() != "http" or hostname is None:
-        raise ValueError("Ollama base URL must use http on a loopback host")
+        raise ValueError("Ollama base URL must use http on a loopback or private-mesh host")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Ollama base URL must not contain userinfo")
     if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
         raise ValueError("Ollama base URL must be an origin without path or query")
     host = hostname.casefold()
     try:
-        if not ipaddress.ip_address(host).is_loopback:
+        address = ipaddress.ip_address(host)
+        if not (address.is_loopback or address in _PRIVATE_MESH_NETWORK):
             raise ValueError
     except ValueError as exc:
-        raise ValueError("Ollama base URL must target a literal loopback host") from exc
+        raise ValueError(
+            "Ollama base URL must target a literal loopback or private-mesh (100.64.0.0/10) host"
+        ) from exc
     rendered_host = f"[{host}]" if ":" in host else host
     suffix = "" if port is None else f":{port}"
     return f"http://{rendered_host}{suffix}"
@@ -131,7 +159,7 @@ class OllamaClient:
         *,
         timeout_s: float = 30.0,
     ) -> None:
-        self._base_url = validate_loopback_origin(base_url)
+        self._base_url = validate_private_llm_origin(base_url)
         self._default_model = default_model
         self._timeout_s = timeout_s
         self._session: aiohttp.ClientSession | None = None
@@ -157,6 +185,7 @@ class OllamaClient:
         system: str | None = None,
         num_ctx: int | None = None,
         keep_alive: str | int | None = None,
+        think: bool | None = None,
     ) -> GenerationResult:
         """Call Ollama /api/generate and return a GenerationResult.
 
@@ -184,6 +213,14 @@ class OllamaClient:
             payload["system"] = system
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
+        if think is not None:
+            # Ollama's own switch for a reasoning model's chain of thought.
+            # `_strip_reasoning` cleans the OUTPUT, which costs the tokens
+            # anyway; this stops them being generated. Measured 2026-09-05 on
+            # qwen3.8:27b: a one-word intent answer takes 578 ms warm with
+            # think=false. The stage exists as a separate cheap call precisely
+            # because a reasoning model once spent 33.6 s on that decision.
+            payload["think"] = think
 
         session = await self._get_session()
         t0 = time.monotonic()

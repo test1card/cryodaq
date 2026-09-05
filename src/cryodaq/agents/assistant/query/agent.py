@@ -121,12 +121,16 @@ class AssistantQueryAgent:
         self._ollama = ollama_client
         self._audit = audit_logger
         self._config = config
+        # Release the classifier's model only when the answer comes from a
+        # different one. Same model for both stages means releasing would
+        # unload what the next call immediately reloads.
         self._classifier = IntentClassifier(
             ollama_client,
             model=intent_model,
             temperature=intent_temperature,
             timeout_s=intent_timeout_s,
             channel_manager=channel_manager,
+            release_model_after=intent_model != format_model,
         )
         self._router = QueryRouter(adapters, channel_manager=channel_manager)
         self._format_model = format_model

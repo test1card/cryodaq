@@ -69,7 +69,7 @@ from cryodaq.agents.assistant.shared.engine_client import (
     DEFAULT_ENGINE_CMD_ADDR,
     EngineQueryClient,
 )
-from cryodaq.agents.assistant.shared.ollama_client import OllamaClient, validate_loopback_origin
+from cryodaq.agents.assistant.shared.ollama_client import OllamaClient, validate_private_llm_origin
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.zmq_bridge import (
@@ -777,7 +777,7 @@ async def _run_llm_runtime(
         logger.info("cryodaq-assistant: config/agent.yaml не найден — нечего запускать, выхожу")
         return
     config = AssistantConfig.from_yaml_path(agent_cfg_path)
-    config.ollama_base_url = validate_loopback_origin(config.ollama_base_url)
+    config.ollama_base_url = validate_private_llm_origin(config.ollama_base_url)
     if not config.enabled:
         logger.info("cryodaq-assistant: agent.enabled=false — нечего запускать, выхожу")
         return
