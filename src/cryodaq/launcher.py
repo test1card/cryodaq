@@ -530,6 +530,34 @@ def _decode_launcher_safety_status(
     return state
 
 
+def _assistant_brand() -> str:
+    """Operator-facing name for the assistant, from `agent.brand_*`.
+
+    Duplicated rather than imported from `cryodaq.engine`: the launcher is a
+    separate process that deliberately avoids importing engine-side modules, so
+    a shared helper would drag their dependencies into GUI start-up.
+
+    Falls back to a neutral label rather than a brand. The tray message used to
+    say "Гемма" from a literal in the string, so a rename in agent.yaml left the
+    operator being greeted by the old name.
+    """
+
+    import yaml
+
+    from cryodaq.paths import get_config_dir
+
+    try:
+        raw = yaml.safe_load((get_config_dir() / "agent.yaml").read_text(encoding="utf-8")) or {}
+        section = raw.get("agent") or {}
+        emoji = str(section.get("brand_emoji", "")).strip()
+        name = str(section.get("brand_name", "")).strip()
+        if not name:
+            return "Ассистент"
+        return f"{emoji} {name}".strip()
+    except Exception:  # pragma: no cover - a notification must never break start-up
+        return "Ассистент"
+
+
 def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, bool]:
     """Return ``(assistant_required, periodic_requested)`` without secrets."""
 
@@ -6499,7 +6527,7 @@ class LauncherWindow(QMainWindow):
         if hasattr(self, "_tray") and self._tray is not None:
             self._tray.showMessage(
                 "CryoDAQ",
-                "Ассистент (Гемма) перезапускается — чат временно недоступен.",
+                f"Ассистент ({_assistant_brand()}) перезапускается — чат временно недоступен.",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
             )

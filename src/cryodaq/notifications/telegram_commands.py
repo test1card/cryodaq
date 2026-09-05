@@ -124,7 +124,14 @@ class TelegramCommandBot:
         channel_descriptor_catalog: LiveChannelDescriptorCatalog | None = None,
         alarm_chat_id: int | str | None = None,
         verify_ssl: bool = True,
+        brand: str = "🤖 Ассистент",
     ) -> None:
+        # The operator renamed the assistant to РМКПшка; two messages in this
+        # file still greeted them as Гемма because the name was written into the
+        # string rather than read from `agent.brand_name`. Resolved once by the
+        # caller (`_assistant_brand()`), which already combines brand_emoji and
+        # brand_name and falls back to a neutral label.
+        self._brand = brand
         # Phase 2b K.1: default-deny — empty allowlist with commands
         # enabled would let any chat issue /phase and /log (safety-sensitive
         # control surface). Refuse to construct in that state.
@@ -483,7 +490,7 @@ class TelegramCommandBot:
             # message the bot sends.
             await self._send(
                 chat_id,
-                "🤖 Гемма: уже обрабатываю предыдущий вопрос. Подожди, пока он закончится, и спроси снова.",
+                f"{self._brand}: уже обрабатываю предыдущий вопрос. Подожди, пока он закончится, и спроси снова.",
             )
             return
 
@@ -509,7 +516,7 @@ class TelegramCommandBot:
         except Exception as exc:
             logger.error("Query agent error: %s", exc, exc_info=True)
             try:
-                await self._send(chat_id, "🤖 Гемма: внутренняя ошибка. См. логи.")
+                await self._send(chat_id, f"{self._brand}: внутренняя ошибка. См. логи.")
             except Exception:
                 logger.error("Query agent error notice could not be delivered", exc_info=True)
             return

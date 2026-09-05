@@ -46,7 +46,10 @@ class IntroConfig:
     timeout_s: float = 180.0  # campaign report is long — gemma4:e4b needs 60-120s
     max_tokens: int = 2048
     temperature: float = 0.2  # lower → more formal, less creative
-    brand_name: str = "Гемма"
+    # Neutral, not a brand: this default is reached only when agent.yaml
+    # could not be read, and claiming a specific name there is how a
+    # rename silently fails to take.
+    brand_name: str = "Ассистент"
 
 
 def load_intro_config() -> IntroConfig:
@@ -83,7 +86,7 @@ def load_intro_config() -> IntroConfig:
             model=str(ollama.get("default_model", "gemma4:e4b")),
             # Campaign reports generate 200-400 words — use at least 180s
             timeout_s=max(base_timeout, 180.0),
-            brand_name=str(gemma.get("brand_name", "Гемма")),
+            brand_name=str(gemma.get("brand_name", "Ассистент")),
         )
     except Exception:
         logger.debug("report_intro: failed to load agent.yaml — using defaults", exc_info=True)
@@ -115,7 +118,7 @@ def generate_report_intro(dataset: Any, config: IntroConfig | None = None) -> st
         text = _call_ollama_sync(user_prompt, system_prompt, config)
         latency = time.monotonic() - t0
         if not text or not text.strip():
-            logger.warning("report_intro: empty response from Гемма (%.1fs)", latency)
+            logger.warning("report_intro: empty response from %s (%.1fs)", config.brand_name, latency)
             return None
         logger.info(
             "report_intro: intro generated (%.1fs, %d chars)",

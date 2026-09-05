@@ -8039,6 +8039,7 @@ async def _run_engine(
                         command_handler=handle_gui_command,
                         channel_descriptor_catalog=live_descriptor_catalog,
                         verify_ssl=verify_ssl,
+                        brand=_assistant_brand(),
                     )
                     logger.info(
                         "TelegramCommandBot создан (allowed=%d chat ids)",
