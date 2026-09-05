@@ -22,7 +22,7 @@ the index.
 from __future__ import annotations
 
 import asyncio
-import inspect
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,16 +40,57 @@ class _FixedWidthEmbedder:
     async def embed(self, text: str) -> list[float]:
         return [0.01] * self._width
 
+    async def close(self) -> None:
+        # index_main closes the client in a finally block; a double that omits
+        # this makes the CLI raise AttributeError rather than exercise the path.
+        return None
 
-def test_the_cli_passes_the_configured_dimension() -> None:
-    """The key must reach build_index, not merely be read into a dict."""
 
-    src = inspect.getsource(
-        __import__("cryodaq.agents.rag.cli", fromlist=["index_main"]).index_main
+def test_the_cli_passes_the_configured_dimension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key must reach build_index, not merely be read into a dict.
+
+    Rewritten 2026-09-05 after review. This test used to read index_main's
+    source with `inspect.getsource` and assert the substring "embedding_dim="
+    appeared in it. Review put it exactly right: checking that the CLI source
+    contains embedding_dim= cannot establish that the dimension is carried
+    through. It would pass for a call that passed the wrong value, for one
+    inside dead code, and for a comment — this file's own docstring mentions
+    the key several times.
+
+    It now runs index_main and records what build_index was actually called
+    with.
+    """
+    config = tmp_path / "rag.yaml"
+    config.write_text(
+        f"rag:\n  embedding_model: qwen3-embedding:8b\n  embedding_dim: 4096\n  db_path: {tmp_path / 'idx'}\n",
+        encoding="utf-8",
     )
-    assert "embedding_dim=" in src, (
-        "index_main does not pass embedding_dim to build_index — the config key "
-        "would be silently ignored, as it was until 2026-09-05."
+
+    seen: dict[str, object] = {}
+
+    async def _fake_build_index(**kwargs):
+        seen.update(kwargs)
+        return {
+            "chunks": 0,
+            "embedded": 0,
+            "failed": 0,
+            "indexed": 0,
+            "promoted": False,
+            "db_path": str(kwargs.get("db_path")),
+            "table": "cryodaq_corpus",
+        }
+
+    from cryodaq.agents.rag import cli as rag_cli
+
+    monkeypatch.setattr(rag_cli, "build_index", _fake_build_index)
+    monkeypatch.setattr(rag_cli, "_make_embeddings", lambda cfg: _FixedWidthEmbedder(4096))
+    monkeypatch.setattr(rag_cli, "_find_latest_sqlite", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["cryodaq-rag-index", "--config", str(config), "--no-sqlite"])
+
+    rag_cli.index_main()
+
+    assert seen.get("embedding_dim") == 4096, (
+        f"index_main passed embedding_dim={seen.get('embedding_dim')!r}; the configured 4096 did not reach build_index"
     )
 
 
@@ -95,9 +136,7 @@ def test_the_failed_run_leaves_no_index_behind(tmp_path: Path) -> None:
     import lancedb
 
     if db_path.exists():
-        assert not list(lancedb.connect(str(db_path)).table_names()), (
-            "a refused rebuild must not leave a table behind"
-        )
+        assert not list(lancedb.connect(str(db_path)).table_names()), "a refused rebuild must not leave a table behind"
 
 
 def test_the_shipped_config_matches_the_shipped_model() -> None:
@@ -115,6 +154,5 @@ def test_the_shipped_config_matches_the_shipped_model() -> None:
     model = cfg["embedding_model"]
     if model in known_widths:
         assert int(cfg["embedding_dim"]) == known_widths[model], (
-            f"{model} produces {known_widths[model]}-dim vectors but "
-            f"embedding_dim is {cfg['embedding_dim']}"
+            f"{model} produces {known_widths[model]}-dim vectors but embedding_dim is {cfg['embedding_dim']}"
         )

@@ -64,9 +64,9 @@ def test_the_handler_budget_fits_inside_the_transport_cap() -> None:
     from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_LLM_S
 
     assert _QUERY_TRANSPORT_MARGIN_S > 0
-    assert HANDLER_TIMEOUT_LLM_S - _QUERY_TRANSPORT_MARGIN_S > float(
-        _agent_config()["query"]["format_timeout_s"]
-    ), "the format stage cannot outlast the transport that carries its answer"
+    assert HANDLER_TIMEOUT_LLM_S - _QUERY_TRANSPORT_MARGIN_S > float(_agent_config()["query"]["format_timeout_s"]), (
+        "the format stage cannot outlast the transport that carries its answer"
+    )
 
 
 def test_the_client_bound_can_actually_produce_the_configured_tokens() -> None:

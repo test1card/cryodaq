@@ -9,11 +9,17 @@ CRITICALs about a certificate that cannot exist.
 
 These tests pin the two halves of a removal that must not become anything else.
 
-The first half is that it took effect: a real, connected stack energizes
-without a receipt. On its own that could be satisfied by a manager which now
-admits everything, so the second half pins the other direction — the guards the
-gate sat in front of still refuse, by their own names, and the de-energizing
-path was never gated at all.
+The first half is that it took effect: a non-mock manager, connected and bound
+to a real-reporting driver, energizes without a receipt. On its own that could
+be satisfied by a manager which now admits everything, so the second half pins
+the other direction — the guards the gate sat in front of still refuse, by their
+own names, and the de-energizing path was never gated at all.
+
+Scope, stated because review of 2026-09-05 found the earlier wording overstated
+it: the driver here is a MagicMock that REPORTS itself real. These tests
+exercise the manager's admission logic against a double, not a Keithley, and no
+part of this suite touches laboratory hardware. Nothing below is evidence about
+how the physical stack behaves.
 
 An earlier draft also added a refusal for "a mock-flagged manager must not
 energize a REAL source", believing the gate had enforced it incidentally. It had
@@ -94,7 +100,7 @@ async def _manager(*, driver_simulated: bool, manager_mock: bool) -> tuple[Safet
     return manager, driver
 
 
-async def test_a_real_stack_is_no_longer_refused_for_want_of_a_receipt() -> None:
+async def test_a_connected_non_mock_manager_is_no_longer_refused_for_want_of_a_receipt() -> None:
     """The removal, asserted directly rather than inferred from silence."""
 
     manager, driver = await _manager(driver_simulated=False, manager_mock=False)
@@ -119,7 +125,8 @@ async def test_a_simulated_stack_still_runs() -> None:
 
 
 # Preconditions with nothing to do with qualification, which must still refuse a
-# fully real, fully connected stack now that the receipt check is gone.
+# connected, non-mock manager on a real-reporting driver double now that the
+# receipt check is gone.
 _INDEPENDENT_REFUSALS = (
     ("watchdog", "watchdog_trip_pending", True, "watchdog"),
     ("disconnected", "connected", False, "connected=False"),
