@@ -262,11 +262,29 @@ class _EventDedup:
       path.  Allowing an attempt also CLEARS the failure marker, so the bound
       is measured against the attempt in flight rather than against one that
       has already been superseded.
-    * **A CRITICAL that stays active is re-narrated every**
-      ``escalate_after_s``.  This is ELAPSED TIME since suppression began, not
+    * **A CRITICAL that KEEPS RE-FIRING is re-narrated every**
+      ``escalate_after_s``.  This is ELAPSED TIME since the last narration, not
       a count of suppressed events: an alarm re-firing every second would reach
       any event count almost immediately, which is not what "after N windows"
       means to an operator.
+
+      THIS BOUND NEEDS EVENTS, AND ONE IMPORTANT CASE HAS NONE.  Corrected
+      2026-09-06: this paragraph used to say "a CRITICAL that stays active",
+      which is false for the case that matters most.  `should_dispatch` is
+      reached only from the event consumer, and `alarm_v2` publishes on the
+      TRIGGERED transition only -- its own comment says "no re-notification".
+      A CRITICAL that fires once and then simply stays true therefore produces
+      no further events, so nothing re-enters this gate and the escalation
+      timer is never consulted.  Observed: `vacuum_loss_cold [CRITICAL]`
+      appears exactly ONCE in the 2026-09-03 engine log, while the condition
+      held for the rest of the day and the safety manager stayed latched for
+      eleven hours.
+
+      What this class bounds is therefore the silence of a FLAPPING alarm.
+      The silence of a steady one is not bounded here and cannot be, because
+      the fact "this alarm is still active" is owned by the alarm engine and
+      this ledger only ever sees what that engine chooses to publish.
+      PI-11's remaining scope is exactly that gap.
 
     Only CRITICAL ``alarm_fired`` events reach this gate -- ``_should_handle``
     filters the rest -- so there is no lower severity here to treat differently.
