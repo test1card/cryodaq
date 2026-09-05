@@ -96,6 +96,15 @@ class AssistantConfig:
     query_format_temperature: float = 0.3
     query_intent_timeout_s: float = 20.0
     query_format_timeout_s: float = 40.0
+    # Context and answer budget for the operator-facing answer stage. These
+    # were hardcoded in query/agent.py, and their comment sized them "against
+    # num_ctx (8192)" — a context this deployment no longer has: agent.yaml
+    # now asks for 32768, but that value only ever reached the live agent, so
+    # the interactive stage kept using a quarter of it and nobody could change
+    # that without editing code. Defaults preserve the shipped behaviour
+    # exactly; the point is that tuning them is now a config edit.
+    query_format_num_ctx: int = 12288
+    query_format_max_tokens: int = 6144
     query_max_per_chat_per_hour: int = 60
     # 0 = derive from the stage budgets below. An explicit value overrides.
     query_command_timeout_s: float = 0.0
@@ -187,6 +196,8 @@ class AssistantConfig:
             cfg.query_intent_timeout_s = float(q.get("intent_timeout_s", cfg.query_intent_timeout_s))
             cfg.query_format_timeout_s = float(q.get("format_timeout_s", cfg.query_format_timeout_s))
             cfg.query_command_timeout_s = float(q.get("command_timeout_s", cfg.query_command_timeout_s))
+            cfg.query_format_num_ctx = int(q.get("format_num_ctx", cfg.query_format_num_ctx))
+            cfg.query_format_max_tokens = int(q.get("format_max_tokens", cfg.query_format_max_tokens))
             _rl = q.get("rate_limit", {})
             if isinstance(_rl, dict):
                 cfg.query_max_per_chat_per_hour = int(

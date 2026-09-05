@@ -54,13 +54,15 @@ if TYPE_CHECKING:
     )
     from cryodaq.core.channel_manager import ChannelManager
 
-# Reasoning trace + the Russian answer must both fit. A reasoning model
-# routinely spends 2-3k tokens thinking before it writes anything the
-# operator sees, so a budget in that same range truncates the answer
-# itself. Sized against num_ctx (8192) less room for the prompt and the
-# retrieved manual pages.
+# Fallbacks only — the live values come from config (query.format_max_tokens
+# and query.format_num_ctx). They were constants until 2026-09-06, sized
+# "against num_ctx (8192)": a context this deployment no longer has, and one
+# nobody could change without editing this file. A reasoning model routinely
+# spends 2-3k tokens thinking before it writes anything the operator sees, so
+# the answer budget has to clear that on top of the prompt and the retrieved
+# pages — which is exactly the kind of judgement that belongs in config, next
+# to the model it is sized for.
 _FORMAT_MAX_TOKENS = 6144
-# Prompt + retrieved manual pages + reasoning trace + answer must all fit.
 _FORMAT_NUM_CTX = 12288
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,6 @@ _FALLBACK = "Произошла внутренняя ошибка. Попроб�
 _RATE_WINDOW_S = 3600.0
 _RATE_BUCKET_SWEEP_INTERVAL_S = 60.0
 _MAX_RATE_BUCKETS = 4096
-
 
 
 def _format_horizons(forecast: dict[str, float] | None) -> str:
@@ -213,11 +214,11 @@ class AssistantQueryAgent:
                     # before it writes a word the operator sees. At 2048 a
                     # documentation answer over retrieved manual pages ran out
                     # mid-trace and never reached its conclusion.
-                    max_tokens=_FORMAT_MAX_TOKENS,
+                    max_tokens=getattr(self._config, "query_format_max_tokens", _FORMAT_MAX_TOKENS),
                     # Must be passed explicitly: without it Ollama applies its
                     # own 4096 default, which cannot hold the retrieved manual
                     # pages plus a reasoning trace plus the answer.
-                    num_ctx=_FORMAT_NUM_CTX,
+                    num_ctx=getattr(self._config, "query_format_num_ctx", _FORMAT_NUM_CTX),
                 ),
                 timeout=self._format_timeout_s,
             )
@@ -443,9 +444,7 @@ class AssistantQueryAgent:
             target_mbar=eta.target_mbar,
             eta_str=eta_str,
             trend=eta.trend,
-            p_ultimate=(
-                f"{eta.p_ultimate_mbar:.2e} mbar" if eta.p_ultimate_mbar is not None else "не определён"
-            ),
+            p_ultimate=(f"{eta.p_ultimate_mbar:.2e} mbar" if eta.p_ultimate_mbar is not None else "не определён"),
             horizons_block=_format_horizons(eta.horizon_forecast),
             confidence=eta.confidence,
         )
