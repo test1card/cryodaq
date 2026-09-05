@@ -468,3 +468,171 @@ async def test_an_older_success_cannot_clear_a_newer_outage(tmp_path: Path) -> N
     assert agent._llm_unavailable_announced is True, (
         "an inference observed BEFORE this outage began cleared it on handler return"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stale_in_flight_warning_neither_suppresses_nor_releases_a_newer_one(
+    tmp_path: Path,
+) -> None:
+    """Review's third sequence, including what the OLD transport does on the way out.
+
+        1. outage A starts a warning; its transport blocks
+        2. an inference succeeds, advancing the generation
+        3. a new inference fails BEFORE A's transport settles
+        4. A's transport finally returns failure
+
+    The bug: `_llm_unavailable_announcing` was one boolean shared by every
+    outage, so B's warning was suppressed at step 3 and nothing was pending
+    afterwards — neither outage reached the operator and B's event was spent.
+    Step 4 matters as much as step 3: A's `finally` must not release the claim
+    B now holds.
+    """
+    release_a = asyncio.Event()
+    a_sent: list = []
+    b_sent: list = []
+
+    async def _a_blocks(text):
+        a_sent.append(text)
+        await release_a.wait()
+        return False  # A's transport ultimately fails
+
+    tg = AsyncMock()
+    tg._send_to_all = AsyncMock(side_effect=_a_blocks)
+    agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
+
+    async def _fails(event, **kwargs):
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+
+    # 1. outage A, transport blocked
+    agent._ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("A"))
+    agent._handle_periodic_report = _fails
+    warn_a = asyncio.create_task(agent._safe_handle(_event()))
+    for _ in range(400):
+        if a_sent:
+            break
+        await asyncio.sleep(0.001)
+    assert a_sent, "A never reached the transport"
+
+    # 2. a genuine success advances the generation
+    agent._ollama.generate = AsyncMock(
+        return_value=GenerationResult(text="ответ", tokens_in=1, tokens_out=1, latency_s=0.1, model="m")
+    )
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
+
+    # 3. outage B, on a working transport, while A is still blocked
+    async def _b_ok(text):
+        b_sent.append(text)
+        return True
+
+    tg._send_to_all = AsyncMock(side_effect=_b_ok)
+    agent._ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("B"))
+    await agent._safe_handle(_event())
+
+    assert b_sent, "the newer outage was suppressed by a warning still in flight for an outage that has already ended"
+    assert agent._llm_unavailable_announced is True
+
+    # 4. A's transport finally fails and unwinds
+    release_a.set()
+    await asyncio.wait_for(warn_a, timeout=2.0)
+
+    assert agent._llm_unavailable_announced is True, "the stale warning's finally released the newer outage's state"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_finally_does_not_release_a_claim_it_no_longer_owns(
+    tmp_path: Path,
+) -> None:
+    """The release half, with BOTH warnings in flight at once.
+
+    Added 2026-09-06 because the first version of the test above could not see
+    this: B ran to completion before A unwound, so A's `finally` found nothing
+    left to release and removing the ownership check changed nothing. Holding
+    both open is the only arrangement where the stale release is observable.
+    """
+    gates: dict[str, asyncio.Event] = {}
+    sends: list[str] = []
+
+    async def _park(text):
+        sends.append(text)
+        gate = asyncio.Event()
+        gates[f"g{len(sends)}"] = gate
+        await gate.wait()
+        return False
+
+    tg = AsyncMock()
+    tg._send_to_all = AsyncMock(side_effect=_park)
+    agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
+
+    async def _fails(event, **kwargs):
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+
+    agent._handle_periodic_report = _fails
+
+    # A in flight
+    agent._ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("A"))
+    warn_a = asyncio.create_task(agent._safe_handle(_event()))
+    for _ in range(400):
+        if len(sends) == 1:
+            break
+        await asyncio.sleep(0.001)
+    assert len(sends) == 1
+
+    # a success ends A's outage
+    agent._ollama.generate = AsyncMock(
+        return_value=GenerationResult(text="ответ", tokens_in=1, tokens_out=1, latency_s=0.1, model="m")
+    )
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
+    generation_b = agent._outage_generation
+
+    # B in flight too
+    agent._ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("B"))
+    warn_b = asyncio.create_task(agent._safe_handle(_event()))
+    for _ in range(400):
+        if len(sends) == 2:
+            break
+        await asyncio.sleep(0.001)
+    assert len(sends) == 2, "B was suppressed while A was still in flight"
+
+    # A unwinds while B still holds the claim
+    gates["g1"].set()
+    await asyncio.wait_for(warn_a, timeout=2.0)
+
+    assert agent._announcing_generation == generation_b, "A's finally released the claim B still owns"
+
+    # and the observable consequence: a further failure for B's outage must not
+    # start a second warning while B's is still in flight
+    await agent._safe_handle(_event())
+    assert len(sends) == 2, "a duplicate warning was sent for an outage already in flight"
+
+    gates["g2"].set()
+    await asyncio.wait_for(warn_b, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_a_successful_inference_does_not_log_a_shutdown(tmp_path: Path, caplog) -> None:
+    """Review captured "остановлен" after successful generations, with no stop().
+
+    It came from a method inserted into the middle of `stop()`, which orphaned
+    that call's last line. It does not stop anything — it just hands incident
+    investigation false evidence, and it also meant `stop()` no longer logged
+    its own completion.
+    """
+    import logging
+
+    agent = _agent(tmp_path)
+    agent._ollama.generate = AsyncMock(
+        return_value=GenerationResult(text="ответ", tokens_in=1, tokens_out=1, latency_s=0.1, model="m")
+    )
+
+    with caplog.at_level(logging.INFO, logger="cryodaq.agents.assistant.live.agent"):
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+
+    assert not any("остановлен" in r.message for r in caplog.records), (
+        "a successful inference logged a shutdown that never happened"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="cryodaq.agents.assistant.live.agent"):
+        await agent.stop()
+
+    assert any("остановлен" in r.message for r in caplog.records), "stop() no longer reports its own completion"

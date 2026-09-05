@@ -887,9 +887,13 @@ class AssistantLiveAgent:
         # back cannot land on the next outage's state. ContextVar separates
         # handler-local results; it does not order updates to this shared flag.
         self._outage_generation = 0
-        # True only while an announcement is in flight, so a failed delivery
-        # does not spend the one-shot and a concurrent event cannot double it.
-        self._llm_unavailable_announcing = False
+        # WHICH outage currently has a warning in flight, not merely whether
+        # one does. A bare boolean belonged to every outage at once: review of
+        # 2026-09-06 blocked the transport on outage A, let an inference
+        # succeed (advancing the generation), then failed again — and B's
+        # warning was suppressed because A's was still in flight. Neither
+        # reached the operator, and B's event was consumed.
+        self._announcing_generation: int | None = None
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
         # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
@@ -934,6 +938,7 @@ class AssistantLiveAgent:
             self._bus.unsubscribe("gemma_agent")
             self._queue = None
         await self._ollama.close()
+        logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
     async def _generate_tracked(self, *args: Any, **kwargs: Any) -> Any:
         """Every model call goes through here so recovery has a real signal.
@@ -972,7 +977,6 @@ class AssistantLiveAgent:
         self._outage_generation += 1
         if was_announced:
             logger.info("AssistantLiveAgent: модель снова доступна")
-        logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
     async def _dispatch_with_audit(
         self,
@@ -1726,7 +1730,7 @@ class AssistantLiveAgent:
         outage produces one message instead of one per event.
         """
 
-        if self._llm_unavailable_announced or self._llm_unavailable_announcing:
+        if self._llm_unavailable_announced:
             return
 
         # The flag used to be set BEFORE the send. Review of 2026-09-05
@@ -1741,7 +1745,6 @@ class AssistantLiveAgent:
         # outcomes callback fires before the audit settlement write, so a
         # cancellation during that shielded write cannot lose the fact that
         # the operator was told.
-        self._llm_unavailable_announcing = True
         # Bind this announcement to the outage it describes. Review of
         # 2026-09-05 reproduced the ordering hole: a warning starts sending and
         # waits, the model genuinely recovers in the meantime, then the old
@@ -1749,6 +1752,11 @@ class AssistantLiveAgent:
         # the NEXT outage is silent. Delivery is only recorded if the outage it
         # was about is still the current one.
         generation = self._outage_generation
+        if self._announcing_generation == generation:
+            # This outage already has a warning in flight. A DIFFERENT (older)
+            # generation holding one must not stop this one being sent.
+            return
+        self._announcing_generation = generation
 
         def _note_outcomes(outcomes: dict[str, Any]) -> None:
             # Record delivery HERE, not after the await unwinds. Review of
@@ -1785,7 +1793,10 @@ class AssistantLiveAgent:
         except Exception:  # pragma: no cover - notification must never mask the outage
             logger.warning("AssistantLiveAgent: не удалось сообщить о недоступности модели", exc_info=True)
         finally:
-            self._llm_unavailable_announcing = False
+            # Release only what this call still owns. A stale generation
+            # finishing its transport must not clear a newer outage's claim.
+            if self._announcing_generation == generation:
+                self._announcing_generation = None
 
         if generation != self._outage_generation:
             # Superseded by a recovery; nothing to warn about.
