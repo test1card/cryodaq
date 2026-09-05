@@ -27,7 +27,6 @@ refused is left open for the owner, in its own reviewed commit.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 

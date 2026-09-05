@@ -19,7 +19,6 @@ from cryodaq.notifications.composition_photo_handler import CompositionPhotoHand
 from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
-
 # Every owned task `TelegramCommandBot.stop()` settles. Both doubles below are
 # built with `object.__new__`, so nothing is initialised for them and each new
 # owned task has to be added by hand — `_query_task` was added to `stop()` and

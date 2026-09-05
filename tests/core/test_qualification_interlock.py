@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.core.qualification import verify_qualification_receipt
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import (
@@ -19,11 +18,6 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     SourceOffResult,
     _issue_registry_runtime_binding,
-)
-from tests.qualification_support import (
-    VALID_AT,
-    qualification_context,
-    qualification_receipt_bytes,
 )
 
 
@@ -82,15 +76,17 @@ async def _manager(
     return manager, driver
 
 
-async def test_valid_receipt_preserves_the_complete_energizing_path(
-    tmp_path,
-) -> None:
-    receipt = verify_qualification_receipt(
-        qualification_receipt_bytes(),
-        expected=qualification_context(),
-        replay_directory=tmp_path,
-        now_unix_s=VALID_AT,
-    )
+async def test_the_complete_energizing_path_runs_on_a_real_stack() -> None:
+    """RUN, retarget and re-limit in sequence, with no receipt anywhere.
+
+    Renamed from test_valid_receipt_preserves_the_complete_energizing_path.
+    A2 removed the `qualification_receipt=` argument but left the receipt this
+    test built, so it asserted a "valid receipt" it never passed to anything —
+    a name claiming coverage that no longer existed. The coverage worth keeping
+    is the sequence itself, which is stronger than the single request_run in
+    test_qualification_gate_removed.py.
+    """
+
     manager, driver = await _manager(
         driver_simulated=False,
         manager_mock=False,
@@ -109,19 +105,15 @@ async def test_valid_receipt_preserves_the_complete_energizing_path(
         await manager.stop()
 
 
-@pytest.mark.parametrize("qualified", (False, True), ids=("without-receipt", "with-receipt"))
-async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shutdown(
-    tmp_path,
-    qualified: bool,
-) -> None:
-    receipt = None
-    if qualified:
-        receipt = verify_qualification_receipt(
-            qualification_receipt_bytes(),
-            expected=qualification_context(),
-            replay_directory=tmp_path,
-            now_unix_s=VALID_AT,
-        )
+async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shutdown() -> None:
+    """De-energizing stays admitted under lock contention and while latched.
+
+    The `qualified` parametrization is gone: after A2 both branches built the
+    same manager and ran identical code, so "with-receipt" and "without-receipt"
+    were two names for one test. This remains the guard node for the g-stop and
+    g-emergency-off mutation controls.
+    """
+
     manager, driver = await _manager(
         driver_simulated=False,
         manager_mock=False,
