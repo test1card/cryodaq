@@ -9,7 +9,7 @@ import logging
 import lancedb
 import pytest
 
-from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, build_index
+from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, RagEmbeddingDimensionError, build_index
 
 
 class _MockEmbeddings:
@@ -150,35 +150,31 @@ async def test_indexer_empty_embedding_counts_as_failed_not_embedded(tmp_path, c
 
 
 @pytest.mark.asyncio
-async def test_indexer_dim_mismatch_falls_back_to_zero_vector(tmp_path, caplog):
+async def test_indexer_dim_mismatch_now_refuses_instead_of_zero_filling(tmp_path):
+    """Reversed deliberately on 2026-09-05; this test encoded the old contract.
+
+    It asserted that a wrong-width vector is zero-filled and the run continues.
+    That is correct for an EMPTY vector — one embed call failed, the next may
+    succeed, and the corpus degrades by a single chunk.
+
+    It is wrong for a WRONG-LENGTH vector, which is a property of the model and
+    therefore true of every chunk. Under that rule a 4096-dim model against a
+    1024-dim config produced 3638 zero vectors and an index that would have been
+    swapped in, because `_swap_table_atomically` validates row COUNT, not
+    content. The old behaviour turned a one-line config error into a silently
+    dead corpus.
+
+    The empty-vector fallback is unchanged and still covered by
+    test_indexer_zero_vector_on_failed_embedding.
+    """
+
     _seed_experiment(tmp_path)
-    db_path = tmp_path / "rag_db"
-    with caplog.at_level(logging.WARNING, logger="cryodaq.agents.rag.indexer"):
-        stats = await build_index(
+    with pytest.raises(RagEmbeddingDimensionError) as excinfo:
+        await build_index(
             experiments_dir=tmp_path / "experiments",
             vault_dir=None,
             sqlite_path=None,
-            db_path=db_path,
+            db_path=tmp_path / "rag_db",
             embeddings_client=_ShortVectorEmbeddings(),
         )
-    assert stats["chunks"] == stats["indexed"]
-    assert stats["chunks"] >= 1
-
-    # The dim-mismatch warning must have fired.
-    mismatch_warnings = [r for r in caplog.records if "dim mismatch" in r.message.lower()]
-    assert mismatch_warnings, (
-        f"expected dim-mismatch warning; got: {[r.message for r in caplog.records]}"
-    )
-
-    # The persisted vector must be all-zeros of length _EMBEDDING_DIM.
-    db = lancedb.connect(str(db_path))
-    arrow_table = db.open_table("cryodaq_corpus").to_arrow()
-    assert arrow_table.num_rows >= 1
-    vectors = arrow_table.column("vector").to_pylist()
-    for vec in vectors:
-        assert len(vec) == _EMBEDDING_DIM, (
-            f"zero-fallback vector dim {len(vec)} != {_EMBEDDING_DIM}"
-        )
-        assert all(v == 0.0 for v in vec), (
-            "zero-fallback vector must be all-zeros; got non-zero values"
-        )
+    assert "embedding_dim" in str(excinfo.value)
