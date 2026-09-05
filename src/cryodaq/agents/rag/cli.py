@@ -179,6 +179,27 @@ def index_main() -> None:
         asyncio.run(embeddings_client.close())
     print(f"Done: {stats}")
 
+    # A rebuild that embedded only part of the corpus used to print "Done" and
+    # exit 0. `build_index` stores an unembeddable chunk as a zero vector to keep
+    # row alignment, logs a warning, and STILL swaps the staging table in — so a
+    # flaky embedding backend silently replaces a good index with a worse one and
+    # reports success. The swap is not refused here: the index is built, and
+    # whether to keep or re-run it is the operator's call. But it must be
+    # impossible to mistake for a clean build, and a non-zero exit is what a
+    # script or a hurried operator actually notices.
+    failed = int(stats.get("failed") or 0)
+    if failed:
+        total = int(stats.get("chunks") or 0)
+        print(
+            f"\nWARNING: {failed}/{total} chunks failed to embed and were stored as zero "
+            "vectors. Those chunks are NOT searchable, and this index has already replaced "
+            "the previous one.\n"
+            "  The rebuild is complete but DEGRADED. Re-run it once the embedding backend "
+            "is healthy.",
+            file=sys.stderr,
+        )
+        sys.exit(5)
+
 
 def search_main() -> None:
     parser = argparse.ArgumentParser(description="Query CryoDAQ RAG index")
