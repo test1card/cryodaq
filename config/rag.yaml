@@ -1,0 +1,48 @@
+# F32 — RAG indexer configuration. Copy to rag.local.yaml and customize.
+#
+# 2026-09-05: retrieval moved off the local GTX 1050 Ti onto the owner's server
+# over the NetBird overlay, alongside generation.
+#
+# Model choice was constrained, not free. Ollama only serves GGUF models that
+# declare an `embedding` capability; the stronger 2026 embedders are not
+# servable by it at all — WeMM-Embedding (25 Aug 2026) is `zh, en` only with no
+# Russian, and Granite-Embedding-311M-R2 (Apr 2026, the best language fit) exists
+# in Ollama as R1 only with no GGUF of R2. Beating qwen3-embedding here means
+# running TEI or vLLM as a second service.
+#
+# embedding_dim is MEASURED, not taken from a datasheet. Published sources
+# disagreed (4096 vs 7168) and `indexer.py` substitutes ZERO VECTORS on a
+# mismatch rather than failing, so a wrong number here would silently make every
+# chunk unsearchable. One call to /api/embed returned 4096, L2-normalised.
+#
+# Measured on this corpus's actual languages:
+#   ru "давление в вакуумной камере" ~ en "chamber pressure"      0.814
+#   ru "предел по току Keithley"     ~ en "current compliance"    0.823
+#   vacuum ~ SMU (cross-topic)                                    0.49-0.62
+#   anything ~ unrelated text                                     0.31-0.44
+# The manuals are English and the questions are Russian, so cross-language
+# matching at 0.81+ while still separating topics is the property that matters.
+rag:
+  ollama_base_url: "http://100.87.73.25:11437"
+  embedding_model: "qwen3-embedding:8b"
+  embedding_dim: 4096
+  db_path: "data/rag_index"
+  vault_dir: "~/CryoDAQ-Vault/experiments"
+
+  # F-KnowledgeBaseExpansion (v0.55.7.1): operator-facing corpus root.
+  # CLI + engine bootstrap append three sub-corpora from this folder:
+  #   ${knowledge_dir}/equipment_manuals/  → PDF (page-aware chunks)
+  #   ${knowledge_dir}/procedures/         → Markdown procedures
+  #                                          (subdir → category;
+  #                                          README.md skipped)
+  #   project-root reference docs           → operator_manual,
+  #                                          README, CHANGELOG (latter
+  #                                          section-aware per version)
+  knowledge_dir: "data/knowledge"
+
+  # Chunking
+  chunk_max_chars: 1000
+  chunk_overlap: 100
+
+  # Indexing
+  table_name: "cryodaq_corpus"
