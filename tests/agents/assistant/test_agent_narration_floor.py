@@ -1177,6 +1177,12 @@ def _alarm_agent(*, outcomes, audit_cancels: bool = False):
     from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
 
     agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    # The double bypasses __init__, so state the real object always has must be
+    # supplied here. Added 2026-09-06: a successful generation now records model
+    # availability at the observation, and that writes these two. A double that
+    # omits them fails inside production code rather than in the test.
+    agent._llm_unavailable_announced = False
+    agent._outage_generation = 0
     agent._config = MagicMock(
         brand_name="X",
         max_tokens=64,

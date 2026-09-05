@@ -17,7 +17,6 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -810,19 +809,6 @@ def _event_dedup_id(event: EngineEvent) -> str | None:
     return f"alarm:{alarm_id}"
 
 
-#: Whether THIS handler's own invocation reached the model and got an answer.
-#:
-#: A ContextVar, not an attribute, because handlers run as separate asyncio
-#: tasks (`asyncio.create_task(self._safe_handle(...))`) at two-slot
-#: concurrency, and a task's context is its own. Review of 2026-09-05
-#: reproduced what an agent-wide boolean does instead: handler A generates
-#: successfully and waits in audit settlement, handler B resets the flag and
-#: takes the no-inference periodic-report path, and A's own answer is gone by
-#: the time A looks for it. The marker belongs to the invocation that earned
-#: it.
-_INFERENCE_ANSWERED: ContextVar[bool] = ContextVar("cryodaq_assistant_inference_answered", default=False)
-
-
 def _is_answered_generation(result: Any) -> bool:
     """True only for a generation that actually produced an answer.
 
@@ -943,8 +929,31 @@ class AssistantLiveAgent:
         """
         result = await self._ollama.generate(*args, **kwargs)
         if _is_answered_generation(result):
-            _INFERENCE_ANSWERED.set(True)
+            self._note_model_available()
         return result
+
+    def _note_model_available(self) -> None:
+        """The model answered — recorded HERE, at the observation.
+
+        Not when the enclosing handler returns. Review of 2026-09-06 showed why
+        the previous shape could not work: recovery was gated on
+        ``_llm_unavailable_announced``, which is FALSE while the first warning
+        is still awaiting delivery. A successful inference in that window
+        advanced nothing, the old warning then landed and marked the outage
+        announced, and the NEXT outage reached nobody.
+
+        Bumping the generation unconditionally is the point: any warning still
+        in flight describes an outage this answer has just ended, so its
+        delivery callback must no longer be allowed to mark anything. It also
+        settles the inverse ordering — an older successful inference cannot
+        clear a newer outage, because it recorded its observation before that
+        outage existed rather than when its handler finished.
+        """
+        was_announced = self._llm_unavailable_announced
+        self._llm_unavailable_announced = False
+        self._outage_generation += 1
+        if was_announced:
+            logger.info("AssistantLiveAgent: модель снова доступна")
         logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
     async def _dispatch_with_audit(
@@ -1156,10 +1165,6 @@ class AssistantLiveAgent:
         dedup_id: str | None = None,
         attempt: int | None = None,
     ) -> None:
-        # Per-invocation, and isolated to this task's context: a model call
-        # made by a CONCURRENT handler must not be read as this one having
-        # reached the model, and this reset must not erase that handler's.
-        _INFERENCE_ANSWERED.set(False)
         """Handle one event with rate-limit + semaphore + error isolation.
 
         ``dedup_id`` carries the ledger key so the delivery OUTCOME can be
@@ -1209,21 +1214,6 @@ class AssistantLiveAgent:
                         await self._handle_periodic_report(event)
                     else:
                         await self._handle_alarm_fired(event, dedup_id=dedup_id, attempt=attempt)
-                    # A handler returning is NOT evidence that inference
-                    # recovered. `_handle_periodic_report` returns early when
-                    # its context is unavailable and never reaches the model,
-                    # so the old test here cleared the outage flag — and told
-                    # the operator the model was back — after zero generation
-                    # calls. Review of 2026-09-05 reproduced exactly that.
-                    #
-                    # `_inference_answered` is set only inside
-                    # `_generate_tracked`, so this now says what it means.
-                    if self._llm_unavailable_announced and _INFERENCE_ANSWERED.get():
-                        self._llm_unavailable_announced = False
-                        # The outage this state described is over. Anything
-                        # still in flight for it is now stale.
-                        self._outage_generation += 1
-                        logger.info("AssistantLiveAgent: модель снова доступна")
                 except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                     if dedup_id is not None:
                         self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)

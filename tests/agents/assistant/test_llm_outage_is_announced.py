@@ -350,64 +350,121 @@ async def test_cancellation_after_delivery_keeps_the_delivery(tmp_path: Path) ->
     )
 
 
-@pytest.mark.asyncio
-async def test_a_delayed_old_warning_cannot_overwrite_a_newer_recovery(
-    tmp_path: Path,
-) -> None:
-    """The ordering hole review reproduced with controlled transport delays.
+# ---------------------------------------------------------------------------
+# Both orderings, driven through the real handlers. NOTHING below assigns
+# _llm_unavailable_announced: review of 2026-09-06 showed the previous version
+# of the first test set it by hand while delivery was blocked, which supplies
+# exactly the condition production lacks. The outage must be created the way
+# production creates one — by the model failing.
+# ---------------------------------------------------------------------------
 
-    ContextVar separates handler-local results. It does not order updates to
-    the SHARED outage flag, and this is the sequence where that matters:
 
-        1. the model fails; its warning starts sending and waits
-        2. another handler gets a genuine successful answer  -> recovery
-        3. the old warning finally lands and re-marks the outage as announced
-        4. the model fails again -> and that outage is announced to nobody
-
-    Step 4 is the damage: the operator is not told about a real outage because
-    a message about a PREVIOUS one arrived late.
-    """
-    telegram = _working_telegram()
+def _blocking_telegram() -> tuple[AsyncMock, asyncio.Event, list]:
     release = asyncio.Event()
-    sent: list[str] = []
+    sent: list = []
 
-    async def _slow_send(text):
+    async def _slow(text):
         sent.append(text)
-        await release.wait()  # the warning is in flight, not yet settled
+        await release.wait()
         return True
 
-    telegram._send_to_all = AsyncMock(side_effect=_slow_send)
-    agent = _agent(tmp_path, telegram=telegram, max_concurrent=2)
+    tg = AsyncMock()
+    tg._send_to_all = AsyncMock(side_effect=_slow)
+    return tg, release, sent
 
-    # 1. outage; the warning starts sending and blocks in the transport
-    warn = asyncio.create_task(agent._announce_llm_unavailable(_event(), OllamaUnavailableError("refused")))
-    for _ in range(200):
+
+async def _fail_once_then(agent, exc, handler):
+    """Install a handler whose inference raises, i.e. a real outage."""
+    agent._ollama.generate = AsyncMock(side_effect=exc)
+    agent._handle_periodic_report = handler
+
+
+@pytest.mark.asyncio
+async def test_a_success_during_delivery_invalidates_the_in_flight_warning(
+    tmp_path: Path,
+) -> None:
+    """Review's reproduction, without seeding the flag.
+
+    1. the model fails; its warning starts sending and blocks
+    2. another inference genuinely succeeds
+    3. the old warning lands and must NOT mark the outage announced
+    4. the model fails again -> that outage must reach the operator
+    """
+    tg, release, sent = _blocking_telegram()
+    agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
+
+    async def _fails(event, **kwargs):
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+
+    await _fail_once_then(agent, OllamaUnavailableError("refused"), _fails)
+
+    warn = asyncio.create_task(agent._safe_handle(_event()))
+    for _ in range(400):
         if sent:
             break
         await asyncio.sleep(0.001)
     assert sent, "the warning never reached the transport"
+    assert agent._llm_unavailable_announced is False, "precondition: not yet delivered"
 
-    # 2. a different handler genuinely gets an answer -> recovery
-    agent._llm_unavailable_announced = True
-
-    async def _actually_infers(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="test-model")
-
-    agent._handle_periodic_report = _actually_infers
-    await agent._safe_handle(_event())
-    assert agent._llm_unavailable_announced is False, "recovery did not take"
+    # 2. a genuine successful inference, observed while delivery is blocked
+    agent._ollama.generate = AsyncMock(
+        return_value=GenerationResult(text="ответ", tokens_in=5, tokens_out=7, latency_s=1.0, model="m")
+    )
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
 
     # 3. the old warning finally lands
     release.set()
     await asyncio.wait_for(warn, timeout=2.0)
-
     assert agent._llm_unavailable_announced is False, (
-        "a delayed warning about the PREVIOUS outage re-marked the current state as announced"
+        "a warning about an outage that has since ended marked the state announced"
     )
 
-    # 4. the model fails again — this outage must reach the operator
-    release.clear()
-    telegram._send_to_all = AsyncMock(return_value=True)
-    await agent._announce_llm_unavailable(_event(), OllamaUnavailableError("refused again"))
+    # 4. a new outage must be announced
+    tg._send_to_all = AsyncMock(return_value=True)
+    await _fail_once_then(agent, OllamaUnavailableError("again"), _fails)
+    await agent._safe_handle(_event())
+    assert agent._llm_unavailable_announced is True, "the new outage reached nobody"
 
-    assert agent._llm_unavailable_announced is True, "the new outage produced no warning at all"
+
+@pytest.mark.asyncio
+async def test_an_older_success_cannot_clear_a_newer_outage(tmp_path: Path) -> None:
+    """The inverse ordering review also exercised.
+
+    1. an inference succeeds; its handler then waits in settlement
+    2. a LATER inference fails and its warning is delivered
+    3. the older handler finishes and must not clear that newer outage
+    """
+    tg = _working_telegram()
+    agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
+
+    held = asyncio.Event()
+    proceed = asyncio.Event()
+
+    agent._ollama.generate = AsyncMock(
+        return_value=GenerationResult(text="ответ", tokens_in=5, tokens_out=7, latency_s=1.0, model="m")
+    )
+
+    async def _succeeds_then_waits(event, **kwargs):
+        await agent._generate_tracked(system_prompt="", user_prompt="a", model="m")
+        held.set()
+        await proceed.wait()
+
+    agent._handle_periodic_report = _succeeds_then_waits
+    older = asyncio.create_task(agent._safe_handle(_event()))
+    await asyncio.wait_for(held.wait(), timeout=2.0)
+
+    # 2. a later, genuine outage
+    async def _fails(event, **kwargs):
+        await agent._generate_tracked(system_prompt="", user_prompt="b", model="m")
+
+    await _fail_once_then(agent, OllamaUnavailableError("refused"), _fails)
+    await agent._safe_handle(_event())
+    assert agent._llm_unavailable_announced is True, "precondition: the outage was announced"
+
+    # 3. the older successful handler finishes
+    proceed.set()
+    await asyncio.wait_for(older, timeout=2.0)
+
+    assert agent._llm_unavailable_announced is True, (
+        "an inference observed BEFORE this outage began cleared it on handler return"
+    )
