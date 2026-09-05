@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import logging
 import math
-import os
 import re
 import time
 from collections import deque
@@ -56,21 +55,13 @@ _CHECK_INTERVAL_S = 1.0
 _INTENT_RESUME_MAX_AGE_S = 900.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
 
+
 # Owner-authorised escape from the signed laboratory-qualification gate.
 # Set to exactly "1" in the engine environment to permit energizing while no
 # qualification receipt exists. It covers ONLY the absent-receipt case; a
 # present receipt that is stale or malformed is still refused, and no other
 # safety precondition is affected. Every process that uses it logs CRITICAL
 # once, so an unqualified run is always visible in the log.
-_LAB_QUALIFICATION_OVERRIDE_ENV = "CRYODAQ_LAB_QUALIFICATION_OVERRIDE"
-
-
-def _lab_qualification_override_active() -> bool:
-    """Whether the operator explicitly authorised unqualified energizing."""
-
-    return os.environ.get(_LAB_QUALIFICATION_OVERRIDE_ENV, "").strip() == "1"
-
-
 class SafetyConfigError(RuntimeError):
     """Raised when safety.yaml cannot be loaded in a fail-closed manner.
 
@@ -220,7 +211,6 @@ class SafetyManager:
     # Set once per process the first time the qualification override is
     # exercised, so the CRITICAL announcement is not repeated on every
     # precondition evaluation (they run at _CHECK_INTERVAL_S).
-    _lab_override_announced = False
 
     def __init__(
         self,
@@ -4324,39 +4314,47 @@ class SafetyManager:
         return set(SMU_CHANNELS)
 
     def _energizing_mutation_refusal(self) -> str | None:
-        """Return why this authority cannot energize; never used by OFF paths."""
+        """Return why this authority cannot energize; never used by OFF paths.
 
-        if self._explicit_simulation_authorized():
-            return None
-        receipt = self._qualification_receipt
-        if receipt is None:
-            if _lab_qualification_override_active():
-                # Owner-authorised deviation (Vladimir, 2026-08-31). The lane-P2
-                # receipt issuer does not exist in the tree: only the RSA public
-                # modulus ships, no private key, and tests carry a deliberately
-                # expired vector. No receipt can therefore be obtained for this
-                # stand, and without this escape the source is permanently
-                # unusable — which blocks the thermal-conductivity measurement
-                # the stand exists for.
-                #
-                # Scope is EXACTLY the absent-receipt case. A present receipt
-                # that is stale or malformed is still refused below, and every
-                # other precondition — verified OFF evidence, source limits,
-                # interlocks, staleness, rate limits, watchdog-trip evidence —
-                # is untouched. Opt-in per process, never a default.
-                if not type(self)._lab_override_announced:
-                    type(self)._lab_override_announced = True
-                    logger.critical(
-                        "ENERGIZING AUTHORISED WITHOUT QUALIFICATION RECEIPT: %s=1 "
-                        "is set. The signed laboratory-qualification gate is "
-                        "BYPASSED for this process. This is an explicit operator "
-                        "deviation, not a qualified stand.",
-                        _LAB_QUALIFICATION_OVERRIDE_ENV,
-                    )
-                return None
-            return "UNQUALIFIED: a separately signed laboratory-qualification receipt is required"
-        if time.monotonic() >= receipt.expires_monotonic_s:
-            return "UNQUALIFIED: laboratory-qualification receipt is stale"
+        The signed laboratory-qualification gate is GONE, on the owner's ruling
+        of 2026-09-04. It demanded an RSA-signed receipt before the source could
+        be energised, and no such receipt could ever be obtained: only the
+        public modulus ships, there is no private key anywhere in the tree, and
+        the issuer does not exist. Every boot therefore announced that the stand
+        was unqualified and that the gate had been bypassed — two CRITICALs, on
+        every start, about a certificate that cannot exist. A control that must
+        be permanently excepted is not a control; it is noise that teaches
+        operators to read past CRITICAL.
+
+        What actually protects the source is untouched and always did the work:
+        verified OFF evidence, source limits, interlocks, staleness and rate
+        limits, watchdog-trip evidence, and the operator's own confirmation.
+        Those are exercised by the regressions kept alongside this removal.
+
+        NOTHING IS ADDED HERE, and that is deliberate. An earlier draft of this
+        removal kept a refusal for "a mock-flagged manager must not energize a
+        REAL source", on the reasoning that the gate had been enforcing it
+        incidentally. Checked against the deployed code, that reasoning is
+        false: `start.sh` exported CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1
+        unconditionally, so an absent receipt returned None and the mismatch was
+        ADMITTED on every production run. Keeping the refusal would not have
+        preserved a protection — it would have installed a new veto inside a
+        change whose whole purpose is removal, and five existing limit-write
+        regressions that deliberately drive a real-reporting double from a mock
+        manager went red proving it.
+
+        Whether that mismatch should be refused is a real question and an
+        OPEN one, recorded for the owner rather than decided here. It is a
+        behaviour change on the source path and belongs in its own reviewed
+        commit, not smuggled in beside a deletion.
+
+        `qualification_receipt` is still accepted by __init__ and is now inert.
+        It is removed separately, together with core/qualification.py, the test
+        support module and the twenty-one suites that construct a receipt — a
+        mechanical edit across forty-four files that does not belong in the same
+        commit as a behaviour change to the source path.
+        """
+
         return None
 
     def _explicit_simulation_authorized(self) -> bool:

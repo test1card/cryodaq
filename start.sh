@@ -17,12 +17,6 @@ if [ -z "$CRYODAQ_PY" ]; then
     exit 1
 fi
 
-# Owner-authorised (Vladimir, 2026-08-31): permit energizing while the
-# lane-P2 qualification-receipt issuer does not exist. Covers ONLY the
-# absent-receipt case; every other safety precondition still applies, and
-# the engine logs CRITICAL once per run when it is used. Remove this line
-# to restore the signed-qualification requirement.
-export CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1
 
 # Print a traceback when a NATIVE fault kills a process (SIGBUS, SIGSEGV).
 # The engine died with SIGBUS six times on 2026-09-02 and left no evidence:
@@ -34,5 +28,4 @@ export PYTHONFAULTHANDLER=1
 
 echo "=== CryoDAQ — запуск системы ==="
 echo "Интерпретатор: $CRYODAQ_PY"
-echo "ВНИМАНИЕ: energizing разрешён без qualification receipt (CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1)"
 exec "$CRYODAQ_PY" -m cryodaq.launcher "$@"

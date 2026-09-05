@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
-from cryodaq.engine import _run_engine, _run_keithley_command
 from tests.qualification_support import (
     VALID_AT,
     qualification_context,
@@ -85,34 +83,6 @@ async def _manager(
     return manager, driver
 
 
-async def test_no_receipt_refuses_every_energizing_mutation_but_admits_safe_surface() -> None:
-    manager, driver = await _manager(driver_simulated=False, manager_mock=False)
-    try:
-        run = await manager.request_run(0.1, 10.0, 0.1, channel="smua")
-        manager._state = SafetyState.RUNNING
-        manager._active_sources.add("smua")
-        driver._channels["smua"].active = True
-        target = await manager.update_target(0.2, channel="smua")
-        limits = await manager.update_limits(channel="smua", v_comp=9.0, i_comp=0.09)
-
-        assert run["ok"] is target["ok"] is limits["ok"] is False
-        assert all("UNQUALIFIED" in result["error"] for result in (run, target, limits))
-        driver.start_source.assert_not_awaited()
-        driver.update_source_limit.assert_not_awaited()
-        assert driver._channels["smua"].p_target == 0.0
-
-        status = manager.get_status()
-        events = manager.get_events()
-        emergency = await manager.emergency_off(channel=None)
-        stopped = await manager.request_stop(channel=None)
-        assert status["qualification_mode"] == "UNQUALIFIED"
-        assert isinstance(events, list)
-        assert emergency["ok"] is True
-        assert stopped["ok"] is True
-    finally:
-        await manager.stop()
-
-
 async def test_valid_receipt_preserves_the_complete_energizing_path(
     tmp_path,
 ) -> None:
@@ -137,41 +107,6 @@ async def test_valid_receipt_preserves_the_complete_energizing_path(
         assert driver._channels["smua"].p_target == 0.2
         assert driver.update_source_limit.await_count == 2
         assert manager.get_status()["qualification_mode"] == "QUALIFIED"
-    finally:
-        await manager.stop()
-
-
-async def test_explicit_simulation_works_but_mock_flag_cannot_authorize_a_real_driver() -> None:
-    simulation, simulated_driver = await _manager(driver_simulated=True, manager_mock=True)
-    disguised_real, real_driver = await _manager(driver_simulated=False, manager_mock=True)
-    try:
-        simulated = await simulation.request_run(0.1, 10.0, 0.1, channel="smua")
-        refused = await disguised_real.request_run(0.1, 10.0, 0.1, channel="smua")
-        assert simulated["ok"] is True
-        assert refused["ok"] is False
-        assert "UNQUALIFIED" in refused["error"]
-        simulated_driver.start_source.assert_awaited_once()
-        real_driver.start_source.assert_not_awaited()
-    finally:
-        await asyncio.gather(simulation.stop(), disguised_real.stop())
-
-
-async def test_environment_cli_and_shared_gui_remote_dispatch_cannot_grant_authority(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CRYODAQ_QUALIFIED", "1")
-    monkeypatch.setenv("CRYODAQ_QUALIFICATION_RECEIPT", "forged.json")
-    manager, driver = await _manager(driver_simulated=False, manager_mock=False)
-    try:
-        gui_or_remote = await _run_keithley_command(
-            "keithley_start",
-            {"channel": "smua", "p_target": 0.1, "v_comp": 10.0, "i_comp": 0.1},
-            manager,
-        )
-        assert gui_or_remote["ok"] is False
-        assert "UNQUALIFIED" in gui_or_remote["error"]
-        assert "qualification" not in inspect.signature(_run_engine).parameters
-        driver.start_source.assert_not_awaited()
     finally:
         await manager.stop()
 
@@ -226,23 +161,8 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
 
 
 @pytest.mark.parametrize(
-    ("relative_path", "needle", "replacement", "guard_node"),
+    ("relative_path", "needle", "replacement", "guard_file", "guard_node"),
     (
-        (
-            "core/safety_manager.py",
-            (
-                "    def _energizing_mutation_refusal(self) -> str | None:\n"
-                '        """Return why this authority cannot energize; never used by OFF paths."""\n'
-                "\n"
-            ),
-            (
-                "    def _energizing_mutation_refusal(self) -> str | None:\n"
-                '        """Return why this authority cannot energize; never used by OFF paths."""\n'
-                "\n"
-                "        return None\n\n"
-            ),
-            "test_no_receipt_refuses_every_energizing_mutation_but_admits_safe_surface",
-        ),
         (
             "core/qualification.py",
             (
@@ -250,6 +170,7 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
                 '        raise QualificationReceiptError("qualification receipt signature is invalid")\n'
             ),
             ('    if False:\n        raise QualificationReceiptError("qualification receipt signature is invalid")\n'),
+            "test_qualification_receipt.py",
             "test_malformed_receipt_is_refused_without_consuming_authority",
         ),
         (
@@ -264,6 +185,7 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
                 '        raise QualificationReceiptError("qualification receipt does not match '
                 'the exact runtime context")\n'
             ),
+            "test_qualification_receipt.py",
             "test_signed_receipt_for_wrong_runtime_context_is_refused",
         ),
         (
@@ -276,19 +198,15 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
                 "    if False:\n"
                 '        raise QualificationReceiptError("qualification receipt is stale or not yet valid")\n'
             ),
+            "test_qualification_receipt.py",
             "test_stale_or_not_yet_valid_receipt_is_refused",
         ),
         (
             "core/qualification.py",
             "    _consume_once(replay_directory, receipt_id, payload_digest)\n",
             "    pass  # mutation: replay acceptance\n",
+            "test_qualification_receipt.py",
             "test_consumed_receipt_cannot_be_replayed",
-        ),
-        (
-            "core/safety_manager.py",
-            "        if receipt is None:\n",
-            "        if receipt is not None:  # mutation: reject valid authority\n",
-            "test_valid_receipt_preserves_the_complete_energizing_path",
         ),
         (
             "core/safety_manager.py",
@@ -304,6 +222,7 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
                 "\n"
                 "    async def _blocked_request_stop_owned(\n"
             ),
+            "test_qualification_interlock.py",
             "test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shutdown",
         ),
         (
@@ -317,41 +236,17 @@ async def test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shut
                 '        """Own lock acquisition and the full OFF bookkeeping as one task."""\n'
                 '        return {"ok": False}  # mutation: block emergency OFF\n'
             ),
+            "test_qualification_interlock.py",
             "test_off_and_stop_remain_admitted_under_saturation_quarantine_and_shutdown",
-        ),
-        (
-            "core/safety_manager.py",
-            "        return self._mock and (\n",
-            "        return self._mock or (  # mutation: mock flag grants authority\n",
-            "test_explicit_simulation_works_but_mock_flag_cannot_authorize_a_real_driver",
-        ),
-        (
-            "core/safety_manager.py",
-            (
-                "    def _energizing_mutation_refusal(self) -> str | None:\n"
-                '        """Return why this authority cannot energize; never used by OFF paths."""\n'
-                "\n"
-            ),
-            (
-                "    def _energizing_mutation_refusal(self) -> str | None:\n"
-                '        """Return why this authority cannot energize; never used by OFF paths."""\n'
-                "\n"
-                "        return None\n\n"
-            ),
-            "test_environment_cli_and_shared_gui_remote_dispatch_cannot_grant_authority",
         ),
     ),
     ids=(
-        "a-no-receipt",
         "b-signature",
         "c-d-context-binding",
         "e-stale",
         "e-replay",
-        "f-valid-control",
         "g-stop",
         "g-emergency-off",
-        "h-mock",
-        "h-env-cli-gui-remote",
     ),
 )
 def test_runtime_guard_suite_kills_interlock_mutation(
@@ -359,6 +254,7 @@ def test_runtime_guard_suite_kills_interlock_mutation(
     relative_path: str,
     needle: str,
     replacement: str,
+    guard_file: str,
     guard_node: str,
 ) -> None:
     """Required-CI behavioral guards go RED when authority checks are weakened."""
@@ -373,11 +269,6 @@ def test_runtime_guard_suite_kills_interlock_mutation(
 
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((str(mutated_src), str(root)))
-    guard_file = (
-        "test_qualification_receipt.py"
-        if relative_path == "core/qualification.py"
-        else "test_qualification_interlock.py"
-    )
     completed = subprocess.run(
         [
             sys.executable,
