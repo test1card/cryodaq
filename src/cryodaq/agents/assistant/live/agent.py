@@ -834,6 +834,12 @@ class AssistantLiveAgent:
         # outage into a flood of identical Telegram messages, which is how a
         # notification stops being read.
         self._llm_unavailable_announced = False
+        # Set by _generate_tracked, read by _safe_handle: distinguishes "the
+        # model answered" from "the handler returned".
+        self._inference_answered = False
+        # True only while an announcement is in flight, so a failed delivery
+        # does not spend the one-shot and a concurrent event cannot double it.
+        self._llm_unavailable_announcing = False
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
         # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
@@ -878,6 +884,20 @@ class AssistantLiveAgent:
             self._bus.unsubscribe("gemma_agent")
             self._queue = None
         await self._ollama.close()
+
+    async def _generate_tracked(self, *args: Any, **kwargs: Any) -> Any:
+        """Every model call goes through here so recovery has a real signal.
+
+        Review of 2026-09-05: the outage flag was cleared whenever a handler
+        returned normally, and a handler can return without ever reaching the
+        model — `_handle_periodic_report` returns early when its context is
+        unavailable. So "the model is answering again" was announced on the
+        strength of zero inference calls. Setting the marker here means the
+        claim is made only where the model actually answered.
+        """
+        result = await self._ollama.generate(*args, **kwargs)
+        self._inference_answered = True
+        return result
         logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
     async def _dispatch_with_audit(
@@ -1089,6 +1109,9 @@ class AssistantLiveAgent:
         dedup_id: str | None = None,
         attempt: int | None = None,
     ) -> None:
+        # Per-event, so a model call made while handling an EARLIER event
+        # cannot be read as this one having reached the model.
+        self._inference_answered = False
         """Handle one event with rate-limit + semaphore + error isolation.
 
         ``dedup_id`` carries the ledger key so the delivery OUTCOME can be
@@ -1138,12 +1161,16 @@ class AssistantLiveAgent:
                         await self._handle_periodic_report(event)
                     else:
                         await self._handle_alarm_fired(event, dedup_id=dedup_id, attempt=attempt)
-                    # Reached only when a handler returned without raising, so
-                    # inference is answering again. Clearing here rather than in
-                    # an `else:` clause keeps it inside the same try that owns
-                    # the failure, and re-arms the announcement for a LATER
-                    # outage instead of leaving it permanently spent.
-                    if self._llm_unavailable_announced:
+                    # A handler returning is NOT evidence that inference
+                    # recovered. `_handle_periodic_report` returns early when
+                    # its context is unavailable and never reaches the model,
+                    # so the old test here cleared the outage flag — and told
+                    # the operator the model was back — after zero generation
+                    # calls. Review of 2026-09-05 reproduced exactly that.
+                    #
+                    # `_inference_answered` is set only inside
+                    # `_generate_tracked`, so this now says what it means.
+                    if self._llm_unavailable_announced and self._inference_answered:
                         self._llm_unavailable_announced = False
                         logger.info("AssistantLiveAgent: модель снова доступна")
                 except (OllamaUnavailableError, OllamaModelMissingError) as exc:
@@ -1203,7 +1230,7 @@ class AssistantLiveAgent:
         )
 
         system_prompt = format_with_brand(ALARM_SUMMARY_SYSTEM, self._config.brand_name)
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1329,7 +1356,7 @@ class AssistantLiveAgent:
         )
 
         system_prompt = format_with_brand(DIAGNOSTIC_SUGGESTION_SYSTEM, self._config.brand_name)
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1387,7 +1414,7 @@ class AssistantLiveAgent:
         )
 
         system_prompt = format_with_brand(EXPERIMENT_FINALIZE_SYSTEM, self._config.brand_name)
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1445,7 +1472,7 @@ class AssistantLiveAgent:
         )
 
         system_prompt = format_with_brand(SENSOR_ANOMALY_SYSTEM, self._config.brand_name)
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1510,7 +1537,7 @@ class AssistantLiveAgent:
         )
 
         system_prompt = format_with_brand(SHIFT_HANDOVER_SYSTEM, self._config.brand_name)
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1586,7 +1613,7 @@ class AssistantLiveAgent:
         )
         system_prompt = format_with_brand(PERIODIC_REPORT_SYSTEM, self._config.brand_name)
 
-        result = await self._ollama.generate(
+        result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
             max_tokens=self._config.max_tokens,
@@ -1640,23 +1667,56 @@ class AssistantLiveAgent:
         outage produces one message instead of one per event.
         """
 
-        if self._llm_unavailable_announced:
+        if self._llm_unavailable_announced or self._llm_unavailable_announcing:
             return
-        self._llm_unavailable_announced = True
+
+        # The flag used to be set BEFORE the send. Review of 2026-09-05
+        # exercised the real dispatch path with audit preparation failing: no
+        # transport send happened, yet the next outage event announced nothing,
+        # because an ATTEMPT had been recorded as a DELIVERY. A one-shot
+        # warning that can be silently spent is worse than no warning, since
+        # nobody is waiting for a message they were never told to expect.
+        #
+        # Delivery is now read from the router's own settlement, through the
+        # same `_is_delivered_outcome` the rest of this class uses. The
+        # outcomes callback fires before the audit settlement write, so a
+        # cancellation during that shielded write cannot lose the fact that
+        # the operator was told.
+        self._llm_unavailable_announcing = True
+        delivered = False
+
+        def _note_outcomes(outcomes: dict[str, Any]) -> None:
+            nonlocal delivered
+            delivered = any(_is_delivered_outcome(state) for state in outcomes.values())
+
         try:
             await self._dispatch_unavailable_context(
                 event=event,
                 audit_id=self._audit.make_audit_id(),
                 payload=event.payload,
                 kind="llm_unavailable",
-                message=(
-                    "Помощник не может формировать отчёты: модель недоступна. "
-                    "Сбор и запись данных продолжаются в обычном режиме. "
-                    f"Причина: {exc}"
-                ),
+                # No claim about acquisition or recording. The model being
+                # unreachable says nothing whatever about the health of the
+                # engine's sampling and writing, and this text is read at the
+                # exact moment an operator is deciding whether to trust the
+                # stand. Certifying services this agent cannot observe would
+                # be the software deciding for them.
+                message=(f"Помощник не может формировать отчёты: модель недоступна. Причина: {exc}"),
+                on_outcomes=_note_outcomes,
             )
         except Exception:  # pragma: no cover - notification must never mask the outage
             logger.warning("AssistantLiveAgent: не удалось сообщить о недоступности модели", exc_info=True)
+        finally:
+            self._llm_unavailable_announcing = False
+
+        if delivered:
+            self._llm_unavailable_announced = True
+        else:
+            # Left un-spent deliberately: the next outage event tries again.
+            logger.warning(
+                "AssistantLiveAgent: сообщение о недоступности модели НЕ доставлено — "
+                "попытка будет повторена при следующем событии"
+            )
 
     async def _dispatch_unavailable_context(
         self,
@@ -1666,6 +1726,7 @@ class AssistantLiveAgent:
         payload: dict[str, Any],
         kind: str,
         message: str,
+        on_outcomes: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         logger.warning("AssistantLiveAgent: %s context unavailable (audit_id=%s)", kind, audit_id)
         await self._dispatch_with_audit(
@@ -1682,6 +1743,7 @@ class AssistantLiveAgent:
             latency_s=0.0,
             errors=[],
             targets=_build_targets(self._config),
+            on_outcomes=on_outcomes,
         )
 
 
