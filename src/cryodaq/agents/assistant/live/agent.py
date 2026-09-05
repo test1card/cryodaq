@@ -797,7 +797,7 @@ def _event_dedup_id(event: EngineEvent) -> str | None:
 
 
 class AssistantLiveAgent:
-    """Local LLM agent. Operator-facing brand: Гемма."""
+    """LLM agent. The operator-facing brand comes from `agent.brand_name`."""
 
     def __init__(
         self,
@@ -844,12 +844,13 @@ class AssistantLiveAgent:
     async def start(self) -> None:
         """Subscribe to EventBus and begin event processing."""
         if not self._config.enabled:
-            logger.info("AssistantLiveAgent (Гемма): отключён в конфигурации")
+            logger.info("AssistantLiveAgent (%s): отключён в конфигурации", self._config.brand_name)
             return
         self._queue = await self._bus.subscribe("gemma_agent", maxsize=1000)
         self._task = asyncio.create_task(self._event_loop(), name="gemma_agent")
         logger.info(
-            "AssistantLiveAgent (Гемма): запущен. Модель=%s, timeout=%.0fs",
+            "AssistantLiveAgent (%s): запущен. Модель=%s, timeout=%.0fs",
+            self._config.brand_name,
             self._config.default_model,
             self._config.timeout_s,
         )
@@ -875,7 +876,7 @@ class AssistantLiveAgent:
             self._bus.unsubscribe("gemma_agent")
             self._queue = None
         await self._ollama.close()
-        logger.info("AssistantLiveAgent (Гемма): остановлен")
+        logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
     async def _dispatch_with_audit(
         self,

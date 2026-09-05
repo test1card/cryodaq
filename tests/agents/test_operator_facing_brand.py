@@ -29,10 +29,17 @@ _ROOT = Path(__file__).resolve().parents[2]
 # Retired names. A future rename adds to this rather than editing the test.
 _RETIRED_BRANDS = ("Гемма", "Gemma")
 
+# The list was three modules and missed live/agent.py, which announced the
+# retired brand on every start — found by reading the boot log after a deploy,
+# not by this test. Any module that renders the assistant's identity belongs
+# here.
 _OPERATOR_FACING = (
     "src/cryodaq/notifications/telegram_commands.py",
     "src/cryodaq/launcher.py",
     "src/cryodaq/agents/assistant/shared/report_intro.py",
+    "src/cryodaq/agents/assistant/live/agent.py",
+    "src/cryodaq/agents/assistant/query/agent.py",
+    "src/cryodaq/agents/assistant_main.py",
 )
 
 
