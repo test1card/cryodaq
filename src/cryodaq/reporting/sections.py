@@ -22,6 +22,7 @@ from docx.document import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Inches, Mm, Pt
 
+from cryodaq.reporting import operator_channels
 from cryodaq.reporting.data import HistoricalReading, ReportDataset
 from cryodaq.utils.xml_safe import xml_safe
 
@@ -364,10 +365,32 @@ def _reading_series_key(reading: HistoricalReading) -> tuple[object, ...]:
 
 
 def _visible_quantity(reading: HistoricalReading, quantity: str) -> bool:
+    """Eligible by descriptor AND not switched off by the operator.
+
+    The formal report was the last place that decided visibility without asking
+    the operator. Everything else already asks: the GUI grid and plots, the
+    Telegram hourly report, the hourly PNG, the on-demand report, the run
+    overview, alarm suppression and sensor diagnostics all consult
+    ChannelManager. So a sensor unticked in Настройки vanished everywhere except
+    the one artefact the operator opens to reconstruct a run.
+
+    Both conditions, not one. `visible_by_default` still decides what is
+    ELIGIBLE for a formal plot at all — 24 `.raw` calibration channels are
+    absent from `channels.yaml`, and `is_visible()` defaults an unknown channel
+    to True, so consulting the operator alone would pull every raw channel into
+    the report. The operator's switch can therefore always hide, and the
+    descriptor still governs what could be shown in the first place.
+
+    Fail-open on lookup trouble, matching `operator_channels.is_visible`: a
+    configuration problem must not silently drop data from a report.
+    """
+
     descriptor = reading.descriptor
     if descriptor is None or descriptor.legacy:
         return False
-    return descriptor.visible_by_default and descriptor.quantity == quantity
+    if not (descriptor.visible_by_default and descriptor.quantity == quantity):
+        return False
+    return operator_channels.is_visible(reading.channel)
 
 
 def _descriptor_integrity_notice(document: Document, dataset: ReportDataset) -> None:
