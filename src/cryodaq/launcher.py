@@ -542,20 +542,9 @@ def _assistant_brand() -> str:
     operator being greeted by the old name.
     """
 
-    import yaml
+    from cryodaq.agents.assistant.shared.brand import resolve_brand_label
 
-    from cryodaq.paths import get_config_dir
-
-    try:
-        raw = yaml.safe_load((get_config_dir() / "agent.yaml").read_text(encoding="utf-8")) or {}
-        section = raw.get("agent") or {}
-        emoji = str(section.get("brand_emoji", "")).strip()
-        name = str(section.get("brand_name", "")).strip()
-        if not name:
-            return "Ассистент"
-        return f"{emoji} {name}".strip()
-    except Exception:  # pragma: no cover - a notification must never break start-up
-        return "Ассистент"
+    return resolve_brand_label(fallback="Ассистент")
 
 
 def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, bool]:

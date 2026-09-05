@@ -113,3 +113,58 @@ def test_the_guard_would_catch_a_reintroduction(tmp_path: Path, brand: str) -> N
     offences = _offences(planted)
     assert len(offences) == 1, offences
     assert "label" not in offences[0]
+
+
+# ---------------------------------------------------------------------------
+# A centralised DEFAULT is not the same as a propagated CONFIGURED value.
+# Review of 2026-09-05: "the default brand is centralized, but configured
+# branding is not fully propagated — chat/knowledge widgets use
+# DEFAULT_BRAND_NAME, while Telegram can use agent.brand_name."
+# ---------------------------------------------------------------------------
+
+
+def test_a_rename_in_agent_yaml_is_what_the_resolver_returns(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryodaq.agents.assistant.shared import brand
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "agent.yaml").write_text('agent:\n  brand_name: "Минерва"\n  brand_emoji: "🦉"\n', encoding="utf-8")
+    monkeypatch.setattr(brand, "get_config_dir", lambda: config_dir, raising=False)
+    monkeypatch.setattr("cryodaq.paths.get_config_dir", lambda: config_dir, raising=False)
+
+    assert brand.resolve_brand_name() == "Минерва"
+    assert brand.resolve_brand_label() == "🦉 Минерва"
+
+
+def test_an_unreadable_config_falls_back_rather_than_raising(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """These run from GUI start-up and from failure paths."""
+    from cryodaq.agents.assistant.shared import brand
+
+    monkeypatch.setattr("cryodaq.paths.get_config_dir", lambda: tmp_path / "absent", raising=False)
+    assert brand.resolve_brand_name() == DEFAULT_BRAND_NAME
+    # The LABEL falls back to something neutral, not to a brand: a message sent
+    # when the config could not be read must not assert a name that may be wrong.
+    assert brand.resolve_brand_label() == "Ассистент"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "gui/shell/overlays/_assistant_chat_widget.py",
+        "gui/shell/overlays/knowledge_base_panel.py",
+        "gui/shell/views/assistant_insight_panel.py",
+        "engine.py",
+        "launcher.py",
+    ],
+)
+def test_operator_facing_surfaces_resolve_rather_than_hardcode(relative: str) -> None:
+    """Every surface that shows the name must follow a rename in agent.yaml.
+
+    The constant is the FALLBACK, not the answer. A module that renders the
+    brand from DEFAULT_BRAND_NAME alone is correct today and wrong the next
+    time the operator renames — which has already happened once.
+    """
+    source = (_SRC / relative).read_text(encoding="utf-8")
+    assert "resolve_brand_name" in source or "resolve_brand_label" in source, (
+        f"{relative} renders the assistant's name without resolving the operator's configured value"
+    )

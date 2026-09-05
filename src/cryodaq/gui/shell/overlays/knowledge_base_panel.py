@@ -57,7 +57,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.agents.assistant.shared.brand import (
     DEFAULT_BRAND_EMOJI,
-    DEFAULT_BRAND_NAME,
+    resolve_brand_name,
 )
 from cryodaq.agents.rag.source_labels import prettify_source_label
 from cryodaq.gui import theme
@@ -311,7 +311,7 @@ class KnowledgeBasePanel(QWidget):
         sep.setFlags(Qt.ItemFlag.NoItemFlags)
         sep.setForeground(self.palette().mid())
         self._list.addItem(sep)
-        chat_item = QListWidgetItem(f"{DEFAULT_BRAND_EMOJI} Помощник {DEFAULT_BRAND_NAME}")
+        chat_item = QListWidgetItem(f"{DEFAULT_BRAND_EMOJI} Помощник {resolve_brand_name()}")
         chat_item.setData(Qt.ItemDataRole.UserRole, _CHAT_ITEM_ID)
         self._list.addItem(chat_item)
 
@@ -347,7 +347,7 @@ class KnowledgeBasePanel(QWidget):
         title.setStyleSheet(f"color: {theme.FOREGROUND};")
         sub = QLabel(
             "Выберите категорию слева, чтобы посмотреть документы по теме, "
-            f"или откройте «Помощник {DEFAULT_BRAND_NAME}» для свободного диалога."
+            f"или откройте «Помощник {resolve_brand_name()}» для свободного диалога."
         )
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setWordWrap(True)

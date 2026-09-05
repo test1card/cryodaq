@@ -29,18 +29,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.agents.assistant.shared.brand import (
-    DEFAULT_BRAND_NAME,
-)
+from cryodaq.agents.assistant.shared.brand import resolve_brand_name
 from cryodaq.gui import theme
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
-_WELCOME_TEXT = (
-    f"Привет! Я {DEFAULT_BRAND_NAME}, помощник по эксперименту. "
-    "Спроси про температуру, давление, фазу, прогноз охлаждения или активные тревоги."
-)
+
+def _welcome_text() -> str:
+    # Built per widget rather than at import, so a rename in agent.yaml is
+    # picked up by the next window instead of the next interpreter.
+    return (
+        f"Привет! Я {resolve_brand_name()}, помощник по эксперименту. "
+        "Спроси про температуру, давление, фазу, прогноз охлаждения или активные тревоги."
+    )
+
+
 _ERROR_PREFIX = "⚠ "  # ⚠
 # v0.55.2 ds-106: 16 * SPACE_6 + SPACE_2 = 512 + 8 = 520. Wide enough
 # for paragraph answers, narrow enough to feel chat-like — value is
@@ -130,7 +134,7 @@ class AssistantChatPanel(QWidget):
         self._bubbles: list[_ChatBubble] = []
 
         self._build_ui()
-        self._add_bubble(_WELCOME_TEXT, author="assistant")
+        self._add_bubble(_welcome_text(), author="assistant")
 
     # ------------------------------------------------------------------
     # UI construction
@@ -142,7 +146,7 @@ class AssistantChatPanel(QWidget):
         root.setSpacing(theme.SPACE_3)
 
         # Header
-        header = QLabel(f"Помощник {DEFAULT_BRAND_NAME}")
+        header = QLabel(f"Помощник {resolve_brand_name()}")
         title_font = QFont(theme.FONT_BODY)
         title_font.setPixelSize(theme.FONT_SIZE_XL)
         title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))

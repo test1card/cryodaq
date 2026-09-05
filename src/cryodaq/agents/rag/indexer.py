@@ -142,8 +142,18 @@ async def build_index(
 ) -> dict:
     """Build (or rebuild) the RAG index. Returns a stats dict.
 
-    Embedding dimension mismatches are logged and zero-vector-substituted
-    so a single bad chunk does not abort the whole build.
+    Two embedding failures, deliberately handled differently:
+
+    A WRONG-WIDTH vector raises :class:`RagEmbeddingDimensionError` at the
+    first chunk. It is a property of the model, true of every chunk, and
+    cannot improve by continuing — zero-filling it once turned a one-line
+    config error into 3638 unsearchable vectors.
+
+    An EMPTY vector is one failed call (typically a timeout); the next may
+    succeed. It is counted in ``failed`` and stored as a zero vector to keep
+    row alignment, but the rebuild is then ABANDONED rather than promoted,
+    leaving the existing canonical index untouched, unless the caller passes
+    ``promote_on_partial=True``.
 
     v0.55.14 (audit SCOPE 6 finding 6.6) — synchronous filesystem
     walks and LanceDB writes are offloaded via :func:`asyncio.to_thread`

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.agents.assistant.shared.brand import (
     DEFAULT_BRAND_EMOJI,
-    DEFAULT_BRAND_NAME,
+    resolve_brand_name,
 )
 from cryodaq.gui import theme
 
@@ -126,11 +126,13 @@ class AssistantInsightPanel(QWidget):
         self,
         parent: QWidget | None = None,
         *,
-        brand_name: str = DEFAULT_BRAND_NAME,
+        brand_name: str | None = None,
         brand_emoji: str = DEFAULT_BRAND_EMOJI,
     ) -> None:
         super().__init__(parent)
-        self._brand_name = brand_name
+        # None means "whatever the operator configured", resolved now rather
+        # than baked in as a default argument at import time.
+        self._brand_name = brand_name or resolve_brand_name()
         self._brand_emoji = brand_emoji
         self._entries: deque[_InsightEntry] = deque(maxlen=_MAX_INSIGHTS)
         self._setup_ui()

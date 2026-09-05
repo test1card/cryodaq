@@ -11,9 +11,10 @@
 # running TEI or vLLM as a second service.
 #
 # embedding_dim is MEASURED, not taken from a datasheet. Published sources
-# disagreed (4096 vs 7168) and `indexer.py` substitutes ZERO VECTORS on a
-# mismatch rather than failing, so a wrong number here would silently make every
-# chunk unsearchable. One call to /api/embed returned 4096, L2-normalised.
+# disagreed (4096 vs 7168). Since 2026-09-05 a wrong number here is refused at
+# the first chunk rather than zero-filled, so it costs a second instead of an
+# index — but it still has to be right, because nothing else can derive it.
+# One call to /api/embed returned 4096, L2-normalised.
 #
 # Measured on this corpus's actual languages:
 #   ru "давление в вакуумной камере" ~ en "chamber pressure"      0.814

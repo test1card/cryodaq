@@ -1314,16 +1314,9 @@ def _assistant_brand() -> str:
     this one transport-failure message still calling it by the old name.
     Fail-safe: falls back to a neutral label rather than a stale one.
     """
-    try:
-        import yaml
+    from cryodaq.agents.assistant.shared.brand import resolve_brand_label
 
-        raw = yaml.safe_load((_CONFIG_DIR / "agent.yaml").read_text(encoding="utf-8")) or {}
-        agent = raw.get("agent") or {}
-        emoji = str(agent.get("brand_emoji", "🤖")).strip()
-        name = str(agent.get("brand_name", "")).strip()
-        return f"{emoji} {name}".strip() if name else "🤖 Ассистент"
-    except Exception:  # pragma: no cover - never break a failure path
-        return "🤖 Ассистент"
+    return resolve_brand_label(fallback="🤖 Ассистент")
 
 
 def _telegram_alarms_enabled() -> bool:
@@ -7416,7 +7409,6 @@ async def _run_engine(
             or reviewed_source_runtime_binding.trust_class is not DriverTrustClass.REVIEWED_SOURCE
         ):
             raise DriverRegistryError("reviewed source lacks exact sealed runtime binding")
-
 
     # SafetyManager — создаётся ПЕРВЫМ
     safety_manager = SafetyManager(

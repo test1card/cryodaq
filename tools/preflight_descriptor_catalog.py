@@ -25,14 +25,23 @@ Read-only. Opens the database with `mode=ro`, writes nothing, and starts no
 engine. Safe to run while the stack is live — and that is the point, because
 the answer is only useful before `kill -TERM`.
 
-    python tools/preflight_descriptor_catalog.py [--root /home/lab53/cryodaq]
+Name both sides explicitly. The question is whether the CANDIDATE catalogue
+installs against the LIVE database, and during a deploy those live in different
+trees:
 
-`--root` exists so the check can be run from a pristine worktree against the
-LIVE stand's config and data, which is the arrangement the standing rules
-require for anything executed while the stack is up.
+    python tools/preflight_descriptor_catalog.py \
+        --catalogue /path/to/candidate/config/channel_descriptors.local.yaml \
+        --database  /home/lab53/cryodaq/data/data_YYYY-MM-DD.db
+
+`--root` still works and still derives both sides from one tree, but it CANNOT
+answer that question: pointed at the live checkout it validates the live
+catalogue against itself and always passes. Anything it infers is reported as
+guessed, and a guessed run is a smoke test, not certification that a deploy is
+safe.
 
 Exit 0 = the catalogue installs. Exit 1 = it does not, and the message is the
 refusal the engine would have raised after the stand was already down.
+Exit 2 = an explicitly named input does not exist.
 """
 
 from __future__ import annotations
