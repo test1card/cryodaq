@@ -20,6 +20,24 @@ from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
 
+# Every owned task `TelegramCommandBot.stop()` settles. Both doubles below are
+# built with `object.__new__`, so nothing is initialised for them and each new
+# owned task has to be added by hand — `_query_task` was added to `stop()` and
+# not to either double, and both tests failed with AttributeError against a
+# production class that was perfectly correct. One list, used twice, so the next
+# addition breaks in one visible place instead of two invisible ones.
+_TELEGRAM_OWNED_TASKS = (
+    "_collect_task",
+    "_poll_task",
+    "_mutation_discovery_task",
+    "_query_task",
+)
+
+
+def _seed_telegram_owned_tasks(owner: object) -> None:
+    for name in _TELEGRAM_OWNED_TASKS:
+        setattr(owner, name, None)
+
 async def _terminal_failure(failure: BaseException) -> None:
     raise failure
 
@@ -207,9 +225,9 @@ async def test_telegram_stop_settles_all_tasks_and_dependencies_before_reporting
     owner._session = _Session()
     owner._mutation_envelope = object()
     exact_failure = RuntimeError("telegram terminal failure")
+    _seed_telegram_owned_tasks(owner)
     owner._collect_task = asyncio.create_task(_terminal_failure(exact_failure))
     owner._poll_task = asyncio.create_task(asyncio.Event().wait())
-    owner._mutation_discovery_task = None
     await asyncio.sleep(0)
 
     with pytest.raises(ShutdownOwnerSettledError) as raised:
@@ -253,9 +271,7 @@ async def test_subscriber_stop_retains_exact_queue_when_replacement_owns_name(
     elif owner_type is InterlockEngine:
         owner._task = None
     elif owner_type is TelegramCommandBot:
-        owner._collect_task = None
-        owner._poll_task = None
-        owner._mutation_discovery_task = None
+        _seed_telegram_owned_tasks(owner)
         owner._mutation_envelope = None
         owner._session = None
     else:
