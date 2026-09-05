@@ -104,7 +104,7 @@ async def test_valid_receipt_preserves_the_complete_energizing_path(
         driver.start_source.assert_awaited_once()
         assert driver._channels["smua"].p_target == 0.2
         assert driver.update_source_limit.await_count == 2
-        assert manager.get_status()["qualification_mode"] == "QUALIFIED"
+        assert manager.get_status()["simulation"] is False
     finally:
         await manager.stop()
 

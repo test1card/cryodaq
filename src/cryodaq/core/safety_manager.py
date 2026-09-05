@@ -2872,10 +2872,6 @@ class SafetyManager:
             update_abort_generation = self._abort_generation
             update_full_abort_generation = self._full_abort_generation
 
-            qualification_refusal = self._energizing_mutation_refusal()
-            if qualification_refusal is not None:
-                return {"ok": False, "error": qualification_refusal}
-
             if not self._safety_children_authoritative():
                 return {"ok": False, "error": "Safety child authority is unavailable"}
 
@@ -3008,10 +3004,6 @@ class SafetyManager:
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
             update_abort_generation = self._abort_generation
-
-            qualification_refusal = self._energizing_mutation_refusal()
-            if qualification_refusal is not None:
-                return {"ok": False, "error": qualification_refusal}
 
             if not self._safety_children_authoritative():
                 return {"ok": False, "error": "Safety child authority is unavailable"}
@@ -3702,14 +3694,6 @@ class SafetyManager:
         self._operator_safety_snapshot = snapshot
 
     def get_status(self) -> dict[str, Any]:
-        qualification_refusal = self._energizing_mutation_refusal()
-        qualification_mode = (
-            "SIMULATION"
-            if self._explicit_simulation_authorized()
-            else "QUALIFIED"
-            if qualification_refusal is None
-            else "UNQUALIFIED"
-        )
         return {
             "state": self._state.value,
             "fault_reason": self._fault_reason,
@@ -3720,8 +3704,7 @@ class SafetyManager:
             "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
             "active_channels": sorted(self._active_sources),
             "mock": self._mock,
-            "qualification_mode": qualification_mode,
-            "qualification_refusal": qualification_refusal,
+            "simulation": self._explicit_simulation_authorized(),
             "precondition_refusal": self._precondition_refusal,
         }
 
@@ -4298,50 +4281,6 @@ class SafetyManager:
         # both physical outputs require independent OFF verification.
         return set(SMU_CHANNELS)
 
-    def _energizing_mutation_refusal(self) -> str | None:
-        """Return why this authority cannot energize; never used by OFF paths.
-
-        The signed laboratory-qualification gate is GONE, on the owner's ruling
-        of 2026-09-04. It demanded an RSA-signed receipt before the source could
-        be energised, and no such receipt could ever be obtained: only the
-        public modulus ships, there is no private key anywhere in the tree, and
-        the issuer does not exist. Every boot therefore announced that the stand
-        was unqualified and that the gate had been bypassed — two CRITICALs, on
-        every start, about a certificate that cannot exist. A control that must
-        be permanently excepted is not a control; it is noise that teaches
-        operators to read past CRITICAL.
-
-        What actually protects the source is untouched and always did the work:
-        verified OFF evidence, source limits, interlocks, staleness and rate
-        limits, watchdog-trip evidence, and the operator's own confirmation.
-        Those are exercised by the regressions kept alongside this removal.
-
-        NOTHING IS ADDED HERE, and that is deliberate. An earlier draft of this
-        removal kept a refusal for "a mock-flagged manager must not energize a
-        REAL source", on the reasoning that the gate had been enforcing it
-        incidentally. Checked against the deployed code, that reasoning is
-        false: `start.sh` exported CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1
-        unconditionally, so an absent receipt returned None and the mismatch was
-        ADMITTED on every production run. Keeping the refusal would not have
-        preserved a protection — it would have installed a new veto inside a
-        change whose whole purpose is removal, and five existing limit-write
-        regressions that deliberately drive a real-reporting double from a mock
-        manager went red proving it.
-
-        Whether that mismatch should be refused is a real question and an
-        OPEN one, recorded for the owner rather than decided here. It is a
-        behaviour change on the source path and belongs in its own reviewed
-        commit, not smuggled in beside a deletion.
-
-        `qualification_receipt` is still accepted by __init__ and is now inert.
-        It is removed separately, together with core/qualification.py, the test
-        support module and the twenty-one suites that construct a receipt — a
-        mechanical edit across forty-four files that does not belong in the same
-        commit as a behaviour change to the source path.
-        """
-
-        return None
-
     def _explicit_simulation_authorized(self) -> bool:
         binding = self._reviewed_source_runtime_binding
         return self._mock and (
@@ -4357,10 +4296,6 @@ class SafetyManager:
 
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()
-
-        qualification_refusal = self._energizing_mutation_refusal()
-        if qualification_refusal is not None:
-            return False, qualification_refusal
 
         if not self._safety_children_authoritative():
             return False, "Safety monitor/collector authority is unavailable"
@@ -4510,11 +4445,6 @@ class SafetyManager:
                 channel=hazard_channel or "",
                 source="reviewed_source_output_observation",
             )
-            return
-
-        qualification_refusal = self._energizing_mutation_refusal()
-        if qualification_refusal is not None and self._state in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
-            await self._fault(qualification_refusal, source="qualification_interlock")
             return
 
         # A pre-upload trip latch found during connect is preserved by the
