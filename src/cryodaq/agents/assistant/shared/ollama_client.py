@@ -39,9 +39,15 @@ _REASONING_BLOCK = re.compile(
 )
 _REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
 
-# RFC 6598 shared address space. NetBird and Tailscale assign overlay peers
-# from it; it is not routable on the public internet, so an address here is
-# only reachable from inside the authenticated WireGuard mesh.
+# RFC 6598 shared address space, which NetBird and Tailscale draw overlay peer
+# addresses from. Note precisely what admitting this range does and does not
+# buy: it keeps the endpoint off the public internet, and it is where the
+# owner's mesh peers live. It does NOT establish that the responder is a mesh
+# peer, that WireGuard authenticated it, or that it is the owner's server.
+# RFC 6598 defines shared address space for CGNAT; an address in it can be
+# reachable over a provider or local route that has nothing to do with the
+# mesh. Corrected 2026-09-05 after review found the original comment here
+# claiming mesh authentication as though the code enforced it.
 _PRIVATE_MESH_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
@@ -78,13 +84,22 @@ def validate_private_llm_origin(base_url: str) -> str:
 
     The owner moved inference to their own server, so loopback alone no longer
     covers the deployment. The rule is widened by exactly one range and no
-    further: 100.64.0.0/10, the shared address space of RFC 6598, which
-    NetBird and Tailscale use for overlay peers.
+    further: 100.64.0.0/10, the RFC 6598 shared address space that NetBird and
+    Tailscale draw overlay peer addresses from.
 
-    That range is chosen because it is not routable on the public internet.
-    Reaching an address inside it requires membership of the authenticated
-    WireGuard mesh, so the invariant becomes "loopback, or a peer on the
-    private mesh" — never a public host, and never DNS-resolved.
+    What this function guarantees is an ADDRESS-RANGE RESTRICTION, and saying
+    more than that would be false. It refuses public hosts and refuses names,
+    so the endpoint cannot be silently repointed at the internet by whoever
+    answers DNS. It does NOT prove the responder is a WireGuard peer, that the
+    mesh authenticated it, or that it is the owner's server — RFC 6598 is
+    shared address space for CGNAT, not an authentication mechanism, and its
+    lack of global routability does not make it unreachable by other local or
+    provider routes.
+
+    Confirming that the configured endpoint really is the owner's server is a
+    deployment matter — the approved address, the host route and the NetBird
+    access policy — and is verified there, not here. The tests below pin the
+    range check; they do not and cannot demonstrate authentication.
 
     Everything else the original check enforced is kept deliberately: http
     only, a LITERAL address rather than a hostname (a name can be repointed by
