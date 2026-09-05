@@ -61,13 +61,30 @@ def _find_latest_sqlite() -> Path | None:
     return candidates[0] if candidates else None
 
 
+#: Seconds to wait for one embedding. Deliberately far above the 20-34 s
+#: measured for qwen3-embedding:8b on the owner's server, because the two
+#: failure modes are not symmetric: too long merely makes a rebuild slower,
+#: while too short silently drops chunks from the corpus.
+_DEFAULT_EMBED_TIMEOUT_S = 180.0
+
+
 def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
     # May 2026: default switched к qwen3-embedding:0.6b — top of MTEB
     # multilingual leaderboard. Previous default (multilingual-e5-small)
     # deprecated due к Ollama 0.23+ incompatibility for community uploads.
+    #
+    # 2026-09-05: the timeout is now read from config instead of taking
+    # EmbeddingsClient's 30 s default. That default was sized for a 0.6b model
+    # on a local GPU. After retrieval moved to qwen3-embedding:8b on the
+    # owner's server, a single embed call was MEASURED at 20-34 s — straddling
+    # the 30 s default, so chunks timed out at random, each one becoming an
+    # unsearchable zero vector. The 19:53 rebuild on 2026-09-05 lost six chunks
+    # exactly this way. Same defect as the generation timeout left at 120 s for
+    # a model that needed 280.
     return EmbeddingsClient(
         base_url=rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
         model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
+        timeout_s=float(rag_cfg.get("embed_timeout_s", _DEFAULT_EMBED_TIMEOUT_S)),
     )
 
 

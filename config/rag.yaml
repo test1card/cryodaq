@@ -26,6 +26,19 @@ rag:
   ollama_base_url: "http://100.87.73.25:11437"
   embedding_model: "qwen3-embedding:8b"
   embedding_dim: 4096
+
+  # Seconds for ONE embedding call. Measured on this server 2026-09-05: a
+  # single /api/embed for this model takes 20-34 s, and /api/ps shows no
+  # resident model, so Ollama appears to load the weights per request
+  # (keep_alive did not change it). The client's 30 s default sat inside that
+  # range, so chunks timed out at random and each became an unsearchable zero
+  # vector — the 19:53 rebuild lost six that way before it was stopped.
+  #
+  # Set well clear of the measured maximum rather than just above it: too long
+  # only makes a rebuild slower, too short quietly removes chunks from the
+  # corpus. If the server is ever made to keep the model resident, this can
+  # come back down.
+  embed_timeout_s: 180.0
   db_path: "data/rag_index"
   vault_dir: "~/CryoDAQ-Vault/experiments"
 
