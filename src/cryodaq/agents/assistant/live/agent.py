@@ -867,6 +867,11 @@ class AssistantLiveAgent:
         # outage into a flood of identical Telegram messages, which is how a
         # notification stops being read.
         self._llm_unavailable_announced = False
+        # Which OUTAGE the announcement state describes. Bumped on every
+        # recovery, so a warning that was still in flight when the model came
+        # back cannot land on the next outage's state. ContextVar separates
+        # handler-local results; it does not order updates to this shared flag.
+        self._outage_generation = 0
         # True only while an announcement is in flight, so a failed delivery
         # does not spend the one-shot and a concurrent event cannot double it.
         self._llm_unavailable_announcing = False
@@ -1204,6 +1209,9 @@ class AssistantLiveAgent:
                     # `_generate_tracked`, so this now says what it means.
                     if self._llm_unavailable_announced and _INFERENCE_ANSWERED.get():
                         self._llm_unavailable_announced = False
+                        # The outage this state described is over. Anything
+                        # still in flight for it is now stale.
+                        self._outage_generation += 1
                         logger.info("AssistantLiveAgent: модель снова доступна")
                 except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                     if dedup_id is not None:
@@ -1715,6 +1723,13 @@ class AssistantLiveAgent:
         # cancellation during that shielded write cannot lose the fact that
         # the operator was told.
         self._llm_unavailable_announcing = True
+        # Bind this announcement to the outage it describes. Review of
+        # 2026-09-05 reproduced the ordering hole: a warning starts sending and
+        # waits, the model genuinely recovers in the meantime, then the old
+        # warning's callback fires and re-marks the outage as announced — so
+        # the NEXT outage is silent. Delivery is only recorded if the outage it
+        # was about is still the current one.
+        generation = self._outage_generation
 
         def _note_outcomes(outcomes: dict[str, Any]) -> None:
             # Record delivery HERE, not after the await unwinds. Review of
@@ -1725,6 +1740,11 @@ class AssistantLiveAgent:
             # and the next outage re-sent a warning the operator had already
             # read. This callback runs synchronously the moment the router
             # reports, before any further await, so nothing can unwind past it.
+            if generation != self._outage_generation:
+                logger.info(
+                    "AssistantLiveAgent: доставка сообщения о недоступности устарела — модель уже восстановилась"
+                )
+                return
             if any(_is_delivered_outcome(state) for state in outcomes.values()):
                 self._llm_unavailable_announced = True
 
@@ -1748,7 +1768,10 @@ class AssistantLiveAgent:
         finally:
             self._llm_unavailable_announcing = False
 
-        if not self._llm_unavailable_announced:
+        if generation != self._outage_generation:
+            # Superseded by a recovery; nothing to warn about.
+            pass
+        elif not self._llm_unavailable_announced:
             # Left un-spent deliberately: the next outage event tries again.
             logger.warning(
                 "AssistantLiveAgent: сообщение о недоступности модели НЕ доставлено — "

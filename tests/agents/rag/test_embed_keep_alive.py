@@ -24,11 +24,10 @@ underneath itself; the stand states its own policy in config/rag.yaml.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
-
-from unittest.mock import AsyncMock, MagicMock
 
 from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.agents.rag.cli import _make_embeddings

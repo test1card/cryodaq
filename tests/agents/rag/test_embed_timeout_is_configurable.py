@@ -63,10 +63,24 @@ def test_the_shipped_config_sets_it() -> None:
     assert float(rag["embed_timeout_s"]) >= 120.0
 
 
-@pytest.mark.parametrize("bad", ["", None])
-def test_a_missing_value_falls_back_rather_than_crashing(bad) -> None:
-    cfg = {"embedding_model": "qwen3-embedding:8b"}
-    if bad is not None:
-        cfg.pop("embed_timeout_s", None)
+def test_an_absent_key_falls_back() -> None:
+    """Rewritten 2026-09-05 after review.
+
+    This was parametrised over ``["", None]`` and then put NEITHER value into
+    the config — both cases popped a key that was never there, so it tested
+    the absent-key path twice under two misleading names.
+    """
+    client = _make_embeddings({"embedding_model": "qwen3-embedding:8b"})
+    assert _timeout_of(client) == _DEFAULT_EMBED_TIMEOUT_S
+
+
+@pytest.mark.parametrize("bad", ["", None, "not-a-number", []])
+def test_an_unusable_value_falls_back_rather_than_crashing(bad) -> None:
+    """The values are now actually placed in the config, as the name claims.
+
+    A malformed embed_timeout_s must not stop a rebuild before it starts: the
+    fallback is a working default, not a traceback.
+    """
+    cfg = {"embedding_model": "qwen3-embedding:8b", "embed_timeout_s": bad}
     client = _make_embeddings(cfg)
     assert _timeout_of(client) == _DEFAULT_EMBED_TIMEOUT_S

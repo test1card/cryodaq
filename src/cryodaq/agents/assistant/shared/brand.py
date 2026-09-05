@@ -28,6 +28,21 @@ DEFAULT_BRAND_NAME = "РМКПшка"
 DEFAULT_BRAND_EMOJI = "🤖"
 
 
+def _brand_section(raw: dict) -> dict:
+    """The config section carrying the brand, new namespace first.
+
+    ``AssistantConfig`` still accepts the legacy ``gemma.*`` namespace and
+    warns about it, so a stand that has not migrated would otherwise have its
+    configured name read by the assistant and ignored by every surface using
+    this resolver — the same split this module exists to close.
+    """
+    section = raw.get("agent")
+    if isinstance(section, dict) and section:
+        return section
+    legacy = raw.get("gemma")
+    return legacy if isinstance(legacy, dict) else {}
+
+
 def resolve_brand_name(*, fallback: str = DEFAULT_BRAND_NAME) -> str:
     """The operator's configured assistant name, or ``fallback``.
 
@@ -48,7 +63,7 @@ def resolve_brand_name(*, fallback: str = DEFAULT_BRAND_NAME) -> str:
         from cryodaq.paths import get_config_dir
 
         raw = yaml.safe_load((get_config_dir() / "agent.yaml").read_text(encoding="utf-8")) or {}
-        name = str((raw.get("agent") or {}).get("brand_name", "")).strip()
+        name = str(_brand_section(raw).get("brand_name", "")).strip()
         return name or fallback
     except Exception:  # pragma: no cover - never break a caller for a config read
         return fallback
@@ -67,7 +82,7 @@ def resolve_brand_label(*, fallback: str = "Ассистент", with_emoji: boo
         from cryodaq.paths import get_config_dir
 
         raw = yaml.safe_load((get_config_dir() / "agent.yaml").read_text(encoding="utf-8")) or {}
-        section = raw.get("agent") or {}
+        section = _brand_section(raw)
         name = str(section.get("brand_name", "")).strip()
         if not name:
             return fallback

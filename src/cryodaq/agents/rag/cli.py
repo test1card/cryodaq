@@ -68,6 +68,24 @@ def _find_latest_sqlite() -> Path | None:
 _DEFAULT_EMBED_TIMEOUT_S = 180.0
 
 
+def _positive_float(value: object, fallback: float) -> float:
+    """Coerce a config value, falling back rather than raising.
+
+    A malformed `embed_timeout_s` — an empty string, a stray list, a typo —
+    must not stop a rebuild before it starts. Bare float() raises on all
+    three, which would turn a one-character config error into a traceback at
+    the top of a multi-hour job. Reported by review of 2026-09-05, whose point
+    was that the test claiming to cover this never put the values in.
+    """
+    try:
+        coerced = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    if coerced != coerced or coerced <= 0:  # NaN or nonsense
+        return fallback
+    return coerced
+
+
 def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
     # May 2026: default switched к qwen3-embedding:0.6b — top of MTEB
     # multilingual leaderboard. Previous default (multilingual-e5-small)
@@ -84,7 +102,7 @@ def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
     return EmbeddingsClient(
         base_url=rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
         model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
-        timeout_s=float(rag_cfg.get("embed_timeout_s", _DEFAULT_EMBED_TIMEOUT_S)),
+        timeout_s=_positive_float(rag_cfg.get("embed_timeout_s"), _DEFAULT_EMBED_TIMEOUT_S),
         keep_alive=rag_cfg.get("embed_keep_alive"),
     )
 
