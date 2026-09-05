@@ -48,8 +48,8 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-
 from cryodaq.gui.zmq_client import gui_worker_poll_in_flight
+
 
 class _Worker(Protocol):
     """Shape this module needs from a worker — matches ``ZmqCommandWorker``.

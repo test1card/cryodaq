@@ -21,8 +21,6 @@ survives a stop, and that a genuine absence of proof still refuses RUN.
 
 from __future__ import annotations
 
-import pytest
-
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import SourceOffResult

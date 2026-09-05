@@ -22,7 +22,6 @@ with no reviewed source, emergency_off returns ok=True with active_channels=[]
 but off_tier=command_only and verified_off=False, so the gate still refuses.
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest

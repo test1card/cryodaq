@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import contextlib
 
-import pytest
-
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import SourceOffResult
@@ -60,8 +58,9 @@ def _manager(driver: _Keithley) -> SafetyManager:
 
 def _admit(manager: SafetyManager, channel: str, power: float) -> None:
     """Record intent the way an accepted start does."""
-    from cryodaq.core.safety_manager import _AdmittedIntent
     import time
+
+    from cryodaq.core.safety_manager import _AdmittedIntent
 
     manager._admitted_intent[manager._resolve_channels(channel).pop()] = _AdmittedIntent(
         p_target=power,

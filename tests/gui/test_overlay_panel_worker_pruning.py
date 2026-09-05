@@ -96,7 +96,7 @@ def test_worker_b_completes_after_worker_a_was_deleted(qapp, session_epoch):
 
     # B completes while A's wrapper is still in the list and already deleted.
     panel._workers.append(first)
-    second = panel.poll(session_epoch, "B")
+    panel.poll(session_epoch, "B")
     _pump()
 
     assert panel.results == ["A", "B"], "B's callback did not run"
@@ -118,7 +118,7 @@ def test_a_still_running_worker_is_not_pruned(qapp, session_epoch):
     pending._tag = "pending"
     panel._workers.append(pending)
 
-    done = panel.poll(session_epoch, "A")
+    panel.poll(session_epoch, "A")
     _pump()
 
     assert panel.results == ["A"]

@@ -14,8 +14,6 @@ stays on screen for the rest of the sweep rather than flashing past.
 
 import math
 
-import pytest
-
 
 def _compute(t_hot: float, t_cold: float, power: float) -> tuple[float, float]:
     """The panel's own arithmetic, so the test tracks the real formula."""

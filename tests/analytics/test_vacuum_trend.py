@@ -7,7 +7,6 @@ import math
 from dataclasses import asdict
 
 import numpy as np
-import pytest
 
 from cryodaq.analytics.vacuum_trend import (
     _LOG_P_ULT_BOUND_EPS,

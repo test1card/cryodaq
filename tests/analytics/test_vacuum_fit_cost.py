@@ -11,7 +11,7 @@ import ast
 import time
 from pathlib import Path
 
-from cryodaq.analytics.vacuum_trend import _MAX_FIT_POINTS, _thin_for_fitting, VacuumTrendPredictor
+from cryodaq.analytics.vacuum_trend import _MAX_FIT_POINTS, VacuumTrendPredictor, _thin_for_fitting
 
 # Generous: the point is to catch a return to tens of seconds, not to police
 # normal variation on a loaded machine.
