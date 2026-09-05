@@ -148,4 +148,111 @@ def test_the_tool_never_opens_the_database_read_write(flag: str) -> None:
 
     source = _TOOL.read_text(encoding="utf-8")
     assert "mode=ro" in source
-    assert "sqlite3.connect(f\"file:{db_path}?mode=ro\", uri=True)" in source
+    assert 'sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)' in source
+
+
+# ---------------------------------------------------------------------------
+# Identity of what is being certified — review of 2026-09-05
+# ---------------------------------------------------------------------------
+
+
+def _run_explicit(
+    *, catalogue: Path | None = None, database: Path | None = None, root: Path
+) -> subprocess.CompletedProcess[str]:
+    argv = [sys.executable, str(_TOOL), "--root", str(root)]
+    if catalogue is not None:
+        argv += ["--catalogue", str(catalogue)]
+    if database is not None:
+        argv += ["--database", str(database)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_an_actively_written_database_outranks_a_quiescent_newer_file(
+    tmp_path: Path,
+) -> None:
+    """WAL commits need not touch the main file, so mtime alone can mislead.
+
+    Reproduces the review finding: a database still accepting committed rows
+    was passed over in favour of yesterday's file, because yesterday's got a
+    final checkpoint and today's commits were sitting in the -wal.
+    """
+    import os
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    quiescent = data_dir / "data_2026-09-04.db"
+    active = data_dir / "data_2026-09-05.db"
+    _write_database(quiescent, [])
+    _write_database(active, [])
+
+    # The active database's own mtime is OLDER than the quiescent one's...
+    os.utime(active, (1_000_000, 1_000_000))
+    os.utime(quiescent, (2_000_000, 2_000_000))
+    # ...but its WAL carries the recent commits.
+    wal = active.with_name(active.name + "-wal")
+    wal.write_bytes(b"")
+    os.utime(wal, (3_000_000, 3_000_000))
+
+    sys.path.insert(0, str(_ROOT / "tools"))
+    try:
+        import importlib
+
+        module = importlib.import_module("preflight_descriptor_catalog")
+        importlib.reload(module)
+        chosen = module._active_day_database(data_dir)
+    finally:
+        sys.path.pop(0)
+
+    assert chosen == active, (
+        f"chose {chosen.name if chosen else None}; the database with live WAL "
+        "commits must not lose to a quiescent file with a newer main mtime"
+    )
+
+
+def test_explicit_inputs_are_used_verbatim(tmp_path: Path) -> None:
+    """--root binds both sides to one tree; a deploy needs them decoupled."""
+    live = tmp_path / "live"
+    (live / "config").mkdir(parents=True)
+    (live / "data").mkdir()
+    _write_database(live / "data" / "data_2026-09-05.db", [])
+
+    candidate_catalogue = tmp_path / "candidate.yaml"
+    candidate_catalogue.write_text(_BASE_CATALOGUE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = _run_explicit(
+        catalogue=candidate_catalogue,
+        database=live / "data" / "data_2026-09-05.db",
+        root=live,
+    )
+    assert "candidate.yaml  (explicit)" in result.stdout, result.stdout
+    assert "data_2026-09-05.db  (mode=ro, explicit)" in result.stdout, result.stdout
+    # Nothing was inferred, so the tool must not hedge.
+    assert "an input was inferred" not in result.stdout
+
+
+def test_an_inferred_input_is_declared_as_a_guess(tmp_path: Path) -> None:
+    """The final OK line must not read as stronger than its inputs allow."""
+    root = tmp_path / "stand"
+    (root / "config").mkdir(parents=True)
+    (root / "data").mkdir()
+    (root / "config" / "channel_descriptors.yaml").write_text(
+        _BASE_CATALOGUE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _write_database(root / "data" / "data_2026-09-05.db", [])
+
+    result = _run(root)
+    assert "GUESSED by recency" in result.stdout, result.stdout
+    assert "an input was inferred" in result.stdout, result.stdout
+
+
+def test_a_missing_explicit_input_is_refused_not_silently_replaced(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "stand"
+    (root / "config").mkdir(parents=True)
+    (root / "data").mkdir()
+    _write_database(root / "data" / "data_2026-09-05.db", [])
+
+    result = _run_explicit(catalogue=tmp_path / "absent.yaml", root=root)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "catalogue not found" in result.stdout
