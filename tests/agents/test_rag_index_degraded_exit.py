@@ -49,39 +49,101 @@ def _run_cli(stats: dict) -> subprocess.CompletedProcess[str]:
     """)
     return subprocess.run(
         [sys.executable, "-c", program],
-        cwd=_ROOT, capture_output=True, text=True, timeout=180, check=False,
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
     )
 
 
 def test_a_clean_rebuild_still_exits_zero() -> None:
-    r = _run_cli({"chunks": 10, "embedded": 10, "failed": 0, "indexed": 10,
-                  "db_path": "x", "table": "t"})
+    r = _run_cli(
+        {"chunks": 10, "embedded": 10, "failed": 0, "indexed": 10, "promoted": True, "db_path": "x", "table": "t"}
+    )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Done:" in r.stdout
 
 
 def test_a_degraded_rebuild_exits_non_zero() -> None:
-    r = _run_cli({"chunks": 3638, "embedded": 3138, "failed": 500, "indexed": 3638,
-                  "db_path": "x", "table": "t"})
+    r = _run_cli(
+        {
+            "chunks": 3638,
+            "embedded": 3138,
+            "failed": 500,
+            "indexed": 3501,
+            "promoted": False,
+            "db_path": "x",
+            "table": "t",
+        }
+    )
     assert r.returncode == 5, f"expected 5, got {r.returncode}\n{r.stdout}{r.stderr}"
 
 
-def test_the_warning_names_the_scale_and_the_consequence() -> None:
-    """An operator must learn how much, and that it already replaced the index."""
+def test_the_warning_names_the_scale_and_that_nothing_was_lost() -> None:
+    """Rewritten 2026-09-05 after review.
 
-    r = _run_cli({"chunks": 3638, "embedded": 3138, "failed": 500, "indexed": 3638,
-                  "db_path": "x", "table": "t"})
+    This test used to require the words "already replaced" — it pinned a
+    message describing damage that had already happened. Review made the
+    point that a non-zero exit then "makes the failure visible after the
+    damage, not subject to an operator decision". The rebuild is now
+    abandoned instead, so what the operator must learn is the scale AND that
+    their working index is still there.
+    """
+
+    r = _run_cli(
+        {
+            "chunks": 3638,
+            "embedded": 3138,
+            "failed": 500,
+            "indexed": 3501,
+            "promoted": False,
+            "db_path": "x",
+            "table": "t",
+        }
+    )
     err = r.stderr
     assert "500/3638" in err
-    assert "NOT searchable" in err
-    assert "already replaced" in err
-    assert "DEGRADED" in err
+    assert "ABANDONED" in err
+    assert "NOT replaced" in err
+    assert "3501" in err, "the operator must learn what survived"
+    assert "Nothing was lost" in err
+
+
+def test_an_explicitly_requested_partial_promotion_says_so_instead() -> None:
+    """Partial promotion stays available, and must not claim nothing was lost."""
+
+    r = _run_cli(
+        {
+            "chunks": 3638,
+            "embedded": 3138,
+            "failed": 500,
+            "indexed": 3638,
+            "promoted": True,
+            "db_path": "x",
+            "table": "t",
+        }
+    )
+    err = r.stderr
+    assert r.returncode == 5
+    assert "HAS replaced" in err
+    assert "not searchable" in err.lower()
+    assert "Nothing was lost" not in err
 
 
 def test_one_failed_chunk_is_enough_to_flag_it() -> None:
     """No silent tolerance band — the operator decides what is acceptable."""
 
-    r = _run_cli({"chunks": 3638, "embedded": 3637, "failed": 1, "indexed": 3638,
-                  "db_path": "x", "table": "t"})
+    r = _run_cli(
+        {
+            "chunks": 3638,
+            "embedded": 3637,
+            "failed": 1,
+            "indexed": 3501,
+            "promoted": False,
+            "db_path": "x",
+            "table": "t",
+        }
+    )
     assert r.returncode == 5
     assert "1/3638" in r.stderr

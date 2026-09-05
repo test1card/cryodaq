@@ -62,9 +62,7 @@ def _seed_experiment(tmp_path, exp_id: str = "abc12345") -> None:
     exp_dir = tmp_path / "experiments" / exp_id
     (exp_dir / "archive" / "summaries").mkdir(parents=True)
     (exp_dir / "metadata.json").write_text(
-        json.dumps(
-            {"description": "Тестовая проба охлаждения 4К", "notes": "no incidents"}
-        )
+        json.dumps({"description": "Тестовая проба охлаждения 4К", "notes": "no incidents"})
     )
     (exp_dir / "archive" / "summaries" / "summary_metadata.json").write_text(
         json.dumps(
@@ -97,12 +95,8 @@ async def test_indexer_with_single_experiment_creates_table(tmp_path, caplog):
     assert stats["table"] == "cryodaq_corpus"
 
     # No dim-mismatch fallback must fire when mock returns _EMBEDDING_DIM vectors.
-    dim_mismatch_logs = [
-        r for r in caplog.records if "dim mismatch" in r.message.lower()
-    ]
-    assert dim_mismatch_logs == [], (
-        f"unexpected dim-mismatch warnings: {[r.message for r in dim_mismatch_logs]}"
-    )
+    dim_mismatch_logs = [r for r in caplog.records if "dim mismatch" in r.message.lower()]
+    assert dim_mismatch_logs == [], f"unexpected dim-mismatch warnings: {[r.message for r in dim_mismatch_logs]}"
 
     # Open the LanceDB table and verify the persisted row.
     db = lancedb.connect(str(db_path))
@@ -142,9 +136,16 @@ async def test_indexer_empty_embedding_counts_as_failed_not_embedded(tmp_path, c
     # An empty (timeout) embedding must NOT count as a successful embed.
     assert stats["embedded"] == 0
     assert stats["failed"] == stats["chunks"], "all failed embeddings must be counted"
-    # Rows are still written (zero vectors) to keep alignment, but the operator
-    # sees the corpus is degraded via failed count + warnings.
-    assert stats["indexed"] == stats["chunks"]
+    # Reversed deliberately on 2026-09-05, after review. This assertion used to
+    # read `stats["indexed"] == stats["chunks"]`, pinning the behaviour where a
+    # corpus of zero vectors was written and promoted over whatever was there
+    # before. A zero vector is not searchable, so that promoted an index which
+    # silently answers nothing — and the operator found out from an exit code
+    # after the useful index was already gone. The rebuild is now abandoned and
+    # the previous corpus preserved; here there is no previous corpus, so the
+    # count is zero.
+    assert stats["promoted"] is False
+    assert stats["indexed"] == 0
     assert any("FAILED" in r.message for r in caplog.records), "per-chunk failure must be logged"
     assert any("degraded" in r.message for r in caplog.records), "degraded-corpus summary must be logged"
 

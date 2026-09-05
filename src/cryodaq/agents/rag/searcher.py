@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import lancedb
 
@@ -27,6 +27,20 @@ class SearchResult:
 
 class _EmbeddingsLike(Protocol):
     async def embed(self, text: str) -> list[float]: ...
+
+
+def _index_vector_dim(table: Any) -> int | None:
+    """Width the stored index was built at, read from its own schema.
+
+    ``None`` when the schema cannot be read or the vector column is not a
+    fixed-width list — in that case the caller does not guess, it simply
+    does not enforce, and LanceDB reports any genuine mismatch itself.
+    """
+    try:
+        field = table.schema.field("vector")
+    except (KeyError, AttributeError, ValueError):
+        return None
+    return getattr(field.type, "list_size", None)
 
 
 class RagSearcher:
@@ -69,15 +83,21 @@ class RagSearcher:
         table = self._db.open_table(self._table_name)
         query_vec = await self._embeddings.embed(query)
 
-        # H9: guard query embedding dim. Indexer has warn+zero-vec
-        # fallback for dim mismatch; searcher mirrors that pattern.
-        # May 2026: switched to qwen3-embedding:0.6b (1024-dim) from
-        # multilingual-e5-small (384-dim).
-        expected_dim = 1024  # qwen3-embedding:0.6b canonical dim
-        if len(query_vec) != expected_dim:
+        # Guard the query embedding dim against THE INDEX, not against a
+        # constant. This was a hardcoded 1024 until 2026-09-05, when the
+        # corpus moved to a 4096-dim model: config and indexer agreed on
+        # 4096, the index built correctly, and every search returned
+        # nothing because the searcher still measured against 1024. A
+        # constant here can only ever restate what someone believed on the
+        # day they typed it, so read the width the index was actually
+        # built at and compare with that.
+        expected_dim = _index_vector_dim(table)
+        if expected_dim is not None and len(query_vec) != expected_dim:
             logger.warning(
-                "RAG search: query embedding dim %d != expected %d; "
-                "Ollama embedding model likely misconfigured",
+                "RAG search: query embedding dim %d != index dim %d — the "
+                "embedding model and the stored index disagree, so the corpus "
+                "must be rebuilt with the current model (or rag.embedding_model "
+                "pointed back at the one that built it)",
                 len(query_vec),
                 expected_dim,
             )
@@ -89,9 +109,7 @@ class RagSearcher:
         # kinds happened to be closer in vector space.
         query_builder = table.search(query_vec)
         if source_kind_filter:
-            quoted = ", ".join(
-                "'" + str(k).replace("'", "''") + "'" for k in source_kind_filter
-            )
+            quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in source_kind_filter)
             query_builder = query_builder.where(f"source_kind IN ({quoted})")
         rows = query_builder.limit(top_k).to_list()
 

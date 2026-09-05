@@ -61,9 +61,7 @@ def test_swap_creates_canonical_table_when_absent(tmp_path: Path) -> None:
     db = lancedb.connect(str(tmp_path / "lance"))
     rows = [_make_row(0), _make_row(1)]
 
-    table = _swap_table_atomically(
-        db, table_name="test_corpus", rows=rows, schema=_make_schema_for_test()
-    )
+    table = _swap_table_atomically(db, table_name="test_corpus", rows=rows, schema=_make_schema_for_test())
 
     assert table.count_rows() == 2
     assert "test_corpus" in db.list_tables().tables
@@ -81,9 +79,7 @@ def test_swap_replaces_existing_canonical_table(tmp_path: Path) -> None:
     db.create_table("test_corpus", data=[_make_row(99)], schema=schema)
 
     new_rows = [_make_row(0), _make_row(1), _make_row(2)]
-    table = _swap_table_atomically(
-        db, table_name="test_corpus", rows=new_rows, schema=schema
-    )
+    table = _swap_table_atomically(db, table_name="test_corpus", rows=new_rows, schema=schema)
 
     assert table.count_rows() == 3
     # Staging slot is cleaned up
@@ -105,9 +101,7 @@ def test_swap_cleans_up_orphaned_staging(tmp_path: Path) -> None:
     # Simulate orphaned staging from a prior crashed run.
     db.create_table("test_corpus__staging", data=[_make_row(99)], schema=schema)
 
-    table = _swap_table_atomically(
-        db, table_name="test_corpus", rows=[_make_row(0)], schema=schema
-    )
+    table = _swap_table_atomically(db, table_name="test_corpus", rows=[_make_row(0)], schema=schema)
 
     assert table.count_rows() == 1
     assert "test_corpus__staging" not in db.list_tables().tables
@@ -221,9 +215,7 @@ def test_chunk_text_handles_large_doc_with_embedded_code_blocks() -> None:
     doc_parts = []
     for section in range(8):
         doc_parts.append(f"## Section {section}\n")
-        doc_parts.append(
-            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 20
-        )
+        doc_parts.append("Lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 20)
         doc_parts.append(f"\n\n```python\n{code}\n```\n\n")
     text = "".join(doc_parts)
     assert len(text) > chunk_max * 5  # fixture sanity
@@ -260,9 +252,7 @@ def test_chunk_text_single_short_chunk() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_index_offloads_loaders_via_to_thread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_index_offloads_loaders_via_to_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """build_index must offload sync loaders via asyncio.to_thread so the event
     loop stays responsive while a loader blocks in its worker thread.
 
@@ -283,8 +273,8 @@ def test_build_index_offloads_loaders_via_to_thread(
     from cryodaq.agents.rag import indexer
 
     # Two threading events for loader coordination.
-    _loader_entered = threading.Event()   # set inside the blocked loader
-    _loader_release = threading.Event()   # set by the test to unblock the loader
+    _loader_entered = threading.Event()  # set inside the blocked loader
+    _loader_release = threading.Event()  # set by the test to unblock the loader
 
     original_load_vault_notes = _dl_mod.load_vault_notes
 
@@ -293,8 +283,8 @@ def test_build_index_offloads_loaders_via_to_thread(
     def _blocking_load_vault_notes(vault_dir):
         """Replacement that blocks until released — runs in worker thread."""
         seen.append("load_vault_notes")
-        _loader_entered.set()                         # signal: we are now blocked
-        _loader_release.wait(timeout=10.0)            # block until test releases us
+        _loader_entered.set()  # signal: we are now blocked
+        _loader_release.wait(timeout=10.0)  # block until test releases us
         return original_load_vault_notes(vault_dir)
 
     monkeypatch.setattr(_dl_mod, "load_vault_notes", _blocking_load_vault_notes)
@@ -329,7 +319,7 @@ def test_build_index_offloads_loaders_via_to_thread(
         async def _heartbeat() -> None:
             try:
                 while not heartbeat_done.is_set():
-                    await asyncio.sleep(0.005)   # 5 ms
+                    await asyncio.sleep(0.005)  # 5 ms
                     heartbeat_ticks[0] += 1
             except asyncio.CancelledError:
                 pass
@@ -350,7 +340,7 @@ def test_build_index_offloads_loaders_via_to_thread(
         deadline = asyncio.get_event_loop().time() + 3.0
         while not _loader_entered.is_set():
             if asyncio.get_event_loop().time() > deadline:
-                _loader_release.set()    # prevent deadlock before failing
+                _loader_release.set()  # prevent deadlock before failing
                 hb_task.cancel()
                 pytest.fail(
                     "load_vault_notes was not called within 3 s — "
@@ -361,7 +351,7 @@ def test_build_index_offloads_loaders_via_to_thread(
         # Loader is confirmed blocked in worker thread.
         # Give the heartbeat coroutine several scheduling rounds to accumulate ticks.
         for _ in range(10):
-            await asyncio.sleep(0.010)   # 10 ms per iteration → at least 2 ticks each
+            await asyncio.sleep(0.010)  # 10 ms per iteration → at least 2 ticks each
 
         # Loader is blocked in worker thread; assert heartbeat has advanced.
         ticks_while_blocked = heartbeat_ticks[0]
@@ -407,6 +397,10 @@ def test_build_index_returns_zero_stats_on_empty_corpus(tmp_path: Path) -> None:
         "embedded": 0,
         "failed": 0,
         "indexed": 0,
+        # Added 2026-09-05: callers must be able to tell a rebuild that
+        # replaced the index from one that did not. An empty corpus promotes
+        # nothing, so it reports False rather than omitting the key.
+        "promoted": False,
         "db_path": str(tmp_path / "lance"),
         "table": "cryodaq_corpus",
     }

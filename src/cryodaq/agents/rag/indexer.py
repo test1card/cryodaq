@@ -138,6 +138,7 @@ async def build_index(
     literature_dir: Path | None = None,
     procedures_dir: Path | None = None,
     reference_root: Path | None = None,
+    promote_on_partial: bool = False,
 ) -> dict:
     """Build (or rebuild) the RAG index. Returns a stats dict.
 
@@ -171,15 +172,11 @@ async def build_index(
     they do not stall the engine loop.
     """
     chunks: list[DocumentChunk] = []
-    chunks.extend(
-        await asyncio.to_thread(load_experiment_metadata, experiments_dir)
-    )
+    chunks.extend(await asyncio.to_thread(load_experiment_metadata, experiments_dir))
     if vault_dir is not None:
         chunks.extend(await asyncio.to_thread(load_vault_notes, vault_dir))
     if sqlite_path is not None:
-        chunks.extend(
-            await asyncio.to_thread(load_operator_log_entries, sqlite_path)
-        )
+        chunks.extend(await asyncio.to_thread(load_operator_log_entries, sqlite_path))
     if pdf_dir is not None:
         chunks.extend(await asyncio.to_thread(load_pdf_documents, pdf_dir))
     if literature_dir is not None:
@@ -187,17 +184,11 @@ async def build_index(
         # NIST monograph and an answer drawn from the Keithley manual are
         # different kinds of claim, and the operator has to be able to tell
         # them apart when deciding whether to trust one.
-        chunks.extend(
-            await asyncio.to_thread(load_pdf_documents, literature_dir, source_kind="literature")
-        )
+        chunks.extend(await asyncio.to_thread(load_pdf_documents, literature_dir, source_kind="literature"))
     if procedures_dir is not None:
-        chunks.extend(
-            await asyncio.to_thread(load_procedure_documents, procedures_dir)
-        )
+        chunks.extend(await asyncio.to_thread(load_procedure_documents, procedures_dir))
     if reference_root is not None:
-        chunks.extend(
-            await asyncio.to_thread(load_reference_documents, reference_root)
-        )
+        chunks.extend(await asyncio.to_thread(load_reference_documents, reference_root))
 
     logger.info("RAG: %d chunks loaded", len(chunks))
     if not chunks:
@@ -206,6 +197,7 @@ async def build_index(
             "embedded": 0,
             "failed": 0,
             "indexed": 0,
+            "promoted": False,
             "db_path": str(db_path),
             "table": table_name,
         }
@@ -264,6 +256,45 @@ async def build_index(
 
     await asyncio.to_thread(db_path.mkdir, parents=True, exist_ok=True)
     db = await asyncio.to_thread(lancedb.connect, str(db_path))
+
+    if failed_count and not promote_on_partial:
+        # Do not replace a working corpus with a damaged one. Every failed
+        # chunk is stored as a zero vector to keep row alignment, and a zero
+        # vector is not searchable — so promoting here trades an index that
+        # answers questions for one that silently cannot, and the operator
+        # learns about it from an exit code AFTER the useful index is gone.
+        # Reported by review 2026-09-05: a non-zero exit "makes the failure
+        # visible after the damage, not subject to an operator decision".
+        #
+        # The rebuild is therefore abandoned and the existing canonical table
+        # left exactly as it was. Callers that genuinely want a partial
+        # corpus ask for it by name.
+        existing = 0
+        try:
+            if table_name in (await asyncio.to_thread(db.list_tables)).tables:
+                canonical = await asyncio.to_thread(db.open_table, table_name)
+                existing = await asyncio.to_thread(canonical.count_rows)
+        except Exception:  # noqa: BLE001 — reporting only; never blocks the refusal
+            existing = 0
+        logger.error(
+            "RAG rebuild ABANDONED: %d/%d chunks failed to embed. The existing "
+            "index (%d rows) was NOT replaced. Re-run once the embedding "
+            "backend is healthy, or pass promote_on_partial=True to accept a "
+            "corpus in which those chunks are unsearchable.",
+            failed_count,
+            len(chunks),
+            existing,
+        )
+        return {
+            "chunks": len(chunks),
+            "embedded": embedded_count,
+            "failed": failed_count,
+            "indexed": existing,
+            "promoted": False,
+            "db_path": str(db_path),
+            "table": table_name,
+        }
+
     rows: list[dict[str, Any]] = [
         {
             "chunk_id": c.chunk_id,
@@ -291,6 +322,7 @@ async def build_index(
         "embedded": embedded_count,
         "failed": failed_count,
         "indexed": indexed_count,
+        "promoted": True,
         "db_path": str(db_path),
         "table": table_name,
     }
