@@ -19,6 +19,21 @@ exactly the divergence this file exists to catch, one layer down.
 
 This pins the agreement rather than the fix, because the fix is one flag and
 the hazard is the divergence.
+
+2026-09-05: the same absence covers all eight inputs of LS218_3. Т17-Т24
+(Зеркало 1/2, Подвес, Рама, Резерв 1-4) are the mirror assembly and its
+spares, and nothing is wired to that instrument yet. Measured over three days,
+every one of those channels is at or below 0.033% valid — Т19 and Т20 at
+exactly zero — out of ~21500 samples each per day, and the handful of readings
+that do carry `ok` are fixed range artefacts (475, 420, 303, 288.3 K), not
+measurements. They were already hidden in both files; this pins that, so a
+future edit cannot quietly make an uninstrumented input eligible for a formal
+plot.
+
+Т4, Т5 and Т10 are deliberately excluded from this list. They are hidden too,
+but they produce valid data — hiding them is an operator's presentation choice,
+not a physical absence, and conflating the two would turn this guard into an
+assertion that the operator may never show them again.
 """
 
 from __future__ import annotations
@@ -32,7 +47,26 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 # Not connected on this stand. Named explicitly rather than derived, so that
 # reconnecting a sensor is a deliberate edit here and not a silent drift.
-_PHYSICALLY_ABSENT = ("Т8", "Т16")
+#
+# Т8 (LS218_1) and Т16 (LS218_2) lost LEMO contacts. Т17-Т24 are every input of
+# LS218_3, an instrument with nothing wired to it at all.
+_PHYSICALLY_ABSENT = (
+    "Т8",
+    "Т16",
+    "Т17",
+    "Т18",
+    "Т19",
+    "Т20",
+    "Т21",
+    "Т22",
+    "Т23",
+    "Т24",
+)
+
+# The instrument that carries no connected sensor at all. Enumerating channels
+# cannot catch a NEW input being added to this box and left visible; the
+# instrument identity can.
+_UNINSTRUMENTED_INSTRUMENT = "LS218_3"
 
 
 _BASE_CATALOGUE = _ROOT / "config" / "channel_descriptors.yaml"
@@ -130,3 +164,31 @@ def test_the_report_gate_reads_descriptor_visibility() -> None:
     source = inspect.getsource(_visible_quantity)
     assert "visible_by_default" in source
     assert "quantity" in source
+
+
+def test_no_channel_on_the_uninstrumented_box_is_report_visible() -> None:
+    """Nothing is wired to LS218_3, so nothing on it may reach a plot.
+
+    Derived rather than enumerated on purpose, and complementary to
+    `_PHYSICALLY_ABSENT`: the list above pins the channels that exist today,
+    while this pins the box. Adding a ninth input to LS218_3 and leaving it
+    visible would pass every parametrised test above and fail here.
+
+    When the mirror sensors are actually installed, this fails — which is the
+    intent. Instrumenting the box is a deliberate edit to this file, not a
+    silent drift into plotting a channel that reports nothing.
+    """
+
+    for name, path in _catalogues():
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        on_box = [
+            entry
+            for entry in document["descriptors"]
+            if isinstance(entry, dict) and entry.get("instrument_id") == _UNINSTRUMENTED_INSTRUMENT
+        ]
+        assert on_box, f"{name} declares no {_UNINSTRUMENTED_INSTRUMENT} channels at all"
+        visible = sorted(e["channel_id"] for e in on_box if e["visible_by_default"] is not False)
+        assert not visible, (
+            f"{name}: {visible} are bound to {_UNINSTRUMENTED_INSTRUMENT}, which has no "
+            "sensor connected to any input, but are eligible for a formal plot"
+        )
