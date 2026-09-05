@@ -125,6 +125,7 @@ def index_main() -> None:
     # subdir names follow the convention ${knowledge_dir}/{equipment_manuals,procedures}.
     knowledge_dir = Path(rag_cfg.get("knowledge_dir", get_data_dir() / "knowledge")).expanduser()
     pdf_dir = knowledge_dir / "equipment_manuals"
+    literature_dir = knowledge_dir / "literature"
     procedures_dir = knowledge_dir / "procedures"
     reference_root = get_project_root()
 
@@ -138,6 +139,7 @@ def index_main() -> None:
     print(f"  vault: {vault_dir}")
     print(f"  operator_log: {sqlite_path}")
     print(f"  knowledge.pdf_dir: {pdf_dir}")
+    print(f"  knowledge.literature_dir: {literature_dir}")
     print(f"  knowledge.procedures_dir: {procedures_dir}")
     print(f"  knowledge.reference_root: {reference_root}")
 
@@ -151,6 +153,7 @@ def index_main() -> None:
                 embeddings_client=embeddings_client,
                 progress_cb=_progress,
                 pdf_dir=pdf_dir,
+                literature_dir=literature_dir,
                 procedures_dir=procedures_dir,
                 reference_root=reference_root,
                 # `rag.embedding_dim` was documented in rag.yaml.example, read

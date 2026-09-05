@@ -135,6 +135,7 @@ async def build_index(
     table_name: str = "cryodaq_corpus",
     progress_cb: Callable[[int, int], Any] | None = None,
     pdf_dir: Path | None = None,
+    literature_dir: Path | None = None,
     procedures_dir: Path | None = None,
     reference_root: Path | None = None,
 ) -> dict:
@@ -150,6 +151,9 @@ async def build_index(
 
     v0.55.7.1 (F-KnowledgeBaseExpansion) — three new optional sources:
 
+    literature_dir
+        Textbooks, review articles and standards PDFs. Indexed with
+        ``source_kind="literature"`` so a citation reports what it is.
     pdf_dir
         Knowledge corpus folder с equipment manual PDFs (e.g.
         ``data/knowledge/equipment_manuals``). Page-aware chunks via
@@ -178,6 +182,14 @@ async def build_index(
         )
     if pdf_dir is not None:
         chunks.extend(await asyncio.to_thread(load_pdf_documents, pdf_dir))
+    if literature_dir is not None:
+        # Its own source_kind, not "equipment_manual". An answer drawn from a
+        # NIST monograph and an answer drawn from the Keithley manual are
+        # different kinds of claim, and the operator has to be able to tell
+        # them apart when deciding whether to trust one.
+        chunks.extend(
+            await asyncio.to_thread(load_pdf_documents, literature_dir, source_kind="literature")
+        )
     if procedures_dir is not None:
         chunks.extend(
             await asyncio.to_thread(load_procedure_documents, procedures_dir)

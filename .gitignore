@@ -80,6 +80,15 @@ data/*
 data/knowledge/**/*.lance
 data/knowledge/**/*.cache
 
+# The literature corpus is fetched, not source-controlled. It is ~250 MB of
+# third-party PDFs, and a large part of it — the Lake Shore, Keithley, Leybold,
+# Pfeiffer, SHI, Brooks/CTI and Sumitomo documents — is vendor copyright that is
+# free to download and to index for this lab's own use, but NOT free to
+# redistribute. Pushing it to a remote is redistribution. The manifests under
+# docs/literature/ carry every source URL, so a fresh clone rebuilds the same
+# corpus with tools/fetch_literature.sh instead of inheriting the bytes.
+data/knowledge/literature/**/*.pdf
+
 # Reference curves and predictor model — operator-supplied, not source-controlled
 cooldown_v5/
 
