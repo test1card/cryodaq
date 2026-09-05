@@ -17,6 +17,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -798,6 +799,38 @@ def _event_dedup_id(event: EngineEvent) -> str | None:
     return f"alarm:{alarm_id}"
 
 
+#: Whether THIS handler's own invocation reached the model and got an answer.
+#:
+#: A ContextVar, not an attribute, because handlers run as separate asyncio
+#: tasks (`asyncio.create_task(self._safe_handle(...))`) at two-slot
+#: concurrency, and a task's context is its own. Review of 2026-09-05
+#: reproduced what an agent-wide boolean does instead: handler A generates
+#: successfully and waits in audit settlement, handler B resets the flag and
+#: takes the no-inference periodic-report path, and A's own answer is gone by
+#: the time A looks for it. The marker belongs to the invocation that earned
+#: it.
+_INFERENCE_ANSWERED: ContextVar[bool] = ContextVar("cryodaq_assistant_inference_answered", default=False)
+
+
+def _is_answered_generation(result: Any) -> bool:
+    """True only for a generation that actually produced an answer.
+
+    `OllamaClient.generate()` does NOT raise on timeout — it returns a
+    GenerationResult with empty text, zero tokens and truncated=True. So
+    "a result came back" is not evidence the model answered, and treating it
+    as such told the operator the model had recovered when it had just timed
+    out again. Review of 2026-09-05 passed that exact production timeout
+    result through the real alarm handler and watched the outage flag clear.
+    """
+    text = getattr(result, "text", "") or ""
+    if not text.strip():
+        return False
+    # A truncated result with no output tokens is the timeout shape.
+    if getattr(result, "truncated", False) and not getattr(result, "tokens_out", 0):
+        return False
+    return True
+
+
 class AssistantLiveAgent:
     """LLM agent. The operator-facing brand comes from `agent.brand_name`."""
 
@@ -834,9 +867,6 @@ class AssistantLiveAgent:
         # outage into a flood of identical Telegram messages, which is how a
         # notification stops being read.
         self._llm_unavailable_announced = False
-        # Set by _generate_tracked, read by _safe_handle: distinguishes "the
-        # model answered" from "the handler returned".
-        self._inference_answered = False
         # True only while an announcement is in flight, so a failed delivery
         # does not spend the one-shot and a concurrent event cannot double it.
         self._llm_unavailable_announcing = False
@@ -896,7 +926,8 @@ class AssistantLiveAgent:
         claim is made only where the model actually answered.
         """
         result = await self._ollama.generate(*args, **kwargs)
-        self._inference_answered = True
+        if _is_answered_generation(result):
+            _INFERENCE_ANSWERED.set(True)
         return result
         logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
@@ -1109,9 +1140,10 @@ class AssistantLiveAgent:
         dedup_id: str | None = None,
         attempt: int | None = None,
     ) -> None:
-        # Per-event, so a model call made while handling an EARLIER event
-        # cannot be read as this one having reached the model.
-        self._inference_answered = False
+        # Per-invocation, and isolated to this task's context: a model call
+        # made by a CONCURRENT handler must not be read as this one having
+        # reached the model, and this reset must not erase that handler's.
+        _INFERENCE_ANSWERED.set(False)
         """Handle one event with rate-limit + semaphore + error isolation.
 
         ``dedup_id`` carries the ledger key so the delivery OUTCOME can be
@@ -1170,7 +1202,7 @@ class AssistantLiveAgent:
                     #
                     # `_inference_answered` is set only inside
                     # `_generate_tracked`, so this now says what it means.
-                    if self._llm_unavailable_announced and self._inference_answered:
+                    if self._llm_unavailable_announced and _INFERENCE_ANSWERED.get():
                         self._llm_unavailable_announced = False
                         logger.info("AssistantLiveAgent: модель снова доступна")
                 except (OllamaUnavailableError, OllamaModelMissingError) as exc:
@@ -1683,11 +1715,18 @@ class AssistantLiveAgent:
         # cancellation during that shielded write cannot lose the fact that
         # the operator was told.
         self._llm_unavailable_announcing = True
-        delivered = False
 
         def _note_outcomes(outcomes: dict[str, Any]) -> None:
-            nonlocal delivered
-            delivered = any(_is_delivered_outcome(state) for state in outcomes.values())
+            # Record delivery HERE, not after the await unwinds. Review of
+            # 2026-09-05 cancelled the agent during audit completion, after the
+            # real router had reported successful Telegram delivery: the local
+            # variable was set, but CancelledError propagated past the
+            # assignment that followed the finally, so the flag stayed False
+            # and the next outage re-sent a warning the operator had already
+            # read. This callback runs synchronously the moment the router
+            # reports, before any further await, so nothing can unwind past it.
+            if any(_is_delivered_outcome(state) for state in outcomes.values()):
+                self._llm_unavailable_announced = True
 
         try:
             await self._dispatch_unavailable_context(
@@ -1709,9 +1748,7 @@ class AssistantLiveAgent:
         finally:
             self._llm_unavailable_announcing = False
 
-        if delivered:
-            self._llm_unavailable_announced = True
-        else:
+        if not self._llm_unavailable_announced:
             # Left un-spent deliberately: the next outage event tries again.
             logger.warning(
                 "AssistantLiveAgent: сообщение о недоступности модели НЕ доставлено — "
