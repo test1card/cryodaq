@@ -876,7 +876,34 @@ async def _run_llm_runtime(
             )
             rag_emb_client = rag_emb
             rag_searcher = RagSearcher(db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table)
-            logger.info("RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path)
+            # Name what was RESOLVED, not merely which file it came from.
+            # On 2026-09-06 the question "which embedding model is the running
+            # assistant using?" could not be answered from this log: it gave
+            # the filename and nothing else, so the answer had to be
+            # reconstructed from commit timestamps. The model, its width and
+            # the endpoint are the facts an operator or a reviewer actually
+            # needs, and they are the ones that changed.
+            logger.info(
+                "RAG searcher: инициализирован (config=%s, db=%s, model=%s, dim=%s, endpoint=%s)",
+                rag_cfg["_source"],
+                rag_db_path,
+                rag_emb_model,
+                rag_cfg.get("embedding_dim", "?"),
+                rag_emb_url,
+            )
+            if rag_cfg["_source"] == "rag.yaml.example":
+                # Falling back to the committed example is not a configuration.
+                # It points at loopback and at whatever model shipped in the
+                # repository, and until now it logged identically to a real
+                # config — same INFO line, different filename. Every assistant
+                # start from 2026-09-02 to 2026-09-05 took this path unnoticed.
+                logger.warning(
+                    "RAG searcher: используется rag.yaml.example — это committed defaults, "
+                    "а не конфигурация этой машины (model=%s, endpoint=%s). "
+                    "Создайте config/rag.yaml или config/rag.local.yaml.",
+                    rag_emb_model,
+                    rag_emb_url,
+                )
         except Exception as exc:
             logger.warning("RAG searcher: ошибка инициализации — %s", exc)
             rag_searcher = None
