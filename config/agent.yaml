@@ -11,7 +11,21 @@ agent:
     # that range and loopback, and nothing else.
     base_url: http://100.87.73.25:11437
     default_model: qwen3.8:27b
-    timeout_s: 120
+    # 120 s was sized for LFM2.5-2.6B on the local card and was left behind when
+    # the model changed — the first real Telegram question after the 2026-09-05
+    # deploy died on it, and the operator got "Произошла внутренняя ошибка".
+    #
+    # It cannot cover the work this config asks for. Measured on qwen3.8:27b:
+    #   generation   6144 tokens (_FORMAT_MAX_TOKENS) / 48 tok/s   = 128 s
+    #   prompt eval  up to 12288 ctx (_FORMAT_NUM_CTX) / 133 tok/s =  92 s
+    #   cold load    (model evicted between calls)                 =  23 s
+    # so a documentation answer over retrieved manual pages can legitimately
+    # need ~240 s. This is the INNERMOST bound of four, and it must stay under
+    # query.format_timeout_s (300) so the client returns a clean truncated
+    # result instead of being cancelled from outside:
+    #
+    #   ZMQ transport 420 > handler ~390 > format 300 > THIS 280
+    timeout_s: 280
     temperature: 0.3
     # 8192 was sized for the 4 GiB card. That constraint is gone; 32768 is the
     # figure this config carried before the card forced it down.
