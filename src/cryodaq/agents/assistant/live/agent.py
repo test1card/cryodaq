@@ -39,6 +39,7 @@ from cryodaq.agents.assistant.live.prompts import (
     format_with_brand,
 )
 from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.brand import DEFAULT_BRAND_NAME
 from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaClient,
     OllamaModelMissingError,
@@ -54,6 +55,7 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 # Retrieval, adapter fan-out and ZMQ round-trips sit between the two LLM
 # stages; the outer command bound has to cover them as well as the stages.
 _QUERY_RETRIEVAL_BUDGET_S = 30.0
+
 
 @dataclass
 class AssistantConfig:
@@ -80,7 +82,7 @@ class AssistantConfig:
     audit_retention_days: int = 90
     num_ctx: int | None = None  # Ollama context window override; None = use model default
     audit_dir: Path = field(default_factory=lambda: Path("data/agents/assistant/audit"))
-    brand_name: str = "РМКПшка"
+    brand_name: str = DEFAULT_BRAND_NAME
     brand_emoji: str = "🤖"
     periodic_report_enabled: bool = True
     periodic_report_interval_minutes: int = 60

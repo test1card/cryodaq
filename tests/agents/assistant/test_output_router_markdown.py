@@ -18,6 +18,10 @@ from cryodaq.agents.assistant.live.output_router import (
     OutputTarget,
     _markdown_to_html_for_telegram,
 )
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 
 # ---------------------------------------------------------------------------
 # Pure helper
@@ -103,7 +107,7 @@ def test_telegram_dispatch_normalizes_markdown(trigger_event):
     assert "<i>Т12</i>" in sent
     assert "*" not in sent
     # Brand prefix preserved.
-    assert sent.startswith("🤖 Гемма:")
+    assert sent.startswith(f"{DEFAULT_BRAND_EMOJI} {DEFAULT_BRAND_NAME}:")
 
 
 def test_gui_insight_keeps_raw_markdown(trigger_event):

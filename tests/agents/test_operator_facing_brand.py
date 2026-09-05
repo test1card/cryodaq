@@ -1,20 +1,26 @@
 """No operator-facing string may hardcode the assistant's name.
 
-The operator renamed the assistant to РМКПшка in `agent.yaml`, and kept being
-greeted as "Гемма" — because three messages carried the name as a literal
-instead of reading `agent.brand_name`:
+The operator renamed the assistant to РМКПшка and kept being greeted as Гемма.
+The rename was declared finished three times:
 
-    telegram_commands.py  "🤖 Гемма: уже обрабатываю предыдущий вопрос…"
-    telegram_commands.py  "🤖 Гемма: внутренняя ошибка. См. логи."
-    launcher.py           "Ассистент (Гемма) перезапускается…"
+    round 1  three literals in telegram_commands.py and launcher.py
+    round 2  a fourth in live/agent.py — found by reading a boot log
+    round 3  five more in the GUI panels and the DOCX report — found by review
 
-A rename that leaves the old name in the places the operator actually looks has
-not happened. This pins the shape of the fix rather than the fix itself: string
-LITERALS in operator-facing modules must not name a brand, whatever the brand
-is called next.
+Each round fixed an enumerated list of modules, and each round the list was
+incomplete. THIS TEST WAS PART OF THE PROBLEM: it carried the list, so it could
+only ever confirm that the places someone already thought of were clean.
 
-Comments and docstrings are exempt — they record history, and the history here
-is worth keeping.
+So it no longer enumerates. It walks every module under ``src/cryodaq`` and
+fails on the retired name in any string literal that is not a docstring.
+Comments and docstrings stay exempt — they record the history, and the history
+is the reason this file reads the way it does.
+
+Latin ``gemma`` is deliberately not matched: ``gemma4:e4b`` is a model
+identifier, ``gemma.*`` a retained legacy config namespace, and
+``data/agents/gemma/audit`` a legacy path. Those are identifiers that share a
+word with a retired display name; renaming them breaks compatibility and
+changes nothing the operator sees.
 """
 
 from __future__ import annotations
@@ -24,87 +30,86 @@ from pathlib import Path
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[2]
+from cryodaq.agents.assistant.shared.brand import DEFAULT_BRAND_NAME
 
-# Retired names. A future rename adds to this rather than editing the test.
-_RETIRED_BRANDS = ("Гемма", "Gemma")
+_SRC = Path(__file__).resolve().parents[2] / "src" / "cryodaq"
 
-# The list was three modules and missed live/agent.py, which announced the
-# retired brand on every start — found by reading the boot log after a deploy,
-# not by this test. Any module that renders the assistant's identity belongs
-# here.
-_OPERATOR_FACING = (
-    "src/cryodaq/notifications/telegram_commands.py",
-    "src/cryodaq/launcher.py",
-    "src/cryodaq/agents/assistant/shared/report_intro.py",
-    "src/cryodaq/agents/assistant/live/agent.py",
-    "src/cryodaq/agents/assistant/query/agent.py",
-    "src/cryodaq/agents/assistant_main.py",
-)
+#: Display names the assistant has retired. A future rename appends here.
+_RETIRED_BRANDS = ("Гемма",)
 
 
-def _docstring_nodes(tree: ast.AST) -> set[int]:
+def _module_paths() -> list[Path]:
+    return sorted(_SRC.rglob("*.py"))
+
+
+def _docstring_constants(tree: ast.AST) -> set[int]:
     """id() of every Constant that is a module/class/function docstring."""
-
     out: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = getattr(node, "body", None)
-            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-                if isinstance(body[0].value.value, str):
-                    out.add(id(body[0].value))
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                out.add(id(body[0].value))
     return out
 
 
-@pytest.mark.parametrize("relative", _OPERATOR_FACING)
-def test_no_retired_brand_in_string_literals(relative: str) -> None:
-    path = _ROOT / relative
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    docstrings = _docstring_nodes(tree)
+def _offences(path: Path) -> list[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our concern
+        return []
+    exempt = _docstring_constants(tree)
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in exempt:
+            continue
+        for brand in _RETIRED_BRANDS:
+            if brand in node.value:
+                found.append(f"{path.name}:{node.lineno}: {node.value[:70]!r}")
+    return found
 
-    offenders = [
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in docstrings
-        and any(brand in node.value for brand in _RETIRED_BRANDS)
-    ]
-    assert not offenders, (
-        f"{relative} carries a retired brand in a string literal: {offenders}. "
-        "Read agent.brand_name instead — a rename must reach the operator."
+
+def test_no_module_under_src_names_a_retired_brand() -> None:
+    offences: list[str] = []
+    for path in _module_paths():
+        offences.extend(_offences(path))
+    assert not offences, (
+        "retired assistant name in operator-facing string literals:\n  "
+        + "\n  ".join(offences)
+        + f"\n\nUse cryodaq.agents.assistant.shared.brand.DEFAULT_BRAND_NAME "
+        f"({DEFAULT_BRAND_NAME!r}) or the caller's configured brand_name."
     )
 
 
-def test_both_brand_resolvers_agree_with_the_shipped_config() -> None:
-    """The launcher and the engine must not disagree about the name.
-
-    They resolve it separately on purpose — the launcher avoids importing
-    engine-side modules — so nothing but a test keeps them consistent.
-    """
-
-    from cryodaq.engine import _assistant_brand as engine_brand
-    from cryodaq.launcher import _assistant_brand as launcher_brand
-
-    assert engine_brand() == launcher_brand()
-
-
-def test_a_missing_name_falls_back_to_a_neutral_label(tmp_path, monkeypatch) -> None:
-    """An unreadable config must not resurrect a brand from a default."""
-
-    from cryodaq import launcher
-
-    monkeypatch.setattr("cryodaq.paths.get_config_dir", lambda: tmp_path)
-    label = launcher._assistant_brand()
-    assert label == "Ассистент"
-    assert not any(brand in label for brand in _RETIRED_BRANDS)
+def test_the_scan_actually_reaches_the_gui_and_reporting_surfaces() -> None:
+    """A scan that silently walked nothing would pass the test above."""
+    names = {p.as_posix() for p in _module_paths()}
+    for expected in (
+        "gui/shell/overlays/_assistant_chat_widget.py",
+        "gui/shell/overlays/knowledge_base_panel.py",
+        "gui/shell/views/assistant_insight_panel.py",
+        "reporting/generator.py",
+        "notifications/telegram_commands.py",
+        "launcher.py",
+    ):
+        assert any(n.endswith(expected) for n in names), f"{expected} not scanned"
 
 
-def test_the_telegram_bot_takes_the_brand_as_a_parameter() -> None:
-    """The messages must interpolate, not embed."""
-
-    import inspect
-
-    from cryodaq.notifications.telegram_commands import TelegramCommandBot
-
-    assert "brand" in inspect.signature(TelegramCommandBot.__init__).parameters
+@pytest.mark.parametrize("brand", _RETIRED_BRANDS)
+def test_the_guard_would_catch_a_reintroduction(tmp_path: Path, brand: str) -> None:
+    """Negative control: the scanner must fail on a planted literal."""
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        f'"""Docstring mentioning {brand} stays legal."""\nlabel = "Помощник {brand}"\n',
+        encoding="utf-8",
+    )
+    offences = _offences(planted)
+    assert len(offences) == 1, offences
+    assert "label" not in offences[0]

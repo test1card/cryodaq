@@ -27,6 +27,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 from cryodaq.gui import theme
 
 logger = logging.getLogger(__name__)
@@ -122,8 +126,8 @@ class AssistantInsightPanel(QWidget):
         self,
         parent: QWidget | None = None,
         *,
-        brand_name: str = "Гемма",
-        brand_emoji: str = "🤖",
+        brand_name: str = DEFAULT_BRAND_NAME,
+        brand_emoji: str = DEFAULT_BRAND_EMOJI,
     ) -> None:
         super().__init__(parent)
         self._brand_name = brand_name

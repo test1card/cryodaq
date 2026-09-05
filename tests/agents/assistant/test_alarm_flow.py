@@ -15,6 +15,10 @@ from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAg
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult, OllamaUnavailableError
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
@@ -246,7 +250,7 @@ async def test_alarm_fired_dispatches_to_telegram(tmp_path: Path) -> None:
 
     telegram._send_to_all.assert_awaited_once()
     sent_text = telegram._send_to_all.call_args[0][0]
-    assert "🤖 Гемма:" in sent_text
+    assert f"{DEFAULT_BRAND_EMOJI} {DEFAULT_BRAND_NAME}:" in sent_text
     await agent.stop()
 
 

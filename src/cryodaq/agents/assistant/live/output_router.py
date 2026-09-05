@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from cryodaq.core.event_bus import EngineEvent, EventBus
 
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
+
 logger = logging.getLogger(__name__)
 
 # F-BotPolish — Markdown→HTML normalizer for the TELEGRAM target only.
@@ -77,8 +82,8 @@ class OutputRouter:
         *,
         telegram_bot: Any | None,
         event_bus: EventBus,
-        brand_name: str = "Гемма",
-        brand_emoji: str = "🤖",
+        brand_name: str = DEFAULT_BRAND_NAME,
+        brand_emoji: str = DEFAULT_BRAND_EMOJI,
     ) -> None:
         self._telegram = telegram_bot
         self._event_bus = event_bus

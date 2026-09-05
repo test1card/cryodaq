@@ -29,13 +29,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_NAME,
+)
 from cryodaq.gui import theme
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
 _WELCOME_TEXT = (
-    "Привет! Я Гемма, помощник по эксперименту. "
+    f"Привет! Я {DEFAULT_BRAND_NAME}, помощник по эксперименту. "
     "Спроси про температуру, давление, фазу, прогноз охлаждения или активные тревоги."
 )
 _ERROR_PREFIX = "⚠ "  # ⚠
@@ -139,7 +142,7 @@ class AssistantChatPanel(QWidget):
         root.setSpacing(theme.SPACE_3)
 
         # Header
-        header = QLabel("Помощник Гемма")
+        header = QLabel(f"Помощник {DEFAULT_BRAND_NAME}")
         title_font = QFont(theme.FONT_BODY)
         title_font.setPixelSize(theme.FONT_SIZE_XL)
         title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))

@@ -55,6 +55,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 from cryodaq.agents.rag.source_labels import prettify_source_label
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
@@ -307,7 +311,7 @@ class KnowledgeBasePanel(QWidget):
         sep.setFlags(Qt.ItemFlag.NoItemFlags)
         sep.setForeground(self.palette().mid())
         self._list.addItem(sep)
-        chat_item = QListWidgetItem("🤖 Помощник Гемма")
+        chat_item = QListWidgetItem(f"{DEFAULT_BRAND_EMOJI} Помощник {DEFAULT_BRAND_NAME}")
         chat_item.setData(Qt.ItemDataRole.UserRole, _CHAT_ITEM_ID)
         self._list.addItem(chat_item)
 
@@ -343,7 +347,7 @@ class KnowledgeBasePanel(QWidget):
         title.setStyleSheet(f"color: {theme.FOREGROUND};")
         sub = QLabel(
             "Выберите категорию слева, чтобы посмотреть документы по теме, "
-            "или откройте «Помощник Гемма» для свободного диалога."
+            f"или откройте «Помощник {DEFAULT_BRAND_NAME}» для свободного диалога."
         )
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setWordWrap(True)

@@ -20,6 +20,10 @@ from cryodaq.agents.assistant.live.prompts import (
     format_with_brand,
 )
 from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 
 # ---------------------------------------------------------------------------
 # format_with_brand
@@ -53,12 +57,23 @@ def test_telegram_prefix_uses_brand_emoji() -> None:
     assert router._prefix == "🦉 Минерва:"
 
 
-def test_telegram_prefix_default_is_gemma() -> None:
+def test_telegram_prefix_default_is_the_canonical_brand() -> None:
+    """Renamed and repointed 2026-09-05.
+
+    This was `test_telegram_prefix_default_is_gemma`, asserting the default
+    prefix is "🤖 Гемма:". The operator had already renamed the assistant, so
+    the test was pinning the retired name as the contract and would have
+    failed any correct rename — it was part of why the rename kept being
+    declared finished while the operator was still greeted as Гемма.
+
+    It now asserts against the single canonical constant, so the next rename
+    changes one line in `shared/brand.py` and this test follows it.
+    """
     router = OutputRouter(
         telegram_bot=None,
         event_bus=MagicMock(),
     )
-    assert router._prefix == "🤖 Гемма:"
+    assert router._prefix == f"{DEFAULT_BRAND_EMOJI} {DEFAULT_BRAND_NAME}:"
 
 
 # ---------------------------------------------------------------------------

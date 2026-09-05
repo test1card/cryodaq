@@ -270,7 +270,12 @@ class ReportGenerator:
                 document.add_paragraph(xml_safe(para.strip()))
         # Auto-generated marker as italicised note
         note = document.add_paragraph()
-        run = note.add_run("Аннотация сгенерирована автоматически: Гемма (gemma4:e4b).")
+        # No brand name and no model id here. This line is baked into a DOCX
+        # the operator may send outward, and both were stale: the assistant was
+        # renamed, and the model moved off gemma4:e4b entirely. A report should
+        # say that a section was machine-generated — that is the fact the reader
+        # needs — without pinning which assistant or which model produced it.
+        run = note.add_run("Аннотация сгенерирована автоматически.")
         run.italic = True
         run.font.size = Pt(11)
 

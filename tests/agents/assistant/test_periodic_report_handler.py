@@ -12,6 +12,10 @@ from cryodaq.agents.assistant.live.context_builder import ContextBuilder, Period
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.live.prompts import PERIODIC_REPORT_SYSTEM, PERIODIC_REPORT_USER
 from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.brand import (
+    DEFAULT_BRAND_EMOJI,
+    DEFAULT_BRAND_NAME,
+)
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
@@ -147,7 +151,7 @@ async def test_periodic_report_handler_dispatches_when_active(tmp_path: Path) ->
 
     telegram._send_to_all.assert_awaited_once()
     sent = telegram._send_to_all.call_args[0][0]
-    assert "🤖 Гемма (отчёт за час):" in sent
+    assert f"{DEFAULT_BRAND_EMOJI} {DEFAULT_BRAND_NAME} (отчёт за час):" in sent
     await agent.stop()
 
 
