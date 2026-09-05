@@ -866,7 +866,14 @@ async def _run_llm_runtime(
             rag_emb_model = str(rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
             if not await asyncio.to_thread(rag_db_path.is_dir):
                 raise FileNotFoundError(f"offline RAG index is absent at {rag_db_path}; run cryodaq-rag-index")
-            rag_emb = EmbeddingsClient(base_url=rag_emb_url, model=rag_emb_model)
+            # The retrieval path shares the corpus's embedding model, so it
+            # must share its residency policy too — a query that evicts the
+            # model the indexer just warmed pays the reload on the next chunk.
+            rag_emb = EmbeddingsClient(
+                base_url=rag_emb_url,
+                model=rag_emb_model,
+                keep_alive=rag_cfg.get("embed_keep_alive"),
+            )
             rag_emb_client = rag_emb
             rag_searcher = RagSearcher(db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table)
             logger.info("RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path)

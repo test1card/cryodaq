@@ -85,6 +85,7 @@ def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
         base_url=rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
         model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
         timeout_s=float(rag_cfg.get("embed_timeout_s", _DEFAULT_EMBED_TIMEOUT_S)),
+        keep_alive=rag_cfg.get("embed_keep_alive"),
     )
 
 

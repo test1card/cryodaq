@@ -129,9 +129,7 @@ def validate_private_llm_origin(base_url: str) -> str:
         if not (address.is_loopback or address in _PRIVATE_MESH_NETWORK):
             raise ValueError
     except ValueError as exc:
-        raise ValueError(
-            "Ollama base URL must target a literal loopback or private-mesh (100.64.0.0/10) host"
-        ) from exc
+        raise ValueError("Ollama base URL must target a literal loopback or private-mesh (100.64.0.0/10) host") from exc
     rendered_host = f"[{host}]" if ":" in host else host
     suffix = "" if port is None else f":{port}"
     return f"http://{rendered_host}{suffix}"
@@ -294,6 +292,7 @@ class OllamaClient:
         text: str,
         *,
         model: str = "qwen3-embedding:0.6b",
+        keep_alive: float | str | None = None,
     ) -> list[float]:
         """Call Ollama /api/embed and return the raw vector.
 
@@ -318,13 +317,26 @@ class OllamaClient:
             "model": model,
             "input": text,
             "options": {"num_ctx": _EMBED_NUM_CTX},
-            # Release the embedder the moment the vector is returned. It is
-            # needed only to turn one question into one vector (~0.1s warm),
-            # and this card has no room to keep it alongside the answering
-            # model: three resident models pushed LFM2.5 to 83% CPU and every
-            # answer then blew its stage deadline. Reloading costs ~2.9s and
-            # buys the generator its full GPU residency and context budget.
-            "keep_alive": _RELEASE_IMMEDIATELY,
+            # How long the server keeps the embedder resident after answering.
+            #
+            # The default releases it immediately, and that is RIGHT for the
+            # deployment this was written for: a 4 GB GTX 1050 Ti with no room
+            # to hold the embedder beside the answering model — three resident
+            # models pushed LFM2.5 to 83% CPU and every answer blew its stage
+            # deadline. Reloading a 0.6b embedder cost ~2.9 s and bought the
+            # generator its full GPU residency.
+            #
+            # It is WRONG for a server with room. Measured 2026-09-05 on the
+            # owner's box with qwen3-embedding:8b: releasing after every call
+            # made each embedding take 20-34 s, because each one reloaded 8B of
+            # weights. Held resident, the same call takes 0.9-1.1 s — roughly
+            # 25x. Across the 16,118-chunk corpus that is the difference
+            # between days and hours.
+            #
+            # So it is a per-deployment fact, not a constant, and the caller
+            # supplies it. The default is unchanged so no existing deployment
+            # shifts underneath itself.
+            "keep_alive": _RELEASE_IMMEDIATELY if keep_alive is None else keep_alive,
         }
         session = await self._get_session()
         t0 = time.monotonic()

@@ -39,6 +39,23 @@ rag:
   # corpus. If the server is ever made to keep the model resident, this can
   # come back down.
   embed_timeout_s: 180.0
+
+  # How long the server holds the embedder resident after a call.
+  #
+  # This was hardcoded to 0 — release immediately — which was correct when
+  # retrieval ran on the local 4 GB GTX 1050 Ti, where holding the embedder
+  # beside the answering model pushed generation onto the CPU. On the owner's
+  # server that constraint is gone and the setting is actively expensive.
+  #
+  # Measured here 2026-09-05, qwen3-embedding:8b, same machine, same corpus:
+  #   released after every call   20-34 s per embedding   (reloads 8B each time)
+  #   held resident (this value)  0.9-1.1 s per embedding  (~25x faster)
+  # /api/ps confirms 5.0 GB resident while held. Across the 16,118-chunk
+  # literature corpus that is days versus hours.
+  #
+  # Set back to 0 if retrieval ever moves to a card that cannot hold both the
+  # embedder and the answering model at once.
+  embed_keep_alive: "30m"
   db_path: "data/rag_index"
   vault_dir: "~/CryoDAQ-Vault/experiments"
 

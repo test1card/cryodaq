@@ -22,8 +22,13 @@ class EmbeddingsClient:
         base_url: str = "http://127.0.0.1:11434",
         model: str = "qwen3-embedding:0.6b",
         timeout_s: float = 30.0,
+        keep_alive: float | str | None = None,
     ) -> None:
         self._model = model
+        # None keeps the historical behaviour: release the embedder as soon as
+        # the vector is returned. Deployments with room to hold it pass a
+        # duration; see OllamaClient.embed for the measurements.
+        self._keep_alive = keep_alive
         self._client = OllamaClient(
             base_url=base_url,
             default_model=model,
@@ -35,7 +40,7 @@ class EmbeddingsClient:
         return self._model
 
     async def embed(self, text: str) -> list[float]:
-        return await self._client.embed(text, model=self._model)
+        return await self._client.embed(text, model=self._model, keep_alive=self._keep_alive)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
