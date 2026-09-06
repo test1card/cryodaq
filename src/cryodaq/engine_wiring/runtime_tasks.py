@@ -242,6 +242,18 @@ async def _alarm_v2_tick_configs(
             # the assistant's own ledger decides whether to narrate it again.
             if transition in ("TRIGGERED", "REASSERTED") and event is not None:
                 reasserted = transition == "REASSERTED"
+                # WHEN the alarm started, which for a restatement is NOT now.
+                # `event` here is the evaluator's fresh keep-active event and
+                # its triggered_at is this instant; the activation time lives
+                # on the stored event in the state manager. The assistant's
+                # periodic projection reads `triggered_at` from this payload
+                # and REPLACES its active-alarm record with what arrives
+                # (periodic_projection.py:463), so publishing the fresh value
+                # would report an eleven-hour CRITICAL as having started an
+                # hour ago — the report would be wrong about the one fact the
+                # restatement exists to convey.
+                activation = state_mgr.get_active().get(alarm_cfg.alarm_id)
+                triggered_at = event.triggered_at if activation is None else activation.triggered_at
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
                     marker = "⚠ всё ещё активна" if reasserted else "⚠"
@@ -263,7 +275,12 @@ async def _alarm_v2_tick_configs(
                             "channels": event.channels,
                             "values": event.values,
                             # Additive: the payload is free-form and consumers
-                            # that predate this key read the event unchanged.
+                            # that predate these keys read the event unchanged.
+                            # `values` stay CURRENT — the operator wants to know
+                            # what the channel reads now — while triggered_at
+                            # stays the activation. For a TRIGGERED transition
+                            # the two coincide, so this changes nothing there.
+                            "triggered_at": triggered_at,
                             "reasserted": reasserted,
                         },
                         experiment_id=experiment_manager.active_experiment_id,
