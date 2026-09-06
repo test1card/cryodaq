@@ -18,5 +18,9 @@ if [ -z "$CRYODAQ_PY" ]; then
 fi
 
 echo "=== CryoDAQ — режим эмуляции ==="
+# Same library correction as start.sh: this path had none, so a mock start
+# could hit the CXXABI failure the real one is protected from.
+. "$(dirname "$0")/scripts/cryodaq_env_library_path.sh"
+
 echo "Интерпретатор: $CRYODAQ_PY"
 CRYODAQ_MOCK=1 exec "$CRYODAQ_PY" -m cryodaq.launcher "$@"

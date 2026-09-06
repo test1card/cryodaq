@@ -79,5 +79,10 @@ def test_start_sh_exports_the_environment_library_path() -> None:
     acquisition stack, which a test must never do.
     """
     text = (_REPO_ROOT / "start.sh").read_text(encoding="utf-8")
-    assert "LD_LIBRARY_PATH" in text, "start.sh no longer exports the environment's lib path"
-    assert "CRYODAQ_ENV_LIB" in text
+    assert "scripts/cryodaq_env_library_path.sh" in text, "start.sh no longer applies the library correction"
+    helper = (_REPO_ROOT / "scripts" / "cryodaq_env_library_path.sh").read_text(encoding="utf-8")
+    assert "LD_LIBRARY_PATH" in helper
+    # Reading a script only proves the words are there. What the selection
+    # actually DOES is exercised in tests/storage/test_env_library_path_selection.py,
+    # which was added after review found a rule that read correctly and behaved
+    # wrong in the configuration that mattered.

@@ -38,12 +38,12 @@ fi
 # An `import sqlite3` inside the package was tried first and rejected: it fixes
 # only the order where cryodaq is imported first, and a caller that reaches
 # pyarrow before cryodaq still fails. This fixes the cause instead.
-if [ "$CRYODAQ_PY" != "$(command -v python3 || true)" ]; then
-    CRYODAQ_ENV_LIB="$(dirname "$(dirname "$CRYODAQ_PY")")/lib"
-    if [ -d "$CRYODAQ_ENV_LIB" ]; then
-        export LD_LIBRARY_PATH="$CRYODAQ_ENV_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    fi
-fi
+# The selection rule and the measurement behind it live in the helper, which
+# start_mock.sh sources too so the two boot paths cannot drift apart. The
+# guard that used to stand here compared the interpreter to `command -v
+# python3` and therefore skipped the correction whenever the environment was
+# properly activated — see the helper for the reviewer's measurement.
+. "$(dirname "$0")/scripts/cryodaq_env_library_path.sh"
 
 
 # Print a traceback when a NATIVE fault kills a process (SIGBUS, SIGSEGV).
