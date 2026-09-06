@@ -124,7 +124,7 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
 # AlarmTransition
 # ---------------------------------------------------------------------------
 
-AlarmTransition = Literal["TRIGGERED", "CLEARED"]
+AlarmTransition = Literal["TRIGGERED", "REASSERTED", "CLEARED"]
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +157,13 @@ class SetpointProvider:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_RATE_WINDOW_S = 120.0
+# PI-11: how long an active CRITICAL may stay silent before it restates itself.
+# One hour, matching the cadence of the periodic report the operator already
+# lives with: an eleven-hour condition then produces eleven reminders rather
+# than the hundred and thirty-two a five-minute floor would send. This is an
+# operator preference, not a safety constant — override it per alarm with
+# `reassert_after_s` in alarms_v3.yaml, or set that to null to silence one.
+_DEFAULT_REASSERT_AFTER_S = 3600.0
 
 
 def _channel_alarms_enabled(channel: str) -> bool:
@@ -698,13 +705,44 @@ class AlarmStateManager:
         Время первого срабатывания условия (для sustained check).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, reassert_after_s: float | None = _DEFAULT_REASSERT_AFTER_S) -> None:
         self._active: dict[str, AlarmEvent] = {}
         self._sustained_since: dict[str, float] = {}
         self._state_revision = 0
         self._activation_sequence = 0
+        self._reassert_after_s = reassert_after_s
+        # When each alarm last produced a NOTIFICATION — its TRIGGERED, or its
+        # most recent REASSERTED. Not the activation time: the interval is
+        # measured against the last thing the operator was actually told, which
+        # is what "I have not heard about this in an hour" means.
+        self._last_notified: dict[str, float] = {}
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
+
+    def _reassert_interval(self, event: AlarmEvent, config: dict) -> float | None:
+        """Seconds of silence after which an active alarm restates itself.
+
+        ``None`` disables restatement. A per-alarm ``reassert_after_s`` wins
+        over the manager default, and an explicit null or non-positive value in
+        either place turns it off for that alarm.
+
+        Absent a per-alarm setting only CRITICAL restates. A WARNING that stays
+        true for eleven hours is a condition the operator has already seen and
+        chosen to live with; restating it hourly would be exactly the noise the
+        dedup ledger exists to prevent.
+        """
+        if "reassert_after_s" in config:
+            interval = config.get("reassert_after_s")
+        elif event.level == "CRITICAL":
+            interval = self._reassert_after_s
+        else:
+            return None
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+            return None
+        interval = float(interval)
+        if not math.isfinite(interval) or interval <= 0.0:
+            return None
+        return interval
 
     @property
     def state_revision(self) -> int:
@@ -743,12 +781,56 @@ class AlarmStateManager:
 
         # A successful fresh event removes the error marker without creating a
         # duplicate activation or notification.
+        #
+        # PI-11: this return is where a still-active alarm went silent forever.
+        # The evaluator does keep producing keep-active events every cycle (see
+        # the deadband branch of _eval_threshold), so the events exist — this
+        # swallowed all of them, and the assistant's escalation floor, built for
+        # exactly this case and measured in elapsed time, was starved of the
+        # events it needs. Observed: `vacuum_loss_cold [CRITICAL]` appears
+        # exactly ONCE in the 2026-09-03 engine log while the condition held for
+        # the rest of the day and the safety manager stayed latched for eleven
+        # hours. To an operator, silence in Telegram is indistinguishable from
+        # the alarm having cleared.
+        #
+        # A restatement is NOT a new activation: `activation_id` is untouched so
+        # acknowledgement identity stays stable, and the history record says
+        # REASSERTED so activation counts do not double.
         if event is not None and alarm_id in self._active:
             active_event = self._active[alarm_id]
             if active_event.evaluator_error:
                 active_event.evaluator_error = False
                 self._mark_active_mutation()
-            return None
+            interval = self._reassert_interval(active_event, config)
+            if interval is None:
+                return None
+            now = time.time()
+            last = self._last_notified.get(alarm_id)
+            if last is None:
+                # Active with no notification on record — an alarm restored into
+                # a fresh manager, say. Anchor the interval now rather than
+                # restating instantly on the first tick after startup.
+                self._last_notified[alarm_id] = now
+                return None
+            if now - last < interval:
+                return None
+            self._last_notified[alarm_id] = now
+            self._history.append(
+                {
+                    "alarm_id": alarm_id,
+                    "transition": "REASSERTED",
+                    "at": now,
+                    "level": active_event.level,
+                    "message": active_event.message,
+                }
+            )
+            logger.info(
+                "ALARM REASSERTED: %s [%s] still active after %.0fs",
+                alarm_id,
+                active_event.level,
+                now - active_event.triggered_at,
+            )
+            return "REASSERTED"
 
         # --- Условие сработало ---
         if event is not None:
@@ -772,6 +854,7 @@ class AlarmStateManager:
             self._activation_sequence += 1
             stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
+            self._last_notified[alarm_id] = stored_event.triggered_at
             self._mark_active_mutation()
             self._history.append(
                 {
@@ -803,6 +886,7 @@ class AlarmStateManager:
                 return None  # Ещё в зоне гистерезиса
 
             old_event = self._active.pop(alarm_id)
+            self._last_notified.pop(alarm_id, None)
             self._mark_active_mutation()
             self._history.append(
                 {

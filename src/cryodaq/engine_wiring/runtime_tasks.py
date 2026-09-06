@@ -233,10 +233,19 @@ async def _alarm_v2_tick_configs(
             # by the real production logic. Out-of-phase returns
             # (None, None) after clearing, so nothing dispatches below.
             event, transition = tick_alarm(alarm_cfg, current_phase, evaluator, state_mgr)
-            if transition == "TRIGGERED" and event is not None:
+            # PI-11: REASSERTED travels the same path as TRIGGERED. It is the
+            # engine restating that an alarm is STILL active, for a condition
+            # that fires once and then simply stays true — alarm_v2 publishes on
+            # the transition only, so without this the operator hears about an
+            # eleven-hour CRITICAL exactly once and cannot tell continued
+            # silence from the alarm having cleared. The engine states the fact;
+            # the assistant's own ledger decides whether to narrate it again.
+            if transition in ("TRIGGERED", "REASSERTED") and event is not None:
+                reasserted = transition == "REASSERTED"
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
-                    msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                    marker = "⚠ всё ещё активна" if reasserted else "⚠"
+                    msg = f"{marker} [{event.level}] {event.alarm_id}\n{event.message}"
                     t = asyncio.create_task(
                         telegram_bot._send_to_all(msg),
                         name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
@@ -253,6 +262,9 @@ async def _alarm_v2_tick_configs(
                             "message": event.message,
                             "channels": event.channels,
                             "values": event.values,
+                            # Additive: the payload is free-form and consumers
+                            # that predate this key read the event unchanged.
+                            "reasserted": reasserted,
                         },
                         experiment_id=experiment_manager.active_experiment_id,
                     )

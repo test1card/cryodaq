@@ -139,7 +139,12 @@ def _valid_v2_history(history: object) -> bool:
         transition = row.get("transition")
         if type(transition) is not str:
             return False
-        if transition in {"TRIGGERED", "SEVERITY_UPGRADED"}:
+        # PI-11: REASSERTED carries the same shape as TRIGGERED — it is the
+        # engine restating that an alarm is still active, not a new activation.
+        # It must be admitted here: this validator rejects the WHOLE history
+        # payload on one unknown transition, so omitting it would blank the
+        # operator's alarm history the first time a CRITICAL held for an hour.
+        if transition in {"TRIGGERED", "SEVERITY_UPGRADED", "REASSERTED"}:
             expected_keys = {"alarm_id", "transition", "at", "level", "message"}
         elif transition == "CLEARED":
             expected_keys = {"alarm_id", "transition", "at", "level"}
@@ -160,7 +165,7 @@ def _valid_v2_history(history: object) -> bool:
             or float(timestamp) < 0.0
         ):
             return False
-        if transition in {"TRIGGERED", "SEVERITY_UPGRADED"} and not _valid_v2_text(
+        if transition in {"TRIGGERED", "SEVERITY_UPGRADED", "REASSERTED"} and not _valid_v2_text(
             row.get("message"), max_chars=_MAX_V2_MESSAGE
         ):
             return False

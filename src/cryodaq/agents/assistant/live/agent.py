@@ -284,7 +284,14 @@ class _EventDedup:
       The silence of a steady one is not bounded here and cannot be, because
       the fact "this alarm is still active" is owned by the alarm engine and
       this ledger only ever sees what that engine chooses to publish.
-      PI-11's remaining scope is exactly that gap.
+
+      CLOSED 2026-09-06, on the side that owns the fact: `AlarmStateManager`
+      now returns a REASSERTED transition for an alarm still active past its
+      `reassert_after_s` (one hour by default, CRITICAL only), and the engine
+      publishes it down the same `alarm_fired` path. So this gate does now see
+      a steady alarm again — and because a restatement arrives long after the
+      escalation floor, it is admitted rather than suppressed. The engine
+      states the fact; this ledger still decides whether to narrate it.
 
     Only CRITICAL ``alarm_fired`` events reach this gate -- ``_should_handle``
     filters the rest -- so there is no lower severity here to treat differently.
