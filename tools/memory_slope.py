@@ -32,6 +32,17 @@ from pathlib import Path
 MIB = 1024.0
 
 
+# A PID is reused, and the sampler records `etime_s`, so a lifetime boundary is
+# observable. Two tolerances rather than one, because either alone has a hole:
+# a reuse fast enough to keep the implied start close is caught by the elapsed
+# time going backwards, and a clock adjustment that leaves elapsed time
+# monotonic is caught by the implied start moving. Neither is an equality test —
+# `timestamp - etime_s` is a float difference against a value the sampler
+# rounds, so comparing it exactly would split a single lifetime into hundreds.
+_LIFETIME_START_TOLERANCE_S = 60.0
+_ELAPSED_REGRESSION_TOLERANCE_S = 5.0
+
+
 @dataclass(frozen=True, slots=True)
 class Point:
     t: float
@@ -39,6 +50,7 @@ class Point:
     threads: int
     fds: int
     iso: str
+    etime_s: float = 0.0
 
 
 def _slope_mib_per_hour(points: list[Point]) -> float | None:
@@ -61,8 +73,30 @@ def _slope_mib_per_hour(points: list[Point]) -> float | None:
     return sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / denominator
 
 
-def load(path: Path) -> dict[tuple[str, int], list[Point]]:
-    series: dict[tuple[str, int], list[Point]] = defaultdict(list)
+def _is_new_lifetime(previous: Point, current: Point) -> bool:
+    """Whether `current` belongs to a different process than `previous`.
+
+    Same role, same PID, different process. Reviewer finding, 2026-09-06: with
+    lifetimes merged, a flat 100 MiB run followed by a flat 400 MiB run on a
+    reused PID reported 77.14 MiB/hour of growth that never happened.
+    """
+    if current.etime_s < previous.etime_s - _ELAPSED_REGRESSION_TOLERANCE_S:
+        return True
+    return abs((current.t - current.etime_s) - (previous.t - previous.etime_s)) > _LIFETIME_START_TOLERANCE_S
+
+
+def _split_lifetimes(points: list[Point]) -> list[list[Point]]:
+    lifetimes: list[list[Point]] = [[]]
+    for point in points:
+        if lifetimes[-1] and _is_new_lifetime(lifetimes[-1][-1], point):
+            lifetimes.append([])
+        lifetimes[-1].append(point)
+    return [lifetime for lifetime in lifetimes if lifetime]
+
+
+def load(path: Path) -> dict[tuple[str, int, int], list[Point]]:
+    """Samples grouped per PROCESS, not per PID — see _is_new_lifetime."""
+    raw: dict[tuple[str, int], list[Point]] = defaultdict(list)
     with path.open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             try:
@@ -73,6 +107,7 @@ def load(path: Path) -> dict[tuple[str, int], list[Point]]:
                     threads=int(row["threads"] or 0),
                     fds=int(row["open_fds"] or 0),
                     iso=row["iso"],
+                    etime_s=float(row["etime_s"]),
                 )
             except (KeyError, TypeError, ValueError):
                 # A truncated final row is normal: the sampler appends while
@@ -84,9 +119,12 @@ def load(path: Path) -> dict[tuple[str, int], list[Point]]:
                 # so a torn tail row like `...,gui,4` invented a phantom
                 # incarnation `('gui', 4)` with no samples in it.
                 continue
-            series[key].append(point)
-    for points in series.values():
+            raw[key].append(point)
+    series: dict[tuple[str, int, int], list[Point]] = {}
+    for (role, pid), points in raw.items():
         points.sort(key=lambda p: p.t)
+        for index, lifetime in enumerate(_split_lifetimes(points)):
+            series[(role, pid, index)] = lifetime
     return series
 
 
@@ -95,7 +133,7 @@ def _window(points: list[Point], *, last_hours: float) -> list[Point]:
     return [p for p in points if p.t >= cutoff]
 
 
-def report(series: dict[tuple[str, int], list[Point]], *, min_hours: float, pid: int | None) -> None:
+def report(series: dict[tuple[str, int, int], list[Point]], *, min_hours: float, pid: int | None) -> None:
     rows = sorted(series.items(), key=lambda kv: kv[1][0].t)
     header = (
         f"{'роль':<10} {'pid':>8} {'старт':>17} {'ч':>6} "
@@ -103,7 +141,7 @@ def report(series: dict[tuple[str, int], list[Point]], *, min_hours: float, pid:
     )
     print(header)
     print("-" * len(header))
-    for (role, process_id), points in rows:
+    for (role, process_id, _lifetime), points in rows:
         hours = (points[-1].t - points[0].t) / 3600.0
         if hours < min_hours or (pid is not None and process_id != pid):
             continue
@@ -119,10 +157,11 @@ def report(series: dict[tuple[str, int], list[Point]], *, min_hours: float, pid:
         )
     print()
     print(
-        "Наклон за последние 5 часов — главное число: он отделяет процесс, "
-        "который вырос и встал, от того, который растёт без предела. Плоские "
-        "потоки и дескрипторы при растущем RSS означают кучу, а не утёкший "
-        "хэндл."
+        "Наклон за последние 5 часов отделяет процесс, который вырос и встал, "
+        "от того, который продолжает расти. Он описывает НАБЛЮДЁННОЕ окно и "
+        "не доказывает ни безграничного роста, ни отсутствия утечки. Плоские "
+        "потоки и дескрипторы при растущем RSS говорят, что искать надо не "
+        "утёкший хэндл; RSS при этом не равен куче."
     )
 
 
