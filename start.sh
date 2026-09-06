@@ -17,6 +17,34 @@ if [ -z "$CRYODAQ_PY" ]; then
     exit 1
 fi
 
+# Put the environment's own libstdc++ ahead of the system one.
+#
+# MEASURED on lab53, 2026-09-06, in a clean interpreter:
+#
+#     import pyarrow   -> binds /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.30
+#     import sqlite3   -> binds <env>/lib/libstdc++.so.6.0.36
+#
+#     import pyarrow; import sqlite3  -> ImportError: libstdc++.so.6:
+#         version `CXXABI_1.3.15' not found (required by libicui18n.so.78)
+#     import sqlite3; import pyarrow  -> fine
+#
+# The system libstdc++ is older than what this environment's libicui18n needs,
+# so whichever of the two loads FIRST decides whether sqlite3 can load at all.
+# `storage/cold_rotation.py` imports pyarrow before sqlite3 and therefore cannot
+# be imported on its own; the stack survives only because `engine.py` happens to
+# reach sqlite3 first. That is an accident of line order, not a guarantee, and a
+# new entry point with the other order would fail at start.
+#
+# An `import sqlite3` inside the package was tried first and rejected: it fixes
+# only the order where cryodaq is imported first, and a caller that reaches
+# pyarrow before cryodaq still fails. This fixes the cause instead.
+if [ "$CRYODAQ_PY" != "$(command -v python3 || true)" ]; then
+    CRYODAQ_ENV_LIB="$(dirname "$(dirname "$CRYODAQ_PY")")/lib"
+    if [ -d "$CRYODAQ_ENV_LIB" ]; then
+        export LD_LIBRARY_PATH="$CRYODAQ_ENV_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+fi
+
 
 # Print a traceback when a NATIVE fault kills a process (SIGBUS, SIGSEGV).
 # The engine died with SIGBUS six times on 2026-09-02 and left no evidence:

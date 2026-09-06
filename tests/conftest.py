@@ -41,3 +41,51 @@ if sys.platform == "win32":  # pragma: win32 cover
 
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             yield runner
+
+
+# --- the environment's own libstdc++, exactly as start.sh arranges it --------
+#
+# Tests must run in the environment production runs in. `start.sh` puts the
+# interpreter's own lib directory ahead of the system one, because pyarrow binds
+# the SYSTEM libstdc++ and this environment's libicui18n — which sqlite3 needs —
+# requires a newer CXXABI than that library carries. Whichever loads first
+# decides whether sqlite3 can load at all.
+#
+# Without this, any test that spawns a fresh interpreter inherits a pytest
+# environment that production never has, and fails on an import the running
+# stand performs successfully every start. That is precisely how
+# `test_engine_wiring_submodules_import_without_engine_reverse_cycle` failed,
+# and why it was written off as "environmental" for days.
+#
+# `tests/storage/test_libstdcxx_import_order.py` deliberately clears the
+# variable for its control case, so this does not hide the underlying fragility.
+def _put_environment_library_path_first() -> None:
+    import os
+    import sys
+    from pathlib import Path as _Path
+
+    env_lib = _Path(sys.executable).parent.parent / "lib"
+    if not env_lib.is_dir():
+        return
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    if str(env_lib) in entries:
+        return
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([str(env_lib), *entries]) if entries else str(env_lib)
+
+
+_put_environment_library_path_first()
+
+# LD_LIBRARY_PATH only reaches CHILD processes: glibc fixes this process's
+# search path at exec, so setting the variable now does nothing for imports
+# performed here. Collection still imports test modules in THIS process, and a
+# module that reaches pyarrow first still breaks every later `import sqlite3` —
+# 118 collection errors, seen the moment test order was left unpinned.
+#
+# Importing sqlite3 here closes that half. This is NOT the package-level import
+# that was tried and rejected: inside `cryodaq/__init__.py` it fixed only the
+# order where cryodaq is imported first, because a caller could always reach
+# pyarrow before it. conftest is different — pytest loads it BEFORE any test
+# module, so the environment's libstdc++ is always bound first, with no order
+# left for a caller to lose.
+import sqlite3 as _sqlite3_bound_before_any_test_module  # noqa: E402,F401
