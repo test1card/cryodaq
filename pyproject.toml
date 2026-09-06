@@ -123,6 +123,26 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-m 'not ollama'"
+# A hanging test must FAIL, not stop the world.
+#
+# pytest-timeout has been a declared dependency since this file was written and
+# was never configured, so a test that blocks forever simply blocks forever. On
+# 2026-09-06 that cost a full-suite result twice over: a run sat for an hour and
+# 45 minutes at 4957 passed, indistinguishable from "still going", until it was
+# interrupted by hand and the stack read. The hang was
+# test_target_update_cannot_report_success_after_emergency_off_authority, which
+# reproduces on its own.
+#
+# 600 s is generous on purpose. The point is that the suite always terminates
+# and always names the culprit, not that tests are held to a speed limit — the
+# slowest legitimate FILE in this repository takes about 900 s, and its
+# individual tests are far below this. Raise it if a real test ever needs more;
+# do not remove it.
+#
+# The default `signal` method is deliberate: it raises inside the test so the
+# run continues to the next one. `thread` kills the process, which turns one
+# hang into no result at all — the very thing this exists to prevent.
+timeout = 600
 markers = [
     "smoke: requires live external services (ollama, instruments); excluded from default CI",
     "ollama: requires a live Ollama HTTP server on localhost:11434. Skipped by default. Run with: pytest -m ollama",
