@@ -178,9 +178,42 @@ class _AcceptingWriter:
         return True
 
 
+def _plugins_dir_with_bound_thermal_calculator(tmp_path: Path) -> Path:
+    """A plugins directory this test owns, with the sensor pair bound.
+
+    The test used to point PluginPipeline at the repository's live `plugins/`
+    directory, so it depended on the OPERATOR's configuration. On 2026-09-04
+    the operator deliberately unbound the pair — `hot_sensor: ""`,
+    `cold_sensor: ""`, and the standing watch instructions state that
+    ThermalCalculator "ships unbound by design", because R_thermal is
+    meaningless until a real hot/cold pair is chosen for the actual assembly.
+
+    From then on this test could never see `analytics/thermal_calculator/
+    R_thermal`: the raw readings still arrived, and only the derived metric
+    never came, which is exactly how it failed. A test that asserts a derived
+    value must supply the configuration that derives it; asserting against
+    operator config makes the operator's choice a test failure.
+    """
+    import shutil
+
+    plugins = tmp_path / "plugins"
+    shutil.copytree(ROOT / "plugins", plugins, ignore=shutil.ignore_patterns("__pycache__"))
+    config_path = plugins / "thermal_calculator.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    # Stable channel IDs, not display names. The plugin refuses a display name
+    # outright now — "похоже на идентификатор с приписанным именем; используйте
+    # 'Т1'" — because on 2026-09-02 a rename silently disabled the calculation
+    # for seven hours. The test must configure it the way the operator has to.
+    config["hot_sensor"] = "Т1"
+    config["cold_sensor"] = "Т7"
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    return plugins
+
+
 async def test_external_process_reaches_published_thermal_calculator_result(
     external_simulator: ExternalMockInstrumentClient,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     context = DriverConstructionContext(mock=True, mock_instrument_client=external_simulator)
     lakeshore = construct_driver(_lakeshore_config(), context)
@@ -197,7 +230,7 @@ async def test_external_process_reaches_published_thermal_calculator_result(
         "thermal_simulator_result",
         filter_fn=lambda reading: reading.channel == "analytics/thermal_calculator/R_thermal",
     )
-    pipeline = PluginPipeline(broker, ROOT / "plugins", batch_interval_s=0.01)
+    pipeline = PluginPipeline(broker, _plugins_dir_with_bound_thermal_calculator(tmp_path), batch_interval_s=0.01)
     safety_broker = SafetyBroker()
     binding = runtime_binding_for_driver(keithley)
     assert binding is not None
@@ -294,8 +327,11 @@ async def test_external_process_reaches_published_thermal_calculator_result(
             assert product_result.unit == "K/W"
             assert product_result.metadata["source"] == "analytics"
             assert product_result.metadata["plugin_id"] == "thermal_calculator"
-            assert product_result.metadata["hot_sensor"] == "Т1 Криостат верх"
-            assert product_result.metadata["cold_sensor"] == "Т7 Детектор"
+            # The metadata carries the stable ID, not the display name. That is
+            # the point of the 2026-09-02 hardening: a renamed channel must not
+            # change what the record says the calculation was bound to.
+            assert product_result.metadata["hot_sensor"] == "Т1"
+            assert product_result.metadata["cold_sensor"] == "Т7"
             assert product_result.metadata["heater_channel"] == "Keithley_1/smua/power"
 
         stop_result = await safety_manager.emergency_off(channel="smua")
