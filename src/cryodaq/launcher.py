@@ -72,6 +72,13 @@ from cryodaq.gui.zmq_client import (
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 from cryodaq.operator_snapshot import SnapshotMode
+from cryodaq.diagnostics.memory_profile import (
+    MemoryProfileSampler,
+    interval_s as memory_profile_interval_s,
+)
+from cryodaq.diagnostics.memory_profile import (
+    profiling_requested as memory_profiling_requested,
+)
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -2503,6 +2510,47 @@ class LauncherWindow(QMainWindow):
             from cryodaq.paths import get_data_dir
 
             self._assistant_periodic_data_dir = get_data_dir()
+        # Opt-in memory profiling, off unless CRYODAQ_MEMORY_PROFILE is set.
+        #
+        # The engine has had this since it was written; the launcher never did,
+        # and the launcher is the process that grows. Measured across sixteen
+        # incarnations 2026-09-01..06: the engine's trailing slope is 0.06-2.0
+        # MiB/h and flat, the assistant grows and settles near 410-430 MiB, the
+        # launcher keeps rising with no plateau at 21 or at 25 hours. Review's
+        # next step was to profile ONE correctly identified launcher and find
+        # out whether the growing allocations are Python objects at all — which
+        # could not be done, because the only process carrying a profiler was
+        # the one that does not grow.
+        #
+        # A QTimer rather than the engine's asyncio task, because this process
+        # has no such loop. The capture runs on a worker thread: taking and
+        # dumping a snapshot of a large heap is slow enough to be seen as a
+        # freeze, and a diagnostic must not change the behaviour of the thing it
+        # is measuring.
+        self._memory_profile_sampler: MemoryProfileSampler | None = None
+        self._memory_profile_timer: QTimer | None = None
+        if memory_profiling_requested():
+            from cryodaq.paths import get_data_dir
+
+            self._memory_profile_sampler = MemoryProfileSampler(
+                get_data_dir() / "diagnostics" / "memprofile",
+                process_label="launcher",
+            )
+            # Tracing starts HERE, in the constructor, rather than after the
+            # window is up: everything allocated before it starts is invisible
+            # to the diff, and the widgets built during construction are among
+            # the things a growth investigation would want to see named.
+            self._memory_profile_sampler.start_tracing()
+            self._memory_profile_sampler.prepare()
+            self._memory_profile_timer = QTimer(self)
+            self._memory_profile_timer.setInterval(max(1, int(memory_profile_interval_s() * 1000)))
+            self._memory_profile_timer.timeout.connect(self._capture_memory_profile)
+            self._memory_profile_timer.start()
+            logger.info(
+                "memory profile: enabled for launcher, every %.0f s, writing to %s",
+                memory_profile_interval_s(),
+                self._memory_profile_sampler.output_dir,
+            )
         self._periodic_health_read_failed_logged = False
         self._periodic_reporting_fault: bool | None = None if self._assistant_periodic_requested else False
         self._assistant_restart_attempts: int = 0
@@ -8488,6 +8536,23 @@ class LauncherWindow(QMainWindow):
         if not self._alarm_timer.isActive():
             QApplication.beep()  # sound immediately, don't wait 2s
             self._alarm_timer.start()
+
+    def _capture_memory_profile(self) -> None:
+        """Take one sample off the GUI thread.
+
+        A snapshot of a large heap takes long enough to be seen as a freeze, and
+        a diagnostic that changes the responsiveness of the process it measures
+        is measuring something else. `capture` never raises, so nothing here
+        needs to guard the thread.
+        """
+        sampler = self._memory_profile_sampler
+        if sampler is None:
+            return
+        threading.Thread(
+            target=sampler.capture,
+            name="cryodaq-memory-profile",
+            daemon=True,
+        ).start()
 
     def _beep_if_runtime_current(self) -> None:
         if LauncherWindow._runtime_callback_is_current(self):

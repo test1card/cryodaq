@@ -158,57 +158,78 @@ def _write_diff(path: Path, current: tracemalloc.Snapshot, previous_dump: Path, 
     del previous
 
 
-async def memory_profile_loop(output_dir: Path, *, process_label: str = "engine") -> None:
-    """Sample Python allocations and process totals until cancelled."""
-    if not tracemalloc.is_tracing():
-        # Start tracing here rather than requiring PYTHONTRACEMALLOC. That
-        # variable is inherited by every child the launcher spawns, so the GUI
-        # and the assistant would pay the overhead too — and their RSS is
-        # exactly what has to stay clean for per-process attribution. Starting
-        # here misses allocations made before this point, which does not matter:
-        # the question is what GROWS over the next hours, not what the baseline
-        # was.
+class MemoryProfileSampler:
+    """One process's profiling state, driven by whatever clock the host has.
+
+    The engine has an asyncio supervisor and drives this from a task; the
+    launcher is a Qt application with no such loop and drives it from a QTimer
+    on a worker thread. Both call `capture`, so the two cannot drift apart in
+    what they write or how they name it — which matters, because the whole
+    point of profiling the launcher is comparing it against the engine.
+    """
+
+    def __init__(self, output_dir: Path, *, process_label: str = "engine") -> None:
+        self._root = Path(output_dir)
+        self._label = process_label
+        self._index = 0
+        self._previous_dump: Path | None = None
+
+    @property
+    def output_dir(self) -> Path:
+        return self._root
+
+    def start_tracing(self) -> None:
+        """Begin tracing in THIS process, and say so.
+
+        Deliberately not PYTHONTRACEMALLOC: that variable is inherited by every
+        child the launcher spawns, so enabling it for one process would make
+        every other process pay the overhead — and their RSS is exactly what has
+        to stay clean for per-process attribution. Starting here misses
+        allocations made before this point, which does not matter: the question
+        is what GROWS over the next hours, not what the baseline was.
+        """
+        if tracemalloc.is_tracing():
+            return
         tracemalloc.start(_FRAME_DEPTH)
         logger.info(
-            "memory profile: tracemalloc started in-process at depth %d (allocations before this point are not traced)",
+            "memory profile: tracemalloc started in-process at depth %d "
+            "(allocations before this point are not traced)",
             _FRAME_DEPTH,
         )
-    root = Path(output_dir)
-    await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
-    period = interval_s()
-    previous_dump: Path | None = None
-    index = 0
-    logger.info(
-        "memory profile: enabled for %s, every %.0f s, writing to %s",
-        process_label,
-        period,
-        root,
-    )
-    while True:
-        await asyncio.sleep(period)
-        index += 1
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-        label = f"{process_label} #{index} at {stamp} (pid {os.getpid()})"
+
+    def prepare(self) -> None:
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def capture(self) -> None:
+        """Write one sample. Never raises: diagnostics must not take a host down."""
+        self._index += 1
+        # The sample INDEX is part of every filename, not only the timestamp.
+        # Two captures inside one second otherwise write the same path, and the
+        # second one then diffs against a dump it has just overwritten and
+        # reports no growth at all — a silently wrong answer rather than an
+        # error. Impossible at the hourly default; reachable the moment someone
+        # sets CRYODAQ_MEMORY_PROFILE_INTERVAL_S low to watch something happen.
+        stamp = f"{datetime.now().strftime('%Y%m%dT%H%M%S')}-{self._index:04d}"
+        label = f"{self._label} #{self._index} at {stamp} (pid {os.getpid()})"
         try:
-            process = await asyncio.to_thread(ProcessMemory.read)
+            process = ProcessMemory.read()
             if not tracemalloc.is_tracing():
-                await asyncio.to_thread(
-                    (root / f"{process_label}-{stamp}-process.txt").write_text,
+                # Process totals alone still answer the question that matters
+                # most — whether RSS is rising while Python's traced memory is
+                # not — so a sample without tracing is written, not skipped.
+                (self._root / f"{self._label}-{stamp}-process.txt").write_text(
                     f"# {label}\nrss_kb: {process.rss_kb}\npss_kb: {process.pss_kb}\n"
                     f"threads: {process.threads}\nopen_fds: {process.open_fds}\n",
                     encoding="utf-8",
                 )
-                continue
-            snapshot = await asyncio.to_thread(tracemalloc.take_snapshot)
-            dump = root / f"{process_label}-{stamp}.snapshot"
-            await asyncio.to_thread(snapshot.dump, str(dump))
-            await asyncio.to_thread(_write_summary, root / f"{process_label}-{stamp}-top.txt", snapshot, process, label)
-            previous_exists = previous_dump is not None and await asyncio.to_thread(previous_dump.exists)
-            if previous_exists:
-                await asyncio.to_thread(
-                    _write_diff, root / f"{process_label}-{stamp}-diff.txt", snapshot, previous_dump, label
-                )
-            previous_dump = dump
+                return
+            snapshot = tracemalloc.take_snapshot()
+            dump = self._root / f"{self._label}-{stamp}.snapshot"
+            snapshot.dump(str(dump))
+            _write_summary(self._root / f"{self._label}-{stamp}-top.txt", snapshot, process, label)
+            if self._previous_dump is not None and self._previous_dump.exists():
+                _write_diff(self._root / f"{self._label}-{stamp}-diff.txt", snapshot, self._previous_dump, label)
+            self._previous_dump = dump
             logger.info(
                 "memory profile: %s traced=%d KB profiler=%d KB rss=%s KB pss=%s KB threads=%s fds=%s",
                 label,
@@ -220,7 +241,24 @@ async def memory_profile_loop(output_dir: Path, *, process_label: str = "engine"
                 process.open_fds,
             )
             del snapshot
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - diagnostics must never take the engine down
+        except Exception:  # noqa: BLE001 - diagnostics must never take the host down
             logger.warning("memory profile: sample failed", exc_info=True)
+
+
+async def memory_profile_loop(output_dir: Path, *, process_label: str = "engine") -> None:
+    """Sample Python allocations and process totals until cancelled."""
+    sampler = MemoryProfileSampler(output_dir, process_label=process_label)
+    await asyncio.to_thread(sampler.start_tracing)
+    await asyncio.to_thread(sampler.prepare)
+    period = interval_s()
+    logger.info(
+        "memory profile: enabled for %s, every %.0f s, writing to %s",
+        process_label,
+        period,
+        sampler.output_dir,
+    )
+    while True:
+        await asyncio.sleep(period)
+        # The snapshot and its files are the slow part and they are blocking, so
+        # they run off the event loop exactly as before.
+        await asyncio.to_thread(sampler.capture)
