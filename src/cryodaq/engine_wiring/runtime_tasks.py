@@ -254,6 +254,22 @@ async def _alarm_v2_tick_configs(
                 # restatement exists to convey.
                 activation = state_mgr.get_active().get(alarm_cfg.alarm_id)
                 triggered_at = event.triggered_at if activation is None else activation.triggered_at
+                # AND THE ACKNOWLEDGEMENT, for the same reason and by the same
+                # route. The projection replaces the WHOLE active record from
+                # this payload and defaults every field the payload omits
+                # (periodic_projection.py:434-460), so carrying triggered_at
+                # alone silently un-acknowledged an alarm the operator had
+                # already attended to: the report would ask them to look again
+                # at something they had already dealt with, once an hour.
+                # Reviewer-reproduced 2026-09-06 as
+                # before_ack=true, after_ack=false, engine_ack=true.
+                #
+                # The stored activation is the authority here. `event` is the
+                # evaluator's fresh keep-active event and carries no
+                # acknowledgement at all, so it cannot be the source.
+                acknowledged = False if activation is None else activation.acknowledged
+                acknowledged_at = 0.0 if activation is None else activation.acknowledged_at
+                acknowledged_by = "" if activation is None else activation.acknowledged_by
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
                     marker = "⚠ всё ещё активна" if reasserted else "⚠"
@@ -278,9 +294,13 @@ async def _alarm_v2_tick_configs(
                             # that predate these keys read the event unchanged.
                             # `values` stay CURRENT — the operator wants to know
                             # what the channel reads now — while triggered_at
-                            # stays the activation. For a TRIGGERED transition
-                            # the two coincide, so this changes nothing there.
+                            # and the acknowledgement stay the activation's. For
+                            # a TRIGGERED transition all of them coincide, so
+                            # this changes nothing there.
                             "triggered_at": triggered_at,
+                            "acknowledged": acknowledged,
+                            "acknowledged_at": acknowledged_at,
+                            "acknowledged_by": acknowledged_by,
                             "reasserted": reasserted,
                         },
                         experiment_id=experiment_manager.active_experiment_id,

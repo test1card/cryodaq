@@ -711,11 +711,15 @@ class AlarmStateManager:
         self._state_revision = 0
         self._activation_sequence = 0
         self._reassert_after_s = reassert_after_s
-        # When each alarm last produced a NOTIFICATION — its TRIGGERED, or its
-        # most recent REASSERTED. Not the activation time: the interval is
-        # measured against the last thing the operator was actually told, which
-        # is what "I have not heard about this in an hour" means.
-        self._last_notified: dict[str, float] = {}
+        # When each alarm last EMITTED — its TRIGGERED, or its most recent
+        # REASSERTED. Emission, not confirmed delivery: this records that the
+        # engine published, and says nothing about whether Telegram or the
+        # assistant actually reached the operator. Naming it "notified" implied
+        # a receipt the engine does not have and is not going to grow for this
+        # slice. Not the activation time either: the interval is measured
+        # against the last thing the engine SAID, which is the best available
+        # proxy for "I have not heard about this in an hour".
+        self._last_emitted_at: dict[str, float] = {}
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
 
@@ -805,16 +809,16 @@ class AlarmStateManager:
             if interval is None:
                 return None
             now = time.time()
-            last = self._last_notified.get(alarm_id)
+            last = self._last_emitted_at.get(alarm_id)
             if last is None:
-                # Active with no notification on record — an alarm restored into
+                # Active with no emission on record — an alarm restored into
                 # a fresh manager, say. Anchor the interval now rather than
                 # restating instantly on the first tick after startup.
-                self._last_notified[alarm_id] = now
+                self._last_emitted_at[alarm_id] = now
                 return None
             if now - last < interval:
                 return None
-            self._last_notified[alarm_id] = now
+            self._last_emitted_at[alarm_id] = now
             self._history.append(
                 {
                     "alarm_id": alarm_id,
@@ -846,15 +850,17 @@ class AlarmStateManager:
                 # Сброс sustained_since если нет sustained
                 self._sustained_since.pop(alarm_id, None)
 
-            # Dedup: уже активен?
-            if alarm_id in self._active:
-                return None  # Уже активен, не re-notify
+            # The duplicate-active guard that stood here was unreachable: the
+            # branch above catches `event is not None and alarm_id in
+            # self._active` first and always returns. Confirmed by review
+            # 2026-09-06 and removed, because a dedup check sitting where dedup
+            # visibly is not performed misleads the next reader.
 
             stored_event = _copy_alarm_event(event)
             self._activation_sequence += 1
             stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
-            self._last_notified[alarm_id] = stored_event.triggered_at
+            self._last_emitted_at[alarm_id] = stored_event.triggered_at
             self._mark_active_mutation()
             self._history.append(
                 {
@@ -886,7 +892,7 @@ class AlarmStateManager:
                 return None  # Ещё в зоне гистерезиса
 
             old_event = self._active.pop(alarm_id)
-            self._last_notified.pop(alarm_id, None)
+            self._last_emitted_at.pop(alarm_id, None)
             self._mark_active_mutation()
             self._history.append(
                 {
