@@ -80,20 +80,56 @@ def test_the_interval_defaults_and_is_overridable(monkeypatch: pytest.MonkeyPatc
     assert interval_s() == 3600.0, "a malformed interval must fall back, not crash a boot"
 
 
-def test_the_launcher_wires_the_sampler_only_when_asked() -> None:
-    """Read the construction path rather than build a window in a test.
+# ---------------------------------------------------------------------------
+# The installation boundary, exercised rather than read.
+#
+# The first version of this asserted that the env guard appeared before the
+# construction in launcher.py's SOURCE. Review pointed out that source order
+# does not establish conditional execution, and that the initialization — unlike
+# capture() — did not contain its failures: an obstructed diagnostics directory
+# propagated FileExistsError out of the constructor. Both are tested directly.
+# ---------------------------------------------------------------------------
 
-    Constructing LauncherWindow starts subprocesses. What matters here is that
-    the sampler is created under the env guard and nowhere else.
-    """
+
+def test_installation_is_skipped_when_not_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cryodaq.launcher as launcher
+
+    monkeypatch.delenv(ENABLE_ENV, raising=False)
+    sampler, timer = launcher._install_memory_profile(None, lambda: None)
+    assert sampler is None and timer is None
+
+
+def test_an_obstructed_directory_disables_profiling_instead_of_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reviewer finding: this used to abort launcher construction."""
+    import cryodaq.launcher as launcher
+
+    data_dir = tmp_path / "data"
+    (data_dir / "diagnostics").mkdir(parents=True)
+    # The path the profiler wants to create as a directory already exists as a
+    # FILE, which is what makes mkdir(exist_ok=True) raise.
+    (data_dir / "diagnostics" / "memprofile").write_text("", encoding="utf-8")
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: data_dir)
+
+    with caplog.at_level("WARNING"):
+        sampler, timer = launcher._install_memory_profile(None, lambda: None)
+
+    assert sampler is None and timer is None, "profiling must switch itself off, not raise"
+    assert any("memory profile" in record.message for record in caplog.records), (
+        "and it must say so rather than disappear silently"
+    )
+
+
+def test_the_shutdown_path_stops_the_profiler_first() -> None:
+    """The timer belongs to quiescence, and admission stops before it."""
     source = (Path(__file__).parents[2] / "src" / "cryodaq" / "launcher.py").read_text(encoding="utf-8")
-    assert source.count("MemoryProfileSampler(") == 1, "one construction site only"
-    guard = source.index("if memory_profiling_requested():")
-    construction = source.index("self._memory_profile_sampler = MemoryProfileSampler(")
-    assert guard < construction, "the sampler must be built inside the env guard"
-    # And the capture runs off the GUI thread.
-    capture = source.index("def _capture_memory_profile(")
-    assert "threading.Thread(" in source[capture : capture + 900]
+    quiesce = source.index("def _quiesce_for_shutdown(")
+    body = source[quiesce : source.index("\n    def ", quiesce + 10)]
+    assert "_memory_profile_timer" in body, "the profiler timer must be stopped during quiescence"
+    assert "memory_profile_sampler.stop()" in body, "and further captures must not be admitted"
 
 
 def test_two_samples_in_one_second_do_not_collide(tmp_path: Path) -> None:
@@ -129,3 +165,63 @@ def test_two_samples_in_one_second_do_not_collide(tmp_path: Path) -> None:
         f"itself looks like:\n{body}"
     )
     assert len(held) == 220_000
+
+
+
+def test_a_second_capture_is_skipped_while_one_is_running(tmp_path: Path) -> None:
+    """Reviewer's sequence, 2026-09-06.
+
+    The launcher starts a thread per timer tick. With overlapping captures, #1
+    can pause after dumping, #2 complete, and #1 then finish late and move the
+    previous-snapshot pointer BACKWARDS from #2 to #1 — so #3 diffs against the
+    older snapshot and reports growth over the wrong interval. Unique filenames
+    fixed overwriting; they never addressed ordering.
+    """
+    import threading
+
+    sampler = MemoryProfileSampler(tmp_path, process_label="launcher")
+    sampler.prepare()
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+    original = sampler._capture_locked
+
+    def _slow() -> None:
+        calls.append(1)
+        entered.set()
+        release.wait(10)
+        original()
+
+    sampler._capture_locked = _slow  # type: ignore[method-assign]
+
+    first = threading.Thread(target=sampler.capture, daemon=True)
+    first.start()
+    assert entered.wait(10), "the first capture must have started"
+
+    # Two more ticks arrive while the first is still inside the capture. Neither
+    # may enter, and neither may block its caller — this is the GUI thread.
+    sampler.capture()
+    sampler.capture()
+    assert calls == [1], f"a capture must not overlap another: {len(calls)} entered"
+
+    release.set()
+    first.join(10)
+    assert not first.is_alive()
+
+    # And once it is free, the next tick is admitted normally.
+    sampler._capture_locked = original  # type: ignore[method-assign]
+    sampler.capture()
+    assert len(list(tmp_path.glob("launcher-*"))) >= 2
+
+
+def test_stop_refuses_further_captures(tmp_path: Path) -> None:
+    sampler = MemoryProfileSampler(tmp_path, process_label="launcher")
+    sampler.prepare()
+    sampler.capture()
+    written = len(list(tmp_path.iterdir()))
+    sampler.stop()
+    sampler.capture()
+    sampler.capture()
+    assert len(list(tmp_path.iterdir())) == written, "nothing may be admitted after stop()"
+    sampler.stop()  # idempotent

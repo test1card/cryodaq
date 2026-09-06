@@ -143,12 +143,52 @@ def test_an_existing_library_path_is_kept_behind_the_new_entry(tmp_path: Path) -
     assert result == f"{lib}:/opt/vendor/lib"
 
 
-def test_the_entry_is_not_duplicated_when_already_present(tmp_path: Path) -> None:
+def test_the_entry_is_not_duplicated_when_already_first(tmp_path: Path) -> None:
     prefix = tmp_path / "env"
     lib = _with_libstdcxx(prefix)
     interpreter = _fake_interpreter(prefix / "bin", prefix=prefix)
     result = _run_selection(interpreter, path="/usr/bin:/bin", ld_library_path=str(lib))
     assert result == str(lib)
+
+
+def test_present_but_not_first_is_moved_to_the_front(tmp_path: Path) -> None:
+    """Reviewer finding, 2026-09-06. Being on the path decides nothing.
+
+    The first version treated "the directory appears somewhere" as "the
+    directory wins", and its own comment said "already first or present" — the
+    conflation written down. Reproduced through the real start.sh with only the
+    final launch replaced by an import probe: system library first with the
+    environment library already second still fails with CXXABI_1.3.15.
+    """
+    prefix = tmp_path / "env"
+    lib = _with_libstdcxx(prefix)
+    interpreter = _fake_interpreter(prefix / "bin", prefix=prefix)
+
+    result = _run_selection(
+        interpreter,
+        path="/usr/bin:/bin",
+        ld_library_path=f"/usr/lib/x86_64-linux-gnu:{lib}:/opt/vendor/lib",
+    )
+
+    assert result.split(":")[0] == str(lib), (
+        f"the environment library must be moved to the FRONT, got {result!r}"
+    )
+    assert result.count(str(lib)) == 1, f"and not duplicated: {result!r}"
+    assert result == f"{lib}:/usr/lib/x86_64-linux-gnu:/opt/vendor/lib", (
+        f"the remaining entries must keep their order: {result!r}"
+    )
+
+
+def test_moving_it_forward_preserves_every_other_entry(tmp_path: Path) -> None:
+    prefix = tmp_path / "env"
+    lib = _with_libstdcxx(prefix)
+    interpreter = _fake_interpreter(prefix / "bin", prefix=prefix)
+    result = _run_selection(
+        interpreter,
+        path="/usr/bin:/bin",
+        ld_library_path=f"/a:/b:{lib}:/c:/d",
+    )
+    assert result == f"{lib}:/a:/b:/c:/d"
 
 
 def test_an_interpreter_that_cannot_be_run_changes_nothing(tmp_path: Path) -> None:

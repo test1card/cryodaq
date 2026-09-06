@@ -2356,6 +2356,51 @@ def _request_engine_ready_reply(command: dict[str, Any], *, address: str | None 
         context.term()
 
 
+def _install_memory_profile(
+    owner: Any,
+    on_timeout: Any,
+) -> tuple[MemoryProfileSampler | None, QTimer | None]:
+    """Start opt-in profiling for this process, or return (None, None).
+
+    Never raises. Everything here is optional diagnostics: a missing directory,
+    an obstructed path or a refused tracemalloc start must warn and leave
+    profiling off, not prevent the launcher from starting.
+
+    Split out of the constructor so the boundary can be tested directly.
+    Asserting that the env guard appears before the construction in the source
+    does not establish conditional execution — the reviewer said so and was
+    right.
+    """
+    if not memory_profiling_requested():
+        return None, None
+    try:
+        from cryodaq.paths import get_data_dir
+
+        sampler = MemoryProfileSampler(
+            get_data_dir() / "diagnostics" / "memprofile",
+            process_label="launcher",
+        )
+        sampler.prepare()
+        # Tracing starts HERE, during construction rather than after the window
+        # is up: everything allocated before it starts is invisible to every
+        # later diff, and the widgets built during construction are among the
+        # things a growth investigation would want named.
+        sampler.start_tracing()
+        timer = QTimer(owner)
+        timer.setInterval(max(1, int(memory_profile_interval_s() * 1000)))
+        timer.timeout.connect(on_timeout)
+        timer.start()
+    except Exception:  # noqa: BLE001 - optional diagnostics never block a start
+        logger.warning("memory profile: could not be enabled for launcher; continuing without it", exc_info=True)
+        return None, None
+    logger.info(
+        "memory profile: enabled for launcher, every %.0f s, writing to %s",
+        memory_profile_interval_s(),
+        sampler.output_dir,
+    )
+    return sampler, timer
+
+
 class LauncherWindow(QMainWindow):
     """Главное окно лаунчера — встраивает MainWindow и управляет engine."""
 
@@ -2527,30 +2572,16 @@ class LauncherWindow(QMainWindow):
         # dumping a snapshot of a large heap is slow enough to be seen as a
         # freeze, and a diagnostic must not change the behaviour of the thing it
         # is measuring.
-        self._memory_profile_sampler: MemoryProfileSampler | None = None
-        self._memory_profile_timer: QTimer | None = None
-        if memory_profiling_requested():
-            from cryodaq.paths import get_data_dir
-
-            self._memory_profile_sampler = MemoryProfileSampler(
-                get_data_dir() / "diagnostics" / "memprofile",
-                process_label="launcher",
-            )
-            # Tracing starts HERE, in the constructor, rather than after the
-            # window is up: everything allocated before it starts is invisible
-            # to the diff, and the widgets built during construction are among
-            # the things a growth investigation would want to see named.
-            self._memory_profile_sampler.start_tracing()
-            self._memory_profile_sampler.prepare()
-            self._memory_profile_timer = QTimer(self)
-            self._memory_profile_timer.setInterval(max(1, int(memory_profile_interval_s() * 1000)))
-            self._memory_profile_timer.timeout.connect(self._capture_memory_profile)
-            self._memory_profile_timer.start()
-            logger.info(
-                "memory profile: enabled for launcher, every %.0f s, writing to %s",
-                memory_profile_interval_s(),
-                self._memory_profile_sampler.output_dir,
-            )
+        # Opt-in memory profiling, off unless CRYODAQ_MEMORY_PROFILE is set.
+        #
+        # Set up by a helper that CANNOT raise. Reviewer finding, 2026-09-06:
+        # capture() contained its failures but initialization did not, so an
+        # obstructed diagnostics directory propagated FileExistsError out of the
+        # constructor. An optional diagnostic must never be able to stop a
+        # normal start; it warns and disables itself instead.
+        self._memory_profile_sampler, self._memory_profile_timer = _install_memory_profile(
+            self, self._capture_memory_profile
+        )
         self._periodic_health_read_failed_logged = False
         self._periodic_reporting_fault: bool | None = None if self._assistant_periodic_requested else False
         self._assistant_restart_attempts: int = 0
@@ -7768,7 +7799,18 @@ class LauncherWindow(QMainWindow):
         self._restart_pending = False
         self._assistant_restart_pending = False
 
-        for name in ("_health_timer", "_data_timer", "_status_timer", "_async_timer"):
+        # Optional diagnostics stop admitting work before anything else winds
+        # down: a capture started now would outlive the quiescence it is not
+        # part of. A capture already running is left to finish — it holds
+        # nothing the shutdown needs.
+        memory_profile_sampler = getattr(self, "_memory_profile_sampler", None)
+        if memory_profile_sampler is not None:
+            try:
+                memory_profile_sampler.stop()
+            except Exception as exc:
+                errors["memory_profile_sampler"] = exc
+
+        for name in ("_health_timer", "_data_timer", "_status_timer", "_async_timer", "_memory_profile_timer"):
             timer = getattr(self, name, None)
             if timer is None:
                 continue

@@ -42,10 +42,28 @@ if [ -n "$CRYODAQ_PY" ] && [ -x "$CRYODAQ_PY" ]; then
         [ -n "$_cryodaq_prefix" ] || continue
         _cryodaq_lib="$_cryodaq_prefix/lib"
         [ -e "$_cryodaq_lib/libstdc++.so.6" ] || continue
-        case ":${LD_LIBRARY_PATH:-}:" in
-            *":$_cryodaq_lib:"*) ;;  # already first or present; do not duplicate
-            *) export LD_LIBRARY_PATH="$_cryodaq_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-        esac
+        # FIRST, not merely present. The previous version treated "the
+        # directory appears somewhere" as "the directory wins" — its own comment
+        # said "already first or present", which is exactly the conflation.
+        # Reviewer reproduced it through the real start.sh with only the final
+        # launch replaced by an import probe: environment library first, imports
+        # succeed; system library first with the environment library already
+        # second, CXXABI_1.3.15 failure. Being on the path decides nothing; only
+        # being ahead of the system one does.
+        #
+        # Any existing occurrence is removed and the directory is prepended, so
+        # the remaining entries keep their order and nothing is duplicated.
+        _cryodaq_rest=""
+        _cryodaq_ifs="$IFS"
+        IFS=":"
+        for _cryodaq_entry in ${LD_LIBRARY_PATH:-}; do
+            [ -n "$_cryodaq_entry" ] || continue
+            [ "$_cryodaq_entry" = "$_cryodaq_lib" ] && continue
+            _cryodaq_rest="${_cryodaq_rest:+$_cryodaq_rest:}$_cryodaq_entry"
+        done
+        IFS="$_cryodaq_ifs"
+        export LD_LIBRARY_PATH="$_cryodaq_lib${_cryodaq_rest:+:$_cryodaq_rest}"
+        unset _cryodaq_rest _cryodaq_ifs _cryodaq_entry
         break
     done
     unset _cryodaq_prefix _cryodaq_lib

@@ -28,6 +28,7 @@ import asyncio
 import linecache
 import logging
 import os
+import threading
 import tracemalloc
 from dataclasses import dataclass
 from datetime import datetime
@@ -173,6 +174,21 @@ class MemoryProfileSampler:
         self._label = process_label
         self._index = 0
         self._previous_dump: Path | None = None
+        # ONE capture at a time, and a tick that arrives while one is running is
+        # dropped rather than queued.
+        #
+        # Reviewer finding, 2026-09-06: the launcher starts a thread per timer
+        # tick, so two captures could overlap. The damage is not the CPU — it is
+        # the comparison history. Reproduced with controlled snapshot I/O:
+        # capture #1 pauses after dumping, #2 completes, #1 then completes late
+        # and moves `_previous_dump` from #2 back to #1, so #3 diffs against the
+        # older snapshot and reports growth over the wrong interval. Unique
+        # filenames fixed overwriting; they do not fix ordering.
+        #
+        # A non-blocking acquire, because the caller may be a GUI thread and a
+        # diagnostic must never make it wait.
+        self._capture_lock = threading.Lock()
+        self._closed = False
 
     @property
     def output_dir(self) -> Path:
@@ -200,8 +216,29 @@ class MemoryProfileSampler:
     def prepare(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
 
+    def stop(self) -> None:
+        """Refuse further captures. Idempotent, and safe from any thread.
+
+        A capture already running is left to finish — it holds no resource the
+        shutdown needs — but nothing new is admitted.
+        """
+        self._closed = True
+
     def capture(self) -> None:
-        """Write one sample. Never raises: diagnostics must not take a host down."""
+        """Write one sample, or skip. Never raises: diagnostics must not take a host down."""
+        if self._closed:
+            return
+        if not self._capture_lock.acquire(blocking=False):
+            logger.debug("memory profile: %s sample skipped, previous capture still running", self._label)
+            return
+        try:
+            if self._closed:
+                return
+            self._capture_locked()
+        finally:
+            self._capture_lock.release()
+
+    def _capture_locked(self) -> None:
         self._index += 1
         # The sample INDEX is part of every filename, not only the timestamp.
         # Two captures inside one second otherwise write the same path, and the
