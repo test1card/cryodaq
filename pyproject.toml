@@ -123,25 +123,32 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-m 'not ollama'"
-# A hanging test must FAIL, not stop the world.
+# A hanging test should FAIL rather than consume the run in silence.
 #
-# pytest-timeout has been a declared dependency since this file was written and
-# was never configured, so a test that blocks forever simply blocks forever. On
-# 2026-09-06 that cost a full-suite result twice over: a run sat for an hour and
-# 45 minutes at 4957 passed, indistinguishable from "still going", until it was
-# interrupted by hand and the stack read. The hang was
-# test_target_update_cannot_report_success_after_emergency_off_authority, which
-# reproduces on its own.
+# pytest-timeout was a declared dependency here and was never configured, so a
+# test that blocked forever blocked forever. On 2026-09-06 that cost a
+# full-suite result twice: a run sat at 4957 passed for an hour and forty-five
+# minutes, indistinguishable from progress.
 #
-# 600 s is generous on purpose. The point is that the suite always terminates
-# and always names the culprit, not that tests are held to a speed limit — the
-# slowest legitimate FILE in this repository takes about 900 s, and its
-# individual tests are far below this. Raise it if a real test ever needs more;
-# do not remove it.
+# WHAT THIS DOES NOT DO, narrowed after review. It does not guarantee the
+# session terminates. Collection and session start are outside the per-test
+# timer; a native operation that does not return can prevent Python's signal
+# handler from running at all — reproduced by the reviewer with a native mutex
+# deadlock that a one-second timeout did not recover, ended only by an outer
+# process deadline; and signal-based continuation is platform-dependent. A hard
+# runner deadline (`timeout <n> pytest …`, or a CI job limit) is the separate
+# measure that actually bounds a session, and this setting is not a substitute
+# for it.
 #
 # The default `signal` method is deliberate: it raises inside the test so the
-# run continues to the next one. `thread` kills the process, which turns one
-# hang into no result at all — the very thing this exists to prevent.
+# run continues, while `thread` kills the process and turns one hang into no
+# result at all.
+#
+# 600 s is PROVISIONAL. Nothing measured here establishes that every legitimate
+# individual test fits inside it — the slowest file runs about 900 s in total,
+# which says nothing definitive about its slowest test. It is set wide so the
+# guard bounds hangs without becoming a flake source. Raise it if a real test
+# needs more; do not remove it.
 timeout = 600
 markers = [
     "smoke: requires live external services (ollama, instruments); excluded from default CI",

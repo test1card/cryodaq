@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import linecache
 import logging
+import math
 import os
 import threading
 import tracemalloc
@@ -61,12 +62,23 @@ def profiling_requested() -> bool:
 
 
 def interval_s() -> float:
+    """The configured interval, or the default when it is not usable.
+
+    `inf` and `nan` parse as floats and are positive-or-not in ways that read
+    fine here and explode later: reviewer measurement 2026-09-06, with
+    CRYODAQ_MEMORY_PROFILE_INTERVAL_S=inf the launcher's installer raised
+    OverflowError converting it to milliseconds, caught the failure, and left
+    tracemalloc running while reporting profiling disabled. Rejecting a
+    non-finite value HERE fixes it for every caller rather than at one of them.
+    """
     raw = os.environ.get(INTERVAL_ENV, "").strip()
     try:
         value = float(raw)
     except ValueError:
         return DEFAULT_INTERVAL_S
-    return value if value > 0 else DEFAULT_INTERVAL_S
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_INTERVAL_S
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,8 +206,12 @@ class MemoryProfileSampler:
     def output_dir(self) -> Path:
         return self._root
 
-    def start_tracing(self) -> None:
-        """Begin tracing in THIS process, and say so.
+    def start_tracing(self) -> bool:
+        """Begin tracing in THIS process, and say whether THIS call started it.
+
+        The return value exists so a caller that fails afterwards can undo only
+        what it turned on. Tracing already owned by something else is not this
+        installation's to stop.
 
         Deliberately not PYTHONTRACEMALLOC: that variable is inherited by every
         child the launcher spawns, so enabling it for one process would make
@@ -205,13 +221,22 @@ class MemoryProfileSampler:
         is what GROWS over the next hours, not what the baseline was.
         """
         if tracemalloc.is_tracing():
-            return
+            return False
         tracemalloc.start(_FRAME_DEPTH)
         logger.info(
             "memory profile: tracemalloc started in-process at depth %d "
             "(allocations before this point are not traced)",
             _FRAME_DEPTH,
         )
+        return True
+
+    def stop_tracing(self) -> None:
+        """Undo a tracing start made by this sampler. Never raises."""
+        try:
+            if tracemalloc.is_tracing():
+                tracemalloc.stop()
+        except Exception:  # noqa: BLE001 - cleanup must not replace the original failure
+            logger.warning("memory profile: could not stop tracing during cleanup", exc_info=True)
 
     def prepare(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)

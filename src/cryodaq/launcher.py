@@ -2373,9 +2373,17 @@ def _install_memory_profile(
     """
     if not memory_profiling_requested():
         return None, None
+    tracing_started_here = False
+    sampler: MemoryProfileSampler | None = None
     try:
         from cryodaq.paths import get_data_dir
 
+        # EVERYTHING THAT CAN FAIL COMES BEFORE TRACING IS TURNED ON. Reviewer
+        # measurement 2026-09-06: with CRYODAQ_MEMORY_PROFILE_INTERVAL_S=inf the
+        # millisecond conversion raised OverflowError, the failure was caught,
+        # and the launcher then carried tracemalloc's overhead for its whole
+        # life while reporting profiling disabled and producing no snapshots.
+        interval_ms = max(1, int(memory_profile_interval_s() * 1000))
         sampler = MemoryProfileSampler(
             get_data_dir() / "diagnostics" / "memprofile",
             process_label="launcher",
@@ -2385,12 +2393,17 @@ def _install_memory_profile(
         # is up: everything allocated before it starts is invisible to every
         # later diff, and the widgets built during construction are among the
         # things a growth investigation would want named.
-        sampler.start_tracing()
+        tracing_started_here = sampler.start_tracing()
         timer = QTimer(owner)
-        timer.setInterval(max(1, int(memory_profile_interval_s() * 1000)))
+        timer.setInterval(interval_ms)
         timer.timeout.connect(on_timeout)
         timer.start()
     except Exception:  # noqa: BLE001 - optional diagnostics never block a start
+        # Undo ONLY what this installation turned on. Tracing that was already
+        # running belongs to someone else and stopping it would be a second
+        # defect wearing the first one's clothes.
+        if tracing_started_here and sampler is not None:
+            sampler.stop_tracing()
         logger.warning("memory profile: could not be enabled for launcher; continuing without it", exc_info=True)
         return None, None
     logger.info(

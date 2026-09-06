@@ -225,3 +225,94 @@ def test_stop_refuses_further_captures(tmp_path: Path) -> None:
     sampler.capture()
     assert len(list(tmp_path.iterdir())) == written, "nothing may be admitted after stop()"
     sampler.stop()  # idempotent
+
+
+# ---------------------------------------------------------------------------
+# Reviewer P2, 2026-09-06: a failed installation could leave tracing enabled.
+#
+# The obstructed-directory case returned (None, None) before tracing started, so
+# it never exercised cleanup. With CRYODAQ_MEMORY_PROFILE_INTERVAL_S=inf the
+# millisecond conversion raised OverflowError AFTER start_tracing(), the failure
+# was caught, and the launcher then carried tracemalloc's overhead for its whole
+# life while reporting profiling disabled and producing no snapshots.
+#
+# Two fixes, and both are pinned: the interval can no longer be non-finite, and
+# a failure after tracing starts undoes it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan", "0", "-5", "не число", ""])
+def test_an_unusable_interval_falls_back_instead_of_exploding_later(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`inf` parses as a float and is > 0; it detonates at the conversion."""
+    monkeypatch.setenv(INTERVAL_ENV, raw)
+    value = interval_s()
+    assert value == 3600.0, f"{raw!r} must fall back, got {value!r}"
+    # And the value must survive the conversion the installer performs.
+    assert isinstance(max(1, int(value * 1000)), int)
+
+
+def test_a_failure_after_tracing_starts_undoes_the_tracing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cleanup path, exercised where the old test could not reach."""
+    import cryodaq.launcher as launcher
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
+    monkeypatch.delenv(INTERVAL_ENV, raising=False)
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+
+    class _ExplodingTimer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("no event dispatcher")
+
+    monkeypatch.setattr(launcher, "QTimer", _ExplodingTimer)
+    assert not tracemalloc.is_tracing(), "precondition: nothing is tracing yet"
+
+    sampler, timer = launcher._install_memory_profile(None, lambda: None)
+
+    assert (sampler, timer) == (None, None)
+    assert not tracemalloc.is_tracing(), (
+        "a failed installation must not leave the process paying tracing "
+        "overhead while reporting profiling disabled"
+    )
+
+
+def test_cleanup_does_not_stop_tracing_it_did_not_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undo only what this installation turned on.
+
+    Tracing already running belongs to something else — stopping it would be a
+    second defect wearing the first one's clothes.
+    """
+    import cryodaq.launcher as launcher
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
+    monkeypatch.delenv(INTERVAL_ENV, raising=False)
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+
+    class _ExplodingTimer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("no event dispatcher")
+
+    monkeypatch.setattr(launcher, "QTimer", _ExplodingTimer)
+
+    tracemalloc.start(2)
+    try:
+        sampler, timer = launcher._install_memory_profile(None, lambda: None)
+        assert (sampler, timer) == (None, None)
+        assert tracemalloc.is_tracing(), "someone else's tracing must survive our failure"
+    finally:
+        tracemalloc.stop()
+
+
+def test_start_tracing_reports_whether_it_started_anything(tmp_path: Path) -> None:
+    sampler = MemoryProfileSampler(tmp_path, process_label="launcher")
+    assert not tracemalloc.is_tracing()
+    try:
+        assert sampler.start_tracing() is True, "the first start is this sampler's"
+        assert sampler.start_tracing() is False, "an already-tracing process is not ours to claim"
+    finally:
+        tracemalloc.stop()
