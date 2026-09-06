@@ -1314,7 +1314,7 @@ def _assistant_brand() -> str:
     this one transport-failure message still calling it by the old name.
     Fail-safe: falls back to a neutral label rather than a stale one.
     """
-    from cryodaq.agents.assistant.shared.brand import resolve_brand_label
+    from cryodaq.core.branding import resolve_brand_label
 
     return resolve_brand_label(fallback="🤖 Ассистент")
 
