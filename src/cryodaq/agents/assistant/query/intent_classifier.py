@@ -74,6 +74,39 @@ def _build_landmark_hint(channel_manager: ChannelManager) -> str:
     return "\n".join(lines)
 
 
+def _build_live_channel_hint(live: dict[str, dict] | None, channel_manager: ChannelManager | None) -> str:
+    """Channels that are PUBLISHING but are not in channels.yaml.
+
+    channels.yaml describes the operator's thermometer set. It does not
+    describe the pressure gauge or the source meter, and it never has —
+    `VSP63D_1/pressure` appears in it zero times. So the classifier was told
+    about 24 temperatures and nothing else, and could not map the word
+    "давление" onto any channel it knew. Asked "какое сейчас давление",
+    the assistant answered "давление не вижу" while the gauge was writing a
+    value every second. Found 2026-09-07 by asking it.
+
+    The snapshot knows what is actually arriving, which is the honest answer
+    to "what channels exist". Units are included because they are how the
+    model tells a pressure from a temperature without being told which is
+    which.
+    """
+    if not live:
+        return ""
+    known = set(channel_manager.get_all()) if channel_manager is not None else set()
+    rows: list[str] = []
+    for channel, info in sorted(live.items()):
+        short = channel.split(" ")[0]
+        if short in known or channel in known:
+            continue
+        unit = str(info.get("unit") or "").strip()
+        name = str(info.get("display_name") or "").strip()
+        label = f'  {channel} → "{name}"' if name and name != channel else f"  {channel}"
+        rows.append(f"{label} [{unit}]" if unit else label)
+    if not rows:
+        return ""
+    return "\nПРИБОРНЫЕ КАНАЛЫ (не термометры эксперимента, но они пишут прямо сейчас):\n" + "\n".join(rows)
+
+
 def _build_channel_hint(channel_manager: ChannelManager | None) -> str:
     """Build channel reference table for classifier prompt.
 
@@ -253,9 +286,14 @@ class IntentClassifier:
         max_tokens: int = 2048,
         timeout_s: float | None = None,
         channel_manager: ChannelManager | None = None,
+        live_channels_provider: Any | None = None,
         release_model_after: bool = True,
     ) -> None:
         self._ollama = ollama_client
+        # Awaitable returning {channel: {"unit": ..., "display_name": ...}} for
+        # whatever is publishing now. Optional: without it the classifier still
+        # works, it just cannot name a channel outside channels.yaml.
+        self._live_channels_provider = live_channels_provider
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
@@ -279,6 +317,14 @@ class IntentClassifier:
         """
         try:
             channel_hint = _build_channel_hint(self._channel_manager)
+            live_hint = ""
+            if self._live_channels_provider is not None:
+                try:
+                    live = await self._live_channels_provider()
+                    live_hint = _build_live_channel_hint(live, self._channel_manager)
+                except Exception as exc:  # noqa: BLE001 - a hint must never fail a query
+                    logger.debug("live channel hint unavailable: %s", exc)
+            channel_hint = channel_hint + live_hint
             # Landmark hint goes FIRST — gemma4:e2b position-biased,
             # critical instructions must lead.
             system_prompt = channel_hint + "\n\n" + INTENT_CLASSIFIER_SYSTEM

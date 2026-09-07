@@ -198,9 +198,7 @@ def test_query_router_resolves_landmark_alias_over_experiment_name() -> None:
         target_channels=["азотная плита"],
     )
     resolved = router._resolve_target_channels(intent)
-    assert resolved == ["Т11"], (
-        f"Landmark alias must beat experiment name on collision; got {resolved}"
-    )
+    assert resolved == ["Т11"], f"Landmark alias must beat experiment name on collision; got {resolved}"
 
 
 def test_query_router_canonical_id_still_wins_first_pass() -> None:
@@ -242,3 +240,64 @@ def test_query_router_falls_through_to_experiment_name_without_landmarks() -> No
         target_channels=["Болометр"],
     )
     assert router._resolve_target_channels(intent) == ["Т7"]
+
+
+def test_the_pressure_gauge_is_offered_to_the_classifier() -> None:
+    """Reported by the operator's own test question, 2026-09-07.
+
+    Asked "какое сейчас давление и куда оно идёт", the assistant answered
+    "давление не вижу — данных по каналу нет" while the gauge was writing a
+    value every second. No warning, no error: the pipeline ran and honestly
+    reported nothing.
+
+    The cause was upstream of every adapter. The classifier's channel hint was
+    built only from channels.yaml, which describes the operator's thermometer
+    set and contains `VSP63D_1/pressure` exactly zero times — so the model was
+    told about 24 temperatures and nothing else, and could not map the word to
+    a channel. `BrokerSnapshot.latest` already resolves ids AND display names,
+    and its docstring records the same symptom from an earlier incident; the
+    resolution was never the problem, the naming was.
+    """
+    from cryodaq.agents.assistant.query.intent_classifier import _build_live_channel_hint
+    from cryodaq.core.channel_manager import ChannelManager
+
+    hint = _build_live_channel_hint(
+        {
+            "VSP63D_1/pressure": {"unit": "mbar", "display_name": "VSP63D_1/pressure"},
+            "Keithley_1/smua/voltage": {"unit": "V", "display_name": "Keithley_1/smua/voltage"},
+        },
+        ChannelManager(),
+    )
+
+    assert "VSP63D_1/pressure" in hint, "the classifier is still not told the gauge exists"
+    assert "[mbar]" in hint, "the unit is how the model tells a pressure from a temperature"
+    assert "Keithley_1/smua/voltage" in hint
+
+
+def test_channels_already_named_in_the_config_are_not_repeated(tmp_path) -> None:
+    """The experiment's own thermometers are listed by the other hint."""
+    from cryodaq.agents.assistant.query.intent_classifier import _build_live_channel_hint
+    from cryodaq.core.channel_manager import ChannelManager
+
+    config = tmp_path / "channels.yaml"
+    config.write_text("channels:\n  Т12:\n    name: 2-я ступень\n    visible: true\n", encoding="utf-8")
+
+    hint = _build_live_channel_hint(
+        {
+            "Т12 2-я ступень": {"unit": "K", "display_name": "Т12 2-я ступень"},
+            "VSP63D_1/pressure": {"unit": "mbar", "display_name": "VSP63D_1/pressure"},
+        },
+        ChannelManager(config_path=config),
+    )
+
+    assert "Т12" not in hint, "a configured channel was listed twice"
+    assert "VSP63D_1/pressure" in hint
+
+
+def test_no_live_channels_costs_nothing() -> None:
+    """The hint is additive: without a snapshot the classifier works as before."""
+    from cryodaq.agents.assistant.query.intent_classifier import _build_live_channel_hint
+    from cryodaq.core.channel_manager import ChannelManager
+
+    assert _build_live_channel_hint(None, ChannelManager()) == ""
+    assert _build_live_channel_hint({}, ChannelManager()) == ""

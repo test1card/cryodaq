@@ -161,6 +161,17 @@ class AssistantQueryAgent:
             temperature=intent_temperature,
             timeout_s=intent_timeout_s,
             channel_manager=channel_manager,
+            # What is publishing right now, so the classifier can name the
+            # pressure gauge and the source meter — neither is in channels.yaml
+            # and until 2026-09-07 neither could be asked about by name.
+            # getattr twice on purpose. This runs in the CONSTRUCTOR, so a
+            # snapshot object without the method — a stub, an older adapter,
+            # anything not the production BrokerSnapshot — would take the whole
+            # agent down at construction rather than degrade a hint. Caught by
+            # the suite on a StartStop stub before it reached the stand.
+            live_channels_provider=getattr(
+                getattr(adapters, "broker_snapshot", None), "latest_with_labels", None
+            ),
             release_model_after=intent_model != format_model,
         )
         self._router = QueryRouter(adapters, channel_manager=channel_manager)
