@@ -56,6 +56,11 @@ TOP_ENTRIES = 40
 # which is what a diff needs.
 _FRAME_DEPTH = 2
 
+# Who turned the process-global tracer on, when it was turned on through this
+# class. `tracemalloc` has no session identity of its own, so cleanup has
+# nothing else to ask. See `stop_tracing` for what this can and cannot see.
+_tracing_owner: object | None = None
+
 
 def profiling_requested() -> bool:
     return os.environ.get(ENABLE_ENV, "").strip() not in ("", "0", "false", "False")
@@ -204,6 +209,7 @@ class MemoryProfileSampler:
         # Ownership of the process-global tracer, decided by the only object
         # that can know it: the one that turned it on. See `start_tracing`.
         self._tracing_started_here = False
+        self._tracing_depth: int | None = None
 
     @property
     def output_dir(self) -> Path:
@@ -235,6 +241,9 @@ class MemoryProfileSampler:
         # profiling disabled. Reproduced by making this logger raise: the
         # installer returned disabled and `tracemalloc.is_tracing()` stayed True.
         self._tracing_started_here = True
+        self._tracing_depth = _FRAME_DEPTH
+        global _tracing_owner
+        _tracing_owner = self
         logger.info(
             "memory profile: tracemalloc started in-process at depth %d "
             "(allocations before this point are not traced)",
@@ -258,11 +267,38 @@ class MemoryProfileSampler:
         where nobody took over, which is every case reachable here — this
         sampler is the only tracemalloc user in the source tree.
         """
+        global _tracing_owner
         if not self._tracing_started_here:
             return
         try:
-            if tracemalloc.is_tracing():
-                tracemalloc.stop()
+            if not tracemalloc.is_tracing():
+                return
+            # TWO independent signals that the running session is still ours,
+            # because a boolean saying "we started tracing once" does not say
+            # "the tracer running right now is the one we started".
+            #
+            # Reviewer finding, 2026-09-07. The interleaving they ran: we start,
+            # another owner stops it, that owner starts its own tracer, and our
+            # cleanup then killed theirs. The flag alone could not see it.
+            #
+            # 1. The module owner. Any user going through this class hands the
+            #    ownership over on its own `start_tracing`, so a second sampler
+            #    taking over is fully covered.
+            # 2. The traceback limit of the CURRENT session. A tracer started
+            #    by anyone with a different depth than ours is provably not the
+            #    one we started — that catches a raw `tracemalloc.start()` too,
+            #    which the module owner cannot see.
+            #
+            # What remains uncoverable, stated rather than implied: a raw
+            # `tracemalloc.start(_FRAME_DEPTH)` by a non-cooperating owner is
+            # indistinguishable from ours, because CPython exposes no session
+            # identity. No such user exists in this tree.
+            if _tracing_owner is not self:
+                return
+            if tracemalloc.get_traceback_limit() != self._tracing_depth:
+                return
+            tracemalloc.stop()
+            _tracing_owner = None
         except Exception:  # noqa: BLE001 - cleanup must not replace the original failure
             logger.warning("memory profile: could not stop tracing during cleanup", exc_info=True)
         finally:
@@ -341,16 +377,27 @@ async def memory_profile_loop(output_dir: Path, *, process_label: str = "engine"
     """Sample Python allocations and process totals until cancelled."""
     sampler = MemoryProfileSampler(output_dir, process_label=process_label)
     await asyncio.to_thread(sampler.start_tracing)
-    await asyncio.to_thread(sampler.prepare)
-    period = interval_s()
-    logger.info(
-        "memory profile: enabled for %s, every %.0f s, writing to %s",
-        process_label,
-        period,
-        sampler.output_dir,
-    )
-    while True:
-        await asyncio.sleep(period)
-        # The snapshot and its files are the slow part and they are blocking, so
-        # they run off the event loop exactly as before.
-        await asyncio.to_thread(sampler.capture)
+    # Everything after the start is inside the guard. Reviewer finding,
+    # 2026-09-07: the launcher's copy of this defect was fixed and the engine's
+    # was not — `prepare()` can fail on an obstructed directory, `interval_s()`
+    # can reject a bad value, and cancellation can arrive at any await, each
+    # leaving the engine paying tracemalloc's overhead for its whole life with
+    # no profiling to show for it. Hardening one of two siblings is how the
+    # original leak survived, so both are now closed.
+    try:
+        await asyncio.to_thread(sampler.prepare)
+        period = interval_s()
+        logger.info(
+            "memory profile: enabled for %s, every %.0f s, writing to %s",
+            process_label,
+            period,
+            sampler.output_dir,
+        )
+        while True:
+            await asyncio.sleep(period)
+            # The snapshot and its files are the slow part and they are
+            # blocking, so they run off the event loop exactly as before.
+            await asyncio.to_thread(sampler.capture)
+    finally:
+        sampler.stop()
+        sampler.stop_tracing()

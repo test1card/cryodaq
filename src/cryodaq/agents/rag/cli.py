@@ -133,7 +133,9 @@ def index_main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    from cryodaq.logging_setup import configure_cli_logging
+
+    configure_cli_logging(level=logging.INFO)
 
     cfg_path, cfg_source = _resolve_rag_config_path(args.config)
     if args.config is not None and cfg_path is None:

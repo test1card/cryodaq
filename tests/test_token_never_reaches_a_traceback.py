@@ -172,3 +172,37 @@ def test_redaction_stays_linear_on_a_long_near_miss() -> None:
 
     assert result == hostile, "a near-miss must not be redacted"
     assert elapsed < 0.5, f"redacting a 40k near-miss took {elapsed:.2f}s; the quantifier is unbounded again"
+
+
+def test_the_cli_entry_point_is_hardened(capsys) -> None:
+    """Stand-alone tools print to stderr, and stderr gets captured and kept.
+
+    Reviewer sweep, 2026-09-07: two tools built their own unredacted handler
+    with `logging.basicConfig`. They now share one entry point, and this drives
+    that entry point rather than reading the tools' source.
+    """
+    import logging
+
+    from cryodaq.logging_setup import configure_cli_logging
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    try:
+        configure_cli_logging(level=logging.INFO)
+        logging.getLogger("tool.under.test").error("polling failed: %s", _URL)
+        try:
+            raise RuntimeError(f"Cannot connect to host: {_URL}")
+        except RuntimeError:
+            logging.getLogger("tool.under.test").exception("and again in a traceback")
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+
+    written = capsys.readouterr().err
+    assert _FAKE not in written, "a stand-alone tool still prints the token"
+    assert "bot***" in written

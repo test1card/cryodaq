@@ -479,7 +479,9 @@ def _parse_date(s: str) -> float:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from cryodaq.logging_setup import configure_cli_logging
+
+    configure_cli_logging(level=logging.INFO, fmt="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(description="Replay alarm history with predictor-based evaluation")
     p.add_argument("--since", required=True, help="Start date YYYY-MM-DD")
     p.add_argument("--until", required=True, help="End date YYYY-MM-DD (inclusive)")

@@ -213,6 +213,32 @@ def install_token_redaction(
     handler.addFilter(_TokenRedactFilter())
 
 
+def configure_cli_logging(
+    *,
+    level: int = logging.INFO,
+    fmt: str = "%(levelname)s %(message)s",
+    datefmt: str | None = None,
+) -> logging.Handler:
+    """Stand-alone tools' one way to set up logging. Returns the handler.
+
+    `logging.basicConfig` builds a plain StreamHandler, and a tool that calls it
+    prints whatever it is given — a token included. stderr from a tool is
+    routinely captured by a service manager, a shell redirect or a bundle
+    collector, so "it only goes to the terminal" is not a place the token is
+    safe to be.
+
+    Reviewer finding, 2026-09-07: after the engine-stderr handler was hardened,
+    a sweep found two more unredacted handlers built outside `setup_logging` —
+    `tools/replay_alarm_history.py` and `agents/rag/cli.py`. Hardening one
+    instance and missing its siblings is exactly the failure that produced the
+    first one, so this exists to be the only thing a tool has to call.
+    """
+    handler = logging.StreamHandler()
+    install_token_redaction(handler, fmt=fmt, datefmt=datefmt)
+    logging.basicConfig(level=level, handlers=[handler])
+    return handler
+
+
 def setup_logging(
     component: str,
     *,

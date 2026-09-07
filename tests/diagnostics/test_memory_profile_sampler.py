@@ -382,3 +382,85 @@ def test_cleanup_leaves_a_tracer_this_sampler_did_not_start(tmp_path) -> None:
     finally:
         if tracemalloc.is_tracing():
             tracemalloc.stop()
+
+
+async def test_the_engine_loop_leaves_no_tracing_when_setup_fails_after_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launcher's sibling. Reviewer finding, 2026-09-07.
+
+    `_install_memory_profile` was fixed and `memory_profile_loop` was not, so
+    the engine kept the identical defect: tracing on, `prepare()` raises, and
+    the process carries the overhead for its whole life.
+    """
+    import tracemalloc
+
+    from cryodaq.diagnostics import memory_profile as module
+
+    def _obstructed(self: object) -> None:
+        raise OSError("output directory is obstructed")
+
+    monkeypatch.setattr(module.MemoryProfileSampler, "prepare", _obstructed)
+    assert not tracemalloc.is_tracing(), "precondition: nothing is tracing yet"
+    try:
+        with pytest.raises(OSError):
+            await module.memory_profile_loop(tmp_path, process_label="engine")
+        assert not tracemalloc.is_tracing(), (
+            "the engine loop left tracing on after failing to start"
+        )
+    finally:
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
+
+
+async def test_the_engine_loop_stops_tracing_when_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation is the NORMAL way this loop ends, so it must clean up too."""
+    import asyncio
+    import tracemalloc
+
+    from cryodaq.diagnostics import memory_profile as module
+
+    monkeypatch.setattr(module, "interval_s", lambda: 0.01)
+    assert not tracemalloc.is_tracing(), "precondition: nothing is tracing yet"
+    try:
+        task = asyncio.create_task(module.memory_profile_loop(tmp_path, process_label="engine"))
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if tracemalloc.is_tracing():
+                break
+        assert tracemalloc.is_tracing(), "precondition: the loop turned tracing on"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not tracemalloc.is_tracing(), "a cancelled loop left tracing on"
+    finally:
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
+
+
+def test_cleanup_leaves_a_tracer_that_replaced_ours(tmp_path: Path) -> None:
+    """The interleaving the flag alone could not see. Reviewer repro, 2026-09-07.
+
+    We start tracing; another owner stops it and starts its own; our cleanup
+    runs. The replacement must survive. A boolean recording that this sampler
+    once started tracing says nothing about who owns the session running now.
+    """
+    import tracemalloc
+
+    from cryodaq.diagnostics.memory_profile import MemoryProfileSampler
+
+    sampler = MemoryProfileSampler(tmp_path, process_label="launcher")
+    try:
+        assert sampler.start_tracing() is True, "precondition: we own the tracer"
+        tracemalloc.stop()
+        tracemalloc.start(1)  # a different owner, a different depth
+
+        sampler.stop_tracing()
+
+        assert tracemalloc.is_tracing(), "cleanup killed the tracer that replaced ours"
+        assert tracemalloc.get_traceback_limit() == 1, "and it must still be THEIR session"
+    finally:
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
