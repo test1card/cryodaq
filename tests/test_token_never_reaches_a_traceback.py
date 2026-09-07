@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 
 from cryodaq.logging_setup import _redact, _TokenRedactFilter, _TokenRedactFormatter
 
@@ -80,14 +81,94 @@ def test_the_filter_still_covers_message_and_args() -> None:
     assert _redact(_URL) == "https://api.telegram.org/bot***/getUpdates?timeout=5&offset=490907051"
 
 
-def test_setup_logging_installs_the_redacting_formatter() -> None:
-    """Read the wiring: both handlers must get it, not just one."""
+def test_a_hardened_handler_writes_no_token_even_from_a_traceback() -> None:
+    """Exercise the handler, do not read the source that builds it.
+
+    The previous version of this test asserted that `logging_setup.py`
+    contained certain words. Review pointed out on 2026-09-07 that a source
+    check cannot see a handler built ANYWHERE ELSE, and one such handler was
+    leaking at the time.
+    """
+    import logging
+    import tempfile
     from pathlib import Path
 
-    source = (Path(__file__).parents[1] / "src" / "cryodaq" / "logging_setup.py").read_text(encoding="utf-8")
-    assert "formatter = _TokenRedactFormatter(" in source, (
-        "setup_logging must build the redacting formatter, not a plain one"
+    from cryodaq.logging_setup import install_token_redaction
+
+    path = Path(tempfile.mkdtemp()) / "hardened.log"
+    handler = logging.FileHandler(path, encoding="utf-8")
+    install_token_redaction(handler, fmt="%(message)s")
+    logger = logging.getLogger("test.hardened")
+    logger.propagate = False
+    logger.setLevel(logging.ERROR)
+    logger.addHandler(handler)
+    try:
+        try:
+            raise RuntimeError(f"Cannot connect to host: {_URL}")
+        except RuntimeError:
+            logger.exception("polling failed")
+        logger.error("as an arg: %s", _URL)
+        handler.flush()
+        written = path.read_text(encoding="utf-8")
+    finally:
+        handler.close()
+        logger.removeHandler(handler)
+
+    assert _FAKE not in written, "the token survived a hardened handler"
+    assert "bot***" in written
+
+
+def test_the_launcher_child_stderr_log_is_hardened(monkeypatch) -> None:
+    """The production handler that was leaking, driven for real.
+
+    Reviewer finding, 2026-09-07: `_create_engine_stderr_logger` builds its own
+    logger with `propagate = False`, so it never reaches a root handler and
+    never inherited the root's redaction — while a comment in the pump claimed
+    it did. A child stderr line carrying a `getUpdates` URL wrote the token
+    verbatim into `engine.stderr.log`.
+
+    CRYODAQ_STATE_ROOT is redirected because this writes a real log file, and
+    the live stand's is not a scratch directory.
+    """
+    import tempfile
+    from pathlib import Path
+
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", tempfile.mkdtemp())
+    from cryodaq.launcher import _create_engine_stderr_logger
+
+    stderr_logger, handler, log_path = _create_engine_stderr_logger()
+    assert Path(log_path).parent.is_relative_to(Path(os.environ["CRYODAQ_STATE_ROOT"])), (
+        "refusing to run: this test would have written to the real logs directory"
     )
-    assert source.count("setFormatter(formatter)") == 2, (
-        "both the stream and file handlers must use it"
-    )
+    try:
+        stderr_logger.error("engine child stderr; phase=runtime: %s", f"urllib.error: {_URL}")
+        handler.flush()
+        written = Path(log_path).read_text(encoding="utf-8")
+    finally:
+        handler.close()
+        stderr_logger.removeHandler(handler)
+
+    assert _FAKE not in written, "the launcher still persists the child's token"
+    assert "bot***" in written
+
+
+def test_redaction_stays_linear_on_a_long_near_miss() -> None:
+    """A near-miss must not cost seconds. It used to.
+
+    Reviewer measurement, 2026-09-07: with an unbounded digit run, "bot" plus
+    40000 digits plus a colon took 3.18 s to NOT match, and the cost grew
+    exactly fourfold per doubling. Redaction runs on every record on both
+    handlers, so one such line stalls logging repeatedly.
+
+    The threshold is deliberately loose — this catches a return to quadratic
+    behaviour, not a small regression in constant factors.
+    """
+    import time
+
+    hostile = "bot" + "9" * 40000 + ":" + "!" * 20
+    started = time.perf_counter()
+    result = _redact(hostile)
+    elapsed = time.perf_counter() - started
+
+    assert result == hostile, "a near-miss must not be redacted"
+    assert elapsed < 0.5, f"redacting a 40k near-miss took {elapsed:.2f}s; the quantifier is unbounded again"

@@ -201,6 +201,9 @@ class MemoryProfileSampler:
         # diagnostic must never make it wait.
         self._capture_lock = threading.Lock()
         self._closed = False
+        # Ownership of the process-global tracer, decided by the only object
+        # that can know it: the one that turned it on. See `start_tracing`.
+        self._tracing_started_here = False
 
     @property
     def output_dir(self) -> Path:
@@ -223,6 +226,15 @@ class MemoryProfileSampler:
         if tracemalloc.is_tracing():
             return False
         tracemalloc.start(_FRAME_DEPTH)
+        # Ownership is recorded on the NEXT line, before anything that can
+        # raise. Reviewer finding, 2026-09-07: the caller used to learn about
+        # ownership only from the return value, so a failure between the start
+        # and the return — a logging handler raising is enough — unwound with
+        # the caller still believing it had started nothing, and the process
+        # carried tracemalloc's overhead for its whole life while reporting
+        # profiling disabled. Reproduced by making this logger raise: the
+        # installer returned disabled and `tracemalloc.is_tracing()` stayed True.
+        self._tracing_started_here = True
         logger.info(
             "memory profile: tracemalloc started in-process at depth %d "
             "(allocations before this point are not traced)",
@@ -231,12 +243,30 @@ class MemoryProfileSampler:
         return True
 
     def stop_tracing(self) -> None:
-        """Undo a tracing start made by this sampler. Never raises."""
+        """Undo a tracing start made by THIS sampler. Never raises.
+
+        The guard is our own flag, not `tracemalloc.is_tracing()`. That global
+        answers "is anything tracing", never "is the thing we started tracing",
+        and cleanup that reads it will happily stop a tracer belonging to
+        someone else — the reviewer's 2026-09-07 interleaving, where another
+        owner stops and restarts tracing between our start and our cleanup, and
+        we then kill theirs.
+
+        The residual is stated rather than papered over: CPython's tracemalloc
+        exposes no ownership token, so if another owner takes over in that
+        window we still stop the wrong tracer. The flag removes every case
+        where nobody took over, which is every case reachable here — this
+        sampler is the only tracemalloc user in the source tree.
+        """
+        if not self._tracing_started_here:
+            return
         try:
             if tracemalloc.is_tracing():
                 tracemalloc.stop()
         except Exception:  # noqa: BLE001 - cleanup must not replace the original failure
             logger.warning("memory profile: could not stop tracing during cleanup", exc_info=True)
+        finally:
+            self._tracing_started_here = False
 
     def prepare(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)

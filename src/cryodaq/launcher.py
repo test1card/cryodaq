@@ -51,6 +51,15 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.diagnostics.memory_profile import (
+    MemoryProfileSampler,
+)
+from cryodaq.diagnostics.memory_profile import (
+    interval_s as memory_profile_interval_s,
+)
+from cryodaq.diagnostics.memory_profile import (
+    profiling_requested as memory_profiling_requested,
+)
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import parse_global_off_evidence
 from cryodaq.drivers.transport.mock_instrument import MockInstrumentEndpoint
@@ -72,13 +81,6 @@ from cryodaq.gui.zmq_client import (
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 from cryodaq.operator_snapshot import SnapshotMode
-from cryodaq.diagnostics.memory_profile import (
-    MemoryProfileSampler,
-    interval_s as memory_profile_interval_s,
-)
-from cryodaq.diagnostics.memory_profile import (
-    profiling_requested as memory_profiling_requested,
-)
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -1741,6 +1743,7 @@ class _StrictEngineStderrHandler(logging.handlers.RotatingFileHandler):
 
 def _create_engine_stderr_logger() -> tuple[logging.Logger, logging.Handler, Path]:
     """Build a dedicated rotating logger for forwarded engine stderr lines."""
+    from cryodaq.logging_setup import install_token_redaction
     from cryodaq.paths import get_logs_dir
 
     log_path = get_logs_dir() / _ENGINE_STDERR_LOG_NAME
@@ -1772,11 +1775,15 @@ def _create_engine_stderr_logger() -> tuple[logging.Logger, logging.Handler, Pat
         encoding="utf-8",
         delay=True,
     )
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s │ %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    # This logger has propagate = False, so it never reaches a root handler and
+    # never inherits the root's redaction. It has to ask. Forwarded child stderr
+    # is exactly the text most likely to carry a token: aiohttp puts the full
+    # request URL in its errors and Telegram has no header auth, so the token
+    # travels in the URL path.
+    install_token_redaction(
+        handler,
+        fmt="%(asctime)s │ %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     stderr_logger.addHandler(handler)
     return stderr_logger, handler, log_path
@@ -1937,12 +1944,18 @@ def _pump_engine_stderr(
                 # withholding it is not evidence of anything.
                 #
                 # The content was withheld because engine stderr can carry a
-                # Telegram bot token in a traceback URL. That is handled where
-                # it should be: passing the text as an ARG runs it through the
-                # _TokenRedactFilter already installed on these handlers, which
-                # rewrites botNNN:xxx in record.args. Undecodable bytes are
-                # replaced rather than raising inside the pump, and the line is
-                # already bounded by _MAX_ENGINE_STDERR_LINE_BYTES above.
+                # Telegram bot token in a traceback URL. It is redacted by the
+                # formatter installed on THIS logger's own handler by
+                # _create_engine_stderr_logger — not by the root filter, which
+                # this logger never reaches because it sets propagate = False.
+                #
+                # An earlier version of this comment claimed the root filter
+                # covered it. It did not, and the token was written verbatim;
+                # found by review on 2026-09-07. Redacting on the final string
+                # also covers the traceback, which no filter can reach.
+                # Undecodable bytes are replaced rather than raising inside the
+                # pump, and the line is already bounded by
+                # _MAX_ENGINE_STDERR_LINE_BYTES above.
                 stderr_logger.error(
                     "engine child stderr; phase=runtime: %s",
                     raw_line.decode("utf-8", errors="replace").rstrip("\n"),
@@ -2373,7 +2386,6 @@ def _install_memory_profile(
     """
     if not memory_profiling_requested():
         return None, None
-    tracing_started_here = False
     sampler: MemoryProfileSampler | None = None
     try:
         from cryodaq.paths import get_data_dir
@@ -2393,7 +2405,7 @@ def _install_memory_profile(
         # is up: everything allocated before it starts is invisible to every
         # later diff, and the widgets built during construction are among the
         # things a growth investigation would want named.
-        tracing_started_here = sampler.start_tracing()
+        sampler.start_tracing()
         timer = QTimer(owner)
         timer.setInterval(interval_ms)
         timer.timeout.connect(on_timeout)
@@ -2402,7 +2414,12 @@ def _install_memory_profile(
         # Undo ONLY what this installation turned on. Tracing that was already
         # running belongs to someone else and stopping it would be a second
         # defect wearing the first one's clothes.
-        if tracing_started_here and sampler is not None:
+        #
+        # The sampler decides that, not a local flag here. A local flag can only
+        # be set once `start_tracing()` RETURNS, which leaves the window where
+        # tracing is on and this frame does not know it — the 2026-09-07 finding.
+        # `stop_tracing()` is a no-op unless this sampler started the tracer.
+        if sampler is not None:
             sampler.stop_tracing()
         logger.warning("memory profile: could not be enabled for launcher; continuing without it", exc_info=True)
         return None, None

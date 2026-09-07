@@ -111,8 +111,20 @@ def rotated_log_name_pattern(basename: str) -> re.Pattern[str]:
 #
 # We match BOTH. Bare form requires 8+ digit ID + 30+ char secret to keep
 # false-positive rate near zero on unrelated colon-delimited strings.
-_TELEGRAM_TOKEN_RE = re.compile(r"(?:bot)?\d{6,}:[A-Za-z0-9_-]{20,}")
-_BARE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])\d{8,}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
+# The digit run is BOUNDED. Reviewer measurement 2026-09-07: with an unbounded
+# `\d{6,}` a near-miss like "bot" + 40000 digits + ":" + punctuation took 3.18 s
+# to NOT match, growing exactly fourfold per doubling — quadratic, because every
+# start position rescans the whole digit run before failing. Untrusted text does
+# reach logging, and redaction runs on both handlers, so a single long line
+# stalls the logging thread repeatedly. A Telegram bot ID is ten digits; 24 is
+# already absurd headroom, and bounding it makes the scan linear.
+#
+# The SECRET stays unbounded on purpose: a bound there would match its first N
+# characters and leave the tail of a longer secret in the log, which is the very
+# leak this exists to stop. It costs nothing — nothing follows it to backtrack
+# for, so the greedy match succeeds on the first attempt.
+_TELEGRAM_TOKEN_RE = re.compile(r"(?:bot)?\d{6,24}:[A-Za-z0-9_-]{20,}")
+_BARE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])\d{8,24}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
 
 
 def _redact(text: str) -> str:
@@ -172,6 +184,35 @@ class _TokenRedactFormatter(logging.Formatter):
         return _redact(super().format(record))
 
 
+def install_token_redaction(
+    handler: logging.Handler,
+    *,
+    fmt: str,
+    datefmt: str | None = None,
+) -> None:
+    """Make one handler unable to write a Telegram token. Use for EVERY handler.
+
+    `setup_logging` hardens the root handlers, and that covers everything which
+    propagates. It does not cover a component that builds its own logger with
+    `propagate = False` — such a handler never sees a root filter or formatter,
+    so the protection has to be asked for by name.
+
+    Reviewer finding, 2026-09-07: the launcher's engine-stderr logger is exactly
+    that shape, and a comment in the pump asserted the redaction filter was
+    "already installed on these handlers" when it was installed only on the root
+    ones. Reproduced: a child stderr line carrying a `getUpdates` URL wrote the
+    token verbatim into `engine.stderr.log`. The claim in that comment, and in
+    the commit that added the formatter, was that a new logging path could not
+    outflank it. A new logging path had already outflanked it.
+
+    Both are applied because they cover different halves: the filter reaches
+    `record.msg` and `record.args`, the formatter reaches the final string and
+    with it the traceback, which is rendered after every filter has run.
+    """
+    handler.setFormatter(_TokenRedactFormatter(fmt=fmt, datefmt=datefmt))
+    handler.addFilter(_TokenRedactFilter())
+
+
 def setup_logging(
     component: str,
     *,
@@ -220,17 +261,12 @@ def setup_logging(
 
     root.setLevel(level)
 
-    formatter = _TokenRedactFormatter(
-        fmt="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    redact = _TokenRedactFilter()
+    fmt = "%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
 
     if console:
         stream_handler = logging.StreamHandler(sys.stderr)
-        stream_handler.setFormatter(formatter)
-        stream_handler.addFilter(redact)
+        install_token_redaction(stream_handler, fmt=fmt, datefmt=datefmt)
         root.addHandler(stream_handler)
 
     if file:
@@ -244,8 +280,7 @@ def setup_logging(
                 encoding="utf-8",
                 delay=True,
             )
-            file_handler.setFormatter(formatter)
-            file_handler.addFilter(redact)
+            install_token_redaction(file_handler, fmt=fmt, datefmt=datefmt)
             root.addHandler(file_handler)
         except Exception as exc:
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")

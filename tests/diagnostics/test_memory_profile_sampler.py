@@ -316,3 +316,69 @@ def test_start_tracing_reports_whether_it_started_anything(tmp_path: Path) -> No
         assert sampler.start_tracing() is False, "an already-tracing process is not ours to claim"
     finally:
         tracemalloc.stop()
+
+
+def test_a_failure_between_start_and_return_still_leaves_tracing_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap the previous test could not see: inside `start_tracing` itself.
+
+    Reviewer finding, 2026-09-07. `test_a_failure_after_tracing_starts_undoes_
+    the_tracing` above fails AFTER `start_tracing()` has returned, so the
+    installer already knows it owns the tracer. The uncovered case is a failure
+    BETWEEN `tracemalloc.start()` and that return — a logging handler raising is
+    enough. The installer then unwound believing it had started nothing, skipped
+    the stop, and the process carried tracing for its whole life while reporting
+    profiling disabled.
+
+    Written against `_install_memory_profile` on purpose: the defect was the
+    caller's local ownership flag, not anything visible from the sampler alone.
+    A sampler-level version of this test passed on the broken code.
+    """
+    import cryodaq.launcher as launcher
+    from cryodaq.diagnostics import memory_profile as module
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
+    monkeypatch.delenv(INTERVAL_ENV, raising=False)
+    monkeypatch.setattr("cryodaq.paths.get_data_dir", lambda: tmp_path)
+
+    class _RaisingLogger:
+        def info(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("logging handler failed right after tracemalloc.start()")
+
+        def warning(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    monkeypatch.setattr(module, "logger", _RaisingLogger())
+    assert not tracemalloc.is_tracing(), "precondition: nothing is tracing yet"
+
+    try:
+        sampler, timer = launcher._install_memory_profile(None, lambda: None)
+        assert (sampler, timer) == (None, None)
+        assert not tracemalloc.is_tracing(), (
+            "tracing survived an installation that reported itself disabled"
+        )
+    finally:
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
+
+
+def test_cleanup_leaves_a_tracer_this_sampler_did_not_start(tmp_path) -> None:
+    """`is_tracing()` answers the wrong question, so cleanup must not ask it.
+
+    Reviewer finding, 2026-09-07: cleanup stopped whatever was tracing. A
+    sampler that never started the tracer would stop somebody else's.
+    """
+    import tracemalloc
+
+    from cryodaq.diagnostics.memory_profile import MemoryProfileSampler
+
+    sampler = MemoryProfileSampler(tmp_path, process_label="launcher")
+    tracemalloc.start(1)
+    try:
+        assert sampler.start_tracing() is False, "someone else is already tracing"
+        sampler.stop_tracing()
+        assert tracemalloc.is_tracing(), "cleanup stopped a tracer belonging to someone else"
+    finally:
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
