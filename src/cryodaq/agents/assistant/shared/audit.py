@@ -126,10 +126,17 @@ class AuditLogger:
     ) -> None:
         self._audit_dir = Path(audit_dir)
         self._enabled = enabled
+        # Read by the live agent to place the summary note beside the audit it
+        # actually writes, rather than beside a config default nobody sets.
         self._retention_days = retention_days
         self._pending: dict[str, tuple[Path, dict[str, Any]]] = {}
         self._owned_tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
+
+    @property
+    def audit_dir(self) -> Path:
+        """Where this logger really writes."""
+        return self._audit_dir
         _legacy = Path("data/agents/gemma/audit")
         if _legacy.exists():
             logger.warning(

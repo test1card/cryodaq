@@ -7,16 +7,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
+from cryodaq.agents.assistant.live.agent import (
+    AssistantConfig,
+    AssistantLiveAgent,
+    _report_window_label,
+)
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder, PeriodicReportContext
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.live.prompts import PERIODIC_REPORT_SYSTEM, PERIODIC_REPORT_USER
 from cryodaq.agents.assistant.shared.audit import AuditLogger
-from cryodaq.agents.assistant.shared.brand import (
-    DEFAULT_BRAND_EMOJI,
-    DEFAULT_BRAND_NAME,
-)
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
+from cryodaq.agents.assistant.shared.summary_note import read_summary
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 
@@ -145,11 +146,13 @@ async def test_periodic_report_handler_dispatches_when_active(tmp_path: Path) ->
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
+    # The bulletin reaches the operator in the hourly chart's CAPTION now, not
+    # as a Telegram message of its own — sending both gave the operator the
+    # agent's paragraph and then the same paragraph under the chart.
+    await _wait_until(lambda: read_summary(tmp_path) != "")
 
-    telegram._send_to_all.assert_awaited_once()
-    sent = telegram._send_to_all.call_args[0][0]
-    assert f"{DEFAULT_BRAND_EMOJI} {DEFAULT_BRAND_NAME} (отчёт за час):" in sent
+    telegram._send_to_all.assert_not_awaited()
+    assert read_summary(tmp_path), "the summary never reached the caption's note"
     await agent.stop()
 
 
@@ -169,24 +172,19 @@ def test_report_window_label_matches_window_minutes() -> None:
     assert _report_window_label(2) == "за 2 минуты"
 
 
-async def test_periodic_report_handler_label_reflects_30min_window(tmp_path: Path) -> None:
-    """A 30-minute periodic report must be labelled "(отчёт за 30 минут)",
-    not the hardcoded "(отчёт за час)" the handler previously always emitted.
+def test_the_window_label_reflects_the_actual_window() -> None:
+    """A 30-minute report must say so, not the hardcoded "за час".
+
+    Asserted on the label function itself. It used to be read out of the
+    Telegram message, and the periodic bulletin no longer sends one — it reaches
+    the operator in the hourly chart's caption. The property under test never
+    depended on the delivery channel.
     """
-    telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock()
-    ctx = _make_mock_context(total_event_count=3)
-    agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
-    await agent.start()
-
-    await bus.publish(_periodic_event(window_minutes=30))
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    telegram._send_to_all.assert_awaited_once()
-    sent = telegram._send_to_all.call_args[0][0]
-    assert "(отчёт за 30 минут)" in sent
-    assert "(отчёт за час)" not in sent
-    await agent.stop()
+    assert _report_window_label(30) == "за 30 минут"
+    assert _report_window_label(60) == "за час"
+    assert _report_window_label(120) == "за 2 часа"
+    assert _report_window_label(300) == "за 5 часов"
+    assert _report_window_label(1) == "за 1 минуту"
 
 
 async def test_an_empty_log_still_gets_a_bulletin(tmp_path: Path) -> None:
@@ -210,10 +208,10 @@ async def test_an_empty_log_still_gets_a_bulletin(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
+    await _wait_until(lambda: read_summary(tmp_path) != "")
 
-    telegram._send_to_all.assert_awaited_once()
     ollama.generate.assert_awaited_once()
+    telegram._send_to_all.assert_not_awaited()
     await agent.stop()
 
 
@@ -233,9 +231,10 @@ async def test_periodic_report_critical_sensor_health_is_not_idle(tmp_path: Path
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
+    await _wait_until(lambda: read_summary(tmp_path) != "")
 
     ollama.generate.assert_awaited_once()
+    telegram._send_to_all.assert_not_awaited()
     await agent.stop()
 
 
@@ -274,10 +273,10 @@ async def test_periodic_report_valid_dict_critical_bypasses_idle_and_dispatches(
     await agent.start()
 
     await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
+    await _wait_until(lambda: read_summary(tmp_path) != "")
 
     ollama.generate.assert_awaited_once()
-    telegram._send_to_all.assert_awaited_once()
+    telegram._send_to_all.assert_not_awaited()
     await agent.stop()
 
 

@@ -1271,21 +1271,40 @@ class CalibrationPanel(QWidget):
                 )
             return
         if result.get("active"):
-            experiment_name = str(result.get("experiment_name", ""))
-            if self._unresolved_start_name and experiment_name == self._unresolved_start_name:
+            # A fresh status saying the run IS going is the confirmation. It
+            # used to be gated on result["experiment_name"] matching the name we
+            # started, and `calibration_acquisition.stats` has never contained
+            # that key — it returns active, point_count, t_min, t_max,
+            # reference_channel, target_channels and nothing else. So the
+            # comparison was always "" == <name>, always false, and
+            # `_unresolved_start_name` never cleared. Every calibration start
+            # after the first was then refused with "исход предыдущего запуска
+            # ещё не подтверждён", permanently, until the GUI was restarted.
+            # Software vetoing a trained operator on a confirmation that cannot
+            # arrive is the opposite of what this program is for.
+            if self._unresolved_start_name:
                 self._unresolved_start_name = ""
                 self.show_info("Запуск подтверждён свежим статусом Engine.")
             self._switch_mode("acquisition")
             self._acquisition_widget.update_stats(result)
+            # No producer writes "coverage_bins" anywhere in the tree; the branch
+            # is the wiring point for one, and no-ops until it exists.
             bins = result.get("coverage_bins") or []
             if bins:
                 self._acquisition_widget.update_coverage(bins)
-        elif self._current_mode == "acquisition":
-            # Just deactivated — transition to results.
-            target_channels = result.get("target_channels") or []
-            self._results_widget.set_channels(list(target_channels))
-            self._switch_mode("results")
-        # Else stay in current mode.
+        else:
+            # An authoritative status saying no run is going means the start did
+            # not take. Say so and let the operator try again, rather than
+            # holding the panel shut waiting for news that already arrived.
+            if self._unresolved_start_name:
+                self._unresolved_start_name = ""
+                self.show_warning("Прогон не идёт по данным Engine. Запуск можно повторить.")
+            if self._current_mode == "acquisition":
+                # Just deactivated — transition to results.
+                target_channels = result.get("target_channels") or []
+                self._results_widget.set_channels(list(target_channels))
+                self._switch_mode("results")
+            # Else stay in current mode.
 
     def _switch_mode(self, mode: str) -> None:
         if mode == self._current_mode:

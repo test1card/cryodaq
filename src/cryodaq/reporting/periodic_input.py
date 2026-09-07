@@ -180,7 +180,14 @@ def _summary_text(value: object) -> str:
     """
     if not isinstance(value, str):
         return ""
-    cleaned = "".join(char for char in value if char == "\n" or char >= " ").strip()
+    # `char >= " "` let DEL (U+007F) and the whole C1 block through, because
+    # they sort ABOVE space. The caption validator rejects control characters,
+    # so a summary containing one passed render-input validation and then made
+    # the frozen caption unsendable on every retry — the report lost to an
+    # invisible byte.
+    cleaned = "".join(
+        char for char in value if char == "\n" or (char >= " " and not ("\x7f" <= char <= "\x9f"))
+    ).strip()
     if not cleaned:
         return ""
     if len(cleaned) <= MAX_SUMMARY_CHARS:

@@ -24,7 +24,37 @@ from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryContext
 #: The delivery contract refuses an artifact under 33 bytes, so the fakes are
 #: long enough to be plausible payloads rather than markers.
 _REPORT = b"report-png-bytes-" + b"r" * 32
-_OVERVIEW = b"overview-png-bytes-" + b"o" * 32
+
+
+def _png() -> bytes:
+    """A real 200x200 PNG — the validator refuses anything under 100 px.
+
+    The companion is now validated before it is attached, because the transport
+    rejects the WHOLE group when any item is not a valid PNG and that rejection
+    is terminal — a corrupt decoration would take the report down with it. So a
+    fixture of arbitrary bytes no longer stands in for a chart: it is exactly
+    the case that must NOT be sent.
+    """
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 200, 200, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+_OVERVIEW = _png()
 
 
 def _context(photo: bytes, caption: str) -> PeriodicDeliveryContext:

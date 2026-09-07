@@ -1710,14 +1710,28 @@ class AssistantLiveAgent:
             errors.append("timeout_truncated")
             logger.warning("AssistantLiveAgent: periodic report обрезан (audit_id=%s)", audit_id)
 
-        targets = _build_targets(self._config)
+        # The hourly summary reaches the operator IN THE REPORT'S CAPTION, and
+        # must not also arrive as a Telegram message of its own. Sending both is
+        # the two-messages-per-hour the caption work existed to remove: the
+        # operator would get the agent's paragraph, then the chart carrying the
+        # same paragraph underneath it. Other targets are unaffected — the GUI
+        # insight panel has no caption to read.
+        targets = [t for t in _build_targets(self._config) if t is not OutputTarget.TELEGRAM]
         if result.truncated or not result.text.strip():
             logger.warning("AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id)
         # Leave the summary where the hourly chart can pick it up. Written
         # before dispatch on purpose: the note is for the NEXT report, and a
         # delivery that fails should not also cost the operator the words.
         # Beside the audit, which is where this process already writes.
-        write_summary(Path(self._config.audit_dir).parent, result.text)
+        # Beside the audit logger's REAL directory, not `config.audit_dir`.
+        # Nothing sets that field: assistant_main builds the AuditLogger from
+        # the resolved data dir and leaves the config at its relative default
+        # `data/agents/assistant/audit`, which happens to agree only because
+        # the process runs with the repository as its working directory. The
+        # report reads the note from the resolved data dir, so any deployment
+        # where those two differ would write the note where nothing looks for
+        # it — the producer and the consumer split apart again, silently.
+        write_summary(Path(self._audit.audit_dir).parent, result.text)
         dispatched_pr, _ = await self._dispatch_with_audit(
             event=event,
             audit_id=audit_id,

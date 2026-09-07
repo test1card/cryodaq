@@ -48,6 +48,7 @@ from cryodaq.agents.assistant.periodic_png import (
 from cryodaq.agents.assistant.periodic_telegram import (
     PeriodicTelegramClient,
     TelegramOutcome,
+    _validate_png,
 )
 from cryodaq.core.zmq_bridge import (
     DEFAULT_CMD_ADDR,
@@ -1570,12 +1571,34 @@ class _TelegramPeriodicDelivery:
             return None
         if type(rendered) is not bytes or not rendered:
             return None
+        # The transport rejects the WHOLE group when any item is not a valid
+        # PNG, and that rejection is terminal: a truncated or oversized
+        # companion would take the report down with it, every hour, for a
+        # decoration. Validate here with the transport's own checker so an
+        # unusable companion simply is not attached.
+        try:
+            _validate_png(rendered)
+        except ValueError as exc:
+            _log.info("Обзор прогона не приложен: изображение не прошло проверку (%s)", exc)
+            return None
         return rendered
 
     async def close(self) -> None:
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._client.close())
         await asyncio.shield(self._close_task)
+
+
+async def _kill(process: Any) -> None:
+    """Stop a render child and reap it. Never raises."""
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        return
+    try:
+        await process.wait()
+    except Exception as exc:  # noqa: BLE001 - reaping must not mask the original exit
+        _log.debug("Обзор прогона: дочерний процесс не дождан: %s", exc)
 
 
 def _make_run_overview_provider(*, data_dir: Path):
@@ -1608,10 +1631,17 @@ def _make_run_overview_provider(*, data_dir: Path):
                 async with asyncio.timeout(_RUN_OVERVIEW_TIMEOUT_S):
                     _stdout, stderr = await process.communicate()
             except TimeoutError:
-                process.kill()
-                await process.wait()
+                await _kill(process)
                 _log.warning("Обзор прогона: рендер не уложился в %.0f с", _RUN_OVERVIEW_TIMEOUT_S)
                 return None
+            except asyncio.CancelledError:
+                # The CALLER's budget is shorter than this one, so cancellation,
+                # not TimeoutError, is the ordinary way a slow render ends. The
+                # kill lived only in the TimeoutError branch, so every slow hour
+                # left another matplotlib child alive forever on a machine that
+                # also runs the DAQ.
+                await _kill(process)
+                raise
             detail = stderr.decode("utf-8", errors="replace").strip()
             if process.returncode == _RUN_OVERVIEW_NOTHING_TO_CHART:
                 _log.info("Обзор прогона не построен: %s", detail or "нечего строить")

@@ -71,6 +71,7 @@ from cryodaq.report_process import (
     write_periodic_input_file,
 )
 from cryodaq.reporting.periodic_input import (
+    MAX_SUMMARY_CHARS,
     PeriodicInputError,
     read_periodic_input_file,
 )
@@ -1440,7 +1441,13 @@ class PeriodicPngCoordinator:
                 # the agent that writes the note is neither, so they meet
                 # through a file and nothing blocks. Absent or stale means the
                 # caption reads exactly as it did before.
-                "summary": read_summary(self._data_dir / "agents" / "assistant"),
+                # Bounded HERE, not only in the reader. `_summary_text` caps at
+                # MAX_SUMMARY_CHARS, but that happens AFTER the payload is serialised
+                # and checked against max_input_bytes — so a stored summary of several
+                # thousand characters could push a legal payload over the cap and fail
+                # input creation identically on every retry, losing the report to a
+                # decoration.
+                "summary": read_summary(self._data_dir / "agents" / "assistant")[:MAX_SUMMARY_CHARS],
             },
             "readings": [
                 {

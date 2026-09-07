@@ -327,7 +327,7 @@ class PeriodicTelegramClient:
                 return observed
             if not isinstance(observed, _CompleteHttpResponse):
                 return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_internal_unknown")
-            return _classify_response(observed, self._chat_id)
+            return _classify_response(observed, self._chat_id, group=True)
         finally:
             if not done.done():
                 done.set_result(None)
@@ -555,7 +555,23 @@ async def _read_response(response: Any) -> _CompleteHttpResponse | TelegramDeliv
     return _CompleteHttpResponse(status, bytes(body))
 
 
-def _classify_response(response: _CompleteHttpResponse, configured_chat: int | str) -> TelegramDeliveryResult:
+def _classify_response(
+    response: _CompleteHttpResponse,
+    configured_chat: int | str,
+    *,
+    group: bool = False,
+) -> TelegramDeliveryResult:
+    """Read one Telegram reply. `group` selects sendMediaGroup's result shape.
+
+    sendPhoto returns `result` as a single Message OBJECT; sendMediaGroup
+    returns an ARRAY of them. Reading the array with the object's rules found
+    no `chat` and no `message_id`, so every ordinary successful group came back
+    UNKNOWN — a delivery that plainly arrived, recorded as one that might not
+    have. The unresolved ledger is bounded, so after enough hourly successes it
+    fills and delivery stops at READY: sixteen good reports in a row would have
+    silenced the seventeenth and every one after it. Found by review before it
+    ran a full day.
+    """
     status = response.status
     try:
         text = response.body.decode("utf-8", errors="strict")
@@ -575,6 +591,32 @@ def _classify_response(response: _CompleteHttpResponse, configured_chat: int | s
         if status != 200:
             return _response_unknown(status)
         result = payload.get("result")
+        if group:
+            # Every item must be a real message in the configured chat: a
+            # partial or foreign group is not an accepted delivery. The first
+            # message identifies the group, because that is the one carrying the
+            # caption.
+            if not isinstance(result, list) or not 2 <= len(result) <= 10:
+                return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_acceptance_unknown", status=200)
+            first_id: int | None = None
+            for item in result:
+                if not isinstance(item, Mapping):
+                    return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_acceptance_unknown", status=200)
+                item_chat = item.get("chat")
+                item_id = item.get("message_id")
+                if (
+                    not isinstance(item_chat, Mapping)
+                    or type(item_id) is not int
+                    or not 1 <= item_id <= _MAX_JSON_INTEGER
+                    or not _chat_matches(item_chat, configured_chat)
+                ):
+                    return _fixed_result(
+                        TelegramOutcome.UNKNOWN, "telegram_acceptance_unknown", status=200
+                    )
+                if first_id is None:
+                    first_id = item_id
+            assert first_id is not None  # a non-empty list always sets it
+            return TelegramDeliveryResult(TelegramOutcome.ACCEPTED, first_id, 200, None, None, "")
         chat = result.get("chat") if isinstance(result, Mapping) else None
         message_id = result.get("message_id") if isinstance(result, Mapping) else None
         if (

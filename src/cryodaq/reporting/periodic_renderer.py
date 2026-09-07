@@ -527,7 +527,20 @@ def _with_summary(caption: str, summary: str) -> str:
     if remaining < 40:
         return caption
     if len(escaped) > remaining:
-        escaped = escaped[: remaining - 1].rstrip() + "…"
+        # Cut the RAW text and escape afterwards. Slicing the ESCAPED text can
+        # land inside an entity and leave "&a", which Telegram's HTML parser
+        # rejects — and because the caption is fenced, every retry re-sends the
+        # same broken text until the report is lost. Shrinking one codepoint at
+        # a time is bounded by MAX_SUMMARY_CHARS and is obviously correct, which
+        # matters more here than being clever.
+        cut = summary[: max(remaining - 1, 0)]
+        while cut:
+            escaped = _escape(cut.rstrip()) + "…"
+            if len(escaped) <= remaining:
+                break
+            cut = cut[:-1]
+        if not cut:
+            return caption
     candidate = caption + separator + escaped
     if len(candidate.encode("utf-8")) > MAX_CAPTION_BYTES:
         return caption
