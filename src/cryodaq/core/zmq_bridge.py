@@ -523,7 +523,13 @@ HANDLER_TIMEOUT_SLOW_S = 55.0  # H7: bumped from 30 — Ollama cold-start
 # Sized to not cut off a working answer on hardware that is admittedly
 # unsuited to this (GTX 1050 Ti, 4 GB): the operator would rather wait
 # minutes than read a truncated one. It bounds a hung Ollama, nothing else.
-HANDLER_TIMEOUT_LLM_S = 420.0
+# Raised with the rest of the chain on 2026-09-07 (operator: quality over
+# latency until the server moves to vLLM). It must stay ABOVE agent.yaml's
+# query.format_timeout_s, or the handler cancels work the inner stages were
+# still entitled to finish and the operator gets "outcome may be unknown"
+# instead of an answer. Chain: transport 1800 > THIS 1740 > format 1500 >
+# ollama 1400.
+HANDLER_TIMEOUT_LLM_S = 1740.0
 
 _SLOW_COMMANDS: frozenset[str] = frozenset(
     {

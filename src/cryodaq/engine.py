@@ -1089,7 +1089,7 @@ class _RemoteAssistantQueryProxy:
         # (HANDLER_TIMEOUT_LLM_S) so the handler's plain-Russian "took too
         # long" reply reaches Telegram instead of this socket giving up
         # first and reporting the assistant unreachable.
-        timeout_s: float = 450.0,
+        timeout_s: float = 1800.0,
     ) -> None:
         self._address = address
         self._timeout_ms = int(timeout_s * 1000)

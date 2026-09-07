@@ -21,15 +21,26 @@ agent:
     #   cold load    (model evicted between calls)                 =  23 s
     # so a documentation answer over retrieved manual pages can legitimately
     # need ~240 s. This is the INNERMOST bound of four, and it must stay under
-    # query.format_timeout_s (300) so the client returns a clean truncated
-    # result instead of being cancelled from outside:
+    # query.format_timeout_s so the client returns a clean truncated result
+    # instead of being cancelled from outside.
     #
-    #   ZMQ transport 420 > handler ~390 > format 300 > THIS 280
-    timeout_s: 280
+    # 2026-09-07, operator's decision: quality over latency until the server
+    # moves to vLLM with one resident MoE. Until then a good slow answer beats
+    # a fast truncated one, and the measured cases were 236-290 s with one
+    # question timing out entirely at 290 s. Every bound in the chain is raised
+    # together, because raising one alone just moves which one cancels the work:
+    #
+    #   ZMQ transport 1800 > handler 1740 > format 1500 > THIS 1400
+    timeout_s: 1400
     temperature: 0.3
-    # 8192 was sized for the 4 GiB card. That constraint is gone; 32768 is the
-    # figure this config carried before the card forced it down.
-    num_ctx: 32768
+    # 8192 was sized for the 4 GiB card; 32768 was the figure before that.
+    #
+    # 100000 by the operator's decision of 2026-09-07: the assistant is to hold
+    # a conversation and carry an experiment's worth of context, and both need
+    # room. MEASURED against 100.87.73.25:11437 before changing it — the server
+    # accepts it and answered in 27.9 s, against 172.2 s at 32768 on a cold
+    # load, so the larger window costs nothing here.
+    num_ctx: 100000
     # Measured 2026-09-05 against 100.87.73.25:11437, warm unless stated:
     #
     #   qwen3.8:27b   48.0 tok/s generation, 135 tok answer in 2.8 s  <- selected
@@ -95,13 +106,14 @@ agent:
     format_model: qwen3.8:27b
     intent_temperature: 0.1
     format_temperature: 0.3
-    # 578 ms warm; 23.3 s if the model has been evicted. 30 s left no room for
-    # a cold load, so the budget is the cold case plus headroom. It exists to
-    # catch a hung server, not to cut a working answer short.
-    intent_timeout_s: 60.0
-    # Unchanged. A documentation answer over retrieved manual pages is the long
-    # case, and a late answer still beats a truncated one.
-    format_timeout_s: 300.0
+    # 578 ms warm; 23.3 s if the model has been evicted. It exists to catch a
+    # hung server, not to cut a working answer short — and a classification that
+    # gets cut takes the whole query with it.
+    intent_timeout_s: 300.0
+    # A documentation answer over retrieved manual pages is the long case, and a
+    # late answer still beats a truncated one. Raised with the rest of the chain
+    # on 2026-09-07; see the note on ollama.timeout_s.
+    format_timeout_s: 1500.0
     rate_limit:
       max_queries_per_chat_per_hour: 60
 
