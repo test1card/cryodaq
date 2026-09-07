@@ -94,8 +94,6 @@ class AssistantConfig:
     brand_emoji: str = "🤖"
     periodic_report_enabled: bool = True
     periodic_report_interval_minutes: int = 60
-    periodic_report_skip_if_idle: bool = True
-    periodic_report_min_events: int = 1
     query_enabled: bool = False
     query_intent_model: str | None = None
     query_format_model: str | None = None
@@ -183,8 +181,6 @@ class AssistantConfig:
             cfg.periodic_report_interval_minutes = int(
                 pr_t.get("interval_minutes", cfg.periodic_report_interval_minutes)
             )
-            cfg.periodic_report_skip_if_idle = bool(pr_t.get("skip_if_idle", cfg.periodic_report_skip_if_idle))
-            cfg.periodic_report_min_events = int(pr_t.get("min_events_for_dispatch", cfg.periodic_report_min_events))
         outputs = d.get("outputs", {})
         cfg.output_telegram = bool(outputs.get("telegram", cfg.output_telegram))
         cfg.output_operator_log = bool(outputs.get("operator_log", cfg.output_operator_log))
@@ -874,21 +870,6 @@ def _is_answered_generation(result: Any) -> bool:
     if getattr(result, "truncated", False) and not getattr(result, "tokens_out", 0):
         return False
     return True
-
-
-def _readings_are_moving(ctx) -> bool:
-    """Whether the stand did something worth a bulletin, events or not.
-
-    Keeps the skip for genuinely nothing-happening hours — an assistant that
-    pings anyway is one that gets muted — and lifts it when a measurement is
-    actually moving. The section is built by the context builder, which reports
-    movement or says plainly that there is none.
-    """
-    section = getattr(ctx, "readings_section", "") or ""
-    if not section:
-        return False
-    settled = ("ничего не движется", "показаний за окно нет", "недоступн", "нет данных")
-    return not any(marker in section for marker in settled)
 
 
 class AssistantLiveAgent:
@@ -1701,24 +1682,13 @@ class AssistantLiveAgent:
                 message="Периодический отчёт не сформирован: данные за интервал недоступны.",
             )
             return
-        elif (
-            self._config.periodic_report_skip_if_idle
-            and ctx.total_event_count < self._config.periodic_report_min_events
-            and not ctx.source_saturated
-            and (sensor_health_summary is None or sensor_health_summary.critical == 0)
-            # A quiet log is not a quiet stand. Until 2026-09-07 the report was
-            # skipped whenever nobody had typed anything, so an hour in which
-            # the pressure climbed steadily produced no bulletin at all — the
-            # log said "idle: 0 events" while the gauge had been rising at a
-            # constant +0.106 mbar/h for seven hours.
-            and not _readings_are_moving(ctx)
-        ):
-            logger.debug(
-                "AssistantLiveAgent: periodic report skipped (idle: %d events < min=%d, показания стоят)",
-                ctx.total_event_count,
-                self._config.periodic_report_min_events,
-            )
-            return
+        # NO IDLE SKIP. The bulletin runs every hour, and the agent decides what
+        # is worth saying — including that nothing is. Deciding FOR it in code
+        # went wrong twice: first the gate counted only typed events, so an hour
+        # of steadily rising pressure produced no bulletin at all; then the
+        # replacement counted RELATIVE movement, which this stand's constant leak
+        # defeats on its own as the baseline climbs. Both were code taking a
+        # judgement that belongs to the thing being asked for a judgement.
 
         template_dict = ctx.to_template_dict()
         user_prompt = PERIODIC_REPORT_USER.format(

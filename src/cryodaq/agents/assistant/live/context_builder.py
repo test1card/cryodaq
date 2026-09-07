@@ -161,19 +161,20 @@ class ContextBuilder:
             context.recent_events = "нет событий за смену"
         return context
 
-    #: Below this fraction of the level over the window, a channel is not
-    #: moving — it is being measured. Matches the composite summary's own bar.
-    _REPORT_MOVEMENT_FRACTION = 0.01
-    #: More movers than this and the report is a table, not a summary.
-    _REPORT_MAX_MOVERS = 6
-
     async def _build_readings_section(self, window_minutes: int) -> str:
-        """What is moving, and how fast. The rest in one line.
+        """Every channel, its current value and its rate. No selection.
 
-        No channel list is configured on purpose. The report shows whatever is
-        actually changing, which is what a watching assistant is for; a fixed
-        list would show the channels someone expected to be interesting when
-        they wrote it.
+        This section used to decide FOR the agent: it ranked channels by relative
+        change, showed the top few as "movers" and collapsed the rest into a
+        count. That is the operator's judgement and the agent's judgement, taken
+        by a threshold. It also broke on this stand's own physics — the chamber
+        leaks at a constant rate, so its RELATIVE rise shrinks as the pressure
+        climbs, and a relative gate would have quietly stopped reporting the leak
+        once the baseline got large enough.
+
+        The fix is not a better threshold. It is no threshold. Fifteen channels
+        with a value and a rate each is a handful of lines; the agent reads them
+        and says what matters. Give it everything and let it decide.
         """
         reader = self._reader
         if not hasattr(reader, "read_readings_history"):
@@ -194,8 +195,7 @@ class ContextBuilder:
         if not isinstance(history, dict) or not history:
             return "показаний за окно нет"
 
-        movers: list[tuple[float, str]] = []
-        steady = 0
+        lines: list[str] = []
         for channel, samples in sorted(history.items()):
             if not isinstance(samples, list) or len(samples) < 2:
                 continue
@@ -210,30 +210,11 @@ class ContextBuilder:
             span_h = (pairs[-1][0] - pairs[0][0]) / 3600.0
             if span_h <= 0:
                 continue
-            change = pairs[-1][1] - pairs[0][1]
-            level = max(abs(pairs[0][1]), abs(pairs[-1][1]), 1e-30)
-            if abs(change) / level < self._REPORT_MOVEMENT_FRACTION:
-                steady += 1
-                continue
-            rate = change / span_h
-            movers.append(
-                (
-                    abs(change) / level,
-                    f"{channel}: {pairs[-1][1]:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч)",
-                )
-            )
-
-        if not movers:
-            return f"ничего не движется: {steady} каналов держат уровень за {window_minutes} мин"
-        movers.sort(reverse=True)
-        shown = [text for _, text in movers[: self._REPORT_MAX_MOVERS]]
-        tail = len(movers) - len(shown)
-        line = "; ".join(shown)
-        if tail > 0:
-            line += f"; и ещё {tail} движущихся"
-        if steady:
-            line += f". Остальные {steady} держат уровень."
-        return line
+            rate = (pairs[-1][1] - pairs[0][1]) / span_h
+            lines.append(f"{channel}: {pairs[-1][1]:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч)")
+        if not lines:
+            return "показаний за окно нет"
+        return "; ".join(lines)
 
     async def build_periodic_report_context(
         self,

@@ -50,8 +50,6 @@ def _make_config(**overrides) -> AssistantConfig:
         output_gui_insight=False,
         audit_enabled=True,
         periodic_report_enabled=True,
-        periodic_report_min_events=1,
-        periodic_report_skip_if_idle=True,
     )
     for k, v in overrides.items():
         setattr(cfg, k, v)
@@ -191,19 +189,31 @@ async def test_periodic_report_handler_label_reflects_30min_window(tmp_path: Pat
     await agent.stop()
 
 
-async def test_periodic_report_handler_skips_when_idle(tmp_path: Path) -> None:
+async def test_an_empty_log_still_gets_a_bulletin(tmp_path: Path) -> None:
+    """This test used to assert the opposite, and the opposite was wrong.
+
+    A quiet log is not a quiet stand: nobody typing for an hour says nothing
+    about whether the pressure moved. The bulletin now runs every hour and the
+    agent decides what is worth saying — including that nothing is.
+    """
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
-    # total_event_count=0 < min_events=1 → idle skip
+    ollama = AsyncMock()
+    ollama.generate = AsyncMock(
+        return_value=GenerationResult(
+            text="Стенд держит уровень.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
+        )
+    )
+    ollama.close = AsyncMock()
     ctx = _make_mock_context(total_event_count=0)
-    agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
+    agent, bus = _make_agent(ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
     await agent.start()
 
     await bus.publish(_periodic_event())
-    # Wait for all handler tasks to finish; then assert nothing was dispatched.
-    await _wait_until(lambda: len(agent._handler_tasks) == 0)
+    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
 
-    telegram._send_to_all.assert_not_awaited()
+    telegram._send_to_all.assert_awaited_once()
+    ollama.generate.assert_awaited_once()
     await agent.stop()
 
 
@@ -268,30 +278,6 @@ async def test_periodic_report_valid_dict_critical_bypasses_idle_and_dispatches(
 
     ollama.generate.assert_awaited_once()
     telegram._send_to_all.assert_awaited_once()
-    await agent.stop()
-
-
-async def test_periodic_report_skip_if_idle_false_dispatches_always(tmp_path: Path) -> None:
-    """skip_if_idle=False → dispatch even when no events."""
-    telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock()
-    ctx = _make_mock_context(total_event_count=0)
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="Нет событий.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
-        )
-    )
-    ollama.close = AsyncMock()
-    cfg = _make_config(periodic_report_skip_if_idle=False)
-    agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
-    await agent.start()
-
-    await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    telegram._send_to_all.assert_awaited_once()
-    ollama.generate.assert_awaited_once()
     await agent.stop()
 
 

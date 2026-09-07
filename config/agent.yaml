@@ -76,8 +76,6 @@ agent:
     periodic_report:
       enabled: true
       interval_minutes: 60
-      skip_if_idle: true
-      min_events_for_dispatch: 1
 
   outputs:
     telegram: true
