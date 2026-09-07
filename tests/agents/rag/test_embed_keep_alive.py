@@ -103,14 +103,20 @@ def test_the_shipped_config_holds_the_model_resident() -> None:
 
 
 def test_the_retrieval_path_shares_the_residency_policy() -> None:
-    """A query that evicts the model makes the next indexed chunk pay the reload."""
-    source = (Path(__file__).resolve().parents[3] / "src/cryodaq/agents/assistant_main.py").read_text(encoding="utf-8")
-    # Behavioural check is impossible without booting the whole assistant; this
-    # asserts the construction site was not left behind, which is the defect
-    # that actually happened twice with the brand name.
-    assert "embed_keep_alive" in source, (
-        "assistant_main builds its own EmbeddingsClient and would still evict the model on every retrieval"
-    )
+    """A query that evicts the model makes the next indexed chunk pay the reload.
+
+    This used to read `assistant_main.py` and look for the string
+    `embed_keep_alive`, because — as its own comment said — a behavioural check
+    was impossible without booting the whole assistant. That stopped being true
+    on 2026-09-07: indexing and retrieval had drifted (retrieval passed
+    keep_alive but not the timeout), and both now go through one builder, so
+    the policy can simply be read off the object.
+    """
+    from cryodaq.agents.rag.embeddings import make_embeddings_client
+
+    client = make_embeddings_client({"embed_keep_alive": "30m"})
+
+    assert client._keep_alive == "30m", "retrieval would evict the model on every query"
 
 
 # ---------------------------------------------------------------------------

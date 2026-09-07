@@ -798,7 +798,7 @@ async def _run_llm_runtime(
         raise
     if rag_cfg is not None:
         try:
-            from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
+            from cryodaq.agents.rag.embeddings import make_embeddings_client  # noqa: PLC0415
             from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
 
             rag_db_path = Path(  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
@@ -812,11 +812,11 @@ async def _run_llm_runtime(
             # The retrieval path shares the corpus's embedding model, so it
             # must share its residency policy too — a query that evicts the
             # model the indexer just warmed pays the reload on the next chunk.
-            rag_emb = EmbeddingsClient(
-                base_url=rag_emb_url,
-                model=rag_emb_model,
-                keep_alive=rag_cfg.get("embed_keep_alive"),
-            )
+            # Built by the shared builder, which is where the measured
+            # timeout lives. Passing base_url/model/keep_alive here while
+            # omitting timeout_s is exactly how this path kept the 30 s
+            # default against its own config's 180.
+            rag_emb = make_embeddings_client(rag_cfg)
             rag_emb_client = rag_emb
             rag_searcher = RagSearcher(db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table)
             # Name what was RESOLVED, not merely which file it came from.
@@ -827,12 +827,13 @@ async def _run_llm_runtime(
             # the endpoint are the facts an operator or a reviewer actually
             # needs, and they are the ones that changed.
             logger.info(
-                "RAG searcher: инициализирован (config=%s, db=%s, model=%s, dim=%s, endpoint=%s)",
+                "RAG searcher: инициализирован (config=%s, db=%s, model=%s, dim=%s, endpoint=%s, timeout=%.0fs)",
                 rag_cfg["_source"],
                 rag_db_path,
-                rag_emb_model,
+                rag_emb.model,
                 rag_cfg.get("embedding_dim", "?"),
-                rag_emb_url,
+                rag_emb.base_url,
+                rag_emb.timeout_s,
             )
             if rag_cfg["_source"] == "rag.yaml.example":
                 # Falling back to the committed example is not a configuration.

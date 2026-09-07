@@ -273,3 +273,73 @@ def test_search_truncates_long_chunk_text_in_snippet() -> None:
     assert "\n" not in snippet  # newlines collapsed
     assert "\t" not in snippet  # tabs collapsed
     assert "  " not in snippet  # consecutive spaces collapsed
+
+
+def test_the_configured_embed_timeout_reaches_the_client() -> None:
+    """Reported by review, 2026-09-07: it did not, on the path that answers questions.
+
+    A single embed call against this stand's server was MEASURED at 20-34 s,
+    straddling the client's 30 s default. `embed_timeout_s: 180.0` went into
+    rag.yaml for that reason, and the INDEXING path passed it. The RETRIEVAL
+    path built its client with base_url, model and keep_alive and left the
+    timeout out, so a cold model could fail an operator's question while every
+    log line reported the configuration rather than the object built from it.
+
+    Both paths now go through one builder.
+    """
+    from cryodaq.agents.rag.embeddings import DEFAULT_EMBED_TIMEOUT_S, make_embeddings_client
+
+    client = make_embeddings_client(
+        {
+            "ollama_base_url": "http://127.0.0.1:11437",
+            "embedding_model": "qwen3-embedding:8b",
+            "embed_timeout_s": 180.0,
+        }
+    )
+
+    assert client.timeout_s == 180.0, "the retrieval client ignored its configured timeout"
+    assert client.model == "qwen3-embedding:8b"
+    assert client.base_url == "http://127.0.0.1:11437"
+
+    assert DEFAULT_EMBED_TIMEOUT_S >= 180.0, (
+        "the fallback must clear the measured 20-34 s embed, not the old 30 s default"
+    )
+
+
+def test_a_malformed_timeout_falls_back_instead_of_raising() -> None:
+    """A one-character config error must not stop the assistant from starting."""
+    from cryodaq.agents.rag.embeddings import DEFAULT_EMBED_TIMEOUT_S, make_embeddings_client
+
+    for bad in ("", "сто восемьдесят", [], None, 0, -5, float("inf"), float("nan")):
+        client = make_embeddings_client({"embed_timeout_s": bad})
+        assert client.timeout_s == DEFAULT_EMBED_TIMEOUT_S, f"{bad!r} did not fall back"
+
+
+def test_there_is_exactly_one_place_that_constructs_the_embeddings_client() -> None:
+    """The defect was a SECOND construction site, so the invariant is "one".
+
+    This is a source check, and deliberately so. The builder test above pins
+    what the client gets from configuration, but it cannot see a caller that
+    bypasses the builder — and bypassing it is precisely what happened: the
+    indexing path passed the measured timeout, the retrieval path constructed
+    its own client and did not, and no behavioural test could reach the second
+    one without booting the assistant.
+
+    A second construction site is the drift itself, not a proxy for it. If a
+    caller ever genuinely needs its own client, this test should be changed
+    deliberately rather than by accident.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[3] / "src" / "cryodaq"
+    sites = [
+        f"{path.relative_to(src)}:{number}"
+        for path in sorted(src.rglob("*.py"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "EmbeddingsClient(" in line and "make_embeddings_client" not in line
+    ]
+
+    assert len(sites) == 1, f"expected one construction site, found {len(sites)}: {sites}"
+    assert sites[0].startswith("agents/rag/embeddings.py:"), (
+        f"the only construction site must be the shared builder, not {sites[0]}"
+    )

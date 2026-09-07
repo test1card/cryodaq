@@ -14,7 +14,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaModelMissingError,
     OllamaUnavailableError,
 )
-from cryodaq.agents.rag.embeddings import EmbeddingsClient
+from cryodaq.agents.rag.embeddings import EmbeddingsClient, make_embeddings_client
 from cryodaq.agents.rag.indexer import _EMBEDDING_DIM, RagEmbeddingDimensionError, build_index
 from cryodaq.agents.rag.searcher import RagSearcher
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
@@ -68,43 +68,9 @@ def _find_latest_sqlite() -> Path | None:
 _DEFAULT_EMBED_TIMEOUT_S = 180.0
 
 
-def _positive_float(value: object, fallback: float) -> float:
-    """Coerce a config value, falling back rather than raising.
-
-    A malformed `embed_timeout_s` — an empty string, a stray list, a typo —
-    must not stop a rebuild before it starts. Bare float() raises on all
-    three, which would turn a one-character config error into a traceback at
-    the top of a multi-hour job. Reported by review of 2026-09-05, whose point
-    was that the test claiming to cover this never put the values in.
-    """
-    try:
-        coerced = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return fallback
-    if coerced != coerced or coerced <= 0:  # NaN or nonsense
-        return fallback
-    return coerced
-
-
 def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
-    # May 2026: default switched к qwen3-embedding:0.6b — top of MTEB
-    # multilingual leaderboard. Previous default (multilingual-e5-small)
-    # deprecated due к Ollama 0.23+ incompatibility for community uploads.
-    #
-    # 2026-09-05: the timeout is now read from config instead of taking
-    # EmbeddingsClient's 30 s default. That default was sized for a 0.6b model
-    # on a local GPU. After retrieval moved to qwen3-embedding:8b on the
-    # owner's server, a single embed call was MEASURED at 20-34 s — straddling
-    # the 30 s default, so chunks timed out at random, each one becoming an
-    # unsearchable zero vector. The 19:53 rebuild on 2026-09-05 lost six chunks
-    # exactly this way. Same defect as the generation timeout left at 120 s for
-    # a model that needed 280.
-    return EmbeddingsClient(
-        base_url=rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
-        model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
-        timeout_s=_positive_float(rag_cfg.get("embed_timeout_s"), _DEFAULT_EMBED_TIMEOUT_S),
-        keep_alive=rag_cfg.get("embed_keep_alive"),
-    )
+    """Kept as the CLI's name for the shared builder."""
+    return make_embeddings_client(rag_cfg)
 
 
 def _add_config_flag(parser: argparse.ArgumentParser) -> None:
