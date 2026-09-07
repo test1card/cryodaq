@@ -45,6 +45,7 @@ def test_launcher_loads_fonts():
         patch("sys.argv", ["cryodaq"]),
     ):
         from cryodaq import launcher
+
         try:
             launcher.main()
         except SystemExit:
@@ -83,6 +84,7 @@ def test_gui_app_loads_fonts():
         patch("sys.argv", ["cryodaq-gui"]),
     ):
         from cryodaq.gui import app as gui_app
+
         try:
             gui_app.main()
         except SystemExit:

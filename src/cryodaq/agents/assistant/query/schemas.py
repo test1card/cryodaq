@@ -107,6 +107,13 @@ class VacuumETA:
         _validate_availability(self.available, self.stale, self.reason)
 
 
+#: How many residual standard deviations the fitted change must clear before a
+#: direction is claimed in prose. Two is the usual "not noise" bar and is what
+#: separates this stand's real ramps — whose scatter is a thousandth of the
+#: change — from a flat window with one bad sample.
+_DIRECTION_SIGNIFICANCE = 2.0
+
+
 @dataclass
 class ChannelTrend:
     """Where a channel is going, not just where it is.
@@ -134,6 +141,11 @@ class ChannelTrend:
     #: Seconds actually covered, first sample to last.
     span_s: float
     rate_per_hour: float
+    #: Scatter of the samples about the fitted line, in the channel's own unit.
+    #: `direction` needs it: a slope is only a direction if the data supports
+    #: one. Zero when not computed, which reads as "no scatter" and is correct
+    #: for the degenerate cases that set it.
+    residual_std: float = 0.0
     unit: str = ""
     available: bool = True
     stale: bool = False
@@ -149,12 +161,30 @@ class ChannelTrend:
 
     @property
     def direction(self) -> str:
-        """Coarse direction, for prose. Deliberately three-valued."""
+        """Coarse direction, for prose. Deliberately three-valued.
+
+        A slope is not a direction until the data supports one. Least squares
+        alone does not give that: reviewed 2026-09-07, a flat window with a
+        single spike on its last sample fitted +0.198/h and this property said
+        "растёт" — the prose an operator acts on, produced by one bad reading.
+        The rate being smaller than the endpoint difference was not protection;
+        the earlier regression asserted only that, and passed while the
+        operator-facing word stayed wrong.
+
+        So the claim is gated on significance: the change the fit predicts over
+        the window must stand clear of the scatter about that fit. One spike
+        inflates the scatter far more than it moves the slope, which is exactly
+        the asymmetry needed. Below the gate the honest word is "стабильно" —
+        not "unknown", because the level IS known and steady within noise.
+        """
         if not self.available:
             return "неизвестно"
         magnitude = abs(self.rate_per_hour)
         reference = max(abs(self.first_value), abs(self.last_value), 1e-30)
         if magnitude / reference < 0.01:
+            return "стабильно"
+        predicted_change = magnitude * (self.span_s / 3600.0)
+        if predicted_change < _DIRECTION_SIGNIFICANCE * self.residual_std:
             return "стабильно"
         return "растёт" if self.rate_per_hour > 0 else "падает"
 

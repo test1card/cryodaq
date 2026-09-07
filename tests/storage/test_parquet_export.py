@@ -35,8 +35,7 @@ def _create_test_db(db_path: Path, readings: list[tuple]) -> None:
         ")"
     )
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         readings,
     )
     conn.commit()
@@ -256,9 +255,7 @@ def test_export_reads_rotated_cold_day(tmp_path: Path) -> None:
             ]
         )
         await writer.stop()
-        service = ColdRotationService(
-            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
-        )
+        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
         results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
         assert results, "old day must have rotated to Parquet"
 

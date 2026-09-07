@@ -1,4 +1,5 @@
 """F-CHANGELOG-Audit: structural validation of CHANGELOG.md."""
+
 import re
 from pathlib import Path
 
@@ -17,9 +18,7 @@ def test_changelog_versions_in_descending_order():
     text = (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
     versions = re.findall(r"## \[(\d+\.\d+\.\d+)\]", text)
     parsed = [tuple(int(p) for p in v.split(".")) for v in versions]
-    assert parsed == sorted(parsed, reverse=True), (
-        f"Versions not in descending order: {versions}"
-    )
+    assert parsed == sorted(parsed, reverse=True), f"Versions not in descending order: {versions}"
 
 
 def test_changelog_documents_current_version():
@@ -34,6 +33,4 @@ def test_changelog_documents_current_version():
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     with (root / "pyproject.toml").open("rb") as fh:
         version = tomllib.load(fh)["project"]["version"]
-    assert f"[{version}]" in text, (
-        f"CHANGELOG.md has no entry for the current version [{version}]"
-    )
+    assert f"[{version}]" in text, f"CHANGELOG.md has no entry for the current version [{version}]"

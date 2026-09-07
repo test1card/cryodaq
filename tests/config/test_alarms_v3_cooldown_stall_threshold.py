@@ -4,6 +4,7 @@ The cooldown_stall composite alarm (static threshold workaround) was deleted
 in F-X v3. CooldownAlarm (predictor-based) replaces it.
 See config/physical_alarms.yaml.
 """
+
 from pathlib import Path
 
 import yaml

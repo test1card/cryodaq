@@ -97,6 +97,25 @@ _COUNTER_LOCK_TIMEOUT_S = 0.01
 # still working. Named (not an inline literal) so tests assert the ordering on
 # the live constant rather than grepping source text.
 SUBPROCESS_REQ_TIMEOUT_S = 60.0
+# The LLM tier. 2026-09-07: the assistant's bounds were raised to a
+# 1800 > 1740 > 1500 > 1400 chain by operator decision, and this forwarder was
+# left at 60 s — so a GUI-side assistant query the assistant was legitimately
+# still answering surfaced as a false cmd_timeout and restarted the bridge:
+# exactly the failure the comment above describes, one order of magnitude
+# later. Raising the single constant instead would have made every ordinary
+# command wait half an hour on a hung server, so the tiers are separate, the
+# way the server side already separates them (`HANDLER_TIMEOUT_LLM_S`).
+SUBPROCESS_REQ_TIMEOUT_LLM_S = 1860.0
+#: Commands that reach a language model. Mirrors `zmq_bridge._LLM_COMMANDS`;
+#: kept as its own set because this module must not import the bridge.
+_LLM_COMMAND_ACTIONS: frozenset[str] = frozenset({"assistant.query", "rag.search", "rag.rebuild"})
+
+
+def _req_timeout_for(action: object) -> float:
+    """The reply ceiling for one command. Fast by default, wide for the model."""
+    if isinstance(action, str) and action in _LLM_COMMAND_ACTIONS:
+        return SUBPROCESS_REQ_TIMEOUT_LLM_S
+    return SUBPROCESS_REQ_TIMEOUT_S
 
 
 def _bounded_command_label(action: object) -> str:
@@ -463,7 +482,7 @@ def zmq_bridge_main(
         command-channel-only failures and restart the bridge.
         """
 
-        def _new_req_socket(addr: str):
+        def _new_req_socket(addr: str, timeout_s: float):
             """Build a fresh per-command REQ socket connected to ``addr``.
 
             IV.6: REQ_RELAXED / REQ_CORRELATE dropped — they were only
@@ -487,7 +506,7 @@ def zmq_bridge_main(
             # cold-start, capped at 55 s) has room to reply before the REQ
             # side gives up, so timeouts at each layer fire in predictable
             # order: server → subprocess REQ → GUI future.
-            _req_timeout_ms = int(SUBPROCESS_REQ_TIMEOUT_S * 1000)
+            _req_timeout_ms = int(timeout_s * 1000)
             req.setsockopt(zmq.RCVTIMEO, _req_timeout_ms)
             req.setsockopt(zmq.SNDTIMEO, _req_timeout_ms)
             req.connect(addr)
@@ -496,7 +515,7 @@ def zmq_bridge_main(
         class _ForwarderStopping(Exception):
             pass
 
-        def _recv_reply(req: Any) -> str:
+        def _recv_reply(req: Any, timeout_s: float) -> str:
             """Wait for a reply while retaining bounded shutdown ownership."""
 
             poll = getattr(req, "poll", None)
@@ -504,7 +523,7 @@ def zmq_bridge_main(
                 # Minimal fake sockets used by isolated guards expose only the
                 # blocking API. Production pyzmq sockets always provide poll.
                 return req.recv_string()
-            deadline = time.monotonic() + SUBPROCESS_REQ_TIMEOUT_S
+            deadline = time.monotonic() + timeout_s
             while True:
                 if shutdown_event.is_set():
                     raise _ForwarderStopping
@@ -660,11 +679,12 @@ def zmq_bridge_main(
                 wire_cmd = {**wire_cmd, "cmd": "protocol_version"}
 
             # Fresh socket per command — no shared state across commands.
-            req = _new_req_socket(target_addr)
+            _timeout_s = _req_timeout_for(cmd_type)
+            req = _new_req_socket(target_addr, _timeout_s)
             try:
                 try:
                     req.send_string(json.dumps(wire_cmd))
-                    reply_raw = _recv_reply(req)
+                    reply_raw = _recv_reply(req, _timeout_s)
                     try:
                         reply = _decode_command_reply(reply_raw)
                     except (json.JSONDecodeError, UnicodeError, ValueError, TypeError):

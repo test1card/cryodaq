@@ -121,9 +121,7 @@ def test_loop_owned_tasks_never_offload(name):
 
 @pytest.mark.parametrize(
     "name",
-    sorted(
-        spec.name for spec in PERIODIC_OWNERS if spec.owner_class is PeriodicOwnerClass.OFFLOADED_BEST_EFFORT
-    ),
+    sorted(spec.name for spec in PERIODIC_OWNERS if spec.owner_class is PeriodicOwnerClass.OFFLOADED_BEST_EFFORT),
 )
 def test_best_effort_analytics_offloads_its_computation(name):
     """Being slow must cost analytics its own turn, never an observation window."""
@@ -157,8 +155,6 @@ def test_sensor_diagnostics_offloads_only_the_pure_half():
                 offloaded_args.append(arg.attr)
 
     assert offloaded_args, "sensor_diag_tick offloads nothing"
-    assert "update" not in offloaded_args, (
-        "sensor_diag_tick offloads update(), which mutates alarm state in the worker"
-    )
+    assert "update" not in offloaded_args, "sensor_diag_tick offloads update(), which mutates alarm state in the worker"
     assert "apply" not in offloaded_args, "apply() mutates alarm state and must run on the event loop"
     assert "compute" in offloaded_args, "the pure half is what belongs in the worker"

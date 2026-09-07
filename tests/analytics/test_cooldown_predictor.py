@@ -73,8 +73,9 @@ async def test_compute_progress_quasi_stationary_not_saturated():
         compute_progress,
     )
 
-    p = compute_progress(np.array([4.0]), np.array([80.0]),
-                         T_cold_end=T_COLD_END_FALLBACK, T_warm_end=T_WARM_END_FALLBACK)
+    p = compute_progress(
+        np.array([4.0]), np.array([80.0]), T_cold_end=T_COLD_END_FALLBACK, T_warm_end=T_WARM_END_FALLBACK
+    )
     assert float(p[0]) < 0.999, "Progress at 4K should not saturate with data-driven floors"
     assert float(p[0]) > 0.95, "Progress at 4K should still be high"
 
@@ -396,11 +397,7 @@ async def test_no_print_in_module():
 
     bare_prints: list[int] = []
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "print"
-        ):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
             bare_prints.append(node.lineno)
 
     assert bare_prints == [], (
@@ -488,7 +485,7 @@ async def test_build_model_from_curves_sets_floors():
     model = build_model_from_curves([rc, rc2])
 
     # Literal expected values from known minima (3.2K cold, 68.0K warm)
-    expected_cold_end = 2.7   # max(1.0, 3.2 - 0.5)
+    expected_cold_end = 2.7  # max(1.0, 3.2 - 0.5)
     expected_warm_end = 66.0  # max(50.0, 68.0 - 2.0)
 
     assert model.T_cold_end == pytest.approx(expected_cold_end, abs=0.01), (
@@ -517,17 +514,21 @@ async def test_predict_quasi_stationary_returns_trajectory(synthetic_curves):
 
     raw = [
         ReferenceCurve(
-            name=d["name"], date=d["date"], t_hours=d["t_hours"],
-            T_cold=d["T_cold"], T_warm=d["T_warm"],
-            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
-            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            name=d["name"],
+            date=d["date"],
+            t_hours=d["t_hours"],
+            T_cold=d["T_cold"],
+            T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"],
+            phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"],
+            T_cold_final=d["T_cold_final"],
             T_warm_final=d["T_warm_final"],
         )
         for d in synthetic_curves
     ]
     model = build_model_from_curves(raw)
-    pred = predict(model, T_cold_now=5.0, T_warm_now=86.0, t_elapsed=18.0,
-                   generate_trajectory=True)
+    pred = predict(model, T_cold_now=5.0, T_warm_now=86.0, t_elapsed=18.0, generate_trajectory=True)
 
     assert pred.phase != "steady", "5K with data-driven floor should not be 'steady'"
     assert pred.future_t is not None, "Trajectory should be generated in quasi-stationary regime"
@@ -544,18 +545,22 @@ async def test_predict_at_true_floor_is_steady(synthetic_curves):
 
     raw = [
         ReferenceCurve(
-            name=d["name"], date=d["date"], t_hours=d["t_hours"],
-            T_cold=d["T_cold"], T_warm=d["T_warm"],
-            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
-            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            name=d["name"],
+            date=d["date"],
+            t_hours=d["t_hours"],
+            T_cold=d["T_cold"],
+            T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"],
+            phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"],
+            T_cold_final=d["T_cold_final"],
             T_warm_final=d["T_warm_final"],
         )
         for d in synthetic_curves
     ]
     model = build_model_from_curves(raw)
     # Predict at T_cold=1.0K — well below the derived floor (~2.8K)
-    pred = predict(model, T_cold_now=1.0, T_warm_now=60.0, t_elapsed=22.0,
-                   generate_trajectory=True)
+    pred = predict(model, T_cold_now=1.0, T_warm_now=60.0, t_elapsed=22.0, generate_trajectory=True)
     assert pred.phase == "steady"
     assert pred.future_t is None
 
@@ -573,10 +578,15 @@ async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path
 
     raw = [
         ReferenceCurve(
-            name=d["name"], date=d["date"], t_hours=d["t_hours"],
-            T_cold=d["T_cold"], T_warm=d["T_warm"],
-            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
-            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            name=d["name"],
+            date=d["date"],
+            t_hours=d["t_hours"],
+            T_cold=d["T_cold"],
+            T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"],
+            phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"],
+            T_cold_final=d["T_cold_final"],
             T_warm_final=d["T_warm_final"],
         )
         for d in synthetic_curves
@@ -607,9 +617,9 @@ async def test_load_legacy_model_without_floor_fields(synthetic_curves, tmp_path
     #   T_warm_end = max(50.0, min(warm_mins) - 2.0) = max(50.0, 84.814... - 2.0) = 82.814...
     #
     # Substituting literal arithmetic (independent of _derive_floors):
-    _COLD_MIN_FIXTURE = 5.238214802103644   # min T_cold across all 9 synthetic curves
-    _WARM_MIN_FIXTURE = 84.81452007433214   # min T_warm across all 9 synthetic curves
-    expected_cold_end = max(1.0, _COLD_MIN_FIXTURE - 0.5)   # = 4.738214802103644
+    _COLD_MIN_FIXTURE = 5.238214802103644  # min T_cold across all 9 synthetic curves
+    _WARM_MIN_FIXTURE = 84.81452007433214  # min T_warm across all 9 synthetic curves
+    expected_cold_end = max(1.0, _COLD_MIN_FIXTURE - 0.5)  # = 4.738214802103644
     expected_warm_end = max(50.0, _WARM_MIN_FIXTURE - 2.0)  # = 82.81452007433214
 
     assert loaded.T_cold_end == pytest.approx(expected_cold_end, abs=0.01), (
@@ -642,10 +652,15 @@ async def test_save_load_round_trip_preserves_floors(synthetic_curves, tmp_path)
 
     raw = [
         ReferenceCurve(
-            name=d["name"], date=d["date"], t_hours=d["t_hours"],
-            T_cold=d["T_cold"], T_warm=d["T_warm"],
-            duration_hours=d["duration_hours"], phase1_hours=d["phase1_hours"],
-            phase2_hours=d["phase2_hours"], T_cold_final=d["T_cold_final"],
+            name=d["name"],
+            date=d["date"],
+            t_hours=d["t_hours"],
+            T_cold=d["T_cold"],
+            T_warm=d["T_warm"],
+            duration_hours=d["duration_hours"],
+            phase1_hours=d["phase1_hours"],
+            phase2_hours=d["phase2_hours"],
+            T_cold_final=d["T_cold_final"],
             T_warm_final=d["T_warm_final"],
         )
         for d in synthetic_curves

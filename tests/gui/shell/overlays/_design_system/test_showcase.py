@@ -36,8 +36,7 @@ def test_showcase_builds_all_phase_i1_primitives(app):
     # DrillDownBreadcrumb present and shows "Аналитика"
     breadcrumb = window.findChild(DrillDownBreadcrumb)
     assert breadcrumb is not None, "DrillDownBreadcrumb must be present"
-    assert "Аналитика" in breadcrumb._overlay_label.toolTip() or \
-           "Аналитика" in breadcrumb._overlay_label.text(), (
+    assert "Аналитика" in breadcrumb._overlay_label.toolTip() or "Аналитика" in breadcrumb._overlay_label.text(), (
         f"Breadcrumb must show 'Аналитика', got text={breadcrumb._overlay_label.text()!r}"
     )
 
@@ -48,8 +47,7 @@ def test_showcase_builds_all_phase_i1_primitives(app):
     # Collect all tile title labels (the first QLabel child of each showcaseTile QFrame)
     all_frames = window.findChildren(QFrame, "showcaseTile")
     assert len(all_frames) == 7, (
-        f"Expected 7 showcase tiles, found {len(all_frames)}: "
-        f"{[f.objectName() for f in all_frames]}"
+        f"Expected 7 showcase tiles, found {len(all_frames)}: {[f.objectName() for f in all_frames]}"
     )
 
     # Collect the title text from each tile (first QLabel child)
@@ -70,8 +68,7 @@ def test_showcase_builds_all_phase_i1_primitives(app):
     }
     found_titles = set(tile_titles)
     assert found_titles == expected_titles, (
-        f"Tile titles mismatch.\nExpected: {sorted(expected_titles)}\n"
-        f"Got:      {sorted(found_titles)}"
+        f"Tile titles mismatch.\nExpected: {sorted(expected_titles)}\nGot:      {sorted(found_titles)}"
     )
 
     # Verify bento grid layout positions/spans via QGridLayout
@@ -79,11 +76,11 @@ def test_showcase_builds_all_phase_i1_primitives(app):
     # Expected: (row, col, row_span, col_span) for each tile title
     expected_positions = {
         "Executive tile": (0, 0, 1, 4),
-        "Live tile":      (0, 4, 1, 4),
-        "Wide tile":      (1, 0, 1, 5),
-        "Tall tile":      (1, 5, 2, 3),
-        "Support tile":   (2, 0, 1, 5),
-        "Dense tile":     (3, 0, 1, 4),
+        "Live tile": (0, 4, 1, 4),
+        "Wide tile": (1, 0, 1, 5),
+        "Tall tile": (1, 5, 2, 3),
+        "Support tile": (2, 0, 1, 5),
+        "Dense tile": (3, 0, 1, 4),
         "Telemetry tile": (3, 4, 1, 4),
     }
     for frame in all_frames:

@@ -22,9 +22,7 @@ def test_sensor_fault_notify_gui_only() -> None:
 
     for aid in ("sensor_fault", "sensor_fault_intermittent"):
         assert aid in by_id, f"{aid} missing from alarms_v3.yaml"
-        assert "telegram" not in by_id[aid].notify, (
-            f"{aid} must not dispatch to Telegram (v0.55.5 policy)"
-        )
+        assert "telegram" not in by_id[aid].notify, f"{aid} must not dispatch to Telegram (v0.55.5 policy)"
         assert "gui" in by_id[aid].notify, f"{aid} must keep gui dispatch"
 
 
@@ -60,6 +58,5 @@ def test_plugins_yaml_sensor_diag_telegram_disabled() -> None:
     raw = yaml.safe_load((REPO_ROOT / "config" / "plugins.yaml").read_text(encoding="utf-8"))
     sd = raw.get("sensor_diagnostics", {})
     assert sd.get("notify_telegram", True) is False, (
-        "sensor_diagnostics.notify_telegram must be False — sensor health "
-        "alarms route to GUI only (v0.55.5)"
+        "sensor_diagnostics.notify_telegram must be False — sensor health alarms route to GUI only (v0.55.5)"
     )

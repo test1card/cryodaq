@@ -612,7 +612,9 @@ def test_subprocess_req_timeout_exceeds_server_slow_ceiling() -> None:
     not a source grep of the literal — a grep cannot catch a re-inversion
     that keeps the same literal text elsewhere.
     """
-    from cryodaq.core.zmq_subprocess import SUBPROCESS_REQ_TIMEOUT_S
+    from cryodaq.core.zmq_subprocess import (
+        SUBPROCESS_REQ_TIMEOUT_S,
+    )
     from cryodaq.gui.zmq_client import _CMD_REPLY_TIMEOUT_S
 
     assert HANDLER_TIMEOUT_SLOW_S < SUBPROCESS_REQ_TIMEOUT_S, (
@@ -683,3 +685,34 @@ def test_the_exception_message_is_carried_and_bounded() -> None:
 
     assert "nan" in _bounded_serialization_detail(ValueError("Out of range float values are not JSON compliant: nan"))
     assert len(_bounded_serialization_detail(ValueError("x" * 5000))) <= 201
+
+
+def test_the_llm_tier_nests_the_same_way_as_the_fast_one() -> None:
+    """Two tiers, one ordering. Added 2026-09-07.
+
+    The assistant's bounds were raised to a 1800 > 1740 > 1500 > 1400 chain and
+    this forwarder was left at 60 s, so a GUI-side assistant query the
+    assistant was legitimately still answering surfaced as a false cmd_timeout
+    and restarted the bridge. Raising the single constant would have made every
+    ordinary command wait half an hour on a hung server, so the tiers are
+    separate — and a separate tier is a separate chance to invert the ordering.
+    """
+    from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_LLM_S
+    from cryodaq.core.zmq_subprocess import SUBPROCESS_REQ_TIMEOUT_LLM_S
+    from cryodaq.gui.zmq_client import _CMD_REPLY_TIMEOUT_LLM_S
+
+    assert HANDLER_TIMEOUT_LLM_S < SUBPROCESS_REQ_TIMEOUT_LLM_S < _CMD_REPLY_TIMEOUT_LLM_S, (
+        f"LLM tier is inverted: handler {HANDLER_TIMEOUT_LLM_S}, "
+        f"REQ {SUBPROCESS_REQ_TIMEOUT_LLM_S}, GUI {_CMD_REPLY_TIMEOUT_LLM_S}"
+    )
+
+
+def test_an_ordinary_command_is_not_given_the_model_s_patience() -> None:
+    """A hung status command must fail in about a minute, not half an hour."""
+    from cryodaq.core.zmq_subprocess import _req_timeout_for
+    from cryodaq.gui.zmq_client import _cmd_reply_timeout_for
+
+    assert _req_timeout_for("experiment_status") <= 120.0
+    assert _cmd_reply_timeout_for("experiment_status") <= 120.0
+    assert _req_timeout_for("assistant.query") > 1000.0
+    assert _cmd_reply_timeout_for("assistant.query") > 1000.0

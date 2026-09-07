@@ -61,9 +61,7 @@ def _active_exp(exp_id="exp-001", title="Тест", name="test"):
 
 
 def _make_mgr(**channels: dict) -> ChannelManager:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
     yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
@@ -348,13 +346,9 @@ def test_extract_channels_late_binding_reflects_renames() -> None:
     # After rename: "Болометр" should now match; old name "Детектор" must not
     mgr.set_name("Т7", "Болометр")
     result_after = handler._extract_channels("Болометр установлен при 4K")
-    assert "Т7" in result_after, (
-        "_extract_channels must reflect renamed display name (late binding)"
-    )
+    assert "Т7" in result_after, "_extract_channels must reflect renamed display name (late binding)"
     result_old_name = handler._extract_channels("Детектор сейчас при 4K")
-    assert "Т7" not in result_old_name, (
-        "_extract_channels must NOT match old display name after rename"
-    )
+    assert "Т7" not in result_old_name, "_extract_channels must NOT match old display name after rename"
 
 
 # ---------------------------------------------------------------------------
@@ -411,12 +405,8 @@ async def test_cleanup_loop_removes_expired_entries() -> None:
         await handler._cleanup_loop()
 
     async with handler._lock:
-        assert "old_key" not in handler._pending, (
-            "_cleanup_loop must remove expired entry"
-        )
-        assert "new_key" in handler._pending, (
-            "_cleanup_loop must keep fresh entry"
-        )
+        assert "old_key" not in handler._pending, "_cleanup_loop must remove expired entry"
+        assert "new_key" in handler._pending, "_cleanup_loop must keep fresh entry"
 
 
 # ---------------------------------------------------------------------------

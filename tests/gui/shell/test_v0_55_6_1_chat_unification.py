@@ -32,21 +32,15 @@ def test_knowledge_base_in_main_overlay_items() -> None:
 
     rail = ToolRail()
     # Button must exist in the rendered rail.
-    assert "knowledge_base" in rail._buttons, (
-        f"knowledge_base button absent from rail; buttons: {list(rail._buttons)}"
-    )
+    assert "knowledge_base" in rail._buttons, f"knowledge_base button absent from rail; buttons: {list(rail._buttons)}"
     btn = rail._buttons["knowledge_base"]
     # Tooltip matches the label from _OVERLAY_ITEMS.
-    assert btn.toolTip() == "База знаний", (
-        f"Unexpected tooltip: {btn.toolTip()!r}"
-    )
+    assert btn.toolTip() == "База знаний", f"Unexpected tooltip: {btn.toolTip()!r}"
     # Clicking the button emits tool_clicked with the correct overlay key.
     seen: list[str] = []
     rail.tool_clicked.connect(seen.append)
     btn.click()
-    assert seen == ["knowledge_base"], (
-        f"tool_clicked emitted wrong key: {seen}"
-    )
+    assert seen == ["knowledge_base"], f"tool_clicked emitted wrong key: {seen}"
     # Setting active must render the specific border-left declaration.
     # Assert the exact declaration (not token-anywhere) so hover/bg colours
     # cannot produce a false positive.
@@ -55,28 +49,20 @@ def test_knowledge_base_in_main_overlay_items() -> None:
     rail.set_active("knowledge_base")
     ss = btn.styleSheet()
     _active_border = f"border-left: 3px solid {theme.ACCENT_400}"
-    assert _active_border in ss, (
-        f"Active knowledge_base button missing border-left declaration: {ss!r}"
-    )
+    assert _active_border in ss, f"Active knowledge_base button missing border-left declaration: {ss!r}"
     # Also verify the source list for completeness (existing contract).
     names = [name for name, _, _ in tool_rail._OVERLAY_ITEMS]
-    assert "knowledge_base" in names, (
-        f"knowledge_base must be a main ToolRail entry; got {names}"
-    )
+    assert "knowledge_base" in names, f"knowledge_base must be a main ToolRail entry; got {names}"
 
 
 def test_knowledge_base_removed_from_more_menu() -> None:
     more_names = [name for name, _ in tool_rail._MORE_ITEMS if name != "__separator__"]
-    assert "knowledge_base" not in more_names, (
-        "knowledge_base must not appear in More menu after v0.55.6.1 promotion"
-    )
+    assert "knowledge_base" not in more_names, "knowledge_base must not appear in More menu after v0.55.6.1 promotion"
 
 
 def test_assistant_chat_overlay_entry_removed() -> None:
     names = [name for name, _, _ in tool_rail._OVERLAY_ITEMS]
-    assert "assistant_chat" not in names, (
-        "F34 standalone assistant_chat overlay must be removed in v0.55.6.1"
-    )
+    assert "assistant_chat" not in names, "F34 standalone assistant_chat overlay must be removed in v0.55.6.1"
     assert "assistant_chat" not in tool_rail._PHOSPHOR_ICONS, (
         "Phosphor icon mapping for the deleted overlay must be removed too"
     )
@@ -101,6 +87,4 @@ def test_knowledge_base_panel_imports_chat_widget_from_helper_module() -> None:
 
     # Trace the import path: the embedded chat must come from the renamed
     # private helper, not the deleted overlay module.
-    assert kb.AssistantChatPanel.__module__ == (
-        "cryodaq.gui.shell.overlays._assistant_chat_widget"
-    )
+    assert kb.AssistantChatPanel.__module__ == ("cryodaq.gui.shell.overlays._assistant_chat_widget")

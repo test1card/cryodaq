@@ -51,8 +51,7 @@ def _capture(*, with_formatter: type[logging.Formatter]) -> str:
 def test_the_token_does_not_reach_the_log_through_a_traceback() -> None:
     written = _capture(with_formatter=_TokenRedactFormatter)
     assert _FAKE not in written, (
-        "the bot token survived into a logged traceback — this is the exact "
-        f"defect found on 2026-09-07:\n{written}"
+        f"the bot token survived into a logged traceback — this is the exact defect found on 2026-09-07:\n{written}"
     )
     assert "bot***" in written, f"redaction must leave a visible marker:\n{written}"
     # The rest of the line must still be readable: a redactor that eats the
@@ -69,8 +68,7 @@ def test_a_plain_formatter_shows_why_the_filter_alone_was_not_enough() -> None:
     """
     written = _capture(with_formatter=logging.Formatter)
     assert _FAKE in written, (
-        "if this no longer reproduces, the mechanism has changed and the "
-        "reason for the formatter needs re-checking"
+        "if this no longer reproduces, the mechanism has changed and the reason for the formatter needs re-checking"
     )
 
 

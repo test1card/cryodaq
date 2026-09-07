@@ -147,10 +147,15 @@ def test_one_cooldown_populates_scatter(app):
     DURATION_HOURS = 6.0
     w = _make_widget()
     w._on_history_loaded(
-        {"ok": True, "cooldowns": [_cooldown_entry(
-            cooldown_started_at=COOLDOWN_STARTED_AT,
-            duration_hours=DURATION_HOURS,
-        )]}
+        {
+            "ok": True,
+            "cooldowns": [
+                _cooldown_entry(
+                    cooldown_started_at=COOLDOWN_STARTED_AT,
+                    duration_hours=DURATION_HOURS,
+                )
+            ],
+        }
     )
 
     assert not w._plot.isHidden()
@@ -192,15 +197,10 @@ def test_twenty_cooldowns_all_rendered(app):
     assert len(xs) == 20
     assert len(w._cooldowns) == 20
     # Full Y series must equal [1.0, 2.0, ..., 20.0] in order.
-    assert list(ys) == pytest.approx([float(i + 1) for i in range(20)]), (
-        f"Y values wrong/reordered: {list(ys)}"
-    )
+    assert list(ys) == pytest.approx([float(i + 1) for i in range(20)]), f"Y values wrong/reordered: {list(ys)}"
     # Full X series: every timestamp must match the parsed cooldown_started_at.
     # A wrong date or reordered entry will fail here — count-only checks hide these.
-    expected_xs = [
-        _dt.fromisoformat(f"2026-04-{i + 1:02d}T10:30:00+00:00").timestamp()
-        for i in range(20)
-    ]
+    expected_xs = [_dt.fromisoformat(f"2026-04-{i + 1:02d}T10:30:00+00:00").timestamp() for i in range(20)]
     assert list(xs) == pytest.approx(expected_xs), (
         f"X series wrong/reordered:\n  got:      {list(xs)}\n  expected: {expected_xs}"
     )
@@ -249,9 +249,5 @@ def test_zmq_failure_graceful_empty(app):
     # Simulate ZMQ timeout/failure response (no "error" key → bare ok=False).
     w._on_history_loaded({"ok": False})
     # Per src: ok=False → _empty_label.setHidden(True) + _error_label.setHidden(False)
-    assert w._empty_label.isHidden(), (
-        "Empty label must be hidden on ok=False"
-    )
-    assert not w._error_label.isHidden(), (
-        "Error label must be visible on ok=False"
-    )
+    assert w._empty_label.isHidden(), "Empty label must be hidden on ok=False"
+    assert not w._error_label.isHidden(), "Error label must be visible on ok=False"

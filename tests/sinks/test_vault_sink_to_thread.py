@@ -27,9 +27,7 @@ def _sample_export() -> ExperimentExport:
 
 
 @pytest.mark.asyncio
-async def test_vault_sink_write_runs_in_thread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_vault_sink_write_runs_in_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """VaultSink._write_file_sync must execute on a non-loop thread."""
     main_thread = threading.get_ident()
     captured: list[int] = []
@@ -47,6 +45,4 @@ async def test_vault_sink_write_runs_in_thread(
 
     assert result.success
     assert captured, "Path.write_text was not called"
-    assert captured[0] != main_thread, (
-        "VaultSink wrote on the asyncio loop thread"
-    )
+    assert captured[0] != main_thread, "VaultSink wrote on the asyncio loop thread"

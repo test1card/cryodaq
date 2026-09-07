@@ -34,9 +34,7 @@ class _MockEmbeddings:
 def _seed(tmp_path: Path) -> None:
     exp_dir = tmp_path / "experiments" / "abc12345"
     (exp_dir / "archive" / "summaries").mkdir(parents=True)
-    (exp_dir / "metadata.json").write_text(
-        json.dumps({"description": "Cooldown test"})
-    )
+    (exp_dir / "metadata.json").write_text(json.dumps({"description": "Cooldown test"}))
     (exp_dir / "archive" / "summaries" / "summary_metadata.json").write_text(
         json.dumps(
             {
@@ -106,9 +104,7 @@ async def test_searcher_reconnects_after_external_rebuild(tmp_path, monkeypatch)
     results = await searcher.search("any query", top_k=3)
 
     # The reconnect branch fired (connect was called twice).
-    assert len(connect_calls) == 2, (
-        f"expected 2 connect() calls (init + reconnect), got {len(connect_calls)}"
-    )
+    assert len(connect_calls) == 2, f"expected 2 connect() calls (init + reconnect), got {len(connect_calls)}"
     assert len(results) >= 1, "reconnect path must surface the rebuilt index"
 
 

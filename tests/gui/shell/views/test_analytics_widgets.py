@@ -128,9 +128,7 @@ def test_r_thermal_live_set_data_updates_labels(app):
     from cryodaq.gui.shell.views.analytics_view import RThermalData
 
     w = aw.RThermalLiveWidget()
-    w.set_r_thermal_data(
-        RThermalData(current_value=1.234, delta_per_minute=0.05, last_updated_ts=1.0)
-    )
+    w.set_r_thermal_data(RThermalData(current_value=1.234, delta_per_minute=0.05, last_updated_ts=1.0))
     assert w._value_label.text() == "1.234 К/Вт"
     assert w._delta_label.text() == "ΔR / мин: +0.050"
 

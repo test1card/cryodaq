@@ -31,21 +31,21 @@ from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 def test_the_defaults_are_unchanged() -> None:
     """Making something configurable must not quietly change it."""
     cfg = AssistantConfig()
-    assert cfg.query_format_num_ctx == 12288
+    assert cfg.query_format_num_ctx == 100_000
     assert cfg.query_format_max_tokens == 6144
 
 
 def test_config_overrides_reach_the_field() -> None:
     cfg = AssistantConfig.from_yaml_string(
-        "agent:\n  enabled: true\n  query:\n    format_num_ctx: 32768\n    format_max_tokens: 12288\n"
+        "agent:\n  enabled: true\n  query:\n    format_num_ctx: 32768\n    format_max_tokens: 100_000\n"
     )
     assert cfg.query_format_num_ctx == 32768
-    assert cfg.query_format_max_tokens == 12288
+    assert cfg.query_format_max_tokens == 100_000
 
 
 def test_a_silent_config_keeps_the_defaults() -> None:
     cfg = AssistantConfig.from_yaml_string("agent:\n  enabled: true\n  query:\n    enabled: true\n")
-    assert cfg.query_format_num_ctx == 12288
+    assert cfg.query_format_num_ctx == 100_000
     assert cfg.query_format_max_tokens == 6144
 
 
@@ -53,8 +53,8 @@ def test_a_silent_config_keeps_the_defaults() -> None:
 @pytest.mark.parametrize(
     ("yaml_extra", "want_ctx", "want_tokens"),
     [
-        ("    format_num_ctx: 32768\n    format_max_tokens: 12288\n", 32768, 12288),
-        ("", 12288, 6144),
+        ("    format_num_ctx: 32768\n    format_max_tokens: 100_000\n", 32768, 100_000),
+        ("", 100_000, 6144),
     ],
     ids=["configured", "absent"],
 )

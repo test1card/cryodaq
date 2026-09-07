@@ -93,9 +93,7 @@ async def test_the_assertion_never_becomes_device_evidence():
     evidence = parse_global_off_evidence(result.get("off_evidence"))
 
     assert evidence is not None
-    assert evidence.verified_off is False, (
-        "an operator statement must never be reported as device-verified OFF"
-    )
+    assert evidence.verified_off is False, "an operator statement must never be reported as device-verified OFF"
     assert str(evidence.off_tier) == "command_only", "no new evidence tier was introduced"
 
 
@@ -110,9 +108,9 @@ async def test_nothing_is_retained_after_the_assertion():
     # The assertion lives only in one shutdown request; the manager never sees it.
     after = await manager.emergency_off(channel=None)
     assert before.get("off_evidence") == after.get("off_evidence")
-    assert not any(
-        "physical_disconnect" in name for name in vars(manager)
-    ), "the assertion must not be retained anywhere in SafetyManager"
+    assert not any("physical_disconnect" in name for name in vars(manager)), (
+        "the assertion must not be retained anywhere in SafetyManager"
+    )
 
 
 def test_the_safety_manager_gained_no_assertion_entry_point():
@@ -183,9 +181,7 @@ def test_the_ordinary_receipt_shape_is_unchanged():
 
     source = (Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "launcher.py").read_text(encoding="utf-8")
     keys_block = source.split("expected_receipt_keys = {", 1)[1].split("}", 1)[0]
-    assert "operator_physical_disconnect" not in keys_block, (
-        "the assertion must not become a mandatory receipt field"
-    )
+    assert "operator_physical_disconnect" not in keys_block, "the assertion must not become a mandatory receipt field"
 
 
 def test_the_launcher_flag_dies_with_the_request_identity():
@@ -200,9 +196,7 @@ def test_the_launcher_flag_dies_with_the_request_identity():
     request_resets = source.count("self._engine_shutdown_request_id = None")
     flag_resets = source.count("self._engine_shutdown_operator_asserted = False")
     assert request_resets > 0
-    assert flag_resets == request_resets, (
-        f"{flag_resets} flag resets for {request_resets} request-identity resets"
-    )
+    assert flag_resets == request_resets, f"{flag_resets} flag resets for {request_resets} request-identity resets"
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +239,7 @@ def test_configuration_can_never_raise_the_confirmation():
     assert not hasattr(launcher_module, "_reviewed_source_declared_physically_disconnected")
     source = Path(launcher_module.__file__).read_text(encoding="utf-8")
     raising = [
-        line
-        for line in source.splitlines()
-        if "_source_disconnect_confirmation =" in line and "None" not in line
+        line for line in source.splitlines() if "_source_disconnect_confirmation =" in line and "None" not in line
     ]
     assert len(raising) == 1, f"the confirmation is raised in {len(raising)} places: {raising}"
     assert "confirm_source_physically_disconnected" in source

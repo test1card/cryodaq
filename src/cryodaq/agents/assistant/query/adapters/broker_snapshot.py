@@ -83,6 +83,21 @@ class BrokerSnapshot:
                     return reading
             return None
 
+    async def knows(self, channel: str) -> bool:
+        """Whether this channel is arriving, by id or by display name.
+
+        The router validates a classifier's channel against channels.yaml,
+        which describes the operator's thermometer set and contains neither the
+        pressure gauge nor the source meter. Reviewed 2026-09-07: after the
+        classifier was taught to name live channels, the router still threw the
+        name away one layer later, so "какое давление" resolved to nothing —
+        the fix was half done and the symptom unchanged.
+
+        Deliberately reuses `latest`, so what the router accepts and what the
+        fetch later finds cannot disagree.
+        """
+        return await self.latest(channel) is not None
+
     async def latest_all(self) -> dict[str, Reading]:
         async with self._lock:
             return dict(self._latest)

@@ -176,7 +176,7 @@ def test_find_by_landmark_alias_resolves_to_landmark_id() -> None:
     assert mgr.find_by_landmark_alias("криостат верх") is None
 
 
-def test_query_router_resolves_landmark_alias_over_experiment_name() -> None:
+async def test_query_router_resolves_landmark_alias_over_experiment_name() -> None:
     """Production-bug regression: even if an experiment-level channel name
     collides with a landmark alias, the router returns the landmark."""
     from cryodaq.agents.assistant.query.router import QueryRouter
@@ -197,11 +197,11 @@ def test_query_router_resolves_landmark_alias_over_experiment_name() -> None:
         category=QueryCategory.CURRENT_VALUE,
         target_channels=["азотная плита"],
     )
-    resolved = router._resolve_target_channels(intent)
+    resolved = await router._resolve_target_channels(intent)
     assert resolved == ["Т11"], f"Landmark alias must beat experiment name on collision; got {resolved}"
 
 
-def test_query_router_canonical_id_still_wins_first_pass() -> None:
+async def test_query_router_canonical_id_still_wins_first_pass() -> None:
     """When the LLM emits the canonical channel_id, direct-ID match returns
     it without going through the alias path."""
     from cryodaq.agents.assistant.query.router import QueryRouter
@@ -218,10 +218,10 @@ def test_query_router_canonical_id_still_wins_first_pass() -> None:
         category=QueryCategory.CURRENT_VALUE,
         target_channels=["Т12"],
     )
-    assert router._resolve_target_channels(intent) == ["Т12"]
+    assert await router._resolve_target_channels(intent) == ["Т12"]
 
 
-def test_query_router_falls_through_to_experiment_name_without_landmarks() -> None:
+async def test_query_router_falls_through_to_experiment_name_without_landmarks() -> None:
     """Backward compat: with no landmarks installed, the resolver still
     delegates to experiment-name matching unchanged."""
     from cryodaq.agents.assistant.query.router import QueryRouter
@@ -239,7 +239,7 @@ def test_query_router_falls_through_to_experiment_name_without_landmarks() -> No
         category=QueryCategory.CURRENT_VALUE,
         target_channels=["Болометр"],
     )
-    assert router._resolve_target_channels(intent) == ["Т7"]
+    assert await router._resolve_target_channels(intent) == ["Т7"]
 
 
 def test_the_pressure_gauge_is_offered_to_the_classifier() -> None:

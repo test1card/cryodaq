@@ -34,9 +34,7 @@ def test_legacy_aliases_canonicalize_to_enum():
 
     # Aliases must map to real enum values.
     for alias, canonical in _PHASE_ALIASES.items():
-        assert canonical in VALID_PHASES, (
-            f"alias {alias!r} → {canonical!r} but {canonical!r} not in VALID_PHASES"
-        )
+        assert canonical in VALID_PHASES, f"alias {alias!r} → {canonical!r} but {canonical!r} not in VALID_PHASES"
 
     # Documented legacy aliases.
     assert _PHASE_ALIASES.get("cooling") == "cooldown"

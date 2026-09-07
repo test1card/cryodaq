@@ -37,6 +37,7 @@ def _seed_telegram_owned_tasks(owner: object) -> None:
     for name in _TELEGRAM_OWNED_TASKS:
         setattr(owner, name, None)
 
+
 async def _terminal_failure(failure: BaseException) -> None:
     raise failure
 

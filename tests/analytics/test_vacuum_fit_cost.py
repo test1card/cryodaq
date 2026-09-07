@@ -19,9 +19,7 @@ _BUDGET_S = 8.0
 
 
 def _six_hours_of_samples() -> VacuumTrendPredictor:
-    predictor = VacuumTrendPredictor(
-        config={"window_s": 21600, "update_interval_s": 0, "min_points": 60}
-    )
+    predictor = VacuumTrendPredictor(config={"window_s": 21600, "update_interval_s": 0, "min_points": 60})
     predictor.push(0.0, 1000.0)
     # 6 h at 2 s, the real cadence of the pressure channel.
     for index in range(1, 10800):
@@ -66,9 +64,7 @@ def test_the_tick_never_runs_the_fit_on_the_event_loop():
     source = Path("src/cryodaq/engine_wiring/runtime_tasks.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     tick = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "vacuum_trend_tick"
+        node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "vacuum_trend_tick"
     )
     calls = [node for node in ast.walk(tick) if isinstance(node, ast.Call)]
 
@@ -76,18 +72,10 @@ def test_the_tick_never_runs_the_fit_on_the_event_loop():
         return isinstance(node.func, ast.Attribute) and node.func.attr == "update"
 
     # update() must not be invoked directly; it must be handed to a thread.
-    assert not any(is_update_call(node) for node in calls), (
-        "vacuum_trend.update() is called inline in the event loop"
-    )
-    offloaded = [
-        node
-        for node in calls
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread"
-    ]
+    assert not any(is_update_call(node) for node in calls), "vacuum_trend.update() is called inline in the event loop"
+    offloaded = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread"]
     assert offloaded, "the vacuum fit must be offloaded with asyncio.to_thread"
-    assert any(
-        isinstance(arg, ast.Attribute) and arg.attr == "update" for node in offloaded for arg in node.args
-    )
+    assert any(isinstance(arg, ast.Attribute) and arg.attr == "update" for node in offloaded for arg in node.args)
 
 
 def test_samples_survive_a_writer_running_during_a_fit():

@@ -17,7 +17,6 @@ is interface-wide; three LakeShore sessions share one physical GPIB0 here, so
 recovering one device that way would interrupt healthy peers mid-transaction.
 """
 
-
 import pytest
 
 from cryodaq.drivers.transport.gpib import GPIBTransport

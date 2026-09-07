@@ -61,6 +61,22 @@ from cryodaq.operator_snapshot import OperatorSnapshot
 logger = logging.getLogger(__name__)
 
 _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 60s < GUI 65s
+# The LLM tier, above the forwarder's SUBPROCESS_REQ_TIMEOUT_LLM_S (1860 s).
+# The ordering is the same as the fast tier's, one order of magnitude out:
+# handler 1740 < REQ 1860 < THIS. Two tiers rather than one raised constant,
+# so an ordinary hung command still fails in about a minute instead of making
+# the operator watch a spinner for half an hour.
+_CMD_REPLY_TIMEOUT_LLM_S = 1920.0
+_LLM_COMMAND_ACTIONS: frozenset[str] = frozenset({"assistant.query", "rag.search", "rag.rebuild"})
+
+
+def _cmd_reply_timeout_for(action: object) -> float:
+    """Reply ceiling for one command; wide only for the ones that think."""
+    if isinstance(action, str) and action in _LLM_COMMAND_ACTIONS:
+        return _CMD_REPLY_TIMEOUT_LLM_S
+    return _CMD_REPLY_TIMEOUT_S
+
+
 _BRIDGE_INGRESS_MONOTONIC_KEY = "__bridge_ingress_monotonic"
 _BRIDGE_INGRESS_MONOTONIC_METADATA_KEY = "bridge_ingress_monotonic"
 
@@ -1655,7 +1671,7 @@ class ZmqBridge:
             }
 
         try:
-            deadline = time.monotonic() + _CMD_REPLY_TIMEOUT_S
+            deadline = time.monotonic() + _cmd_reply_timeout_for(cmd.get("cmd") if isinstance(cmd, dict) else None)
             while True:
                 if cancellation_requested is not None and cancellation_requested.is_set():
                     direct_result: dict[str, Any] | None = None

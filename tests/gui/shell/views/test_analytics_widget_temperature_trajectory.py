@@ -169,10 +169,12 @@ def test_channels_from_different_groups_get_separate_plotitems(app):
     mgr._channels.setdefault("Т_compressor_test", {})["group"] = "compressor"
     try:
         w = _make_widget()
-        w.set_temperature_readings({
-            "Т_cryostat_test": _reading("Т_cryostat_test", 4.2),
-            "Т_compressor_test": _reading("Т_compressor_test", 280.0),
-        })
+        w.set_temperature_readings(
+            {
+                "Т_cryostat_test": _reading("Т_cryostat_test", 4.2),
+                "Т_compressor_test": _reading("Т_compressor_test", 280.0),
+            }
+        )
         assert "cryostat" in w._group_plots
         assert "compressor" in w._group_plots
         # Each group has its own PlotItem — they must be distinct objects.
@@ -186,12 +188,14 @@ def test_history_sorted_by_timestamp_after_load(app):
     """After _on_history_loaded, series must be sorted by timestamp even if
     the engine returned out-of-order points; rendered curve must reflect that order."""
     w = _make_widget()
-    w._on_history_loaded({
-        "ok": True,
-        "data": {
-            "Т1": [[3000.0, 200.0], [1000.0, 295.0], [2000.0, 250.0]],
-        },
-    })
+    w._on_history_loaded(
+        {
+            "ok": True,
+            "data": {
+                "Т1": [[3000.0, 200.0], [1000.0, 295.0], [2000.0, 250.0]],
+            },
+        }
+    )
     series = w._series["Т1"]
     assert series.xs == sorted(series.xs)
 
@@ -282,11 +286,13 @@ def test_live_append_trims_to_5000_points(app):
 def test_live_multi_channel_single_call(app):
     """A readings dict with multiple channels must update all of them with exact curve data."""
     w = _make_widget()
-    w.set_temperature_readings({
-        "Т1": _reading("Т1", 100.0, ts=1000.0),
-        "Т2": _reading("Т2", 200.0, ts=1001.0),
-        "Т3": _reading("Т3", 300.0, ts=1002.0),
-    })
+    w.set_temperature_readings(
+        {
+            "Т1": _reading("Т1", 100.0, ts=1000.0),
+            "Т2": _reading("Т2", 200.0, ts=1001.0),
+            "Т3": _reading("Т3", 300.0, ts=1002.0),
+        }
+    )
     assert set(w._series.keys()) == {"Т1", "Т2", "Т3"}
     assert set(w._curves.keys()) == {"Т1", "Т2", "Т3"}
 
@@ -379,11 +385,7 @@ def test_fetch_history_sends_full_channel_labels(app):
         # Named channels must appear as full labels (short_id + space + name).
         # Channels with no registered name legitimately appear as short IDs
         # (get_display_name returns short_id when name is absent).
-        assert "Т_label_test Тестовый Label" in channels, (
-            f"Named channel not sent as full label. channels={channels}"
-        )
-        assert "Т_label_test" not in channels, (
-            "Named channel sent as bare short ID — SQLite query would return 0 rows."
-        )
+        assert "Т_label_test Тестовый Label" in channels, f"Named channel not sent as full label. channels={channels}"
+        assert "Т_label_test" not in channels, "Named channel sent as bare short ID — SQLite query would return 0 rows."
     finally:
         mgr._channels.pop("Т_label_test", None)

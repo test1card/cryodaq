@@ -60,9 +60,7 @@ def test_no_alarm_during_grace_period() -> None:
         eng.update()
         eng.update()
 
-    assert pub.published == [], (
-        f"Expected no publishes during grace window, got {pub.published}"
-    )
+    assert pub.published == [], f"Expected no publishes during grace window, got {pub.published}"
 
 
 def test_alarm_after_grace_period() -> None:
@@ -130,9 +128,7 @@ def test_grace_inactive_until_mark_engine_started() -> None:
         eng.update()
 
     severities = [p[1] for p in pub.published]
-    assert "warning" in severities, (
-        f"Expected publish without mark_engine_started; got {pub.published}"
-    )
+    assert "warning" in severities, f"Expected publish without mark_engine_started; got {pub.published}"
 
 
 def test_grace_config_default_loaded_from_yaml_block() -> None:

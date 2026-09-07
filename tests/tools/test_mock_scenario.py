@@ -24,19 +24,13 @@ def test_vacuum_pressure_decays_into_range():
     # Prod: _exp_decay(0, 1e-3, 1e-7) = 1e-3 (exact start),
     #       _exp_decay(1, 1e-3, 1e-7) = 1e-7 (exact end).
     # Bound BOTH sides within 1 % tolerance.
-    assert 1e-3 * 0.99 <= pressures[0] <= 1e-3 * 1.01, (
-        f"first pressure {pressures[0]} not within 1% of 1e-3"
-    )
-    assert 1e-7 * 0.99 <= pressures[-1] <= 1e-7 * 1.01, (
-        f"last pressure {pressures[-1]} not within 1% of 1e-7"
-    )
+    assert 1e-3 * 0.99 <= pressures[0] <= 1e-3 * 1.01, f"first pressure {pressures[0]} not within 1% of 1e-3"
+    assert 1e-7 * 0.99 <= pressures[-1] <= 1e-7 * 1.01, f"last pressure {pressures[-1]} not within 1% of 1e-7"
     # All samples must be positive (physical).
     assert all(p > 0 for p in pressures), "negative or zero pressure sample found"
     # Pressure must be monotonically non-increasing (pump-down, no reversals).
     for i in range(len(pressures) - 1):
-        assert pressures[i + 1] <= pressures[i], (
-            f"pressure increased at step {i}: {pressures[i]} → {pressures[i + 1]}"
-        )
+        assert pressures[i + 1] <= pressures[i], f"pressure increased at step {i}: {pressures[i]} → {pressures[i + 1]}"
 
 
 def test_cooldown_reaches_liquid_helium():
@@ -74,6 +68,7 @@ def test_measurement_r_thermal_in_range():
     assert k.value == pytest.approx(0.5), f"expected power 0.5 W, got {k.value}"
     assert k.unit == "W", f"expected unit 'W', got {k.unit!r}"
     from cryodaq.drivers.base import ChannelStatus
+
     assert k.status is ChannelStatus.OK, f"expected status OK, got {k.status}"
 
 
@@ -122,9 +117,7 @@ def test_cli_rejects_unknown_scenario():
 
 
 def test_cli_accepts_dry_run_flag():
-    args = mock_scenario._parse_args(
-        ["--scenario", "cooldown_with_prediction", "--duration", "5", "--dry-run"]
-    )
+    args = mock_scenario._parse_args(["--scenario", "cooldown_with_prediction", "--duration", "5", "--dry-run"])
     assert args.dry_run is True
 
 

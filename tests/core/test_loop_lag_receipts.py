@@ -134,9 +134,7 @@ def test_a_failing_sink_never_breaks_the_probe():
 
 def test_no_receipts_and_no_error_without_a_sink():
     clock = _Clock()
-    admission = AnalyticsAdmission(
-        enter_overload_s=0.5, leave_overload_s=0.15, reduce_at_s=0.25, clock=clock
-    )
+    admission = AnalyticsAdmission(enter_overload_s=0.5, leave_overload_s=0.15, reduce_at_s=0.25, clock=clock)
     _degrade_then_recover(admission, clock)
     assert admission.overloaded is False
 

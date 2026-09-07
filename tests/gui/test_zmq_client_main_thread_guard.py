@@ -22,9 +22,7 @@ def test_send_command_warns_when_called_on_main_thread(monkeypatch, caplog) -> N
     monkeypatch.setattr(zc, "_bridge", None)  # no real bridge needed for the guard
     with caplog.at_level(logging.WARNING, logger="cryodaq.gui.zmq_client"):
         result = zc.send_command({"cmd": "noop"})
-    assert any("main thread" in r.getMessage() for r in caplog.records), (
-        "expected a main-thread warning"
-    )
+    assert any("main thread" in r.getMessage() for r in caplog.records), "expected a main-thread warning"
     # Behavior unchanged: with no bridge it still returns the not-initialized error.
     assert result["ok"] is False
 

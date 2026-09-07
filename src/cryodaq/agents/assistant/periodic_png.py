@@ -1779,11 +1779,7 @@ def _reportable_readings(readings: Any) -> list[Any]:
         from cryodaq.core.channel_manager import get_channel_manager
 
         manager = get_channel_manager()
-        return [
-            row
-            for row in readings
-            if manager.is_visible(getattr(row, "channel", "")) and _is_measurement(row)
-        ]
+        return [row for row in readings if manager.is_visible(getattr(row, "channel", "")) and _is_measurement(row)]
     except Exception:  # pragma: no cover - reporting must never crash
         return list(readings)
 

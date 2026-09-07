@@ -155,11 +155,7 @@ class _VanishingSource(InstrumentDriver):
 
     @property
     def unreachable_idle(self) -> bool:
-        return (
-            not self._connected
-            and not self.recovery_transport_open
-            and not self.teardown_incomplete
-        )
+        return not self._connected and not self.recovery_transport_open and not self.teardown_incomplete
 
 
 def _bind(driver: InstrumentDriver):

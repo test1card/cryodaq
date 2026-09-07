@@ -13,6 +13,7 @@ Spec deviation (documented in handoff): existing SensorDiagnosticsEngine uses
 health_score (0-100), not a status enum. _health_to_status() bridges the two:
 >=80 → ok, 50-79 → warning, <50 → critical.
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -150,9 +151,7 @@ def test_alarm_clears_when_status_returns_to_ok() -> None:
     with patch("time.monotonic", return_value=302.0):
         eng.update()
 
-    assert pub.cleared == ["T1"], (
-        f"Expected exactly one clear for T1 after ok push, got: {pub.cleared}"
-    )
+    assert pub.cleared == ["T1"], f"Expected exactly one clear for T1 after ok push, got: {pub.cleared}"
 
 
 def test_no_alarm_when_publisher_is_none() -> None:

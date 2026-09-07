@@ -140,9 +140,7 @@ def test_downsampling_is_uniform_by_temperature_to_task_target(tmp_path: Path) -
     store = CalibrationStore(tmp_path)
     samples = _dense_nonuniform_samples()
 
-    preprocessed = store._preprocess_samples(
-        samples, downsample_target=store._TASK_DOWNSAMPLE_TARGET
-    )
+    preprocessed = store._preprocess_samples(samples, downsample_target=store._TASK_DOWNSAMPLE_TARGET)
     temperatures = np.array([sample.reference_temperature for sample in preprocessed], dtype=float)
     histogram, _ = np.histogram(temperatures, bins=10)
 
@@ -152,17 +150,13 @@ def test_downsampling_is_uniform_by_temperature_to_task_target(tmp_path: Path) -
 
 def test_t_from_v_matches_evaluate_and_voltage_to_temp(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve(
-        "sensor-api", _multi_zone_samples(), raw_unit="V", max_zones=3, min_points_per_zone=24
-    )
+    curve = store.fit_curve("sensor-api", _multi_zone_samples(), raw_unit="V", max_zones=3, min_points_per_zone=24)
     store.save_curve(curve)
 
     raw_value = _piecewise_raw(123.0)
 
     assert store.evaluate("sensor-api", raw_value) == pytest.approx(123.0, abs=0.05)
-    assert store.T_from_V("sensor-api", raw_value) == pytest.approx(
-        store.evaluate("sensor-api", raw_value), abs=1e-9
-    )
+    assert store.T_from_V("sensor-api", raw_value) == pytest.approx(store.evaluate("sensor-api", raw_value), abs=1e-9)
     assert store.voltage_to_temp("sensor-api", raw_value) == pytest.approx(
         store.evaluate("sensor-api", raw_value), abs=1e-9
     )
@@ -376,9 +370,7 @@ def test_export_curve_cof_includes_zone_count_header(tmp_path: Path) -> None:
 
 def test_export_curve_cof_metadata_comments_match_curve(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
-    curve = store.fit_curve(
-        "sensor-cof-04", _sample_series(), raw_unit="ohm", max_zones=2, min_points_per_zone=4
-    )
+    curve = store.fit_curve("sensor-cof-04", _sample_series(), raw_unit="ohm", max_zones=2, min_points_per_zone=4)
     store.save_curve(curve)
 
     cof_path = store.export_curve_cof("sensor-cof-04")
@@ -393,9 +385,7 @@ def test_export_curve_cof_metadata_comments_match_curve(tmp_path: Path) -> None:
 
 def test_export_curve_330_removed(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path)
-    assert not hasattr(store, "export_curve_330"), (
-        "export_curve_330 must be removed — architect decision 2026-04-25"
-    )
+    assert not hasattr(store, "export_curve_330"), "export_curve_330 must be removed — architect decision 2026-04-25"
 
 
 def test_import_curve_file_rejects_330_suffix(tmp_path: Path) -> None:
@@ -492,12 +482,8 @@ def test_load_curves_restores_persisted_assignment_not_glob_order(tmp_path: Path
     the buggy code would make it active and clobber the persisted assignment.
     """
     sensor_id = "sensor-hi3"
-    older = _constant_curve(
-        sensor_id, "aaa-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0
-    )
-    newer = _constant_curve(
-        sensor_id, "zzz-new", datetime(2026, 2, 1, tzinfo=UTC), 200.0
-    )
+    older = _constant_curve(sensor_id, "aaa-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0)
+    newer = _constant_curve(sensor_id, "zzz-new", datetime(2026, 2, 1, tzinfo=UTC), 200.0)
 
     store = CalibrationStore(tmp_path)
     store.save_curve(older)
@@ -523,12 +509,8 @@ def test_load_curves_without_assignment_picks_latest_fit_timestamp(tmp_path: Pat
     import json as _json
 
     sensor_id = "sensor-hi3-noassign"
-    newest = _constant_curve(
-        sensor_id, "aaa-new", datetime(2026, 3, 1, tzinfo=UTC), 200.0
-    )
-    older = _constant_curve(
-        sensor_id, "zzz-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0
-    )
+    newest = _constant_curve(sensor_id, "aaa-new", datetime(2026, 3, 1, tzinfo=UTC), 200.0)
+    older = _constant_curve(sensor_id, "zzz-old", datetime(2026, 1, 1, tzinfo=UTC), 100.0)
     for curve in (newest, older):
         target = tmp_path / "curves" / sensor_id / curve.curve_id / "curve.json"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -546,9 +528,7 @@ def test_load_curves_without_assignment_picks_latest_fit_timestamp(tmp_path: Pat
 def test_load_curves_single_curve_unchanged(tmp_path: Path) -> None:
     """Single curve per sensor: loads and is active, as before."""
     sensor_id = "sensor-hi3-single"
-    only = _constant_curve(
-        sensor_id, "only-curve", datetime(2026, 1, 15, tzinfo=UTC), 150.0
-    )
+    only = _constant_curve(sensor_id, "only-curve", datetime(2026, 1, 15, tzinfo=UTC), 150.0)
     store = CalibrationStore(tmp_path)
     store.save_curve(only)
 

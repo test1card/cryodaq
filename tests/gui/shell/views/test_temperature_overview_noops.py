@@ -103,14 +103,10 @@ def test_temperature_overview_cold_temperature_setter_is_noop(qapp) -> None:
 
     widget.set_cold_temperature_reading(None)
 
-    assert _snapshot(widget) == before, (
-        "set_cold_temperature_reading must not change rendered curves"
-    )
+    assert _snapshot(widget) == before, "set_cold_temperature_reading must not change rendered curves"
 
 
-def test_analytics_dispatch_no_warning_for_no_op_widgets(
-    qapp, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_analytics_dispatch_no_warning_for_no_op_widgets(qapp, caplog: pytest.LogCaptureFixture) -> None:
     """The AnalyticsView dispatcher logs WARNING when no active widget
     implements a setter. With the no-ops, calls to those setters
     forward successfully and do NOT trigger the warning."""
@@ -130,14 +126,10 @@ def test_analytics_dispatch_no_warning_for_no_op_widgets(
         view._forward("set_cold_temperature_reading", None)
 
     # No warning should have been logged for any of those four setters.
-    assert not any(
-        "no active widget" in rec.message for rec in caplog.records
-    )
+    assert not any("no active widget" in rec.message for rec in caplog.records)
 
 
-def test_analytics_dispatch_still_warns_for_truly_missing_setter(
-    qapp, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_analytics_dispatch_still_warns_for_truly_missing_setter(qapp, caplog: pytest.LogCaptureFixture) -> None:
     """Regression check — the no-op fix must NOT swallow warnings for
     setters that genuinely have no implementer. A made-up setter name
     must still produce the WARNING so future dispatcher additions are
@@ -151,6 +143,4 @@ def test_analytics_dispatch_still_warns_for_truly_missing_setter(
     with caplog.at_level(logging.WARNING):
         view._forward("set_completely_made_up_method", None)
 
-    assert any(
-        "no active widget" in rec.message for rec in caplog.records
-    )
+    assert any("no active widget" in rec.message for rec in caplog.records)

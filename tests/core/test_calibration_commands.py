@@ -31,9 +31,7 @@ def _make_samples(n: int = 7) -> list[CalibrationSample]:
 def instruments_yaml(tmp_path: Path) -> Path:
     path = tmp_path / "instruments.yaml"
     path.write_text(
-        yaml.dump(
-            {"instruments": [{"name": "ls218s", "type": "lakeshore_218s", "resource": "MOCK"}]}
-        ),
+        yaml.dump({"instruments": [{"name": "ls218s", "type": "lakeshore_218s", "resource": "MOCK"}]}),
     )
     return path
 
@@ -103,14 +101,14 @@ async def test_calibration_curve_export_import(
     assert imported["curve"]["curve_id"] == original_curve_id
     # Verify round-trip fidelity: imported curve must agree with original at the same raw value.
     import math
+
     raw_probe = 50.0
     original_t = store.evaluate("sensor-002", raw_probe)
     imported_t = imported_store.evaluate("sensor-002", raw_probe)
     assert math.isfinite(original_t), f"Original curve returned non-finite: {original_t}"
     assert math.isfinite(imported_t), f"Imported curve returned non-finite: {imported_t}"
     assert abs(imported_t - original_t) < 1e-9, (
-        f"Import/export round-trip mismatch at raw={raw_probe}: "
-        f"original={original_t}, imported={imported_t}"
+        f"Import/export round-trip mismatch at raw={raw_probe}: original={original_t}, imported={imported_t}"
     )
 
 

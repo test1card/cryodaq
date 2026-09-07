@@ -283,9 +283,7 @@ async def test_acknowledgement_survives_a_restatement_buffered_across_a_snapshot
     await _tick()
     restatement = published.get_nowait()
     assert restatement.payload["reasserted"] is True
-    projection.buffer_event(
-        {"event_type": "alarm_fired", "ts": clock[0], "payload": dict(restatement.payload)}
-    )
+    projection.buffer_event({"event_type": "alarm_fired", "ts": clock[0], "payload": dict(restatement.payload)})
 
     projection.install_snapshot(
         {
@@ -311,7 +309,6 @@ async def test_acknowledgement_survives_a_restatement_buffered_across_a_snapshot
     alarms, complete = projection.freeze(now=clock[0])
     assert complete
     assert alarms[0].acknowledged is True, (
-        "a restatement replayed onto an authoritative snapshot must not strip "
-        "the acknowledgement that snapshot carried"
+        "a restatement replayed onto an authoritative snapshot must not strip the acknowledgement that snapshot carried"
     )
     assert alarms[0].acknowledged_by == "оператор"

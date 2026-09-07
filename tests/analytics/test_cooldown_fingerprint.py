@@ -61,9 +61,7 @@ def test_build_fingerprint_metrics() -> None:
 def test_build_fingerprint_ultimate_vacuum() -> None:
     t, T_cold, T_warm = _synthetic_cooldown()
     pressures = [1e-2, 5e-4, 3e-5, 1e-6, 8e-6]
-    fp = build_fingerprint(
-        t, T_cold, cooldown_start_ts=0.0, pressures=pressures
-    )
+    fp = build_fingerprint(t, T_cold, cooldown_start_ts=0.0, pressures=pressures)
     assert fp.ultimate_vacuum_mbar == pytest.approx(min(pressures))
 
 

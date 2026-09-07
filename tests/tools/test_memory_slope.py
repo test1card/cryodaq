@@ -92,8 +92,7 @@ def test_a_truncated_row_does_not_discard_the_file(tmp_path: Path) -> None:
 
 def _row(ts: float, pid: int, rss_mib: float, etime_s: float, role: str = "gui") -> str:
     return (
-        f"{ts},2026-09-06T00:00:00,{role},{pid},{etime_s},{int(rss_mib * 1024)},"
-        f"{int(rss_mib * 950)},0,19,45,launcher\n"
+        f"{ts},2026-09-06T00:00:00,{role},{pid},{etime_s},{int(rss_mib * 1024)},{int(rss_mib * 950)},0,19,45,launcher\n"
     )
 
 

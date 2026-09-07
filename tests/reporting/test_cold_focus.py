@@ -12,8 +12,7 @@ from cryodaq.reporting.periodic_renderer import _cold_focus_limits, _Series
 
 def _series(channel: str, *values: float) -> _Series:
     rows = tuple(
-        PeriodicReadingSnapshot(1000.0 + index, "ls", channel, value, "K", "ok")
-        for index, value in enumerate(values)
+        PeriodicReadingSnapshot(1000.0 + index, "ls", channel, value, "K", "ok") for index, value in enumerate(values)
     )
     return _Series(channel, "K", rows)
 

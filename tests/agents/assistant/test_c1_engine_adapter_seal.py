@@ -81,6 +81,14 @@ def _return_has_availability_contract(node: ast.Return, class_node: ast.ClassDef
     # with one compliant branch and one bare `return None` no longer passes.
     if class_node is None or not isinstance(node.value.func, ast.Attribute):
         return False
+    # The receiver must be `self`. Without this the name alone was enough:
+    # `return dependency._typed_absence()` found the SAME-NAMED helper on the
+    # containing class and passed, while production called some other object
+    # whose contract nobody checked. Constructed by review on 2026-09-07 and
+    # confirmed accepted — my claim that the generalisation was strictly
+    # stronger was false in exactly this direction.
+    if not (isinstance(node.value.func.value, ast.Name) and node.value.func.value.id == "self"):
+        return False
     helper_name = node.value.func.attr
     helpers = [
         helper
@@ -405,3 +413,48 @@ def test_c1_engine_adapter_seal_proves_each_injected_shape_and_restoration(tmp_p
         assert any(f":{name}:" in finding and finding.endswith(reason) for finding in _violations(scratch))
         target.write_text(original, encoding="utf-8")
         assert set(_violations(scratch)) == set(_KNOWN_PRODUCTION_VIOLATIONS)
+
+
+_FOREIGN_RECEIVER_INJECTION = """
+class Adapter:
+    def _typed_absence(self):
+        return Result(available=False, stale=True, reason="down")
+
+    async def query(self):
+        reply = await self._client.call({"cmd": "readings_history"})
+        if not reply_is_success(reply):
+            return dependency._typed_absence()
+        return Result(available=True)
+"""
+
+
+def test_the_seal_binds_the_helper_to_self() -> None:
+    """A same-named helper on ANOTHER object proves nothing about this call.
+
+    Built by review on 2026-09-07 against the generalisation above: the seal
+    resolved `_typed_absence` on the containing class while production invoked
+    it on `dependency`, whose contract is not checked here at all. The old
+    name-pinned seal rejected this shape by accident; the generalisation must
+    reject it on purpose.
+    """
+    tree = ast.parse(_FOREIGN_RECEIVER_INJECTION)
+    parents = _parent_map(tree)
+    class_node = next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "query"
+    )
+    del parents
+    failure_returns = [
+        node
+        for branch in ast.walk(method)
+        if isinstance(branch, ast.If) and _is_failure_branch(branch)
+        for node in ast.walk(branch)
+        if isinstance(node, ast.Return)
+    ]
+
+    assert failure_returns, "the injection must contain a failure-branch return"
+    assert not any(_return_has_availability_contract(node, class_node) for node in failure_returns), (
+        "the seal accepted a typed absence built by an object it never inspected"
+    )

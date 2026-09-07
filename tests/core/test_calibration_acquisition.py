@@ -238,9 +238,7 @@ class _MockChannelManager:
         info = self._channels.get(short_id)
         if info is None:
             known = sorted(self._channels.keys())
-            raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
-            )
+            raise ChannelConfigError(f"unknown channel reference '{reference}' — known channels: {', '.join(known)}")
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
 

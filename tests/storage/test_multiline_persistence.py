@@ -38,9 +38,7 @@ def _all_channels(db_path: Path) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
-async def test_multiline_reading_writes_to_sqlite(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_multiline_reading_writes_to_sqlite(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     """Proves the SQLiteWriter side of persistence: regardless of channel name,
     every Reading handed to write_immediate lands in the readings table.
@@ -73,9 +71,7 @@ async def test_multiline_reading_writes_to_sqlite(
     assert "MultiLine_1/env_humidity" in channels
 
 
-async def test_multiline_reading_round_trip_value_preserved(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_multiline_reading_round_trip_value_preserved(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     """Picometre-level precision must survive the SQLite round-trip
     (FLOAT column → REAL). Operator-facing display rounds to 4 dp,
@@ -99,9 +95,7 @@ async def test_multiline_reading_round_trip_value_preserved(
     assert abs(row[0] - original) < 1e-12
 
 
-async def test_multiline_persistence_path_is_channel_agnostic(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_multiline_persistence_path_is_channel_agnostic(tmp_path: Path, monkeypatch) -> None:
     """Runtime proof (was a source grep): the writer treats `channel` as an
     opaque string. A single batch mixing a plain temperature channel with
     MultiLine_* channels must persist ALL of them — no channel-name filtering."""
@@ -124,9 +118,7 @@ async def test_multiline_persistence_path_is_channel_agnostic(
     )
 
 
-def test_multiline_parquet_archive_runtime_channel_agnostic(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_multiline_parquet_archive_runtime_channel_agnostic(tmp_path: Path, monkeypatch) -> None:
     """Runtime proof for :func:`export_experiment_readings_to_parquet`.
 
     Writes a mixed-channel batch (plain temperature + MultiLine channels)
@@ -167,9 +159,7 @@ def test_multiline_parquet_archive_runtime_channel_agnostic(
         output_path=output,
     )
 
-    assert result.rows_written == len(mixed), (
-        f"Expected {len(mixed)} rows in Parquet, got {result.rows_written}"
-    )
+    assert result.rows_written == len(mixed), f"Expected {len(mixed)} rows in Parquet, got {result.rows_written}"
 
     table = pq.read_table(str(output))
     archived_channels = set(table.column("channel").to_pylist())
@@ -251,9 +241,7 @@ def test_multiline_cold_rotation_runtime_channel_agnostic(
     assert len(results) == 1, f"Expected 1 rotation result, got {len(results)}"
     result = results[0]
 
-    assert result.rows == len(mixed), (
-        f"Expected {len(mixed)} rows rotated, got {result.rows}"
-    )
+    assert result.rows == len(mixed), f"Expected {len(mixed)} rows rotated, got {result.rows}"
 
     table = pq.read_table(str(result.archive_path))
     archived_channels = set(table.column("channel").to_pylist())

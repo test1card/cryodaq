@@ -934,9 +934,7 @@ def test_auto_start_generates_power_list(app, monkeypatch):
     assert panel._auto_state == "stabilizing"
     assert panel._auto_power_list == [0.001, 0.006, 0.011, 0.016, 0.021]
     # The sweep STARTS the source at its first power, under its own limits.
-    assert started == [
-        {"cmd": "keithley_start", "channel": "smua", "p_target": 0.001, "v_comp": 40.0, "i_comp": 1.0}
-    ]
+    assert started == [{"cmd": "keithley_start", "channel": "smua", "p_target": 0.001, "v_comp": 40.0, "i_comp": 1.0}]
     # Auto timer must be running after start.
     assert panel._auto_timer.isActive(), "Auto-sweep timer must be active after Start"
     # Signal emitted.
@@ -3320,8 +3318,7 @@ def test_failed_running_attachment_never_changes_source_target(app, monkeypatch)
     attachment.finish({"ok": False, "error": "attachment failed"})
 
     assert all(
-        worker.cmd["cmd"] not in ("keithley_set_target", "keithley_start")
-        for worker in _DeferredWorker.all_instances
+        worker.cmd["cmd"] not in ("keithley_set_target", "keithley_start") for worker in _DeferredWorker.all_instances
     )
     assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.all_instances)
     assert panel._auto_outcome_unknown is True

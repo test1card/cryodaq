@@ -65,7 +65,10 @@ if TYPE_CHECKING:
 # pages — which is exactly the kind of judgement that belongs in config, next
 # to the model it is sized for.
 _FORMAT_MAX_TOKENS = 6144
-_FORMAT_NUM_CTX = 12288
+# Sized for a 4 GiB card that is long gone. The interactive path passes this
+# explicitly on every call, so it — not ollama.num_ctx — is the window a
+# conversation actually gets.
+_FORMAT_NUM_CTX = 100_000
 
 logger = logging.getLogger(__name__)
 

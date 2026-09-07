@@ -1,4 +1,5 @@
 """F-ConfigChannelDrift: ensure cooldown.yaml uses canonical Т11/Т12."""
+
 from pathlib import Path
 
 import yaml

@@ -66,8 +66,7 @@ def test_active_critical_restates_itself_after_the_interval(clock) -> None:
 
     clock.advance(1801.0)
     assert manager.process("vacuum_loss_cold", _event(), config) == "REASSERTED", (
-        "a CRITICAL still active an hour after the operator last heard about it "
-        "must restate itself"
+        "a CRITICAL still active an hour after the operator last heard about it must restate itself"
     )
 
     # And the interval restarts from the restatement, not from the activation.
@@ -149,8 +148,7 @@ def test_an_evaluator_error_never_restates(clock) -> None:
     errored = _event()
     errored.evaluator_error = True
     assert manager.process("vacuum_loss_cold", errored, {}) is None, (
-        "an evaluator that failed says nothing about the condition and must not "
-        "produce a restatement"
+        "an evaluator that failed says nothing about the condition and must not produce a restatement"
     )
 
 

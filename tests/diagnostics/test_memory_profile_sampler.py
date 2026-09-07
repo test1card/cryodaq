@@ -161,11 +161,9 @@ def test_two_samples_in_one_second_do_not_collide(tmp_path: Path) -> None:
     growth_lines = [line for line in body.splitlines() if "KB" in line and "+" in line]
     assert growth_lines, f"the diff must record the growth between the two samples:\n{body}"
     assert any("+0.0 KB" not in line for line in growth_lines), (
-        "every entry reads +0.0 KB, which is what a snapshot diffed against "
-        f"itself looks like:\n{body}"
+        f"every entry reads +0.0 KB, which is what a snapshot diffed against itself looks like:\n{body}"
     )
     assert len(held) == 220_000
-
 
 
 def test_a_second_capture_is_skipped_while_one_is_running(tmp_path: Path) -> None:
@@ -242,9 +240,7 @@ def test_stop_refuses_further_captures(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("raw", ["inf", "-inf", "nan", "0", "-5", "не число", ""])
-def test_an_unusable_interval_falls_back_instead_of_exploding_later(
-    raw: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_an_unusable_interval_falls_back_instead_of_exploding_later(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """`inf` parses as a float and is > 0; it detonates at the conversion."""
     monkeypatch.setenv(INTERVAL_ENV, raw)
     value = interval_s()
@@ -253,9 +249,7 @@ def test_an_unusable_interval_falls_back_instead_of_exploding_later(
     assert isinstance(max(1, int(value * 1000)), int)
 
 
-def test_a_failure_after_tracing_starts_undoes_the_tracing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_failure_after_tracing_starts_undoes_the_tracing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The cleanup path, exercised where the old test could not reach."""
     import cryodaq.launcher as launcher
 
@@ -274,14 +268,11 @@ def test_a_failure_after_tracing_starts_undoes_the_tracing(
 
     assert (sampler, timer) == (None, None)
     assert not tracemalloc.is_tracing(), (
-        "a failed installation must not leave the process paying tracing "
-        "overhead while reporting profiling disabled"
+        "a failed installation must not leave the process paying tracing overhead while reporting profiling disabled"
     )
 
 
-def test_cleanup_does_not_stop_tracing_it_did_not_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cleanup_does_not_stop_tracing_it_did_not_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo only what this installation turned on.
 
     Tracing already running belongs to something else — stopping it would be a
@@ -355,9 +346,7 @@ def test_a_failure_between_start_and_return_still_leaves_tracing_off(
     try:
         sampler, timer = launcher._install_memory_profile(None, lambda: None)
         assert (sampler, timer) == (None, None)
-        assert not tracemalloc.is_tracing(), (
-            "tracing survived an installation that reported itself disabled"
-        )
+        assert not tracemalloc.is_tracing(), "tracing survived an installation that reported itself disabled"
     finally:
         if tracemalloc.is_tracing():
             tracemalloc.stop()
@@ -405,17 +394,13 @@ async def test_the_engine_loop_leaves_no_tracing_when_setup_fails_after_the_star
     try:
         with pytest.raises(OSError):
             await module.memory_profile_loop(tmp_path, process_label="engine")
-        assert not tracemalloc.is_tracing(), (
-            "the engine loop left tracing on after failing to start"
-        )
+        assert not tracemalloc.is_tracing(), "the engine loop left tracing on after failing to start"
     finally:
         if tracemalloc.is_tracing():
             tracemalloc.stop()
 
 
-async def test_the_engine_loop_stops_tracing_when_cancelled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_the_engine_loop_stops_tracing_when_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancellation is the NORMAL way this loop ends, so it must clean up too."""
     import asyncio
     import tracemalloc

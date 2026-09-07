@@ -111,10 +111,7 @@ def test_fit_power_law_synthetic() -> None:
     # 0.1 log-decades (proves correct curve shape, not raw parameter recovery).
     # Ground truth: logP(t) = -6 + 3 * t^(-1).
     for t_check in [50.0, 500.0]:
-        fitted_logP = (
-            p.fit_params["log_p_ult"]
-            + p.fit_params["B"] * (t_check ** (-p.fit_params["alpha"]))
-        )
+        fitted_logP = p.fit_params["log_p_ult"] + p.fit_params["B"] * (t_check ** (-p.fit_params["alpha"]))
         gt_logP = log_p_ult + B * (t_check ** (-alpha))
         assert abs(fitted_logP - gt_logP) < 0.1, (
             f"Model prediction mismatch at t={t_check}: fitted={fitted_logP:.3f}, gt={gt_logP:.3f}"
@@ -215,9 +212,7 @@ def test_no_eta_when_the_fitted_floor_is_below_the_measurable_range() -> None:
     assert p is not None
     assert p.model_type == "exponential"
     assert math.isnan(p.p_ultimate_mbar), "a floor below the gauge's range is not reported"
-    assert p.eta_targets.get("1e-05") is None, (
-        "and an ETA resting on that floor is not reported either"
-    )
+    assert p.eta_targets.get("1e-05") is None, "and an ETA resting on that floor is not reported either"
 
 
 def test_no_eta_when_the_fitted_floor_rests_on_its_bound() -> None:
@@ -269,6 +264,7 @@ def test_already_reached_follows_the_gauge_not_the_fit() -> None:
     # MEASUREMENT is at or below the target.
     if p.eta_targets.get("0.001") == 0.0:
         assert fitted_now <= math.log10(1e-3)
+
 
 def test_eta_unreachable() -> None:
     pred = VacuumTrendPredictor(
@@ -726,9 +722,7 @@ def test_an_eta_far_beyond_the_data_is_refused() -> None:
     pred.update()
     p = pred.get_prediction()
     assert p is not None
-    assert p.eta_targets.get("1e-12") is None, (
-        "an ETA beyond the extrapolation horizon must be refused, not reported"
-    )
+    assert p.eta_targets.get("1e-12") is None, "an ETA beyond the extrapolation horizon must be refused, not reported"
 
 
 def test_the_eta_limit_matches_the_plotted_extrapolation() -> None:

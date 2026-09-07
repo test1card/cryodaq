@@ -6,6 +6,7 @@ Covers:
 - test_escalation_cooldown_disabled_by_default_zero
 - test_multiple_channels_all_return_events_above_threshold (verifies new_events count)
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -24,9 +25,7 @@ class _AlarmStatePublisher:
     def __init__(self) -> None:
         self._state = AlarmStateManager()
 
-    def publish_diagnostic_alarm(
-        self, channel_id: str, severity: str, age_s: float
-    ) -> AlarmEvent | None:
+    def publish_diagnostic_alarm(self, channel_id: str, severity: str, age_s: float) -> AlarmEvent | None:
         return self._state.publish_diagnostic_alarm(channel_id, severity, age_s)
 
     def clear_diagnostic_alarm(self, channel_id: str) -> None:

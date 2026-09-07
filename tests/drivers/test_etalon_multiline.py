@@ -30,11 +30,7 @@ def test_parse_channeldata_two_channels():
 
 
 def test_parse_channeldata_with_beam_break():
-    response = (
-        "channeldata_"
-        "1,1234.5678,100,200,22.5,1013.25,45.0,0,1,0,0,0,0,0,0,0,0_"
-        "0"
-    )
+    response = "channeldata_1,1234.5678,100,200,22.5,1013.25,45.0,0,1,0,0,0,0,0,0,0,0_0"
     channels, _ = _parse_channeldata_response(response)
     assert channels[0].beam_break == 1
 
@@ -83,9 +79,7 @@ def test_parse_laserready():
 
 @pytest.mark.asyncio
 async def test_mock_driver_returns_length_and_env_readings():
-    driver = MultiLineDriver(
-        "ML1", "localhost", channel_numbers=[1, 2], mock=True
-    )
+    driver = MultiLineDriver("ML1", "localhost", channel_numbers=[1, 2], mock=True)
     await driver.connect()
     try:
         readings = await driver.read_channels()
@@ -230,9 +224,7 @@ def test_duplicate_channel_ids_rejected() -> None:
 
 
 def test_max_32_channels_accepted() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", channel_count=32, mock=True
-    )
+    driver = MultiLineDriver("ML1", "localhost", channel_count=32, mock=True)
     assert len(driver._channel_numbers) == 32
     assert driver._channel_numbers[0] == 1
     assert driver._channel_numbers[-1] == 32

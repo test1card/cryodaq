@@ -9,7 +9,6 @@ These tests drive `connect()` itself, not the transport, because that is the
 path the scheduler retries.
 """
 
-
 import pytest
 
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S

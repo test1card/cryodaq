@@ -101,22 +101,17 @@ def test_load_pdf_recursive_walk_subdirs(tmp_path: Path) -> None:
     assert sources == ["lakeshore.pdf", "vacuum/thyracont.pdf"]
 
 
-def test_load_pdf_skips_corrupt_pdf_with_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_pdf_skips_corrupt_pdf_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """A truncated PDF must not crash the batch — only warn + continue."""
     write_pdf(tmp_path / "good.pdf", ["good content"])
     (tmp_path / "bad.pdf").write_bytes(b"%PDF-1.4\nthis is not a real pdf\n")
     with caplog.at_level("WARNING"):
         chunks = load_pdf_documents(tmp_path)
     assert {c.source_id for c in chunks} == {"good.pdf"}
-    assert any("PDF load failed" in r.message or "PDF page extract failed" in r.message
-               for r in caplog.records)
+    assert any("PDF load failed" in r.message or "PDF page extract failed" in r.message for r in caplog.records)
 
 
-def test_load_pdf_skips_encrypted_with_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_pdf_skips_encrypted_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Encrypted PDFs are skipped (operator must decrypt first)."""
     write_pdf(tmp_path / "good.pdf", ["unencrypted"])
     encrypted_path = tmp_path / "secret.pdf"
@@ -146,9 +141,7 @@ def test_load_pdf_chunk_text_when_page_exceeds_max_chars(tmp_path: Path) -> None
     # Indices must be strictly sequential starting from 0 — [0, 0] would be
     # a duplicate bug that sorted()+[0] checks cannot catch.
     expected = list(range(len(long_chunks)))
-    assert indices == expected, (
-        f"chunk_index must be sequential 0..N-1; got {indices}"
-    )
+    assert indices == expected, f"chunk_index must be sequential 0..N-1; got {indices}"
 
 
 def test_load_pdf_returns_empty_for_blank_pages(tmp_path: Path) -> None:

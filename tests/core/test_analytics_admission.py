@@ -350,9 +350,7 @@ async def test_slow_sensor_diagnostics_does_not_cost_acquisition_cycles():
         assert len(writes) == len(reads)
         assert calls >= 1, "diagnostics should still have run"
         assert applied_on, "the loop never applied what the worker computed"
-        assert set(applied_on) == {threading.get_ident()}, (
-            "alarm-bearing apply() ran off the event loop"
-        )
+        assert set(applied_on) == {threading.get_ident()}, "alarm-bearing apply() ran off the event loop"
     finally:
         tick.cancel()
         poller.cancel()

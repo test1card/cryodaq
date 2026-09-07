@@ -179,9 +179,7 @@ def test_a_queued_receiver_still_receives(qapp, session_epoch):
 def test_closing_the_window_destroys_workers_that_never_settled(qapp, session_epoch):
     """The property the naive setParent(None) fix broke."""
     window = QWidget()
-    unsettled = [
-        _Worker({"cmd": "experiment_status"}, parent=window, release_on_settle=True) for _ in range(3)
-    ]
+    unsettled = [_Worker({"cmd": "experiment_status"}, parent=window, release_on_settle=True) for _ in range(3)]
     for worker in unsettled:
         worker._epoch_for_test = session_epoch
 
@@ -191,9 +189,7 @@ def test_closing_the_window_destroys_workers_that_never_settled(qapp, session_ep
     del window
     _pump()
 
-    assert not any(isValid(worker) for worker in unsettled), (
-        "closing the window left real QThread objects alive"
-    )
+    assert not any(isValid(worker) for worker in unsettled), "closing the window left real QThread objects alive"
 
 
 # ---------------------------------------------------------------------------

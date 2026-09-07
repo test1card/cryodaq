@@ -25,8 +25,7 @@ def _seed_db(path: Path, rows: list[tuple[float, str, str, float, str, str]]) ->
             "status TEXT NOT NULL)"
         )
         conn.executemany(
-            "INSERT INTO readings(timestamp, instrument_id, channel, value, unit, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO readings(timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()

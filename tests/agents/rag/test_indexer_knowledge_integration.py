@@ -33,9 +33,7 @@ class _MockEmbeddings:
 def _seed_procedures(root: Path) -> Path:
     proc_dir = root / "procedures"
     proc_dir.mkdir()
-    (proc_dir / "cooldown.md").write_text(
-        "# Cooldown protocol\n\nDetails here.", encoding="utf-8"
-    )
+    (proc_dir / "cooldown.md").write_text("# Cooldown protocol\n\nDetails here.", encoding="utf-8")
     return proc_dir
 
 
@@ -50,9 +48,7 @@ def _seed_reference(root: Path) -> Path:
     (root / "README.md").write_text("# README\nbody", encoding="utf-8")
     docs = root / "docs"
     docs.mkdir(exist_ok=True)
-    (docs / "operator_manual.md").write_text(
-        "# Operator Manual\nbody", encoding="utf-8"
-    )
+    (docs / "operator_manual.md").write_text("# Operator Manual\nbody", encoding="utf-8")
     return root
 
 
@@ -97,9 +93,9 @@ async def test_build_index_includes_pdf_when_dir_set(tmp_path: Path):
     assert "equipment_manual" in kinds, f"expected equipment_manual in source_kind; got {kinds}"
     assert all(s != "" for s in source_ids), "source_id must be non-empty"
     assert all(len(t) > 0 for t in texts), "text must be non-empty"
-    assert any(
-        "MultiLine TCP" in t or "multiline" in t.lower() for t in texts
-    ), "expected PDF content 'MultiLine TCP commands' in indexed text"
+    assert any("MultiLine TCP" in t or "multiline" in t.lower() for t in texts), (
+        "expected PDF content 'MultiLine TCP commands' in indexed text"
+    )
 
 
 @pytest.mark.asyncio
@@ -123,9 +119,7 @@ async def test_build_index_includes_procedures_when_dir_set(tmp_path: Path):
     texts = arrow_tbl.column("text").to_pylist()
     assert "procedure" in kinds, f"expected procedure in source_kind; got {kinds}"
     assert all(s != "" for s in source_ids), "source_id must be non-empty"
-    assert any(
-        "cooldown" in t.lower() for t in texts
-    ), "expected procedure content 'cooldown' in indexed text"
+    assert any("cooldown" in t.lower() for t in texts), "expected procedure content 'cooldown' in indexed text"
 
 
 @pytest.mark.asyncio
@@ -178,9 +172,7 @@ async def test_build_index_combines_all_loaders(tmp_path: Path):
     source_ids = arrow_tbl.column("source_id").to_pylist()
     texts = arrow_tbl.column("text").to_pylist()
     expected_kinds = {"equipment_manual", "procedure", "readme", "operator_manual"}
-    assert expected_kinds <= kinds, (
-        f"expected source_kinds {expected_kinds}; got {kinds}"
-    )
+    assert expected_kinds <= kinds, f"expected source_kinds {expected_kinds}; got {kinds}"
     assert all(s != "" for s in source_ids), "source_id must be non-empty"
     assert all(len(t) > 0 for t in texts), "text must be non-empty"
 
@@ -192,9 +184,7 @@ async def test_build_index_existing_call_signature_works(tmp_path: Path):
     """
     exp_dir = tmp_path / "experiments" / "exp001"
     exp_dir.mkdir(parents=True)
-    (exp_dir / "metadata.json").write_text(
-        json.dumps({"description": "test", "notes": ""}), encoding="utf-8"
-    )
+    (exp_dir / "metadata.json").write_text(json.dumps({"description": "test", "notes": ""}), encoding="utf-8")
     archive = exp_dir / "archive" / "summaries"
     archive.mkdir(parents=True)
     (archive / "summary_metadata.json").write_text(

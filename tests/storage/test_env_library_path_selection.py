@@ -24,9 +24,7 @@ import pytest
 _HELPER = Path(__file__).parents[2] / "scripts" / "cryodaq_env_library_path.sh"
 
 
-def _fake_interpreter(
-    directory: Path, *, prefix: Path, base_prefix: Path | None = None, name: str = "python"
-) -> Path:
+def _fake_interpreter(directory: Path, *, prefix: Path, base_prefix: Path | None = None, name: str = "python") -> Path:
     """An executable that answers the two questions the helper asks.
 
     It ignores everything else, so no real interpreter — and no real
@@ -99,8 +97,7 @@ def test_the_correction_applies_when_the_environment_is_the_python3_on_path(tmp_
     result = _run_selection(interpreter, path=path)
 
     assert result.split(":")[0] == str(lib), (
-        "the environment's lib must be prepended even when its python IS the "
-        f"python3 on PATH; got {result!r}"
+        f"the environment's lib must be prepended even when its python IS the python3 on PATH; got {result!r}"
     )
 
 
@@ -170,9 +167,7 @@ def test_present_but_not_first_is_moved_to_the_front(tmp_path: Path) -> None:
         ld_library_path=f"/usr/lib/x86_64-linux-gnu:{lib}:/opt/vendor/lib",
     )
 
-    assert result.split(":")[0] == str(lib), (
-        f"the environment library must be moved to the FRONT, got {result!r}"
-    )
+    assert result.split(":")[0] == str(lib), f"the environment library must be moved to the FRONT, got {result!r}"
     assert result.count(str(lib)) == 1, f"and not duplicated: {result!r}"
     assert result == f"{lib}:/usr/lib/x86_64-linux-gnu:/opt/vendor/lib", (
         f"the remaining entries must keep their order: {result!r}"

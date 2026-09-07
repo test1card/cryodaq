@@ -52,9 +52,8 @@ def test_widget_constructs_log_y(app):
     # pyqtgraph in log-Y mode stores log10(y) in getData() output.
     # set_history passes 1e-5 (positive, no clamping), so getData() returns log10(1e-5) = -5.0.
     import math as _math
-    assert abs(ys[0] - _math.log10(1e-5)) < 1e-9, (
-        f"log-Y curve getData() must return log10(1e-5)=-5.0, got {ys[0]}"
-    )
+
+    assert abs(ys[0] - _math.log10(1e-5)) < 1e-9, f"log-Y curve getData() must return log10(1e-5)=-5.0, got {ys[0]}"
 
 
 def test_horizon_selector_has_six_buttons(app):
@@ -106,9 +105,7 @@ def test_set_prediction_populates_all_three_curves(app):
 
     # CI bounds: lower < central < upper at each point
     for i in range(len(cx)):
-        assert ly[i] < cy[i] < uy[i], (
-            f"CI ordering violated at i={i}: lower={ly[i]} central={cy[i]} upper={uy[i]}"
-        )
+        assert ly[i] < cy[i] < uy[i], f"CI ordering violated at i={i}: lower={ly[i]} central={cy[i]} upper={uy[i]}"
 
 
 def test_horizon_change_emits_signal(app):
@@ -208,14 +205,10 @@ def test_prediction_readout_shows_all_horizons(app):
         # Assert exact value: central at now + hrs*3600 = 100 - hrs
         expected_val = 100.0 - hrs
         expected_val_text = f"{expected_val:.2f} K"
-        assert val_text == expected_val_text, (
-            f"Row {hrs}h: expected {expected_val_text!r}, got {val_text!r}"
-        )
+        assert val_text == expected_val_text, f"Row {hrs}h: expected {expected_val_text!r}, got {val_text!r}"
 
         # Assert exact CI: half_ci = (upper - lower) / 2 = 2.0 → "± 2.00 K, 67% ДИ"
-        assert "± 2.00 K" in ci_text, (
-            f"Row {hrs}h: expected '± 2.00 K' in CI, got {ci_text!r}"
-        )
+        assert "± 2.00 K" in ci_text, f"Row {hrs}h: expected '± 2.00 K' in CI, got {ci_text!r}"
 
 
 def test_prediction_readout_empty_state(app):
@@ -388,10 +381,7 @@ def test_does_not_import_global_window_controller(app):
         # Capture state before controller change.
         vb = w._plot.getPlotItem().getViewBox()
         x_lo_before, x_hi_before = vb.viewRange()[0]
-        readout_before = {
-            hrs: w._horizon_rows[hrs]["value"].text()
-            for hrs in _HORIZON_OPTIONS_HOURS
-        }
+        readout_before = {hrs: w._horizon_rows[hrs]["value"].text() for hrs in _HORIZON_OPTIONS_HOURS}
 
         # Change global controller to HOUR_1 (3600s window).
         get_time_window_controller().set_window(TimeWindow.HOUR_1)
@@ -409,8 +399,7 @@ def test_does_not_import_global_window_controller(app):
         for hrs in _HORIZON_OPTIONS_HOURS:
             after = w._horizon_rows[hrs]["value"].text()
             assert after == readout_before[hrs], (
-                f"Row {hrs}h readout changed after window change: "
-                f"{readout_before[hrs]!r} → {after!r}"
+                f"Row {hrs}h readout changed after window change: {readout_before[hrs]!r} → {after!r}"
             )
     finally:
         reset_time_window_controller()

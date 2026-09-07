@@ -32,9 +32,7 @@ def test_save_load_roundtrip(tmp_path: Path) -> None:
 def test_history_dedup(tmp_path: Path) -> None:
     prefs = UserPreferences(tmp_path / "prefs.json")
     for _ in range(3):
-        prefs.save_last_experiment(
-            template_id="t", operator="Иванов", sample="S", cryostat="C", description=""
-        )
+        prefs.save_last_experiment(template_id="t", operator="Иванов", sample="S", cryostat="C", description="")
 
     history = prefs.get_history("operator")
     assert history.count("Иванов") == 1

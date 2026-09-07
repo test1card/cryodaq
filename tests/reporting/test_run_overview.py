@@ -22,8 +22,7 @@ from cryodaq.reporting.run_overview import (
 def _make_db(path: Path, *, start: float, count: int, channels=("Т1", "Т2")) -> None:
     connection = sqlite3.connect(path)
     connection.execute(
-        "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, "
-        "value REAL, unit TEXT, status TEXT)"
+        "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, value REAL, unit TEXT, status TEXT)"
     )
     rows = []
     for index in range(count):
@@ -35,9 +34,7 @@ def _make_db(path: Path, *, start: float, count: int, channels=("Т1", "Т2")) -
 
 
 def _make_run(tmp_path: Path, *, started_at: float, db_names: list[str]) -> None:
-    (tmp_path / "experiment_state.json").write_text(
-        json.dumps({"active_experiment_id": "abc123"}), encoding="utf-8"
-    )
+    (tmp_path / "experiment_state.json").write_text(json.dumps({"active_experiment_id": "abc123"}), encoding="utf-8")
     experiment_dir = tmp_path / "experiments" / "abc123"
     experiment_dir.mkdir(parents=True)
     (experiment_dir / "metadata.json").write_text(
@@ -88,9 +85,7 @@ def test_daily_file_missing_from_the_record_is_still_charted(tmp_path: Path) -> 
 
 
 def test_no_active_experiment_is_reported_not_charted(tmp_path: Path) -> None:
-    (tmp_path / "experiment_state.json").write_text(
-        json.dumps({"active_experiment_id": None}), encoding="utf-8"
-    )
+    (tmp_path / "experiment_state.json").write_text(json.dumps({"active_experiment_id": None}), encoding="utf-8")
     with pytest.raises(RunOverviewError):
         resolve_run_window(tmp_path)
 
@@ -113,8 +108,7 @@ def test_sentinel_rows_are_never_charted(tmp_path: Path) -> None:
     path = tmp_path / "data_day1.db"
     connection = sqlite3.connect(path)
     connection.execute(
-        "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, "
-        "value REAL, unit TEXT, status TEXT)"
+        "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, value REAL, unit TEXT, status TEXT)"
     )
     connection.executemany(
         "INSERT INTO readings VALUES (?,?,?,?,?,?)",

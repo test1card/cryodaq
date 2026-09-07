@@ -205,9 +205,7 @@ def test_forward_gap_held_rate_yields_to_fresh_once_refilled():
     for i in range(1, 20):  # refill with a FLAT series
         est.push(CH, anchor + POLL_S * i, 4.0)
     fresh = est.get_rate(CH)
-    assert fresh is not None and abs(fresh) < 1.0, (
-        f"once refilled, the fresh flat rate must win, got {fresh}"
-    )
+    assert fresh is not None and abs(fresh) < 1.0, f"once refilled, the fresh flat rate must win, got {fresh}"
 
 
 def test_backward_reset_still_returns_none_during_refill():

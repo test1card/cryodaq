@@ -124,9 +124,7 @@ async def test_publisher_rejects_wildcard_bind():
     await pub.stop()
 
 
-@pytest.mark.parametrize(
-    "address", ["tcp://127.0.0.1:5562", "tcp://[::1]:5562", "tcp://192.168.1.5:5562"]
-)
+@pytest.mark.parametrize("address", ["tcp://127.0.0.1:5562", "tcp://[::1]:5562", "tcp://192.168.1.5:5562"])
 def test_reject_wildcard_bind_allows_specific_hosts(address: str):
     # Pure guard: loopback / specific-interface addresses pass unchanged.
     zmq_bridge._reject_wildcard_bind(address)

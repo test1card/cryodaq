@@ -14,9 +14,7 @@ def test_prettify_equipment_manual_includes_page() -> None:
 
 
 def test_prettify_equipment_manual_no_page_uses_doc() -> None:
-    label = prettify_source_label(
-        "equipment_manual", {"document_name": "Etalon MultiLine"}
-    )
+    label = prettify_source_label("equipment_manual", {"document_name": "Etalon MultiLine"})
     assert label == "Etalon MultiLine"
 
 
@@ -26,9 +24,7 @@ def test_prettify_equipment_manual_no_doc_uses_default() -> None:
 
 
 def test_prettify_procedure_uses_title() -> None:
-    label = prettify_source_label(
-        "procedure", {"title": "Аварийное отключение"}
-    )
+    label = prettify_source_label("procedure", {"title": "Аварийное отключение"})
     assert label == "Процедура: Аварийное отключение"
 
 
@@ -73,9 +69,7 @@ def test_prettify_experiment_metadata_includes_date() -> None:
 
 
 def test_prettify_experiment_metadata_title_only() -> None:
-    label = prettify_source_label(
-        "experiment_metadata", {"title": "Cooldown S-001"}
-    )
+    label = prettify_source_label("experiment_metadata", {"title": "Cooldown S-001"})
     assert label == "Эксперимент: Cooldown S-001"
 
 

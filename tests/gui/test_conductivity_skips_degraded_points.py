@@ -66,9 +66,7 @@ def panel(monkeypatch):
     p._auto_run_writer = _Writer()
     p._sent: list = []
     p._completed: list = []
-    monkeypatch.setattr(
-        ConductivityPanel, "_send_auto_cmd", lambda self, cmd, **kw: (self._sent.append(cmd), True)[1]
-    )
+    monkeypatch.setattr(ConductivityPanel, "_send_auto_cmd", lambda self, cmd, **kw: (self._sent.append(cmd), True)[1])
     monkeypatch.setattr(ConductivityPanel, "_auto_complete", lambda self: self._completed.append(True))
     yield p
     p._auto_run_writer = None
@@ -113,7 +111,7 @@ def test_a_degraded_step_advances_exactly_once_however_often_the_tick_runs(panel
 
 
 def test_a_degraded_final_step_completes_instead_of_staying_powered(panel):
-    panel._auto_step = 1                       # last index of a two-power sweep
+    panel._auto_step = 1  # last index of a two-power sweep
     panel._auto_step_temperature_values = _values(Т3=float("nan"))
 
     panel._auto_record_point()
@@ -150,7 +148,10 @@ def test_a_missing_zone_member_publishes_no_point(panel):
 
 def test_a_non_positive_dt_publishes_no_point(panel):
     panel._auto_step_temperature_values = {
-        "Т1": 295.05, "Т14": 294.95, "Т13": 307.55, "Т3": 307.45,
+        "Т1": 295.05,
+        "Т14": 294.95,
+        "Т13": 307.55,
+        "Т3": 307.45,
     }
     panel._auto_record_point()
     _assert_nothing_published(panel)
@@ -167,7 +168,10 @@ def test_the_two_reasons_are_counted_separately(panel):
 def test_one_step_is_never_counted_twice(panel):
     """Incomplete AND inverted at once still counts once."""
     panel._auto_step_temperature_values = {
-        "Т1": 295.05, "Т14": float("nan"), "Т13": 307.55, "Т3": 307.45,
+        "Т1": 295.05,
+        "Т14": float("nan"),
+        "Т13": 307.55,
+        "Т3": 307.45,
     }
     panel._auto_record_point()
     assert panel._auto_incomplete_zone_points + panel._auto_nonpositive_dt_points == 1

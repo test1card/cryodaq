@@ -49,7 +49,7 @@ class _ScriptedMockEmbeddings:
     async def embed(self, text: str) -> list[float]:
         if self._rare_marker in text:
             return [1.0] * 1024  # rare operator_log row — far from query
-        return [0.0] * 1024      # query and experiment_metadata — collapsed
+        return [0.0] * 1024  # query and experiment_metadata — collapsed
 
 
 def _seed(tmp_path: Path) -> None:
@@ -112,9 +112,7 @@ async def test_searcher_source_kind_filter(tmp_path):
 
     searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings)
 
-    matched = await searcher.search(
-        "query", top_k=5, source_kind_filter=["experiment_metadata"]
-    )
+    matched = await searcher.search("query", top_k=5, source_kind_filter=["experiment_metadata"])
     assert all(r.source_kind == "experiment_metadata" for r in matched)
     assert len(matched) >= 1
 
@@ -158,8 +156,7 @@ async def test_searcher_source_kind_filter_finds_rare_kind_among_many(tmp_path):
             " message TEXT, author TEXT, experiment_id TEXT, tags TEXT)"
         )
         conn.execute(
-            "INSERT INTO operator_log VALUES (1, '2026-05-07T10:00:00Z',"
-            " 'rare needle in haystack', 'V', 'exp000', '')"
+            "INSERT INTO operator_log VALUES (1, '2026-05-07T10:00:00Z', 'rare needle in haystack', 'V', 'exp000', '')"
         )
         conn.commit()
     finally:
@@ -186,13 +183,9 @@ async def test_searcher_source_kind_filter_finds_rare_kind_among_many(tmp_path):
     # would surface zero results — exactly what we'd want to catch.
     unfiltered = await searcher.search("needle", top_k=3)
     assert len(unfiltered) == 3
-    assert all(
-        r.source_kind == "experiment_metadata" for r in unfiltered
-    ), [r.source_kind for r in unfiltered]
+    assert all(r.source_kind == "experiment_metadata" for r in unfiltered), [r.source_kind for r in unfiltered]
 
-    rare = await searcher.search(
-        "needle", top_k=3, source_kind_filter=["operator_log"]
-    )
+    rare = await searcher.search("needle", top_k=3, source_kind_filter=["operator_log"])
     assert len(rare) == 1, "rare kind must be reachable via WHERE pushdown"
     assert rare[0].source_kind == "operator_log"
     assert "needle" in rare[0].text

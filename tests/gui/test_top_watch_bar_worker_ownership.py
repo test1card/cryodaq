@@ -76,9 +76,9 @@ def test_out_of_order_completions_leave_the_newer_poll_owning_the_slot(qapp):
     second = object()
 
     bar._experiment_worker = first
-    bar._experiment_worker = second          # B supersedes A
+    bar._experiment_worker = second  # B supersedes A
 
-    _handler()(bar, {"ok": True}, None, first)   # A's queued completion lands late
+    _handler()(bar, {"ok": True}, None, first)  # A's queued completion lands late
     assert bar._experiment_worker is second, "the late completion stole the slot"
     assert bar.unavailable_calls == 0
 

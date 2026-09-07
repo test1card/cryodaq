@@ -129,9 +129,7 @@ async def test_limit_20_applied():
     """More than 20 COMPLETED experiments → capped at 20."""
     entries = []
     for i in range(25):
-        metadata = _make_metadata(
-            _completed_cooldown_phases(), experiment_id=f"exp_{i:03d}"
-        )
+        metadata = _make_metadata(_completed_cooldown_phases(), experiment_id=f"exp_{i:03d}")
         mp = MagicMock()
         mp.read_text.return_value = json.dumps(metadata)
         entries.append(_make_archive_entry(f"exp_{i:03d}", metadata_path=mp))

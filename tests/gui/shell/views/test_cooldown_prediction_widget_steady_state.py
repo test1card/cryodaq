@@ -134,9 +134,7 @@ def test_active_prediction_renders_trajectory(app) -> None:
     assert not w._steady_badge.isVisible()
 
     # set_prediction must have been called with the actual trajectory data.
-    assert len(set_pred_calls) == 1, (
-        f"expected 1 set_prediction call, got {len(set_pred_calls)}"
-    )
+    assert len(set_pred_calls) == 1, f"expected 1 set_prediction call, got {len(set_pred_calls)}"
     central_arg, lower_arg, upper_arg, ci_pct_arg = set_pred_calls[0]
     # Central: exact (t, v) pairs from predicted.
     assert central_arg == [(now + 60, 80.0), (now + 120, 70.0)]
@@ -218,8 +216,7 @@ def test_cold_reading_buffer_decimates_on_overflow(app, monkeypatch) -> None:
     buf = w._raw_cold_buffer
     assert len(buf) <= cap
     assert buf[0][0] == pytest.approx(now), "first sample must survive decimation"
-    assert buf[-1][0] == pytest.approx(now + (cap + 50) - 1), \
-        "most recent sample must survive"
+    assert buf[-1][0] == pytest.approx(now + (cap + 50) - 1), "most recent sample must survive"
 
 
 # 6. Settled predictor

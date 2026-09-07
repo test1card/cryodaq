@@ -24,8 +24,7 @@ def _create_db(db_path: Path, rows: list[tuple]) -> None:
         "value REAL NOT NULL, unit TEXT NOT NULL, status TEXT NOT NULL)"
     )
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()

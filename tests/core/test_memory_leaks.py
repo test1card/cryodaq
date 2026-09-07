@@ -49,9 +49,7 @@ def test_alarm_state_manager_history_bounded() -> None:
         mgr.process(f"alarm_{i}", ev, cfg)
         mgr.process(f"alarm_{i}", None, cfg)
 
-    assert len(mgr._history) <= 1000, (
-        f"AlarmStateManager._history grew to {len(mgr._history)}, expected ≤ 1000"
-    )
+    assert len(mgr._history) <= 1000, f"AlarmStateManager._history grew to {len(mgr._history)}, expected ≤ 1000"
 
 
 def test_alarm_state_manager_get_history_returns_list() -> None:
@@ -67,9 +65,7 @@ def test_alarm_state_manager_get_history_returns_list() -> None:
 def test_alarm_state_manager_history_is_deque() -> None:
     """Internal _history must be a deque (not a plain list)."""
     mgr = AlarmStateManager()
-    assert isinstance(mgr._history, deque), (
-        "_history must be deque(maxlen=1000) to prevent unbounded growth"
-    )
+    assert isinstance(mgr._history, deque), "_history must be deque(maxlen=1000) to prevent unbounded growth"
     assert mgr._history.maxlen == 1000
 
 
@@ -92,9 +88,7 @@ def test_rate_estimator_maxlen_computed_from_window() -> None:
     for i in range(n_large):
         est_large.push("T1", float(i), float(i))
     size_large = est_large.buffer_size("T1")
-    assert size_large < n_large, (
-        f"Large-window buffer not capped: retained {size_large} of {n_large} pushed samples"
-    )
+    assert size_large < n_large, f"Large-window buffer not capped: retained {size_large} of {n_large} pushed samples"
 
     # Case 2: small window — its cap must be strictly smaller than the large-window cap
     est_small = RateEstimator(window_s=10.0)
@@ -117,9 +111,7 @@ def test_rate_estimator_buffer_does_not_exceed_maxlen() -> None:
     for i in range(maxlen * 2):
         est.push("T1", float(i), float(i))
 
-    assert est.buffer_size("T1") <= maxlen, (
-        f"buffer grew to {est.buffer_size('T1')}, expected ≤ {maxlen}"
-    )
+    assert est.buffer_size("T1") <= maxlen, f"buffer grew to {est.buffer_size('T1')}, expected ≤ {maxlen}"
 
 
 def test_rate_estimator_small_window_uses_floor() -> None:
@@ -179,12 +171,9 @@ def test_channel_state_fault_history_deque_has_maxlen_after_update() -> None:
     n_push = 15_000  # well above max(200, int(300*20)+100) = 6100
     for i in range(n_push):
         tracker.record_fault("T2", float(i) * 0.001)
-    assert len(hist) <= hist.maxlen, (
-        f"fault_history grew to {len(hist)}, exceeds its own maxlen={hist.maxlen}"
-    )
+    assert len(hist) <= hist.maxlen, f"fault_history grew to {len(hist)}, exceeds its own maxlen={hist.maxlen}"
     assert hist.maxlen < n_push, (
-        f"maxlen={hist.maxlen} is not smaller than pushed count {n_push} — "
-        "cap may not be constraining growth"
+        f"maxlen={hist.maxlen} is not smaller than pushed count {n_push} — cap may not be constraining growth"
     )
 
 
@@ -224,8 +213,9 @@ def test_on_reading_callback_no_task_when_no_clients() -> None:
 
     with patch("asyncio.create_task") as mock_create_task:
         _on_reading_callback(reading)
-        mock_create_task.assert_not_called(), (
-            "_on_reading_callback must not create any tasks when there are no clients"
+        (
+            mock_create_task.assert_not_called(),
+            ("_on_reading_callback must not create any tasks when there are no clients"),
         )
 
     assert q.empty(), "Queue must be empty when there are no WebSocket clients"
@@ -305,9 +295,7 @@ async def test_broadcast_pump_drains_queue() -> None:
                 break
             await asyncio.sleep(0.01)
 
-        assert q.empty(), (
-            f"production _broadcast_pump did not drain queue; {q.qsize()} items remain"
-        )
+        assert q.empty(), f"production _broadcast_pump did not drain queue; {q.qsize()} items remain"
     finally:
         pump_task.cancel()
         try:

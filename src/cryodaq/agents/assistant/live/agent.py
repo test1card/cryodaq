@@ -54,7 +54,11 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 
 # Retrieval, adapter fan-out and ZMQ round-trips sit between the two LLM
 # stages; the outer command bound has to cover them as well as the stages.
-_QUERY_RETRIEVAL_BUDGET_S = 30.0
+# Retrieval is not free: one embedding call against this stand's server was
+# MEASURED at 20-34 s, and rag.yaml allows it 180. Budgeting 30 here meant the
+# outer envelope could expire while a legitimate embedding was still in flight,
+# taking the formatting stage's allowance with it. Reviewed 2026-09-07.
+_QUERY_RETRIEVAL_BUDGET_S = 240.0
 
 
 @dataclass
@@ -102,7 +106,11 @@ class AssistantConfig:
     # the interactive stage kept using a quarter of it and nobody could change
     # that without editing code. Defaults preserve the shipped behaviour
     # exactly; the point is that tuning them is now a config edit.
-    query_format_num_ctx: int = 12288
+    #: The window the ANSWER is generated in. Distinct from ollama.num_ctx,
+    #: which the interactive path does not use — reviewed 2026-09-07, raising
+    #: num_ctx to 100000 left conversations at 12288 because this value is
+    #: passed explicitly on every format call.
+    query_format_num_ctx: int = 100_000
     query_format_max_tokens: int = 6144
     query_max_per_chat_per_hour: int = 60
     # 0 = derive from the stage budgets below. An explicit value overrides.

@@ -93,8 +93,7 @@ def test_full_lifecycle_phase_widgets(app):
         view.set_phase(phase)
         active = view.active_widgets()
         assert aw.id_of(active.get("main")) == expected_main_id, (
-            f"Phase {phase!r}: expected main={expected_main_id!r}, "
-            f"got {aw.id_of(active.get('main'))!r}"
+            f"Phase {phase!r}: expected main={expected_main_id!r}, got {aw.id_of(active.get('main'))!r}"
         )
 
 
@@ -223,8 +222,8 @@ def test_r_thermal_placeholder_has_f8_text(app):
     # The PlaceholderCard subtitle must mention F8 as the unblock criterion.
     # The subtitle is rendered into a QLabel body — scan all child QLabel texts.
     from PySide6.QtWidgets import QLabel
+
     label_texts = [lbl.text() for lbl in w.findChildren(QLabel)]
     assert any("F8" in t for t in label_texts), (
-        f"PlaceholderCard for r_thermal_placeholder must mention F8 in a label; "
-        f"got labels={label_texts!r}"
+        f"PlaceholderCard for r_thermal_placeholder must mention F8 in a label; got labels={label_texts!r}"
     )

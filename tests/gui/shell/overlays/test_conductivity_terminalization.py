@@ -28,7 +28,6 @@ def _zones_confirmed(monkeypatch):
     )
 
 
-
 app = guard_support.app
 _isolated_state_root = guard_support._isolated_state_root
 

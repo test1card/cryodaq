@@ -92,8 +92,7 @@ def test_primary_variant_does_not_use_status_ok(filename):
         pytest.skip(f"{filename} has no _style_button primary branch")
     primary_body = "\n".join(primary_lines)
     assert "STATUS_OK" not in primary_body, (
-        f"{filename}: primary button still uses STATUS_OK — III.A migration lost\n"
-        f"Body:\n{primary_body}"
+        f"{filename}: primary button still uses STATUS_OK — III.A migration lost\nBody:\n{primary_body}"
     )
 
 
@@ -123,6 +122,7 @@ def test_top_watch_bar_experiment_badge_not_status_ok():
     Asserts both source (fast regression guard) and rendered QSS (widget-level).
     """
     import os
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
@@ -134,23 +134,15 @@ def test_top_watch_bar_experiment_badge_not_status_ok():
     match = re.search(r'if app_mode\s*==\s*"experiment":.*?(?=\belif\b|def\s)', src, re.DOTALL)
     assert match is not None, "could not locate experiment-mode badge block"
     block = match.group(0)
-    assert "STATUS_OK" not in block, (
-        "TopWatchBar experiment mode badge still uses STATUS_OK — III.A migration lost"
-    )
-    assert "SURFACE_ELEVATED" in block, (
-        "TopWatchBar experiment mode badge should use SURFACE_ELEVATED per III.A spec"
-    )
+    assert "STATUS_OK" not in block, "TopWatchBar experiment mode badge still uses STATUS_OK — III.A migration lost"
+    assert "SURFACE_ELEVATED" in block, "TopWatchBar experiment mode badge should use SURFACE_ELEVATED per III.A spec"
     # Widget-level: instantiate TopWatchBar, trigger experiment mode, assert applied QSS.
     _app = QApplication.instance() or QApplication([])
     bar = TopWatchBar()
     bar._update_mode_badge("experiment", {"app_mode": "experiment"})
     ss = bar._mode_badge.styleSheet()
-    assert theme.SURFACE_ELEVATED in ss, (
-        f"Rendered TopWatchBar mode badge lacks SURFACE_ELEVATED: {ss!r}"
-    )
-    assert theme.STATUS_OK not in ss, (
-        f"Rendered TopWatchBar mode badge still uses STATUS_OK: {ss!r}"
-    )
+    assert theme.SURFACE_ELEVATED in ss, f"Rendered TopWatchBar mode badge lacks SURFACE_ELEVATED: {ss!r}"
+    assert theme.STATUS_OK not in ss, f"Rendered TopWatchBar mode badge still uses STATUS_OK: {ss!r}"
 
 
 def test_experiment_card_mode_badge_not_status_ok():
@@ -161,9 +153,7 @@ def test_experiment_card_mode_badge_not_status_ok():
     assert match is not None, "could not locate _set_mode_badge_style"
     block = match.group(0)
     assert "STATUS_OK" not in block, "ExperimentCard mode badge still uses STATUS_OK — III.A lost"
-    assert "SURFACE_ELEVATED" in block, (
-        "ExperimentCard mode badge should use SURFACE_ELEVATED per III.A"
-    )
+    assert "SURFACE_ELEVATED" in block, "ExperimentCard mode badge should use SURFACE_ELEVATED per III.A"
 
 
 def test_conductivity_progress_chunk_uses_accent():
@@ -174,6 +164,7 @@ def test_conductivity_progress_chunk_uses_accent():
     Asserts both source (fast) and rendered widget QSS (live).
     """
     import os
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
@@ -188,20 +179,14 @@ def test_conductivity_progress_chunk_uses_accent():
     )
     assert match is not None, "could not locate QProgressBar::chunk background"
     token_expr = match.group(1)
-    assert "STATUS_OK" not in token_expr, (
-        "conductivity_panel QProgressBar::chunk still uses STATUS_OK"
-    )
+    assert "STATUS_OK" not in token_expr, "conductivity_panel QProgressBar::chunk still uses STATUS_OK"
     assert "ACCENT" in token_expr, "conductivity_panel QProgressBar::chunk should use ACCENT"
     # Widget-level: instantiate ConductivityPanel, assert the applied progress bar QSS.
     _app = QApplication.instance() or QApplication([])
     panel = ConductivityPanel()
     pb_ss = panel._auto_progress.styleSheet()
-    assert theme.ACCENT in pb_ss, (
-        f"ConductivityPanel progress bar QSS lacks theme.ACCENT ({theme.ACCENT!r}): {pb_ss!r}"
-    )
-    assert theme.STATUS_OK not in pb_ss, (
-        f"ConductivityPanel progress bar QSS still uses STATUS_OK: {pb_ss!r}"
-    )
+    assert theme.ACCENT in pb_ss, f"ConductivityPanel progress bar QSS lacks theme.ACCENT ({theme.ACCENT!r}): {pb_ss!r}"
+    assert theme.STATUS_OK not in pb_ss, f"ConductivityPanel progress bar QSS still uses STATUS_OK: {pb_ss!r}"
 
 
 def test_fusion_palette_highlight_uses_selection_bg_not_status_ok():
@@ -215,6 +200,7 @@ def test_fusion_palette_highlight_uses_selection_bg_not_status_ok():
     Asserts both source token and live QApplication.palette() color.
     """
     import os
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtGui import QColor, QPalette
     from PySide6.QtWidgets import QApplication
@@ -237,13 +223,13 @@ def test_fusion_palette_highlight_uses_selection_bg_not_status_ok():
     assert "ACCENT" not in token
     # Live palette check: apply the fusion palette then assert Highlight == SELECTION_BG.
     from cryodaq.gui.app import apply_fusion_dark_palette
+
     _app = QApplication.instance() or QApplication([])
     apply_fusion_dark_palette(_app)
     live_color = _app.palette().color(QPalette.ColorRole.Highlight)
     expected = QColor(theme.SELECTION_BG)
     assert live_color == expected, (
-        f"Live QApplication palette Highlight = {live_color.name()!r}, "
-        f"expected SELECTION_BG = {expected.name()!r}"
+        f"Live QApplication palette Highlight = {live_color.name()!r}, expected SELECTION_BG = {expected.name()!r}"
     )
 
 
@@ -257,6 +243,7 @@ def test_status_ok_still_used_in_status_display_contexts():
     STATUS_OK when engine is alive (green = running, safety semantics).
     """
     import os
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
@@ -270,6 +257,5 @@ def test_status_ok_still_used_in_status_display_contexts():
     bar.set_engine_state(True)
     ss = bar._engine_label.styleSheet()
     assert theme.STATUS_OK in ss, (
-        f"TopWatchBar._engine_label should render STATUS_OK when engine alive, "
-        f"got stylesheet: {ss!r}"
+        f"TopWatchBar._engine_label should render STATUS_OK when engine alive, got stylesheet: {ss!r}"
     )

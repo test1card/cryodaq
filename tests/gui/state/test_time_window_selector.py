@@ -43,12 +43,8 @@ def test_selector_has_default_four_buttons(app):
     # Verify rendered QPushButton labels match the TimeWindow.label values.
     rendered_buttons = sel.findChildren(QPushButton)
     rendered_labels = {btn.text() for btn in rendered_buttons}
-    expected_labels = {tw.label for tw in (
-        TimeWindow.MIN_1, TimeWindow.HOUR_1, TimeWindow.HOUR_24, TimeWindow.ALL
-    )}
-    assert rendered_labels == expected_labels, (
-        f"rendered button labels {rendered_labels} != expected {expected_labels}"
-    )
+    expected_labels = {tw.label for tw in (TimeWindow.MIN_1, TimeWindow.HOUR_1, TimeWindow.HOUR_24, TimeWindow.ALL)}
+    assert rendered_labels == expected_labels, f"rendered button labels {rendered_labels} != expected {expected_labels}"
     # Default selection: ALL button must be checked, others unchecked.
     for tw, btn in sel._buttons.items():
         if tw is TimeWindow.ALL:
@@ -66,9 +62,7 @@ def test_selector_show_6h_adds_button(app):
     # Verify "6ч" button is rendered as a real QPushButton child.
     rendered_buttons = sel.findChildren(QPushButton)
     rendered_labels = [btn.text() for btn in rendered_buttons]
-    assert TimeWindow.HOUR_6.label in rendered_labels, (
-        f"'6ч' button not found in rendered labels: {rendered_labels}"
-    )
+    assert TimeWindow.HOUR_6.label in rendered_labels, f"'6ч' button not found in rendered labels: {rendered_labels}"
     # The 6h button must not be checked (ALL is default).
     assert not sel._buttons[TimeWindow.HOUR_6].isChecked()
 

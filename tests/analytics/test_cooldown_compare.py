@@ -80,12 +80,8 @@ def test_better_vacuum_is_ok() -> None:
 
 
 def test_null_metrics_yield_unknown() -> None:
-    golden = build_fingerprint(
-        [0.0, 1.0], [300.0, 200.0], cooldown_start_ts=0.0
-    )  # never reaches base, no pressures
-    current = build_fingerprint(
-        [0.0, 1.0], [300.0, 200.0], cooldown_start_ts=0.0
-    )
+    golden = build_fingerprint([0.0, 1.0], [300.0, 200.0], cooldown_start_ts=0.0)  # never reaches base, no pressures
+    current = build_fingerprint([0.0, 1.0], [300.0, 200.0], cooldown_start_ts=0.0)
     result = compare(current, golden, thresholds=DEFAULT_THRESHOLDS)
     assert result.time_to_base_verdict == "unknown"
     assert result.ultimate_vacuum_verdict == "unknown"

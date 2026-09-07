@@ -87,7 +87,6 @@ async def test_searcher_dim_mismatch_returns_empty(
         results = await searcher.search("test query")
 
     assert results == [], f"expected [] on dim mismatch; got {results}"
-    assert any(
-        "embedding dim" in rec.message and "768" in rec.message
-        for rec in caplog.records
-    ), f"expected dim mismatch warning; got: {[r.message for r in caplog.records]}"
+    assert any("embedding dim" in rec.message and "768" in rec.message for rec in caplog.records), (
+        f"expected dim mismatch warning; got: {[r.message for r in caplog.records]}"
+    )

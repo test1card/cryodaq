@@ -98,8 +98,10 @@ async def test_callback_query_routed_to_handle_callback() -> None:
     update = {"update_id": 1, "callback_query": cb}
     session, _ = _make_fetch_session([update])
 
-    with patch.object(bot, "_handle_callback", new_callable=AsyncMock) as mock_cb, \
-         patch.object(bot, "_get_session", new_callable=AsyncMock, return_value=session):
+    with (
+        patch.object(bot, "_handle_callback", new_callable=AsyncMock) as mock_cb,
+        patch.object(bot, "_get_session", new_callable=AsyncMock, return_value=session),
+    ):
         await bot._fetch_updates()
 
     mock_cb.assert_awaited_once_with(cb)
@@ -155,10 +157,12 @@ async def test_get_file_path_returns_path_on_success() -> None:
     bot = _make_bot()
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.json = AsyncMock(return_value={
-        "ok": True,
-        "result": {"file_path": "photos/file.jpg"},
-    })
+    mock_resp.json = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {"file_path": "photos/file.jpg"},
+        }
+    )
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=mock_resp)
     cm.__aexit__ = AsyncMock(return_value=False)
@@ -244,9 +248,7 @@ async def test_send_message_with_keyboard_returns_message_id() -> None:
 
     # F6: exact URL
     post_url = session.post.call_args.args[0]
-    assert post_url == f"{bot._api}/sendMessage", (
-        f"sendMessage URL mismatch: {post_url!r}"
-    )
+    assert post_url == f"{bot._api}/sendMessage", f"sendMessage URL mismatch: {post_url!r}"
     # F6: exact payload
     payload = session.post.call_args.kwargs["json"]
     assert payload == {
@@ -274,9 +276,7 @@ async def test_edit_message_calls_api() -> None:
 
     # F7: exact URL
     post_url = session.post.call_args.args[0]
-    assert post_url == f"{bot._api}/editMessageText", (
-        f"editMessageText URL mismatch: {post_url!r}"
-    )
+    assert post_url == f"{bot._api}/editMessageText", f"editMessageText URL mismatch: {post_url!r}"
     # F7: exact payload
     payload = session.post.call_args.kwargs["json"]
     assert payload == {
@@ -304,11 +304,7 @@ async def test_answer_callback_calls_api() -> None:
 
     # F8: exact URL
     post_url = session.post.call_args.args[0]
-    assert post_url == f"{bot._api}/answerCallbackQuery", (
-        f"answerCallbackQuery URL mismatch: {post_url!r}"
-    )
+    assert post_url == f"{bot._api}/answerCallbackQuery", f"answerCallbackQuery URL mismatch: {post_url!r}"
     # F8: exact payload — no "text" key when text="" (production only adds "text" if truthy)
     payload = session.post.call_args.kwargs["json"]
-    assert payload == {"callback_query_id": "cb_id_123"}, (
-        f"answerCallbackQuery payload mismatch: {payload}"
-    )
+    assert payload == {"callback_query_id": "cb_id_123"}, f"answerCallbackQuery payload mismatch: {payload}"

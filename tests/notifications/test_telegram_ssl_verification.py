@@ -74,9 +74,7 @@ def test_notifier_no_warning_when_ssl_enabled(caplog: pytest.LogCaptureFixture) 
 
 async def test_notifier_get_session_uses_connector_ssl_false() -> None:
     notifier = TelegramNotifier(bot_token="token:ABC", chat_id=123, verify_ssl=False)
-    with patch("aiohttp.TCPConnector") as mock_connector, patch(
-        "aiohttp.ClientSession"
-    ) as mock_session:
+    with patch("aiohttp.TCPConnector") as mock_connector, patch("aiohttp.ClientSession") as mock_session:
         mock_session.return_value = MagicMock()
         await notifier._get_session()
     mock_connector.assert_called_once_with(ssl=False)
@@ -84,9 +82,7 @@ async def test_notifier_get_session_uses_connector_ssl_false() -> None:
 
 async def test_notifier_get_session_uses_connector_ssl_true() -> None:
     notifier = TelegramNotifier(bot_token="token:ABC", chat_id=123, verify_ssl=True)
-    with patch("aiohttp.TCPConnector") as mock_connector, patch(
-        "aiohttp.ClientSession"
-    ) as mock_session:
+    with patch("aiohttp.TCPConnector") as mock_connector, patch("aiohttp.ClientSession") as mock_session:
         mock_session.return_value = MagicMock()
         await notifier._get_session()
     mock_connector.assert_called_once_with(ssl=True)
@@ -141,9 +137,7 @@ def test_bot_no_warning_when_ssl_enabled(caplog: pytest.LogCaptureFixture) -> No
 
 async def test_bot_get_session_uses_connector_ssl_false() -> None:
     bot = _make_bot(verify_ssl=False)
-    with patch("aiohttp.TCPConnector") as mock_connector, patch(
-        "aiohttp.ClientSession"
-    ) as mock_session:
+    with patch("aiohttp.TCPConnector") as mock_connector, patch("aiohttp.ClientSession") as mock_session:
         mock_session.return_value = MagicMock()
         await bot._get_session()
     mock_connector.assert_called_once_with(ssl=False)
@@ -151,9 +145,7 @@ async def test_bot_get_session_uses_connector_ssl_false() -> None:
 
 async def test_bot_get_session_uses_connector_ssl_true() -> None:
     bot = _make_bot(verify_ssl=True)
-    with patch("aiohttp.TCPConnector") as mock_connector, patch(
-        "aiohttp.ClientSession"
-    ) as mock_session:
+    with patch("aiohttp.TCPConnector") as mock_connector, patch("aiohttp.ClientSession") as mock_session:
         mock_session.return_value = MagicMock()
         await bot._get_session()
     mock_connector.assert_called_once_with(ssl=True)

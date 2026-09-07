@@ -173,9 +173,7 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
 
 def _write_cfg(tmp_path: Path, enabled_value: str) -> Path:
     cfg = tmp_path / "plugins.yaml"
-    cfg.write_text(
-        f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8"
-    )
+    cfg.write_text(f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8")
     return cfg
 
 

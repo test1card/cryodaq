@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -38,7 +39,7 @@ class QueryRouter:
         self._adapters = adapters
         self._channel_manager = channel_manager
 
-    def _resolve_target_channels(self, intent: QueryIntent) -> list[str] | None:
+    async def _resolve_target_channels(self, intent: QueryIntent) -> list[str] | None:
         """Validate and resolve target_channels against current ChannelManager.
 
         Late binding: reads ChannelManager fresh on every call, picks up renames.
@@ -71,6 +72,20 @@ class QueryRouter:
             if match_id:
                 resolved.append(match_id)
                 continue
+            # Last: the channel may simply not be in channels.yaml. The gauge
+            # and the source meter never have been, and the classifier is now
+            # told they exist — so refusing them here would advertise a channel
+            # and then drop it, which is what happened until 2026-09-07.
+            snapshot = getattr(self._adapters, "broker_snapshot", None)
+            if snapshot is not None and hasattr(snapshot, "knows"):
+                try:
+                    if await snapshot.knows(raw_s):
+                        resolved.append(raw_s)
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - resolution must not fail a query
+                    logger.debug("QueryRouter: live-channel check unavailable: %s", exc)
             logger.warning("QueryRouter: cannot resolve target_channel %r to known ID", raw)
         return resolved if resolved else None
 
@@ -117,7 +132,7 @@ class QueryRouter:
             raise QueryUnavailableError(f"{cat.value} query unavailable") from exc
 
     async def _fetch_current_value(self, intent: QueryIntent) -> dict[str, Any]:
-        channels = self._resolve_target_channels(intent) or []
+        channels = await self._resolve_target_channels(intent) or []
         snapshot = self._adapters.broker_snapshot
         readings = {}
         for ch in channels:
@@ -154,7 +169,7 @@ class QueryRouter:
         return {"vacuum_eta": eta, "current_pressure": current_p}
 
     async def _fetch_range_stats(self, intent: QueryIntent) -> dict[str, Any]:
-        channels = self._resolve_target_channels(intent) or []
+        channels = await self._resolve_target_channels(intent) or []
         window = intent.time_window_minutes or 60
         results = {}
         for ch in channels:

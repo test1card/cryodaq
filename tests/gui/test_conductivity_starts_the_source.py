@@ -59,8 +59,11 @@ def test_first_step_issues_keithley_start_not_set_target(panel, monkeypatch):
     panel._auto_power_target_dispatched = False
 
     class _Spin:
-        def __init__(self, v): self._v = v
-        def value(self): return self._v
+        def __init__(self, v):
+            self._v = v
+
+        def value(self):
+            return self._v
 
     panel._v_comp_spin = _Spin(40.0)
     panel._i_comp_spin = _Spin(1.0)
@@ -73,13 +76,15 @@ def test_first_step_issues_keithley_start_not_set_target(panel, monkeypatch):
     monkeypatch.setattr(ConductivityPanel, "_latch_auto_outcome_unknown", lambda self, r: sent.append({"latch": r}))
 
     class _Timer:
-        def start(self): pass
+        def start(self):
+            pass
 
     panel._auto_timer = _Timer()
     emitted = []
 
     class _Sig:
-        def emit(self): emitted.append(True)
+        def emit(self):
+            emitted.append(True)
 
     panel.auto_sweep_started = _Sig()
 
@@ -108,13 +113,11 @@ def _result_panel(monkeypatch, sent, latched, armed=None):
         "_send_auto_cmd",
         lambda self, cmd, **kw: (sent.append(cmd), True)[1],
     )
-    monkeypatch.setattr(
-        ConductivityPanel, "_latch_auto_outcome_unknown", lambda self, reason: latched.append(reason)
-    )
+    monkeypatch.setattr(ConductivityPanel, "_latch_auto_outcome_unknown", lambda self, reason: latched.append(reason))
     monkeypatch.setattr(
         ConductivityPanel,
         "_arm_auto_step_evidence",
-        lambda self, **kw: (armed.append(kw) if armed is not None else None),
+        lambda self, **kw: armed.append(kw) if armed is not None else None,
     )
     monkeypatch.setattr(ConductivityPanel, "_update_control_enablement", lambda self: None)
     obj._auto_settled_command_tokens = set()

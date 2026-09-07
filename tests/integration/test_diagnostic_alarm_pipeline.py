@@ -8,6 +8,7 @@ Covers spec §5.3:
   alarm_v2_state_mgr.get_active() contains diagnostic alarm (alarm panel
   polls get_active())
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -45,9 +46,7 @@ def _push_disconnected(eng: SensorDiagnosticsEngine, ch: str, n: int = 200) -> N
 
 
 def _diag_event(level: str, alarm_id: str, channels: list[str], message: str = "msg"):
-    return SimpleNamespace(
-        level=level, alarm_id=alarm_id, channels=channels, message=message
-    )
+    return SimpleNamespace(level=level, alarm_id=alarm_id, channels=channels, message=message)
 
 
 def test_diag_telegram_per_event_format_below_threshold() -> None:

@@ -282,8 +282,7 @@ async def test_a_revoked_intent_is_never_restored():
     await manager._resume_admitted_intent()
 
     assert issued == [], (
-        "the operator stopped it while the cable was out; reconnect must not "
-        "restore the power they were stopping"
+        "the operator stopped it while the cable was out; reconnect must not restore the power they were stopping"
     )
 
 
@@ -350,9 +349,7 @@ async def test_a_stale_epoch_is_refused_by_the_real_locked_admission():
     # this. The queued command still presents the epoch it was admitted under.
     manager._register_abort_intent(full=True)
 
-    result = await manager.request_run(
-        0.7, 40.0, 1.0, channel="smub", _expected_abort_generation=admitted_under
-    )
+    result = await manager.request_run(0.7, 40.0, 1.0, channel="smub", _expected_abort_generation=admitted_under)
 
     assert result.get("ok") is not True
     assert "authority changed" in str(result.get("error", "")).lower()
@@ -469,7 +466,7 @@ async def test_p1_then_update_to_p2_then_reconnect_restores_only_p2():
     manager._state = SafetyState.RUNNING
     channel = manager._resolve_channels("smub").pop()
     manager._active_sources.add(channel)
-    _admit(manager, "smub", 0.010)                       # P1, as request_run records it
+    _admit(manager, "smub", 0.010)  # P1, as request_run records it
 
     assert (await manager.update_target(0.020, channel="smub")).get("ok") is True
 
@@ -480,7 +477,7 @@ async def test_p1_then_update_to_p2_then_reconnect_restores_only_p2():
         return {"ok": True}
 
     manager.request_run = _capture  # type: ignore[method-assign]
-    manager._active_sources.discard(channel)             # the link dropped; nothing is active
+    manager._active_sources.discard(channel)  # the link dropped; nothing is active
     try:
         await manager._resume_admitted_intent()
     finally:
@@ -492,7 +489,7 @@ async def test_p1_then_update_to_p2_then_reconnect_restores_only_p2():
 
 async def test_a_failed_update_leaves_the_previous_target_resumable():
     """P1 stands when the step to P2 did not reach the instrument."""
-    driver = _Keithley()          # no _channels: update_target cannot confirm
+    driver = _Keithley()  # no _channels: update_target cannot confirm
     manager = _manager(driver)
     manager._mock = False
     await manager.start()
@@ -558,7 +555,7 @@ async def test_the_real_update_target_records_the_new_intent():
 
 
 async def test_a_refused_target_update_leaves_the_last_confirmed_intent():
-    driver = _Keithley()          # no _channels: the update cannot reach the instrument
+    driver = _Keithley()  # no _channels: the update cannot reach the instrument
     manager = _manager(driver)
     manager._state = SafetyState.RUNNING
     channel = manager._resolve_channels("smub").pop()

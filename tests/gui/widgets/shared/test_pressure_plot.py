@@ -78,9 +78,7 @@ def test_pressure_y_range_stable_across_same_decade_jitter(app):
     plot.set_series([now - 2, now - 1, now], [2.7e-6, 3.6e-6, 3.05e-6])
     y_second = _y_range()
 
-    assert y_first == pytest.approx(y_second), (
-        f"Y axis danced across same-decade refreshes: {y_first} -> {y_second}"
-    )
+    assert y_first == pytest.approx(y_second), f"Y axis danced across same-decade refreshes: {y_first} -> {y_second}"
     # Bounds must be decade-snapped (integer log10 values).
     lo, hi = y_first
     assert lo == int(lo) and hi == int(hi), f"Y bounds not decade-snapped: {y_first}"
@@ -139,15 +137,14 @@ def test_subscribes_to_global_window(app):
 
     # Process any pending Qt signals.
     from PySide6.QtWidgets import QApplication
+
     QApplication.processEvents()
 
     pi = plot.plot_item.getPlotItem()
     x_lo, x_hi = pi.getViewBox().viewRange()[0]
     span = x_hi - x_lo
     # HOUR_1 = 3600s; allow ±10% for timing jitter between set_window and assertion.
-    assert 3240 <= span <= 3960, (
-        f"Expected X span ≈ 3600s for HOUR_1, got {span:.1f}s"
-    )
+    assert 3240 <= span <= 3960, f"Expected X span ≈ 3600s for HOUR_1, got {span:.1f}s"
     assert plot.plot_item is not None
 
 
@@ -175,12 +172,8 @@ def test_forward_looking_skips_subscribe(app):
     x_lo_after, x_hi_after = pi.getViewBox().viewRange()[0]
 
     # X range must be unchanged — forward-looking plot does not subscribe.
-    assert abs(x_lo_after - x_lo_before) < 1.0, (
-        f"Forward-looking X-left changed: {x_lo_before} → {x_lo_after}"
-    )
-    assert abs(x_hi_after - x_hi_before) < 1.0, (
-        f"Forward-looking X-right changed: {x_hi_before} → {x_hi_after}"
-    )
+    assert abs(x_lo_after - x_lo_before) < 1.0, f"Forward-looking X-left changed: {x_lo_before} → {x_lo_after}"
+    assert abs(x_hi_after - x_hi_before) < 1.0, f"Forward-looking X-right changed: {x_hi_before} → {x_hi_after}"
     assert plot.plot_item is not None
 
 
@@ -203,17 +196,14 @@ def test_non_positive_values_guarded(app):
     assert len(ys) == 3, f"Expected 3 Y values, got {len(ys)}"
 
     # All getData() Y values must be finite (no -inf from log10(0) or log10(-1)).
-    assert all(_math.isfinite(v) for v in ys), (
-        f"All getData() Y must be finite after clamping, got: {list(ys)}"
-    )
+    assert all(_math.isfinite(v) for v in ys), f"All getData() Y must be finite after clamping, got: {list(ys)}"
 
     # The fallback is min positive = 1e-5; log10(1e-5) = -5.0.
     # Both clamped slots AND the original 1e-5 map to the same log10 value.
     expected_log = _math.log10(1e-5)
     for i, v in enumerate(ys):
         assert abs(v - expected_log) < 1e-9, (
-            f"ys[{i}]={v} expected log10(1e-5)={expected_log} "
-            f"(non-positive clamped to 1e-5 fallback)"
+            f"ys[{i}]={v} expected log10(1e-5)={expected_log} (non-positive clamped to 1e-5 fallback)"
         )
 
 
@@ -231,9 +221,7 @@ def test_nan_renders_as_gap_not_fallback(app):
     assert len(ys) == 3
     # log-Y mode: getData() returns log10(y); log10(NaN) is NaN. The gap must
     # survive as NaN — the fallback (a finite positive) must NOT replace it.
-    assert any(_math.isnan(v) for v in ys), (
-        f"NaN sample must remain a gap, got {list(ys)}"
-    )
+    assert any(_math.isnan(v) for v in ys), f"NaN sample must remain a gap, got {list(ys)}"
 
 
 def test_set_title_updates(app):
@@ -387,9 +375,7 @@ def test_dashboard_pressure_uses_shared_component(app):
     # Assert structural composition first.
     buf = ChannelBufferStore()
     widget = PressurePlotWidget(buf)
-    assert isinstance(widget._shared, PressurePlot), (
-        f"_shared must be PressurePlot, got {type(widget._shared)}"
-    )
+    assert isinstance(widget._shared, PressurePlot), f"_shared must be PressurePlot, got {type(widget._shared)}"
 
     # Feed data into the buffer for the expected channel and refresh.
     now = _time.time()
@@ -412,9 +398,7 @@ def test_dashboard_pressure_uses_shared_component(app):
     assert len(raw_x) == 3, f"expected 3 x points, got {len(raw_x)}"
     assert len(raw_y) == 3, f"expected 3 y points, got {len(raw_y)}"
     # All getData() Y values are log10(pressure) — must be finite (no -inf from bad clamping).
-    assert all(_math.isfinite(v) for v in raw_y), (
-        f"all getData() Y must be finite, got {list(raw_y)}"
-    )
+    assert all(_math.isfinite(v) for v in raw_y), f"all getData() Y must be finite, got {list(raw_y)}"
     # The maximum pressure 1.2e-5 → log10(1.2e-5) ≈ -4.921.
     expected_log_max = _math.log10(1.2e-5)
     assert any(abs(v - expected_log_max) < 1e-6 for v in raw_y), (

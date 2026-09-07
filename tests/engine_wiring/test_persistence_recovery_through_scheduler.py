@@ -61,8 +61,6 @@ async def _ready(feed: RecordingLifecycleFeed, epoch: str = "acquisition-1") -> 
     feed.acquisition_running(1, epoch)
 
 
-
-
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.scheduler import Scheduler
 

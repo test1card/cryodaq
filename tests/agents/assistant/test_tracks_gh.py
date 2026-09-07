@@ -79,7 +79,7 @@ def test_find_by_name_mixed_latin_cyrillic_returns_none_gracefully() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_router_resolves_latin_t_via_channelmanager() -> None:
+async def test_router_resolves_latin_t_via_channelmanager() -> None:
     """target_channels=['T12'] (Latin T) resolves to 'Т12' (Cyrillic Т)."""
     from unittest.mock import AsyncMock, MagicMock
 
@@ -102,7 +102,7 @@ def test_router_resolves_latin_t_via_channelmanager() -> None:
     )
     router = QueryRouter(adapters, channel_manager=mgr)
     intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["T12"])
-    resolved = router._resolve_target_channels(intent)
+    resolved = await router._resolve_target_channels(intent)
     assert resolved == ["Т12"], f"Expected ['Т12'], got {resolved!r}"
 
 

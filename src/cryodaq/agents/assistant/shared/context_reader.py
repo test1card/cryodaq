@@ -47,8 +47,6 @@ class AssistantContextProtocolError(RuntimeError):
     """The engine context projection was unavailable or malformed."""
 
 
-
-
 def _bounded_positive_int(value: object, *, name: str, maximum: int) -> int:
     if type(value) is not int or not 1 <= value <= maximum:
         raise ValueError(f"{name} must be an integer in [1, {maximum}]")

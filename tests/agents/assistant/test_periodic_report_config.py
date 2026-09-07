@@ -14,30 +14,22 @@ def test_periodic_report_config_defaults() -> None:
 
 
 def test_periodic_report_config_disabled() -> None:
-    config = AssistantConfig.from_dict(
-        {"triggers": {"periodic_report": {"enabled": False}}}
-    )
+    config = AssistantConfig.from_dict({"triggers": {"periodic_report": {"enabled": False}}})
     assert config.periodic_report_enabled is False
 
 
 def test_periodic_report_interval_seconds_calculation() -> None:
-    config = AssistantConfig.from_dict(
-        {"triggers": {"periodic_report": {"enabled": True, "interval_minutes": 30}}}
-    )
+    config = AssistantConfig.from_dict({"triggers": {"periodic_report": {"enabled": True, "interval_minutes": 30}}})
     assert config.get_periodic_report_interval_s() == 1800.0
 
 
 def test_periodic_report_interval_zero_when_disabled() -> None:
-    config = AssistantConfig.from_dict(
-        {"triggers": {"periodic_report": {"enabled": False, "interval_minutes": 60}}}
-    )
+    config = AssistantConfig.from_dict({"triggers": {"periodic_report": {"enabled": False, "interval_minutes": 60}}})
     assert config.get_periodic_report_interval_s() == 0.0
 
 
 def test_periodic_report_min_events_configurable() -> None:
-    config = AssistantConfig.from_dict(
-        {"triggers": {"periodic_report": {"min_events_for_dispatch": 5}}}
-    )
+    config = AssistantConfig.from_dict({"triggers": {"periodic_report": {"min_events_for_dispatch": 5}}})
     assert config.periodic_report_min_events == 5
 
 

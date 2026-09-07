@@ -60,9 +60,7 @@ def test_rising_reachable_at_high_sample_rate_default_threshold() -> None:
     Before the fix the sustained check used the fixed 30-point rate window,
     which at 10 Hz spans ~3 s << 60 s, so "rising" was unreachable.
     """
-    pred = VacuumTrendPredictor(
-        config={"min_points": 60, "rising_sustained_s": 60.0}
-    )
+    pred = VacuumTrendPredictor(config={"min_points": 60, "rising_sustained_s": 60.0})
     rng = np.random.default_rng(7)
     # 10 Hz sampling: 400 stable points (40 s) then 800 rising points (80 s).
     for i in range(1200):

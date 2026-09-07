@@ -21,9 +21,7 @@ def test_include_patterns_match_cyrillic_channels():
         "Т17 Зеркало 1",
     ]
     for channel in real_channels:
-        assert any(p.match(channel) for p in patterns), (
-            f"No include pattern matched Cyrillic channel {channel!r}"
-        )
+        assert any(p.match(channel) for p in patterns), f"No include pattern matched Cyrillic channel {channel!r}"
 
 
 def test_include_patterns_still_exclude_cryostat_critical():
@@ -33,9 +31,7 @@ def test_include_patterns_still_exclude_cryostat_critical():
 
     excluded = ["Т1 Криостат верх", "Т7 Детектор", "Т8 Калибровка"]
     for channel in excluded:
-        assert not any(p.match(channel) for p in patterns), (
-            f"Critical channel {channel!r} should NOT be throttled"
-        )
+        assert not any(p.match(channel) for p in patterns), f"Critical channel {channel!r} should NOT be throttled"
 
 
 def test_include_patterns_still_match_latin_fallback():
@@ -43,6 +39,4 @@ def test_include_patterns_still_match_latin_fallback():
     raw = yaml.safe_load(HOUSEKEEPING_YAML.read_text(encoding="utf-8"))
     patterns = [re.compile(p) for p in raw["adaptive_throttle"]["include_patterns"]]
 
-    assert any(p.match("T9 Compressor in") for p in patterns), (
-        "Latin T fallback missing from include_patterns"
-    )
+    assert any(p.match("T9 Compressor in") for p in patterns), "Latin T fallback missing from include_patterns"

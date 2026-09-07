@@ -44,9 +44,7 @@ def test_reads_and_writes_use_separate_executors(tmp_path: Path):
                 read_execs = list(seen)
 
                 seen.clear()
-                await writer.write_immediate(
-                    [Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test")]
-                )
+                await writer.write_immediate([Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test")])
                 write_execs = list(seen)
             finally:
                 loop.run_in_executor = orig
@@ -155,9 +153,7 @@ def test_get_operator_log_includes_rotated_cold_days(tmp_path: Path):
             tags=(),
         )
         await writer.stop()
-        service = ColdRotationService(
-            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
-        )
+        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
         results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
         assert results, "old day must rotate to Parquet"
 

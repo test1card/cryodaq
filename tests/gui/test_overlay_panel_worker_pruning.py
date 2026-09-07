@@ -89,7 +89,7 @@ def test_worker_b_completes_after_worker_a_was_deleted(qapp, session_epoch):
     """The exact A-then-B ordering that froze alarm polling."""
     panel = _Panel()
 
-    first = panel.poll(session_epoch, "A")   # _register_worker starts it
+    first = panel.poll(session_epoch, "A")  # _register_worker starts it
     _pump()
     assert panel.results == ["A"]
     assert not isValid(first), "A must be destroyed for this regression to mean anything"

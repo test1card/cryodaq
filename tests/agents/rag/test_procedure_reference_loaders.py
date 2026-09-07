@@ -85,9 +85,7 @@ def test_load_procedure_handles_empty_file(tmp_path: Path) -> None:
     assert chunks == []
 
 
-def test_load_procedure_handles_invalid_utf8(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_procedure_handles_invalid_utf8(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     proc_dir = tmp_path / "procedures"
     proc_dir.mkdir()
     (proc_dir / "bad.md").write_bytes(b"# title\n\xff\xfe invalid utf8")
@@ -102,9 +100,7 @@ def test_load_procedure_h1_extraction_ignores_h2(tmp_path: Path) -> None:
     """Make sure ## doesn't accidentally win."""
     proc_dir = tmp_path / "procedures"
     proc_dir.mkdir()
-    (proc_dir / "p.md").write_text(
-        "## Subheading first\n# Real Title\nbody", encoding="utf-8"
-    )
+    (proc_dir / "p.md").write_text("## Subheading first\n# Real Title\nbody", encoding="utf-8")
     chunks = load_procedure_documents(proc_dir)
     assert chunks[0].metadata["title"] == "Real Title"
 
@@ -156,10 +152,7 @@ def test_load_reference_changelog_sectioned_by_version(tmp_path: Path) -> None:
     versions = {c.metadata["version"] for c in chunks if c.source_kind == "changelog"}
     assert {"Unreleased", "0.55.7", "0.55.6"}.issubset(versions)
     # Each version chunk's source_id encodes the version anchor.
-    chunk_055 = next(
-        c for c in chunks if c.source_kind == "changelog"
-        and c.metadata["version"] == "0.55.7"
-    )
+    chunk_055 = next(c for c in chunks if c.source_kind == "changelog" and c.metadata["version"] == "0.55.7")
     assert chunk_055.source_id == "CHANGELOG.md#0.55.7"
 
 
@@ -189,9 +182,7 @@ def test_load_reference_searches_docs_subdir(tmp_path: Path) -> None:
     assert kinds == {"operator_manual", "readme"}
 
 
-def test_load_reference_handles_unreadable_files(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_reference_handles_unreadable_files(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     (tmp_path / "README.md").write_bytes(b"\xff\xfe invalid utf8")
     (tmp_path / "README.en.md").write_text("# OK\nbody", encoding="utf-8")
     with caplog.at_level("WARNING"):

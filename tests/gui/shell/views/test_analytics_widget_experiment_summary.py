@@ -214,17 +214,11 @@ def test_alarm_fetch_triggered_with_start_ts(app):
     # F19 issues 2 workers (alarm_v2_history + readings_history). Select the
     # alarm_v2_history call by name so the assert is independent of dispatch
     # order / any added ancillary fetch — only that exactly one is issued.
-    alarm_cmds = [
-        c.args[0]
-        for c in mock_cls.call_args_list
-        if c.args and c.args[0].get("cmd") == "alarm_v2_history"
-    ]
+    alarm_cmds = [c.args[0] for c in mock_cls.call_args_list if c.args and c.args[0].get("cmd") == "alarm_v2_history"]
     assert len(alarm_cmds) == 1
     alarm_cmd = alarm_cmds[0]
     assert "start_ts" in alarm_cmd
-    assert alarm_cmd["start_ts"] == pytest.approx(
-        datetime(2026, 4, 15, 10, 0, 0, tzinfo=UTC).timestamp(), abs=1
-    )
+    assert alarm_cmd["start_ts"] == pytest.approx(datetime(2026, 4, 15, 10, 0, 0, tzinfo=UTC).timestamp(), abs=1)
 
 
 def test_alarm_fetch_worker_has_parent(app):
@@ -347,10 +341,7 @@ def test_top3_alarms_shows_at_most_three(app):
     """When more than 3 alarms exist, only top 3 are displayed with exact counts."""
     w = _make_widget()
     # 10 distinct alarm IDs, each triggered once → top 3 are alarm_0/1/2 (all equal ×1)
-    history = [
-        _alarm_entry(alarm_id=f"alarm_{i}")
-        for i in range(10)
-    ]
+    history = [_alarm_entry(alarm_id=f"alarm_{i}") for i in range(10)]
     w._on_alarms_loaded({"ok": True, "history": history})
     text = w._top_alarms_label.text()
     # Exactly 2 semicolons → 3 entries
@@ -368,6 +359,7 @@ def test_top3_alarms_shows_at_most_three(app):
 def test_artifact_links_are_clickable_labels(app):
     """_docx_label and _pdf_label must be _ClickableLabel instances with set_path."""
     from cryodaq.gui.shell.views.analytics_widgets import _ClickableLabel
+
     w = _make_widget()
     assert isinstance(w._docx_label, _ClickableLabel)
     assert isinstance(w._pdf_label, _ClickableLabel)
@@ -376,6 +368,7 @@ def test_artifact_links_are_clickable_labels(app):
 def test_artifact_link_set_path_updates_text_and_path(app):
     """set_path() must update DISPLAYED label text to the full file path."""
     from cryodaq.gui.shell.views.analytics_widgets import _ClickableLabel
+
     w = _make_widget()
     with patch("cryodaq.gui.zmq_client.ZmqCommandWorker") as mock_cls:
         mock_cls.return_value = MagicMock()

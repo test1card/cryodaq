@@ -41,8 +41,7 @@ def test_apply_fusion_dark_palette_sets_fusion_style(app):
 
     # Helper must call app.setStyle("Fusion") — deleting that call must fail this test.
     assert "Fusion" in style_calls, (
-        f"apply_fusion_dark_palette must call app.setStyle('Fusion'); "
-        f"got style_calls={style_calls}"
+        f"apply_fusion_dark_palette must call app.setStyle('Fusion'); got style_calls={style_calls}"
     )
     # Intent flag also set.
     assert app.property("_cryodaq_fusion_applied") is True
@@ -51,9 +50,7 @@ def test_apply_fusion_dark_palette_sets_fusion_style(app):
 def test_apply_fusion_dark_palette_pins_window_role_to_background(app):
     apply_fusion_dark_palette(app)
     palette = app.palette()
-    assert palette.color(QPalette.ColorRole.Window).name().lower() == (
-        theme.BACKGROUND.lower()
-    )
+    assert palette.color(QPalette.ColorRole.Window).name().lower() == (theme.BACKGROUND.lower())
 
 
 def test_apply_fusion_dark_palette_pins_all_primary_roles(app):
@@ -83,8 +80,7 @@ def test_apply_fusion_dark_palette_pins_all_primary_roles(app):
     }
     for role, expected_hex in expected.items():
         assert p.color(role).name().lower() == expected_hex.lower(), (
-            f"palette role {role.name} = {p.color(role).name()!r}, "
-            f"expected {expected_hex!r}"
+            f"palette role {role.name} = {p.color(role).name()!r}, expected {expected_hex!r}"
         )
 
 
@@ -98,8 +94,7 @@ def test_apply_fusion_dark_palette_muted_disabled_text(app):
     ):
         color = p.color(QPalette.ColorGroup.Disabled, role)
         assert color.name().lower() == theme.MUTED_FOREGROUND.lower(), (
-            f"disabled {role.name} = {color.name()!r}, expected "
-            f"{theme.MUTED_FOREGROUND!r}"
+            f"disabled {role.name} = {color.name()!r}, expected {theme.MUTED_FOREGROUND!r}"
         )
 
 
@@ -125,8 +120,7 @@ def test_apply_fusion_dark_palette_preserves_existing_stylesheet(app):
     apply_fusion_dark_palette(app)
     ss = app.styleSheet()
     assert sentinel in ss, (
-        "helper clobbered an existing app-level stylesheet — it must "
-        "concatenate with pre-existing contributions"
+        "helper clobbered an existing app-level stylesheet — it must concatenate with pre-existing contributions"
     )
     assert "QToolTip" in ss
 

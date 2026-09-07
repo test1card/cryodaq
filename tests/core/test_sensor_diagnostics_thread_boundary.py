@@ -39,6 +39,7 @@ def forced_thread_interleaving():
     finally:
         sys.setswitchinterval(original)
 
+
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 
 

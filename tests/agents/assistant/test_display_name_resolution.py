@@ -34,9 +34,7 @@ from cryodaq.core.channel_manager import ChannelManager
 
 
 def _write_config(channels_dict: dict) -> Path:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
     yaml.safe_dump({"channels": channels_dict}, tmp, allow_unicode=True)
     tmp.close()
     return Path(tmp.name)
@@ -58,12 +56,14 @@ def _ollama_returning(text: str) -> MagicMock:
 
 
 def _j(category: str, channels: list[str] | None = None) -> str:
-    return json.dumps({
-        "category": category,
-        "target_channels": channels,
-        "time_window_minutes": None,
-        "quantity": "",
-    })
+    return json.dumps(
+        {
+            "category": category,
+            "target_channels": channels,
+            "time_window_minutes": None,
+            "quantity": "",
+        }
+    )
 
 
 def _make_adapters() -> QueryAdapters:
@@ -104,10 +104,12 @@ def test_find_by_name_substring() -> None:
 
 
 def test_find_by_name_exact_wins_over_substring() -> None:
-    mgr = _make_manager(**{
-        "Т11": {"name": "Плита", "visible": True},
-        "Т12": {"name": "Азотная плита", "visible": True},
-    })
+    mgr = _make_manager(
+        **{
+            "Т11": {"name": "Плита", "visible": True},
+            "Т12": {"name": "Азотная плита", "visible": True},
+        }
+    )
     assert mgr.find_by_name("Плита") == "Т11"
 
 
@@ -136,10 +138,12 @@ def test_build_channel_hint_returns_empty_when_no_manager() -> None:
 
 
 def test_build_channel_hint_includes_visible_channels() -> None:
-    mgr = _make_manager(**{
-        "Т7": {"name": "Детектор", "visible": True},
-        "Т12": {"name": "Азотная плита", "visible": True},
-    })
+    mgr = _make_manager(
+        **{
+            "Т7": {"name": "Детектор", "visible": True},
+            "Т12": {"name": "Азотная плита", "visible": True},
+        }
+    )
     hint = _build_channel_hint(mgr)
     assert "Т7" in hint
     assert "Детектор" in hint
@@ -149,10 +153,12 @@ def test_build_channel_hint_includes_visible_channels() -> None:
 
 
 def test_build_channel_hint_skips_invisible() -> None:
-    mgr = _make_manager(**{
-        "Т7": {"name": "Детектор", "visible": True},
-        "Т8": {"name": "Скрытый", "visible": False},
-    })
+    mgr = _make_manager(
+        **{
+            "Т7": {"name": "Детектор", "visible": True},
+            "Т8": {"name": "Скрытый", "visible": False},
+        }
+    )
     hint = _build_channel_hint(mgr)
     assert "Т7" in hint
     assert "Скрытый" not in hint
@@ -160,9 +166,11 @@ def test_build_channel_hint_skips_invisible() -> None:
 
 
 def test_build_channel_hint_empty_when_all_invisible() -> None:
-    mgr = _make_manager(**{
-        "Т7": {"name": "Детектор", "visible": False},
-    })
+    mgr = _make_manager(
+        **{
+            "Т7": {"name": "Детектор", "visible": False},
+        }
+    )
     assert _build_channel_hint(mgr) == ""
 
 
@@ -178,8 +186,7 @@ async def test_classifier_prompt_includes_channel_hint_when_manager_provided() -
     await clf.classify("что на азотной плите?")
     call_kwargs = ollama.generate.call_args
     system_arg = (
-        call_kwargs.kwargs.get("system")
-        or call_kwargs.args[1]
+        call_kwargs.kwargs.get("system") or call_kwargs.args[1]
         if len(call_kwargs.args) > 1
         else call_kwargs.kwargs["system"]
     )
@@ -233,14 +240,16 @@ async def test_classifier_concurrent_calls_include_channel_hints() -> None:
     """
     import asyncio
 
-    gate = asyncio.Event()       # blocks first generate until rename is done
+    gate = asyncio.Event()  # blocks first generate until rename is done
     first_captured = asyncio.Event()  # signals that first prompt has been stored
     captured_prompts: list[str] = []
 
-    mgr = _make_manager(**{
-        "Т7": {"name": "Детектор", "visible": True},
-        "Т12": {"name": "Азотная плита", "visible": True},
-    })
+    mgr = _make_manager(
+        **{
+            "Т7": {"name": "Детектор", "visible": True},
+            "Т12": {"name": "Азотная плита", "visible": True},
+        }
+    )
 
     call_count = 0
 
@@ -292,77 +301,69 @@ async def test_classifier_concurrent_calls_include_channel_hints() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_router_resolves_direct_channel_id() -> None:
+async def test_router_resolves_direct_channel_id() -> None:
     mgr = _make_manager(**{"Т7": {"name": "Детектор", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
     intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["Т7"])
-    assert router._resolve_target_channels(intent) == ["Т7"]
+    assert await router._resolve_target_channels(intent) == ["Т7"]
 
 
-def test_router_resolves_display_name_to_id() -> None:
+async def test_router_resolves_display_name_to_id() -> None:
     mgr = _make_manager(**{"Т12": {"name": "Азотная плита", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
-    intent = QueryIntent(
-        category=QueryCategory.CURRENT_VALUE, target_channels=["Азотная плита"]
-    )
-    assert router._resolve_target_channels(intent) == ["Т12"]
+    intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["Азотная плита"])
+    assert await router._resolve_target_channels(intent) == ["Т12"]
 
 
-def test_router_partial_fuzzy_match() -> None:
+async def test_router_partial_fuzzy_match() -> None:
     mgr = _make_manager(**{"Т12": {"name": "Азотная плита", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
     intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["плита"])
-    result = router._resolve_target_channels(intent)
+    result = await router._resolve_target_channels(intent)
     assert result == ["Т12"]
 
 
-def test_router_picks_up_rename_without_restart() -> None:
+async def test_router_picks_up_rename_without_restart() -> None:
     """LATE BINDING: rename mid-session reflected in router resolution."""
     mgr = _make_manager(**{"Т12": {"name": "Теплообменник 2", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
 
-    intent_old = QueryIntent(
-        category=QueryCategory.CURRENT_VALUE, target_channels=["Теплообменник 2"]
-    )
-    assert router._resolve_target_channels(intent_old) == ["Т12"]
+    intent_old = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["Теплообменник 2"])
+    assert await router._resolve_target_channels(intent_old) == ["Т12"]
 
     mgr.set_name("Т12", "Азотная плита")
 
-    intent_new = QueryIntent(
-        category=QueryCategory.CURRENT_VALUE, target_channels=["Азотная плита"]
-    )
-    assert router._resolve_target_channels(intent_new) == ["Т12"]
+    intent_new = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["Азотная плита"])
+    assert await router._resolve_target_channels(intent_new) == ["Т12"]
 
     # Old name no longer resolves
-    assert router._resolve_target_channels(intent_old) is None
+    assert await router._resolve_target_channels(intent_old) is None
 
 
-def test_router_drops_unresolvable_logs_warning() -> None:
+async def test_router_drops_unresolvable_logs_warning() -> None:
     mgr = _make_manager(**{"Т7": {"name": "Детектор", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
-    intent = QueryIntent(
-        category=QueryCategory.CURRENT_VALUE, target_channels=["нечто странное"]
-    )
+    intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=["нечто странное"])
     import logging
 
     router_logger = logging.getLogger("cryodaq.agents.assistant.query.router")
     with patch.object(router_logger, "warning") as mock_warn:
-        result = router._resolve_target_channels(intent)
+        result = await router._resolve_target_channels(intent)
     assert result is None
     mock_warn.assert_called_once()
 
 
-def test_router_handles_empty_target_channels() -> None:
+async def test_router_handles_empty_target_channels() -> None:
     mgr = _make_manager(**{"Т7": {"name": "Детектор", "visible": True}})
     router = QueryRouter(_make_adapters(), channel_manager=mgr)
     intent = QueryIntent(category=QueryCategory.CURRENT_VALUE, target_channels=None)
-    assert router._resolve_target_channels(intent) is None
+    assert await router._resolve_target_channels(intent) is None
 
 
-def test_router_passes_through_when_no_channel_manager() -> None:
+async def test_router_passes_through_when_no_channel_manager() -> None:
     router = QueryRouter(_make_adapters(), channel_manager=None)
     intent = QueryIntent(
         category=QueryCategory.CURRENT_VALUE,
         target_channels=["anything", "goes"],
     )
-    assert router._resolve_target_channels(intent) == ["anything", "goes"]
+    assert await router._resolve_target_channels(intent) == ["anything", "goes"]

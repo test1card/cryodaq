@@ -39,16 +39,10 @@ def _build_minimal_pdf(page_texts: Sequence[str]) -> bytes:
     page_ids = list(range(font_id + 1, font_id + 1 + page_count))
     contents_ids = list(range(page_ids[-1] + 1, page_ids[-1] + 1 + page_count))
 
-    objects.append(
-        f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode("ascii")
-    )
+    objects.append(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode("ascii"))
     kids_str = " ".join(f"{pid} 0 R" for pid in page_ids)
-    objects.append(
-        f"<< /Type /Pages /Kids [{kids_str}] /Count {page_count} >>".encode("ascii")
-    )
-    objects.append(
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
-    )
+    objects.append(f"<< /Type /Pages /Kids [{kids_str}] /Count {page_count} >>".encode("ascii"))
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     for pid, cid in zip(page_ids, contents_ids):
         objects.append(
             (
@@ -61,13 +55,8 @@ def _build_minimal_pdf(page_texts: Sequence[str]) -> bytes:
     for text in page_texts:
         # PDF strings: escape ( and \\ — sufficient for ASCII test text.
         safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        stream = (
-            f"BT /F1 12 Tf 100 700 Td ({safe}) Tj ET\n".encode("latin-1")
-        )
-        body = (
-            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\n"
-            b"stream\n" + stream + b"endstream"
-        )
+        stream = f"BT /F1 12 Tf 100 700 Td ({safe}) Tj ET\n".encode("latin-1")
+        body = b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"endstream"
         objects.append(body)
 
     # Assemble file with cross-reference table.

@@ -34,6 +34,7 @@ from cryodaq.core.experiment import _validate_photo_dimensions
 def _make_valid_jpeg() -> bytes:
     try:
         from PIL import Image
+
         img = Image.new("RGB", (64, 48), color=(200, 100, 50))
         buf = BytesIO()
         img.save(buf, format="JPEG")
@@ -45,6 +46,7 @@ def _make_valid_jpeg() -> bytes:
 def _make_valid_png() -> bytes:
     try:
         from PIL import Image
+
         img = Image.new("RGB", (32, 32), color=(0, 128, 255))
         buf = BytesIO()
         img.save(buf, format="PNG")
@@ -106,9 +108,7 @@ def test_attach_composition_photo_creates_composition_dir(tmp_path: Path) -> Non
     artifact_dir = em._artifact_dir(exp_id)
     artifact_dir.mkdir(parents=True)
     # Create a minimal metadata.json so _read_metadata_payload works
-    (artifact_dir / "metadata.json").write_text(
-        json.dumps({"experiment": {"experiment_id": exp_id}}), encoding="utf-8"
-    )
+    (artifact_dir / "metadata.json").write_text(json.dumps({"experiment": {"experiment_id": exp_id}}), encoding="utf-8")
 
     result = em.attach_composition_photo(
         experiment_id=exp_id,
@@ -129,9 +129,7 @@ def test_attach_composition_photo_writes_photo_and_sidecar(tmp_path: Path) -> No
     exp_id = "test-exp-002"
     artifact_dir = em._artifact_dir(exp_id)
     artifact_dir.mkdir(parents=True)
-    (artifact_dir / "metadata.json").write_text(
-        json.dumps({"artifact_index": []}), encoding="utf-8"
-    )
+    (artifact_dir / "metadata.json").write_text(json.dumps({"artifact_index": []}), encoding="utf-8")
 
     result = em.attach_composition_photo(
         experiment_id=exp_id,
@@ -174,9 +172,7 @@ def test_attach_composition_photo_appends_artifact_index(tmp_path: Path) -> None
     exp_id = "test-exp-004"
     artifact_dir = em._artifact_dir(exp_id)
     artifact_dir.mkdir(parents=True)
-    (artifact_dir / "metadata.json").write_text(
-        json.dumps({"artifact_index": []}), encoding="utf-8"
-    )
+    (artifact_dir / "metadata.json").write_text(json.dumps({"artifact_index": []}), encoding="utf-8")
 
     em.attach_composition_photo(
         experiment_id=exp_id,
@@ -190,10 +186,7 @@ def test_attach_composition_photo_appends_artifact_index(tmp_path: Path) -> None
     )
 
     payload = json.loads((artifact_dir / "metadata.json").read_text(encoding="utf-8"))
-    photos = [
-        e for e in payload.get("artifact_index", [])
-        if e.get("category") == "composition_photo"
-    ]
+    photos = [e for e in payload.get("artifact_index", []) if e.get("category") == "composition_photo"]
     assert len(photos) == 2
     assert photos[0]["summary"]["caption"] == "first"
     assert photos[1]["summary"]["caption"] == "second"
@@ -306,9 +299,7 @@ def test_read_photos_filters_composition_photo_category(tmp_path: Path) -> None:
             {"category": "composition_photo", "path": "/b.jpg", "summary": {}},
         ]
     }
-    (tmp_path / "metadata.json").write_text(
-        json.dumps(metadata), encoding="utf-8"
-    )
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     result = CompositionPhotosWidget._read_photos(tmp_path)
     assert len(result) == 2
@@ -420,9 +411,7 @@ async def test_html_escape_in_caption_prevents_injection() -> None:
     # Raw HTML tags must NOT appear in the output (they must be escaped)
     assert "<script>" not in text, f"Unescaped <script> in confirm text: {text!r}"
     assert "<evil>" not in text, f"Unescaped <evil> in confirm text: {text!r}"
-    assert "<b>INJECT</b>" not in text, (
-        f"Unescaped title injection in confirm text: {text!r}"
-    )
+    assert "<b>INJECT</b>" not in text, f"Unescaped title injection in confirm text: {text!r}"
 
     # Exact escaped forms MUST be present
     # caption: <script>alert('xss')</script>  →  &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;
@@ -432,9 +421,7 @@ async def test_html_escape_in_caption_prevents_injection() -> None:
     # username: <evil>user</evil>  →  &lt;evil&gt;user&lt;/evil&gt;
     assert "&lt;evil&gt;" in text, f"Escaped <evil> not found in confirm text: {text!r}"
     # title: <b>INJECT</b>  →  &lt;b&gt;INJECT&lt;/b&gt;
-    assert "&lt;b&gt;INJECT&lt;/b&gt;" in text, (
-        f"Escaped title not found in confirm text: {text!r}"
-    )
+    assert "&lt;b&gt;INJECT&lt;/b&gt;" in text, f"Escaped title not found in confirm text: {text!r}"
 
 
 def test_widgets_set_photos_then_empty_then_photos_restores_max_height() -> None:
@@ -464,15 +451,13 @@ def test_widgets_set_photos_then_empty_then_photos_restores_max_height() -> None
     # Populate — widget is non-empty
     widget.set_photos([fake_photo])
     assert widget.maximumHeight() == 16777215, (
-        f"After set_photos([...]) maximumHeight should be QWIDGETSIZE_MAX, "
-        f"got {widget.maximumHeight()}"
+        f"After set_photos([...]) maximumHeight should be QWIDGETSIZE_MAX, got {widget.maximumHeight()}"
     )
 
     # Clear — widget goes empty (maxHeight locked to 80)
     widget.set_photos([])
     assert widget.maximumHeight() == 80, (
-        f"After set_photos([]) maximumHeight should be 80 (empty state), "
-        f"got {widget.maximumHeight()}"
+        f"After set_photos([]) maximumHeight should be 80 (empty state), got {widget.maximumHeight()}"
     )
 
     # Repopulate — maxHeight must be restored to QWIDGETSIZE_MAX

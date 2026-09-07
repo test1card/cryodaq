@@ -115,9 +115,7 @@ def test_rate_estimator_min_span_gate_custom_window():
         est.push(ch, T0 + 1.0 * i, float(i))
 
     # A 20 s custom window contains only ~20 s of span → None despite 21 points
-    assert est.get_rate_custom_window(ch, 20.0) is None, (
-        "custom window narrower than min_span_s must return None"
-    )
+    assert est.get_rate_custom_window(ch, 20.0) is None, "custom window narrower than min_span_s must return None"
     # A 60 s custom window has span >= 30 s → value
     assert est.get_rate_custom_window(ch, 60.0) is not None
 

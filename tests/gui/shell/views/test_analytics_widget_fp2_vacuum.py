@@ -139,11 +139,13 @@ def test_no_data_status_clears_prediction(app) -> None:
     # Seed a real forecast first
     w = VacuumPredictionWidget()
     with patch("time.time", return_value=2_000_000.0):
-        w._on_trend_result(_make_trend_result(
-            extrap_t=[1000.0, 2000.0],
-            extrap_logP=[-4.0, -5.0],
-            residual_std=0.1,
-        ))
+        w._on_trend_result(
+            _make_trend_result(
+                extrap_t=[1000.0, 2000.0],
+                extrap_logP=[-4.0, -5.0],
+                residual_std=0.1,
+            )
+        )
     xs_before, _ = w._inner._central_curve.getData()
     assert xs_before is not None and len(xs_before) == 2
 
@@ -166,11 +168,13 @@ def test_ok_false_clears_prediction(app) -> None:
     # Seed a real forecast first
     w = VacuumPredictionWidget()
     with patch("time.time", return_value=2_000_000.0):
-        w._on_trend_result(_make_trend_result(
-            extrap_t=[1000.0, 2000.0],
-            extrap_logP=[-4.0, -5.0],
-            residual_std=0.1,
-        ))
+        w._on_trend_result(
+            _make_trend_result(
+                extrap_t=[1000.0, 2000.0],
+                extrap_logP=[-4.0, -5.0],
+                residual_std=0.1,
+            )
+        )
     xs_before, _ = w._inner._central_curve.getData()
     assert xs_before is not None and len(xs_before) == 2
 
@@ -200,9 +204,9 @@ def test_valid_result_prediction_forwarded(app) -> None:
     # PredictionWidget passes 10^logP values; pyqtgraph then takes log10 → back to logP.
     xs_c, ys_c = w._inner._central_curve.getData()
     assert len(xs_c) == 3
-    assert ys_c[0] == pytest.approx(-4.0, abs=1e-9)   # log10(10^-4)
-    assert ys_c[1] == pytest.approx(-5.0, abs=1e-9)   # log10(10^-5)
-    assert ys_c[2] == pytest.approx(-6.0, abs=1e-9)   # log10(10^-6)
+    assert ys_c[0] == pytest.approx(-4.0, abs=1e-9)  # log10(10^-4)
+    assert ys_c[1] == pytest.approx(-5.0, abs=1e-9)  # log10(10^-5)
+    assert ys_c[2] == pytest.approx(-6.0, abs=1e-9)  # log10(10^-6)
 
     # Band = ±1·residual_std in log10 space around central (prod:
     # analytics_widgets.py:727-733 → 10**(lp ∓ residual_std), pyqtgraph log10
@@ -373,19 +377,20 @@ def test_legacy_set_vacuum_prediction(app) -> None:
     xs_h, ys_h = w._inner._history_curve.getData()
     assert len(xs_h) == 2
     assert xs_h[0] == pytest.approx(1.0, rel=1e-6)
-    assert ys_h[0] == pytest.approx(-4.0, abs=1e-9)   # log10(1e-4)
+    assert ys_h[0] == pytest.approx(-4.0, abs=1e-9)  # log10(1e-4)
 
     # Central curve: 1 forecast point at t=3.0, pressure=1e-5 → log10=-5
     xs_c, ys_c = w._inner._central_curve.getData()
     assert len(xs_c) == 1
     assert xs_c[0] == pytest.approx(3.0, rel=1e-6)
-    assert ys_c[0] == pytest.approx(-5.0, abs=1e-9)   # log10(1e-5)
+    assert ys_c[0] == pytest.approx(-5.0, abs=1e-9)  # log10(1e-5)
 
     # CI band: lower 5e-6 → log10=-5.3, upper 2e-5 → log10≈-4.699
     xs_lo, ys_lo = w._inner._lower_curve.getData()
     xs_hi, ys_hi = w._inner._upper_curve.getData()
     assert len(xs_lo) == 1
     import math
+
     assert ys_lo[0] == pytest.approx(math.log10(5e-6), abs=1e-9)
     assert ys_hi[0] == pytest.approx(math.log10(2e-5), abs=1e-9)
 

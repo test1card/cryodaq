@@ -31,9 +31,7 @@ def _row(transition: str) -> dict:
 
 
 def test_a_reassertion_is_admitted() -> None:
-    assert _valid_v2_history([_row("REASSERTED")]), (
-        "a REASSERTED history row must be accepted — the engine emits it"
-    )
+    assert _valid_v2_history([_row("REASSERTED")]), "a REASSERTED history row must be accepted — the engine emits it"
 
 
 def test_one_reassertion_does_not_invalidate_the_whole_history() -> None:

@@ -113,7 +113,6 @@ def test_four_sensor_dt_uses_all_four():
 # tests/gui/test_conductivity_zone_confirmation.py.
 
 
-
 def test_total_resistance_is_the_reciprocal_of_total_conductance():
     """Found by a mock sweep on a deliberately cold-end-first chain.
 

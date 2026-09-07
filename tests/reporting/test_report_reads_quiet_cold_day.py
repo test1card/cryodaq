@@ -65,8 +65,7 @@ async def test_quiet_day_emptiness_is_declared_and_outlives_the_hot_database(tmp
     # indistinguishable from an index written before the field existed, and the
     # reader is required to reject that.
     assert operator_log_declared_absent(entry), (
-        "a quiet day must archive an explicit empty declaration, "
-        f"not an absent one — got {entry!r}"
+        f"a quiet day must archive an explicit empty declaration, not an absent one — got {entry!r}"
     )
     assert entry["operator_log_path"] is None
     assert entry["operator_log_rows"] == 0

@@ -55,12 +55,8 @@ def test_refresh_empty_and_filled(app):
     curves = pi.listDataItems()
     assert len(curves) > 0, "PressurePlot must have at least one curve after set_series"
     xdata, ydata = curves[0].getData()
-    assert xdata is not None and ydata is not None, (
-        "Pressure curve must have data after refresh with points"
-    )
-    assert list(xdata) == pytest.approx([1000.0, 1001.0]), (
-        f"x data must be exactly [1000.0, 1001.0], got {list(xdata)}"
-    )
+    assert xdata is not None and ydata is not None, "Pressure curve must have data after refresh with points"
+    assert list(xdata) == pytest.approx([1000.0, 1001.0]), f"x data must be exactly [1000.0, 1001.0], got {list(xdata)}"
     # Verified: pyqtgraph's log-Y PlotWidget converts raw values to log10
     # internally when setData is called in log mode. getData() returns the
     # log10-transformed values: log10(1e-4) = -4.0, log10(1e-5) = -5.0.

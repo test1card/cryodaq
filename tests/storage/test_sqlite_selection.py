@@ -46,9 +46,7 @@ def test_stdlib_broken_selects_pysqlite3_fallback(caplog):
     with caplog.at_level(logging.INFO, logger="cryodaq.storage._sqlite"):
         chosen = _sqlite._select(BROKEN, fake)
     assert chosen is fake
-    assert any(
-        "3.50.4" in r.message and "3.53.2" in r.message for r in caplog.records
-    ), caplog.text
+    assert any("3.50.4" in r.message and "3.53.2" in r.message for r in caplog.records), caplog.text
 
 
 def test_stdlib_broken_no_fallback_returns_stdlib():

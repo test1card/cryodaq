@@ -101,6 +101,12 @@ class SQLiteAdapter:
             return self._trend_unavailable(channel, window_minutes, "window carries no time span; a slope needs one")
         mean_y = sum(ys) / len(ys)
         slope_per_s = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True)) / denominator
+        intercept = mean_y - slope_per_s * mean_x
+        residuals = [y - (slope_per_s * x + intercept) for x, y in zip(xs, ys, strict=True)]
+        # Population spread about the fit. `direction` compares the predicted
+        # change against it, so a window whose scatter swamps its trend does
+        # not get to claim one.
+        residual_std = (sum(r * r for r in residuals) / len(residuals)) ** 0.5
         return ChannelTrend(
             channel=channel,
             window_minutes=window_minutes,
@@ -109,6 +115,7 @@ class SQLiteAdapter:
             last_value=ys[-1],
             span_s=span_s,
             rate_per_hour=slope_per_s * 3600.0,
+            residual_std=residual_std,
         )
 
     @staticmethod

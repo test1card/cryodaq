@@ -120,9 +120,7 @@ def test_short_id_split_handles_full_channel_names(app: QApplication) -> None:
 
     w = TemperatureSteadyStateWidget()
     with patch.object(w._predictors["T12"], "add_point") as mock_add:
-        w.set_temperature_readings(
-            {"Т12 Криостат верх": _reading("Т12 Криостат верх", 4.5, ts=1.0)}
-        )
+        w.set_temperature_readings({"Т12 Криостат верх": _reading("Т12 Криостат верх", 4.5, ts=1.0)})
 
     assert w._buffers["T12"] == [(1.0, 4.5)]
     # Predictor fed through the short-id split path.
@@ -211,9 +209,7 @@ def test_predictor_only_fed_on_new_timestamps(app: QApplication) -> None:
         w.set_temperature_readings({"Т12": _reading("Т12", 4.2, ts=10.0)})  # duplicate ts
 
     # Duplicate timestamp must NOT call add_point a second time.
-    assert len(add_calls) == 1, (
-        f"add_point called {len(add_calls)} times for duplicate ts; expected 1"
-    )
+    assert len(add_calls) == 1, f"add_point called {len(add_calls)} times for duplicate ts; expected 1"
     assert add_calls[0] == ("T12", 10.0, 4.2)
     assert w._last_ts["T12"] == 10.0
 
@@ -251,9 +247,7 @@ def test_hero_readout_shows_last_value_when_not_settled(app: QApplication) -> No
 
 
 def test_analytics_layout_measurement_phase_uses_temperature_steady_state() -> None:
-    cfg_path = (
-        Path(__file__).resolve().parents[4] / "config" / "analytics_layout.yaml"
-    )
+    cfg_path = Path(__file__).resolve().parents[4] / "config" / "analytics_layout.yaml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     measurement = raw["phases"]["measurement"]
     assert measurement["main"] == "temperature_steady_state"

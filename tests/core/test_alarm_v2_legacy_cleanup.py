@@ -1,4 +1,5 @@
 """Phase G: verify T11/T12 absolute-threshold alarms removed from alarms_v3.yaml."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,10 +15,16 @@ _RETAINED_ALARM_IDS = {
 
 # Absolute-value threshold checks that must NOT appear on Т11/Т12 in measurement phase.
 # Rate checks (rate_above, rate_below, relative_rate_near_zero, …) are explicitly allowed.
-_ABSOLUTE_THRESHOLD_CHECKS = frozenset({
-    "above", "below", "outside_range", "any_above", "any_below",
-    "deviation_from_setpoint",
-})
+_ABSOLUTE_THRESHOLD_CHECKS = frozenset(
+    {
+        "above",
+        "below",
+        "outside_range",
+        "any_above",
+        "any_below",
+        "deviation_from_setpoint",
+    }
+)
 
 _CALIBRATED_CHANNELS = frozenset({"Т11", "Т12"})
 
@@ -89,8 +96,7 @@ def test_measurement_thresholds_removed_from_t11_t12():
 
     assert not violations, (
         "alarms_v3.yaml contains absolute-threshold rules on Т11/Т12 "
-        "that should have been deleted by F-X v3:\n"
-        + "\n".join(f"  {v}" for v in violations)
+        "that should have been deleted by F-X v3:\n" + "\n".join(f"  {v}" for v in violations)
     )
 
 
@@ -119,29 +125,19 @@ def test_calibrated_sensor_fault_retained():
     )
 
     # Must use threshold alarm type with outside_range check
-    assert cfg.get("alarm_type") == "threshold", (
-        f"expected alarm_type='threshold', got {cfg.get('alarm_type')!r}"
-    )
-    assert cfg.get("check") == "outside_range", (
-        f"expected check='outside_range', got {cfg.get('check')!r}"
-    )
+    assert cfg.get("alarm_type") == "threshold", f"expected alarm_type='threshold', got {cfg.get('alarm_type')!r}"
+    assert cfg.get("check") == "outside_range", f"expected check='outside_range', got {cfg.get('check')!r}"
 
     # Must target exactly the calibrated channels Т11 and Т12
     channels = set(cfg.get("channels", []))
-    assert channels == {"Т11", "Т12"}, (
-        f"expected channels={{Т11, Т12}}, got {channels}"
-    )
+    assert channels == {"Т11", "Т12"}, f"expected channels={{Т11, Т12}}, got {channels}"
 
     # Range must cover [1.0, 350.0] K — values outside indicate sensor hardware failure
     range_val = cfg.get("range")
-    assert isinstance(range_val, list) and len(range_val) == 2, (
-        f"expected range=[lo, hi], got {range_val!r}"
-    )
+    assert isinstance(range_val, list) and len(range_val) == 2, f"expected range=[lo, hi], got {range_val!r}"
     lo, hi = range_val
     assert lo == 1.0, f"expected range lower bound 1.0 K (DT-670 calibration floor), got {lo}"
     assert hi == 350.0, f"expected range upper bound 350.0 K, got {hi}"
 
     # Must be CRITICAL severity
-    assert cfg.get("level") == "CRITICAL", (
-        f"expected level='CRITICAL', got {cfg.get('level')!r}"
-    )
+    assert cfg.get("level") == "CRITICAL", f"expected level='CRITICAL', got {cfg.get('level')!r}"

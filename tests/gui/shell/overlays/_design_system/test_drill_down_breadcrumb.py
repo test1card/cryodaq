@@ -44,14 +44,12 @@ def test_breadcrumb_overlay_name_updates_display(app):
 
     # tooltip must always be the full name
     assert new_name in breadcrumb._overlay_label.toolTip(), (
-        f"Tooltip must contain full name {new_name!r}, "
-        f"got {breadcrumb._overlay_label.toolTip()!r}"
+        f"Tooltip must contain full name {new_name!r}, got {breadcrumb._overlay_label.toolTip()!r}"
     )
     # At 500 px the short name "Новое имя" fits — label must equal the full name.
     label_text = breadcrumb._overlay_label.text()
     assert label_text == new_name, (
-        f"At width=500 the full name must fit without elision, "
-        f"got {label_text!r} (expected {new_name!r})"
+        f"At width=500 the full name must fit without elision, got {label_text!r} (expected {new_name!r})"
     )
 
 
