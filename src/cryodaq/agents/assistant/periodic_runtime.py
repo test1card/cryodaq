@@ -20,8 +20,7 @@ import secrets
 import sys
 import tempfile
 import time
-import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +95,9 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 # Child entry that renders the companion chart, so matplotlib is never
 # imported into this process. See reporting/run_overview_main.py.
 _RUN_OVERVIEW_ENTRY = "cryodaq.reporting.run_overview_main"
+#: The companion now blocks the report's send while it renders, so its bound is
+#: the report's patience, not its own. Below the delivery timeout on purpose.
+_COMPANION_RENDER_TIMEOUT_S = 120.0
 _RUN_OVERVIEW_TIMEOUT_S = 180.0
 _RUN_OVERVIEW_NOTHING_TO_CHART = 3
 
@@ -1476,9 +1478,13 @@ class _DeliveryLeaseSlot:
 class _TelegramPeriodicDelivery:
     """Map the accepted Telegram client to the provider-neutral delivery seam."""
 
-    def __init__(self, config: PeriodicPngConfig) -> None:
+    def __init__(self, config: PeriodicPngConfig, *, companion: Any | None = None) -> None:
         self._client = PeriodicTelegramClient(config)
         self._close_task: asyncio.Task[None] | None = None
+        # Awaitable returning the whole-run chart's bytes, or None. Optional and
+        # best-effort by construction: see `send_artifact` for why it rides here
+        # rather than inside the fenced state machine.
+        self._companion = companion
 
     async def send_artifact(
         self,
@@ -1508,7 +1514,22 @@ class _TelegramPeriodicDelivery:
                 "delivery_context_mismatch",
                 "periodic payload contradicts its fenced delivery context",
             )
-        result = await self._client.send_photo(photo, caption)
+        # The report is fenced: its bytes and caption were just verified against
+        # the slot's recorded hashes. The companion chart is NOT fenced and must
+        # never become a way for a supplementary picture to make the report less
+        # reliable — the fenced machine still owns exactly one artifact per slot,
+        # with its receipt and its retry ladder.
+        #
+        # So it is prepared here, immediately before the send, and any failure
+        # simply means the operator gets what they got before: one photo. What
+        # changes is that when both charts exist they arrive as ONE message
+        # instead of two, which is what the operator asked for on 2026-09-07 —
+        # two pictures, one hourly glance, not two screens on a phone.
+        companion = await self._render_companion()
+        if companion is not None:
+            result = await self._client.send_media_group([photo, companion], caption)
+        else:
+            result = await self._client.send_photo(photo, caption)
         outcome = PeriodicDeliveryOutcome(result.outcome.value)
         receipt = (
             PeriodicDeliveryReceipt("telegram", str(result.message_id), None)
@@ -1530,102 +1551,81 @@ class _TelegramPeriodicDelivery:
             result.error_text,
         )
 
+    async def _render_companion(self) -> bytes | None:
+        """The whole-run chart, or None. Never raises, never delays a report long.
+
+        Every failure is swallowed: an unavailable companion is not an incident,
+        it is one fewer picture. A raise here would take the report with it.
+        """
+        provider = self._companion
+        if provider is None:
+            return None
+        try:
+            async with asyncio.timeout(_COMPANION_RENDER_TIMEOUT_S):
+                rendered = await provider()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a companion never costs the report
+            _log.info("Обзор прогона не приложен: %s", exc)
+            return None
+        if type(rendered) is not bytes or not rendered:
+            return None
+        return rendered
+
     async def close(self) -> None:
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._client.close())
         await asyncio.shield(self._close_task)
 
 
-def _make_run_overview_listener(
-    *,
-    data_dir: Path,
-    delivery: PeriodicDelivery,
-) -> Callable[[int], Awaitable[None]]:
-    """Follow each delivered report with a whole-run companion photo.
+def _make_run_overview_provider(*, data_dir: Path):
+    """Render the whole-run chart and return its bytes, or None.
 
-    The hourly chart covers a short window because the projection feeding it is
-    bounded to that window. This second photo answers the other half — how the
-    whole run is going — by reading the run's databases directly.
-
-    Rendered in a child process. This process must never import matplotlib: it
+    Rendered in a CHILD PROCESS. This process must never import matplotlib: it
     supervises reports for the lifetime of the stand, and the H3 import closure
     keeps the plotting and control stacks out of it deliberately.
 
-    Delivered through the same seam as the report but with its own context, and
-    never recorded in the fenced report state: a companion chart must not be
-    able to make the report itself less reliable, so every failure is logged
-    and swallowed here.
+    It only renders. Sending belongs to the delivery seam, which now puts both
+    charts in one message — before 2026-09-07 this function also sent, as a
+    second message announced after the report had already been delivered.
     """
 
-    async def render(destination: Path) -> str | None:
-        """Run the child renderer; return the caption, or None if nothing to send."""
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            _RUN_OVERVIEW_ENTRY,
-            "--data-dir",
-            str(data_dir),
-            "--out",
-            str(destination),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            async with asyncio.timeout(_RUN_OVERVIEW_TIMEOUT_S):
-                stdout, stderr = await process.communicate()
-        except TimeoutError:
-            process.kill()
-            await process.wait()
-            _log.warning("Обзор прогона: рендер не уложился в %.0f с", _RUN_OVERVIEW_TIMEOUT_S)
-            return None
-        detail = stderr.decode("utf-8", errors="replace").strip()
-        if process.returncode == _RUN_OVERVIEW_NOTHING_TO_CHART:
-            _log.info("Обзор прогона не построен: %s", detail or "нечего строить")
-            return None
-        if process.returncode != 0:
-            _log.warning("Обзор прогона не построен (код %s): %s", process.returncode, detail)
-            return None
-        try:
-            caption = json.loads(stdout.decode("utf-8"))["caption"]
-        except (ValueError, KeyError, UnicodeDecodeError):
-            _log.warning("Обзор прогона: дочерний процесс вернул неразборчивый ответ")
-            return None
-        return caption if isinstance(caption, str) and caption else None
-
-    async def send(slot_end: int) -> None:
-        try:
-            with tempfile.TemporaryDirectory(prefix="cryodaq-run-overview-") as tmp:
-                destination = Path(tmp) / "run_overview.png"
-                caption = await render(destination)
-                if caption is None:
-                    return
-                photo = destination.read_bytes()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.warning("Обзор прогона не построен из-за ошибки", exc_info=True)
-            return
-        try:
-            caption_bytes = caption.encode("utf-8", errors="strict")
-            context = PeriodicDeliveryContext(
-                slot_id="sha256:" + hashlib.sha256(f"run-overview:{slot_end}".encode()).hexdigest(),
-                generation_id=uuid.uuid4().hex,
-                owner_token=uuid.uuid4().hex,
-                artifact_sha256="sha256:" + hashlib.sha256(photo).hexdigest(),
-                artifact_size=len(photo),
-                caption_sha256="sha256:" + hashlib.sha256(caption_bytes).hexdigest(),
-                caption_size=len(caption_bytes),
+    async def render() -> bytes | None:
+        with tempfile.TemporaryDirectory(prefix="cryodaq-run-overview-") as scratch:
+            destination = Path(scratch) / "overview.png"
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                _RUN_OVERVIEW_ENTRY,
+                "--data-dir",
+                str(data_dir),
+                "--out",
+                str(destination),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            result = await delivery.send_artifact(photo, caption, context)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _log.warning("Обзор прогона не отправлен", exc_info=True)
-            return
-        if result.outcome is not PeriodicDeliveryOutcome.ACCEPTED:
-            _log.warning("Обзор прогона не доставлен: %s", result.error_code or result.outcome)
+            try:
+                async with asyncio.timeout(_RUN_OVERVIEW_TIMEOUT_S):
+                    _stdout, stderr = await process.communicate()
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                _log.warning("Обзор прогона: рендер не уложился в %.0f с", _RUN_OVERVIEW_TIMEOUT_S)
+                return None
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            if process.returncode == _RUN_OVERVIEW_NOTHING_TO_CHART:
+                _log.info("Обзор прогона не построен: %s", detail or "нечего строить")
+                return None
+            if process.returncode != 0:
+                _log.warning("Обзор прогона: рендер завершился с кодом %s: %s", process.returncode, detail)
+                return None
+            try:
+                return destination.read_bytes()
+            except OSError as exc:
+                _log.warning("Обзор прогона: результат не прочитан: %s", exc)
+                return None
 
-    return send
+    return render
 
 
 def make_periodic_coordinator_factory(
@@ -1664,7 +1664,7 @@ def make_periodic_coordinator_factory(
         delivery: PeriodicDelivery
         slot: _DeliveryLeaseSlot | None = None
         if _delivery_factory is None:
-            delivery = _TelegramPeriodicDelivery(config)
+            delivery = _TelegramPeriodicDelivery(config, companion=_make_run_overview_provider(data_dir=resolved_data))
         else:
             slot = _DeliveryLeaseSlot()
             delivery = slot
@@ -1682,7 +1682,6 @@ def make_periodic_coordinator_factory(
                 else _destination_fingerprint
             ),
             expected_delivery_kind="telegram" if _delivery_kind is None else _delivery_kind,
-            on_report_delivered=_make_run_overview_listener(data_dir=resolved_data, delivery=delivery),
         )
         if slot is not None:
             # This is deliberately the final operation in graph construction:
