@@ -152,7 +152,24 @@ class _RemoteEngineStateCache:
             self._task = None
 
     async def _poll_loop(self) -> None:
+        """Poll both halves, then publish them TOGETHER.
+
+        The experiment status used to be stored the moment it arrived, before
+        the second round-trip that fetches sensor health. Those two assignments
+        were separated by an `await`, and readers here are SYNCHRONOUS: a
+        context build landing in that window saw the NEW experiment beside the
+        PREVIOUS experiment's sensor health, and produced an hourly report
+        describing one run with the other run's diagnostics. Nothing in the
+        output said the two halves came from different moments.
+
+        So nothing is published until both halves are in hand, and then both are
+        assigned with no `await` between them — which, on a single-threaded
+        event loop, is what makes the pair atomic to a synchronous reader. Do
+        not put an await between those two lines.
+        """
         while True:
+            experiment_status: dict[str, Any] = {}
+            sensor_diagnostics: dict[str, Any] | None = None
             try:
                 exp_reply = await self._client.call({"cmd": "experiment_status"})
                 active = (exp_reply.get("active_experiment") or {}).get("experiment_id")
@@ -163,23 +180,21 @@ class _RemoteEngineStateCache:
                     and all(key in exp_reply for key in _REQUIRED_EXPERIMENT_STATUS_KEYS)
                 )
                 if experiment_is_usable:
-                    self._experiment_status = exp_reply
-                else:
-                    self._experiment_status = {}
-                    self._sensor_diagnostics = None
+                    experiment_status = exp_reply
                 diag_reply = await self._client.call({"cmd": "get_sensor_diagnostics"})
                 if (
                     experiment_is_usable
                     and diag_reply.get("ok")
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
-                    self._sensor_diagnostics = diag_reply.get("summary")
-                else:
-                    self._sensor_diagnostics = None
+                    sensor_diagnostics = diag_reply.get("summary")
             except Exception:
-                self._experiment_status = {}
-                self._sensor_diagnostics = None
+                experiment_status = {}
+                sensor_diagnostics = None
                 logger.debug("assistant state cache poll failed", exc_info=True)
+            # Published together. No await between these two lines.
+            self._experiment_status = experiment_status
+            self._sensor_diagnostics = sensor_diagnostics
             await asyncio.sleep(self._poll_interval_s)
 
     def _invalidate(self) -> None:
