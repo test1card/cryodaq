@@ -6,9 +6,17 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
-from cryodaq.agents.assistant.query.schemas import CompositeStatus
+from cryodaq.agents.assistant.query.schemas import ChannelTrend, CompositeStatus
 
 logger = logging.getLogger(__name__)
+
+#: Landmark stages, by canonical id. The gauge is picked up by unit instead,
+#: because its channel is not in channels.yaml and never has been.
+_TREND_CHANNELS = frozenset({"Т11", "Т12"})
+#: Six hours: long enough that a slow drift is visible, short enough that the
+#: engine's 10000-sample reply still covers a useful part of it. The result
+#: reports the span that actually arrived, not this number.
+_TREND_WINDOW_MINUTES = 360
 
 
 class CompositeAdapter:
@@ -25,12 +33,16 @@ class CompositeAdapter:
         vacuum,
         alarms,
         experiment,
+        history=None,
     ) -> None:
         self._snapshot = broker_snapshot
         self._cooldown = cooldown
         self._vacuum = vacuum
         self._alarms = alarms
         self._experiment = experiment
+        # Optional: the summary works without it and simply carries no trends.
+        # Wired in 2026-09-07 so an answer can say where a number is going.
+        self._history = history
 
     async def status(self) -> CompositeStatus:
         labeled_data, cd_eta, vac_eta, alarm_result, exp_status = await asyncio.gather(
@@ -96,6 +108,31 @@ class CompositeAdapter:
             elif unit in ("mbar", "Pa") and current_pressure is None:
                 current_pressure = val
 
+        # Trends for the channels worth a derivative: the gauge, and the two
+        # landmark stages. Not every channel — thirty slopes is noise, and the
+        # cost is one history query each. Failures are contained per channel:
+        # a trend that cannot be fetched is simply absent, never an exception
+        # that costs the operator the whole summary.
+        trends: dict[str, ChannelTrend] = {}
+        if self._history is not None and labeled_data:
+            wanted: list[tuple[str, str]] = []
+            for ch, info in labeled_data.items():
+                if info.get("visible") is False:
+                    continue
+                unit = info.get("unit", "")
+                display = info.get("display_name", ch)
+                if unit in ("mbar", "Pa") or ch in _TREND_CHANNELS or display in _TREND_CHANNELS:
+                    wanted.append((ch, display))
+            if wanted:
+                fetched = await asyncio.gather(
+                    *(self._history.trend(ch, _TREND_WINDOW_MINUTES) for ch, _ in wanted),
+                    return_exceptions=True,
+                )
+                for (_, display), result in zip(wanted, fetched, strict=True):
+                    if isinstance(result, Exception) or result is None:
+                        continue
+                    trends[display] = result
+
         active_alarms = getattr(alarm_result, "active", []) if alarm_result is not None else []
 
         if (
@@ -122,6 +159,7 @@ class CompositeAdapter:
             active_alarms=active_alarms,
             key_temperatures=key_temps,
             current_pressure=current_pressure,
+            trends=trends,
             snapshot_empty=snapshot_empty,
             snapshot_age_s=snapshot_age_s,
             alarms_available=alarm_result is not None and getattr(alarm_result, "available", True),

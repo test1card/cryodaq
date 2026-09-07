@@ -108,6 +108,58 @@ class VacuumETA:
 
 
 @dataclass
+class ChannelTrend:
+    """Where a channel is going, not just where it is.
+
+    `RangeStats` fetches (timestamp, value) pairs and keeps only min, max,
+    mean and std — the timestamps are discarded, so nothing downstream can say
+    whether a value is climbing or steady. Asked what the pressure was doing
+    while it rose at a dead-constant +0.106 mbar/h for six hours, the assistant
+    said "стоит на месте" (2026-09-07). It was not wrong about the level; it
+    had no derivative to be right about.
+
+    The slope is least squares over the window, not last-minus-first: a single
+    noisy endpoint should not decide the answer to "куда оно идёт".
+    """
+
+    channel: str
+    #: What was ASKED for. The engine caps a history reply at 10000 samples,
+    #: so a six-hour request against a 1 Hz channel comes back covering under
+    #: three. Read `span_s` for what actually arrived and render that; saying
+    #: "за 6 ч" over a 2.8 h window is a small lie that compounds.
+    window_minutes: int
+    n_samples: int
+    first_value: float
+    last_value: float
+    #: Seconds actually covered, first sample to last.
+    span_s: float
+    rate_per_hour: float
+    unit: str = ""
+    available: bool = True
+    stale: bool = False
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_availability(self.available, self.stale, self.reason)
+
+    @property
+    def span_hours(self) -> float:
+        """The window that actually arrived, in hours. Render this one."""
+        return self.span_s / 3600.0
+
+    @property
+    def direction(self) -> str:
+        """Coarse direction, for prose. Deliberately three-valued."""
+        if not self.available:
+            return "неизвестно"
+        magnitude = abs(self.rate_per_hour)
+        reference = max(abs(self.first_value), abs(self.last_value), 1e-30)
+        if magnitude / reference < 0.01:
+            return "стабильно"
+        return "растёт" if self.rate_per_hour > 0 else "падает"
+
+
+@dataclass
 class RangeStats:
     channel: str
     window_minutes: int
@@ -280,6 +332,12 @@ class CompositeStatus:
     active_alarms: list[ActiveAlarmInfo]
     key_temperatures: dict[str, float | None]
     current_pressure: float | None
+    #: Where the interesting channels are GOING, keyed by display name. A level
+    #: without a derivative cannot answer "куда оно идёт", and on 2026-09-07
+    #: this summary called a six-hour ramp "стоит на месте" for exactly that
+    #: reason. Empty when history is unavailable; each entry carries its own
+    #: availability, so an unreachable channel says so instead of vanishing.
+    trends: dict[str, ChannelTrend] = field(default_factory=dict)
     snapshot_empty: bool = False
     snapshot_age_s: float | None = None
     alarms_available: bool = True

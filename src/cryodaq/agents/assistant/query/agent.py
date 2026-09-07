@@ -99,6 +99,27 @@ def _format_horizons(forecast: dict[str, float] | None) -> str:
     return "Прогноз давления по горизонтам (выведи их столбиком, как есть):\n" + "\n".join(lines)
 
 
+def _format_trends(trends) -> str:
+    """One line per channel that is going somewhere. Empty when nothing is.
+
+    Rendered from the span that ACTUALLY arrived, not the window that was
+    asked for: the engine caps a history reply at 10000 samples, and "за 6 ч"
+    over a 2.8 h window is a small lie that compounds into a wrong rate in the
+    operator's head.
+    """
+    if not trends:
+        return "нет данных о динамике"
+    rows: list[str] = []
+    for name, trend in sorted(trends.items()):
+        if not getattr(trend, "available", False):
+            rows.append(f"{name}: динамика недоступна ({getattr(trend, 'reason', '?')})")
+            continue
+        rate = trend.rate_per_hour
+        magnitude = f"{rate:+.3g}"
+        rows.append(f"{name}: {trend.direction}, {magnitude}/ч за {trend.span_hours:.1f} ч")
+    return "; ".join(rows)
+
+
 def _vacuum_forecast_qualifier(vac) -> str:
     """What the vacuum forecast is worth, in the operator's words.
 
@@ -169,9 +190,7 @@ class AssistantQueryAgent:
             # anything not the production BrokerSnapshot — would take the whole
             # agent down at construction rather than degrade a hint. Caught by
             # the suite on a StartStop stub before it reached the stand.
-            live_channels_provider=getattr(
-                getattr(adapters, "broker_snapshot", None), "latest_with_labels", None
-            ),
+            live_channels_provider=getattr(getattr(adapters, "broker_snapshot", None), "latest_with_labels", None),
             release_model_after=intent_model != format_model,
         )
         self._router = QueryRouter(adapters, channel_manager=channel_manager)
@@ -598,6 +617,7 @@ class AssistantQueryAgent:
                 temps_text="нет данных",
                 pressure_text="нет данных",
                 cooldown_eta_text="нет данных",
+                trends_text="нет данных о динамике",
                 vacuum_eta_text="нет данных",
                 alarms_text="нет данных",
             )
@@ -684,6 +704,7 @@ class AssistantQueryAgent:
             temps_text=temps_text,
             pressure_text=pressure_text,
             cooldown_eta_text=cd_text,
+            trends_text=_format_trends(getattr(cs, "trends", {})),
             vacuum_eta_text=vac_text,
             alarms_text=alarms_text,
         )

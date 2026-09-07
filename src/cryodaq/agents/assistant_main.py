@@ -878,6 +878,7 @@ async def _run_llm_runtime(
                 vacuum=q_vacuum,
                 alarms=q_alarms,
                 experiment=q_experiment,
+                history=q_sqlite,
             )
             chart_dispatcher: ChartDispatcher | None = None
             if telegram_sender is not None:

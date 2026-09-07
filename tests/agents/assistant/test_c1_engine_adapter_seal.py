@@ -65,15 +65,35 @@ def _return_has_availability_contract(node: ast.Return, class_node: ast.ClassDef
         return False
     if _has_availability_keywords(node.value):
         return True
-    if class_node is None or not isinstance(node.value.func, ast.Attribute) or node.value.func.attr != "_unavailable":
+    # A helper is accepted by what it RETURNS, not by what it is called.
+    #
+    # This used to require the name `_unavailable` exactly. The rule it encodes
+    # — fail into a typed absence — has nothing to do with the name, and an
+    # adapter needing a second absence helper for a second result type cannot
+    # give it that name because the first one already has it. Found 2026-09-07
+    # when `SQLiteAdapter` grew `trend()` beside `range_stats()`: the seal
+    # rejected a method that satisfied its rule and would have accepted a
+    # differently-named helper that did not.
+    #
+    # The check is now the property itself: the failure branch returns a call to
+    # a helper on this class, and every return in that helper constructs the
+    # availability contract. Strictly stronger — "every", not "any", so a helper
+    # with one compliant branch and one bare `return None` no longer passes.
+    if class_node is None or not isinstance(node.value.func, ast.Attribute):
         return False
-    return any(
-        _has_availability_keywords(call)
+    helper_name = node.value.func.attr
+    helpers = [
+        helper
         for helper in class_node.body
-        if isinstance(helper, (ast.FunctionDef, ast.AsyncFunctionDef)) and helper.name == "_unavailable"
-        for returned in ast.walk(helper)
-        if isinstance(returned, ast.Return) and isinstance(returned.value, ast.Call)
-        for call in (returned.value,)
+        if isinstance(helper, (ast.FunctionDef, ast.AsyncFunctionDef)) and helper.name == helper_name
+    ]
+    if not helpers:
+        return False
+    returns = [returned for helper in helpers for returned in ast.walk(helper) if isinstance(returned, ast.Return)]
+    if not returns:
+        return False
+    return all(
+        isinstance(returned.value, ast.Call) and _has_availability_keywords(returned.value) for returned in returns
     )
 
 

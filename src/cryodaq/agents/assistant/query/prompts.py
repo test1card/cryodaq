@@ -237,6 +237,7 @@ FORMAT_COMPOSITE_STATUS_USER = """\
 Фаза: {phase_text}
 Ключевые температуры: {temps_text}
 Давление: {pressure_text}
+Динамика: {trends_text}
 Прогноз захолаживания: {cooldown_eta_text}
 Прогноз вакуума: {vacuum_eta_text}
 Активные тревоги: {alarms_text}
