@@ -103,9 +103,23 @@ INTENT_CLASSIFIER_SYSTEM = """\
 """
 
 INTENT_CLASSIFIER_USER = """\
-Запрос оператора: {query}
+{conversation}Запрос оператора: {query}
 
 JSON:
+"""
+
+#: Prepended to the classifier's prompt when the chat has recent turns. The
+#: classifier used to see the bare query, so a follow-up like "а сейчас?" or
+#: "почему?" carried no subject and was categorised blind — and the ROUTER then
+#: fetched data for the wrong category. Injecting the history only into the
+#: format prompt could not fix that: by then the wrong data had already been
+#: gathered, and a well-written answer over the wrong numbers is worse than an
+#: honest refusal.
+INTENT_CLASSIFIER_CONVERSATION = """\
+Предыдущие реплики этого диалога (нужны, только чтобы понять, о чём спрашивают
+сейчас — классифицируй именно последний запрос):
+{transcript}
+
 """
 
 # ---------------------------------------------------------------------------

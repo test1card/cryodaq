@@ -365,6 +365,16 @@ class AssistantQueryAgent:
             return user_prompt
         return f"{user_prompt}\n\n{block}"
 
+    def _conversation_transcript(self, chat_id: Any) -> str:
+        """What was already said, or "" — never raises, never blocks an answer."""
+        if self._conversation is None:
+            return ""
+        try:
+            return self._conversation.replay(chat_id) or ""
+        except Exception as exc:  # noqa: BLE001 - memory never costs an answer
+            logger.debug("conversation replay unavailable: %s", exc)
+            return ""
+
     def _with_conversation(self, user_prompt: str, chat_id: Any) -> str:
         """Prepend what was already said, if anything was.
 
@@ -372,13 +382,7 @@ class AssistantQueryAgent:
         each of fifteen templates: the memory belongs to the conversation, not
         to whichever bucket this particular question fell into.
         """
-        if self._conversation is None:
-            return user_prompt
-        try:
-            transcript = self._conversation.replay(chat_id)
-        except Exception as exc:  # noqa: BLE001 - memory never costs an answer
-            logger.debug("conversation replay unavailable: %s", exc)
-            return user_prompt
+        transcript = self._conversation_transcript(chat_id)
         if not transcript:
             return user_prompt
         return f"Предыдущий разговор (показания в нём УСТАРЕЛИ — актуальные ниже):\n{transcript}\n\n{user_prompt}"
@@ -480,7 +484,16 @@ class AssistantQueryAgent:
         response = _FALLBACK
 
         try:
-            intent = await self._classifier.classify(query)
+            # The classifier sees the conversation too. It used to get the bare
+            # query, so "а сейчас?" or "почему?" carried no subject: the
+            # category was decided blind and the ROUTER then fetched data for
+            # the wrong one. Injecting the history only into the format prompt
+            # could not repair that — by then the wrong numbers were already in
+            # hand, and a fluent answer over the wrong numbers is worse than an
+            # honest "не знаю".
+            intent = await self._classifier.classify(
+                query, conversation=self._conversation_transcript(chat_id)
+            )
             data = await self._router.fetch(intent, query)
             retrieved = await self._maybe_retrieve(query, intent, data)
             if retrieved is not None:
@@ -521,10 +534,6 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
-                if self._conversation is not None:
-                    # Only what was SAID. The state blocks are rebuilt every
-                    # turn on purpose: a remembered reading is a stale reading.
-                    self._conversation.remember(chat_id, query, response)
         except QueryUnavailableError as exc:
             logger.warning("AssistantQueryAgent: query unavailable for %r: %s", query[:80], exc)
             errors.append(f"query_unavailable: {exc}")
@@ -564,6 +573,23 @@ class AssistantQueryAgent:
             self._last_audit_error = True
             logger.warning("AssistantQueryAgent: audit log failed", exc_info=True)
             return response
+
+        # REMEMBERED HERE, NOT WHERE IT WAS WRITTEN. The exchange used to be
+        # stored the moment the format call returned — before the audit. An
+        # audit failure makes the caller return `delivery_state: not_dispatched`
+        # and `commit_state: not_committed`, so the operator never sees that
+        # text; the agent nonetheless carried it into the next turn's history
+        # and answered follow-ups about a message that, for the operator, was
+        # never said. Past the audit is the last point at which this agent still
+        # withholds an answer, so it is the honest place to commit the memory.
+        #
+        # Only what was SAID: the state blocks are rebuilt every turn on
+        # purpose, because a remembered reading is a stale reading.
+        if self._conversation is not None and response is not _FALLBACK and response.strip():
+            try:
+                self._conversation.remember(chat_id, query, response)
+            except Exception as exc:  # noqa: BLE001 - memory never costs an answer
+                logger.debug("conversation not remembered: %s", exc)
 
         if self._chart_dispatcher is not None and chat_id is not None:
             self._chart_dispatcher.dispatch(intent.category if intent is not None else None, data, chat_id)

@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.query.prompts import (
+    INTENT_CLASSIFIER_CONVERSATION,
     INTENT_CLASSIFIER_SYSTEM,
     INTENT_CLASSIFIER_USER,
 )
@@ -307,7 +308,12 @@ class IntentClassifier:
         # decides; the default keeps the small-GPU behaviour unchanged.
         self._release_model_after = release_model_after
 
-    async def classify(self, query: str) -> QueryIntent:
+    #: Characters of transcript handed to the classifier. It decides one word
+    #: from a small model, so it needs the SUBJECT of the last exchange, not the
+    #: conversation — and a long history would drown the query it must classify.
+    _CONVERSATION_BUDGET_CHARS = 1200
+
+    async def classify(self, query: str, *, conversation: str = "") -> QueryIntent:
         """Classify query text into a QueryIntent. Never raises.
 
         2026-05-08: landmark hint moved к ТОЧНО ВЕРХ system prompt
@@ -328,7 +334,12 @@ class IntentClassifier:
             # Landmark hint goes FIRST — gemma4:e2b position-biased,
             # critical instructions must lead.
             system_prompt = channel_hint + "\n\n" + INTENT_CLASSIFIER_SYSTEM
-            user_prompt = INTENT_CLASSIFIER_USER.format(query=query)
+            transcript = (conversation or "").strip()
+            if len(transcript) > self._CONVERSATION_BUDGET_CHARS:
+                # Keep the END: the last exchange is what a follow-up refers to.
+                transcript = transcript[-self._CONVERSATION_BUDGET_CHARS :]
+            conversation_block = INTENT_CLASSIFIER_CONVERSATION.format(transcript=transcript) if transcript else ""
+            user_prompt = INTENT_CLASSIFIER_USER.format(query=query, conversation=conversation_block)
             generation = self._ollama.generate(
                 user_prompt,
                 model=self._model,
