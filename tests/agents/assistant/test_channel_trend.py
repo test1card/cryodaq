@@ -34,7 +34,7 @@ async def test_a_steady_ramp_reports_its_rate() -> None:
 
     assert trend is not None and trend.available
     assert trend.rate_per_hour == pytest.approx(0.106, rel=1e-6)
-    assert trend.direction == "растёт"
+    assert trend.significance is not None and trend.significance > 3
     assert trend.span_hours == pytest.approx(6.0, rel=0.01)
 
 
@@ -46,7 +46,7 @@ async def test_noise_around_a_level_is_not_movement() -> None:
     trend = await adapter.trend("Т12", 60)
 
     assert trend is not None and trend.available
-    assert trend.direction == "стабильно"
+    assert trend.significance is not None and trend.significance < 2
 
 
 async def test_one_noisy_endpoint_does_not_decide_the_answer() -> None:
@@ -66,9 +66,9 @@ async def test_one_noisy_endpoint_does_not_decide_the_answer() -> None:
     # asserted only that the rate was under half the endpoint difference, and
     # passed while `direction` — the word the operator actually sees — still
     # said "растёт" on the strength of one bad sample.
-    assert trend.direction == "стабильно", (
-        f"one spike still produced the operator-facing word {trend.direction!r} "
-        f"(rate {trend.rate_per_hour}, slope stderr {trend.slope_stderr_per_hour})"
+    assert trend.significance is not None and trend.significance < 2, (
+        f"one spike produced a significant-looking slope: rate {trend.rate_per_hour}, "
+        f"stderr {trend.slope_stderr_per_hour}, z={trend.significance}"
     )
 
 
@@ -80,7 +80,7 @@ async def test_a_window_with_no_time_span_has_no_slope() -> None:
 
     assert trend is not None and not trend.available
     assert "time span" in (trend.reason or "")
-    assert trend.direction == "неизвестно"
+    assert trend.significance is None
 
 
 async def test_an_unavailable_history_says_why() -> None:
@@ -111,7 +111,7 @@ async def test_a_small_drift_in_noise_is_still_a_drift() -> None:
 
     assert trend is not None and trend.available
     assert trend.rate_per_hour == pytest.approx(0.03, abs=0.005)
-    assert trend.direction == "растёт", "a five-sigma drift was called steady"
+    assert trend.significance is not None and trend.significance > 5, "a five-sigma drift did not read as significant"
 
 
 async def test_pure_noise_is_not_a_drift() -> None:
@@ -125,4 +125,4 @@ async def test_pure_noise_is_not_a_drift() -> None:
     trend = await adapter.trend("P", 60)
 
     assert trend is not None and trend.available
-    assert trend.direction == "стабильно"
+    assert trend.significance is not None and trend.significance < 2

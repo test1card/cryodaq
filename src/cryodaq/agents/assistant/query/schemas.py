@@ -107,13 +107,6 @@ class VacuumETA:
         _validate_availability(self.available, self.stale, self.reason)
 
 
-#: How many residual standard deviations the fitted change must clear before a
-#: direction is claimed in prose. Two is the usual "not noise" bar and is what
-#: separates this stand's real ramps — whose scatter is a thousandth of the
-#: change — from a flat window with one bad sample.
-_DIRECTION_SIGNIFICANCE = 2.0
-
-
 @dataclass
 class ChannelTrend:
     """Where a channel is going, not just where it is.
@@ -165,38 +158,26 @@ class ChannelTrend:
         return self.span_s / 3600.0
 
     @property
-    def direction(self) -> str:
-        """Coarse direction, for prose. Deliberately three-valued.
+    def significance(self) -> float | None:
+        """How many standard errors the slope sits from zero, or None.
 
-        A slope is not a direction until the data supports one. Least squares
-        alone does not give that: reviewed 2026-09-07, a flat window with a
-        single spike on its last sample fitted +0.198/h and this property said
-        "растёт" — the prose an operator acts on, produced by one bad reading.
-        The rate being smaller than the endpoint difference was not protection;
-        the earlier regression asserted only that, and passed while the
-        operator-facing word stayed wrong.
+        Reported rather than thresholded. There was a `direction` property
+        here that turned this number into one of three Russian words, and it
+        was wrong in ways I could not fix by tuning a threshold: review's
+        probes on 2026-09-07 had it call stationary AR(1) noise "падает" and a
+        completed step "растёт", because the standard error of a slope assumes
+        independent residuals and a real sensor does not supply them.
 
-        So the claim is gated on significance, in the textbook sense: the fitted
-        slope must stand clear of ITS OWN standard error. One spike inflates
-        that error far more than it moves the slope, which is the asymmetry
-        needed — and because the error of a slope falls as the square root of
-        the sample count, a small drift measured over thousands of points is
-        still allowed to be a drift. My first version compared the total change
-        against one sample's scatter and therefore called a 5.17σ ramp steady;
-        review caught it 2026-09-07.
-
-        Below the gate the honest word is "стабильно" — not "unknown", because
-        the level IS known and steady within what the data can resolve.
+        Deleting the word is not a retreat. Classifying a trend from
+        autocorrelated data is a genuine problem and a fixed threshold was
+        never going to solve it — while the model reading this has the rate,
+        its uncertainty, the window and the values, which is more than the
+        word carried. It is also what the stand's own principle asks for:
+        instruments show, they do not judge.
         """
-        if not self.available:
-            return "неизвестно"
-        magnitude = abs(self.rate_per_hour)
-        reference = max(abs(self.first_value), abs(self.last_value), 1e-30)
-        if magnitude / reference < 0.01:
-            return "стабильно"
-        if self.slope_stderr_per_hour > 0 and magnitude < _DIRECTION_SIGNIFICANCE * self.slope_stderr_per_hour:
-            return "стабильно"
-        return "растёт" if self.rate_per_hour > 0 else "падает"
+        if not self.available or self.slope_stderr_per_hour <= 0:
+            return None
+        return abs(self.rate_per_hour) / self.slope_stderr_per_hour
 
 
 @dataclass

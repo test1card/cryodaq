@@ -625,8 +625,14 @@ async def _handle_assistant_query_command(
         return {"ok": False, "error": str(exc)}
 
 
+#: One embed against this stand's server was MEASURED at 20-34 s and rag.yaml
+#: allows it 180, so a 30 s outer deadline cancelled valid searches before
+#: their own inner deadline could even expire. Reviewed 2026-09-07.
+_RAG_SEARCH_TIMEOUT_S = 300.0
+
+
 async def _handle_rag_search_command(
-    rag_searcher: Any, cmd: dict[str, Any], *, timeout_s: float = 30.0
+    rag_searcher: Any, cmd: dict[str, Any], *, timeout_s: float = _RAG_SEARCH_TIMEOUT_S
 ) -> dict[str, Any]:
     if rag_searcher is None:
         return {"ok": False, "error": "RAG индекс не построен. Запустите cryodaq-rag-index."}
@@ -823,7 +829,14 @@ async def _run_llm_runtime(
             # default against its own config's 180.
             rag_emb = make_embeddings_client(rag_cfg)
             rag_emb_client = rag_emb
-            rag_searcher = RagSearcher(db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table)
+            # `RagSearcher.__init__` calls `lancedb.connect`, which is
+            # synchronous. Its searches were moved off the loop on 2026-09-07
+            # but its CONSTRUCTION was not, so slow storage could still wedge
+            # assistant startup — a hang, not a crash, which the launcher's
+            # restart-on-exit cannot recover.
+            rag_searcher = await asyncio.to_thread(
+                RagSearcher, db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table
+            )
             # Name what was RESOLVED, not merely which file it came from.
             # On 2026-09-06 the question "which embedding model is the running
             # assistant using?" could not be answered from this log: it gave

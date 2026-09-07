@@ -56,10 +56,36 @@ def _is_engine_call(node: ast.AST) -> bool:
 _UNTYPED_CONSTRUCTORS = frozenset({"dict", "OrderedDict", "defaultdict", "SimpleNamespace"})
 
 
-def _has_availability_keywords(call: ast.Call) -> bool:
-    if isinstance(call.func, ast.Name) and call.func.id in _UNTYPED_CONSTRUCTORS:
+def _untyped_aliases(tree: ast.AST) -> frozenset[str]:
+    """Names bound to an untyped constructor in this module.
+
+    `D = dict` then `return D(available=False, ...)` walked straight past a
+    name blacklist — review's probe, 2026-09-07. Aliases are cheap to find and
+    close that exact hole.
+
+    Being honest about the limit: an AST check cannot PROVE a call returns a
+    validated dataclass. It can only refuse the shapes known to be untyped. A
+    determined bypass (an alias through an import, a factory) still exists, and
+    the real proof would be a runtime assertion on the adapters' own results.
+    This raises the cost of the accident, which is what the seal is for.
+    """
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+            continue
+        if node.value.id not in _UNTYPED_CONSTRUCTORS:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return frozenset(aliases)
+
+
+def _has_availability_keywords(call: ast.Call, untyped: frozenset[str] = frozenset()) -> bool:
+    blocked = _UNTYPED_CONSTRUCTORS | untyped
+    if isinstance(call.func, ast.Name) and call.func.id in blocked:
         return False
-    if isinstance(call.func, ast.Attribute) and call.func.attr in _UNTYPED_CONSTRUCTORS:
+    if isinstance(call.func, ast.Attribute) and call.func.attr in blocked:
         return False
     keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
     return (
@@ -72,10 +98,12 @@ def _has_availability_keywords(call: ast.Call) -> bool:
     )
 
 
-def _return_has_availability_contract(node: ast.Return, class_node: ast.ClassDef | None) -> bool:
+def _return_has_availability_contract(
+    node: ast.Return, class_node: ast.ClassDef | None, untyped: frozenset[str] = frozenset()
+) -> bool:
     if not isinstance(node.value, ast.Call):
         return False
-    if _has_availability_keywords(node.value):
+    if _has_availability_keywords(node.value, untyped):
         return True
     # A helper is accepted by what it RETURNS, not by what it is called.
     #
@@ -236,6 +264,7 @@ def _violations(root: Path) -> list[str]:
     violations: list[str] = []
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        untyped = _untyped_aliases(tree)
         parents = _parent_map(tree)
         direct, reachable = _engine_reachable_methods(tree, parents)
         for method in reachable:
@@ -250,7 +279,7 @@ def _violations(root: Path) -> list[str]:
             ]
             if not failure_branches or any(
                 not (returns := [node for node in ast.walk(branch) if isinstance(node, ast.Return)])
-                or not all(_return_has_availability_contract(node, class_node) for node in returns)
+                or not all(_return_has_availability_contract(node, class_node, untyped) for node in returns)
                 for branch in failure_branches
             ):
                 violations.append(
@@ -507,4 +536,42 @@ def test_the_seal_requires_a_typed_result_not_a_dict() -> None:
     assert failure_returns, "the injection must contain a failure-branch return"
     assert not any(_return_has_availability_contract(node, class_node) for node in failure_returns), (
         "the seal accepted a bare dict as a typed unavailable result"
+    )
+
+
+_ALIASED_DICT_INJECTION = """
+D = dict
+
+
+class Adapter:
+    async def query(self):
+        reply = await self._client.call({"cmd": "readings_history"})
+        if not reply_is_success(reply):
+            return D(available=False, stale=True, reason="down")
+        return Result(available=True)
+"""
+
+
+def test_an_alias_of_dict_is_still_a_dict() -> None:
+    """`D = dict` walked past the name blacklist. Review's probe, 2026-09-07."""
+    tree = ast.parse(_ALIASED_DICT_INJECTION)
+    untyped = _untyped_aliases(tree)
+    class_node = next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "query"
+    )
+    failure_returns = [
+        node
+        for branch in ast.walk(method)
+        if isinstance(branch, ast.If) and _is_failure_branch(branch)
+        for node in ast.walk(branch)
+        if isinstance(node, ast.Return)
+    ]
+
+    assert "D" in untyped
+    assert failure_returns
+    assert not any(_return_has_availability_contract(node, class_node, untyped) for node in failure_returns), (
+        "an alias of dict was accepted as a typed unavailable result"
     )

@@ -40,8 +40,20 @@ DEFAULT_MAX_TURNS = 20
 DEFAULT_SILENCE_MARKER_S = 3 * 3600.0
 #: Per-message cap. A transcript is context, not an archive.
 _MAX_STORED_CHARS = 4000
+#: Total cap on a replayed transcript. Twenty pairs at the per-message cap
+#: allow 160000 characters, which on dense Cyrillic can crowd out the answer
+#: inside a 100000-token window — the memory would then cost exactly the reply
+#: it exists to improve. Reviewed 2026-09-07. Oldest turns are dropped first.
+_MAX_REPLAY_CHARS = 24000
 #: Refuse to grow one conversation without bound; the tail is what matters.
+#: Enforced ON WRITE by rotation, not merely on read: reviewed 2026-09-07, the
+#: file grew forever and every replay read all of it before slicing, so an
+#: old conversation cost more I/O each turn and would eventually fill the DAQ
+#: disk. Rotation keeps the file small enough that reading it is cheap.
 _MAX_FILE_TURNS = 500
+#: Rotate when the file exceeds the cap by this much, so a rewrite happens once
+#: per _ROTATE_SLACK turns rather than on every append.
+_ROTATE_SLACK = 100
 
 
 def _safe_chat_key(chat_id: Any) -> str:
@@ -84,10 +96,26 @@ class ConversationStore:
             }
             if not record["q"] and not record["a"]:
                 return
-            with self._path(chat_id).open("a", encoding="utf-8") as handle:
+            path = self._path(chat_id)
+            with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._rotate_if_needed(path)
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not stored: %s", exc)
+
+    def _rotate_if_needed(self, path: Path) -> None:
+        """Keep only the recent tail on disk. Never raises."""
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+            if len(lines) <= _MAX_FILE_TURNS + _ROTATE_SLACK:
+                return
+            tail = lines[-_MAX_FILE_TURNS:]
+            temporary = path.with_suffix(".jsonl.tmp")
+            temporary.write_text("".join(tail), encoding="utf-8")
+            temporary.replace(path)
+        except Exception as exc:  # noqa: BLE001 - rotation is housekeeping
+            logger.debug("conversation not rotated: %s", exc)
 
     def _read(self, chat_id: Any) -> list[dict]:
         path = self._path(chat_id)
@@ -135,6 +163,14 @@ class ConversationStore:
             gap = current - previous_ts
             if gap >= self._silence_marker_s:
                 rows.append(f"[тишина {_human_gap(gap)} до текущего вопроса]")
+        # Drop from the FRONT: the recent exchange is what "а на первой?" needs,
+        # and an old turn is the cheapest thing to lose.
+        dropped = 0
+        while rows and sum(len(row) + 1 for row in rows) > _MAX_REPLAY_CHARS:
+            rows.pop(0)
+            dropped += 1
+        if dropped:
+            rows.insert(0, f"[…{dropped} более ранних реплик опущено]")
         return "\n".join(rows)
 
     def reset(self, chat_id: Any | None = None) -> None:

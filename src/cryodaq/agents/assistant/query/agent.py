@@ -202,9 +202,15 @@ def _format_trends(trends) -> str:
         if not getattr(trend, "available", False):
             rows.append(f"{name}: динамика недоступна ({getattr(trend, 'reason', '?')})")
             continue
-        rate = trend.rate_per_hour
-        magnitude = f"{rate:+.3g}"
-        rows.append(f"{name}: {trend.direction}, {magnitude}/ч за {trend.span_hours:.1f} ч")
+        # The number and its uncertainty, not a verdict. `direction` used to
+        # collapse this into one of three Russian words and got them wrong on
+        # autocorrelated noise and on completed steps; the model reading this
+        # has more to work with than the word carried.
+        parts = [f"{trend.rate_per_hour:+.3g}/ч за {trend.span_hours:.1f} ч"]
+        z = trend.significance
+        if z is not None:
+            parts.append(f"наклон {z:.0f}σ" if z >= 1 else "в пределах шума")
+        rows.append(f"{name}: {', '.join(parts)}")
     return "; ".join(rows)
 
 
@@ -851,7 +857,6 @@ class AssistantQueryAgent:
                 pressure_text="нет данных",
                 cooldown_eta_text="нет данных",
                 trends_text="нет данных о динамике",
-                documents_text=_format_retrieved_documents(data.get("retrieved_documents")),
                 vacuum_eta_text="нет данных",
                 alarms_text="нет данных",
             )
@@ -939,7 +944,6 @@ class AssistantQueryAgent:
             pressure_text=pressure_text,
             cooldown_eta_text=cd_text,
             trends_text=_format_trends(getattr(cs, "trends", {})),
-            documents_text=_format_retrieved_documents(data.get("retrieved_documents")),
             vacuum_eta_text=vac_text,
             alarms_text=alarms_text,
         )
