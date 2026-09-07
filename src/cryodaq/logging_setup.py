@@ -147,6 +147,31 @@ class _TokenRedactFilter(logging.Filter):
         return True
 
 
+class _TokenRedactFormatter(logging.Formatter):
+    """Redact the FULLY FORMATTED record, tracebacks included.
+
+    `_TokenRedactFilter` rewrites `record.msg` and `record.args`, which is
+    where a token lands when someone logs it directly. It cannot reach a
+    TRACEBACK: `exc_text` is rendered by the formatter, after every filter has
+    already run, so an exception carrying the URL sails straight past it.
+
+    That is not hypothetical. aiohttp puts the full request URL into
+    `ConnectionTimeoutError`, and Telegram requires the token IN THE URL PATH
+    because it offers no header auth — so every network hiccup while polling
+    `getUpdates` wrote the live bot token into the log. Found 2026-09-07:
+    fourteen occurrences in `logs/engine.log`, and the same text had already
+    reached a pushed repository through a copied lane log.
+
+    The filter's own docstring said it covered "any aiohttp URL-logging or
+    traceback containing the request URL". The traceback half was the half it
+    could not do. Redacting here, on the final string, covers message, args and
+    traceback in one place and cannot be outflanked by a new logging path.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redact(super().format(record))
+
+
 def setup_logging(
     component: str,
     *,
@@ -195,7 +220,7 @@ def setup_logging(
 
     root.setLevel(level)
 
-    formatter = logging.Formatter(
+    formatter = _TokenRedactFormatter(
         fmt="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
