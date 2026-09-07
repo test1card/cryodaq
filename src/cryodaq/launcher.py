@@ -2369,6 +2369,33 @@ def _request_engine_ready_reply(command: dict[str, Any], *, address: str | None 
         context.term()
 
 
+def _report_startup_refusal(
+    *,
+    attended: bool,
+    title: str,
+    message: str,
+    log_message: str,
+) -> None:
+    """Say why the launcher is not starting, without waiting for a click.
+
+    A modal `QMessageBox` on the startup path is fine when a person is at the
+    screen and fatal when nobody is: it blocks until dismissed, so under
+    systemd the process does not exit — it hangs holding a dialog no one can
+    see. `Restart=on-failure` never fires, because there is no failure yet;
+    there is a launcher that will sit there until someone logs in.
+
+    That is why `deploy/cryodaq.service` has stayed disabled: an earlier note
+    in `deploy/README-autostart.md` called a lock collision harmless because
+    the code "exits 0", which is true of a line the process never reaches.
+
+    The log line is written either way. It is the only channel that exists in
+    the unattended case, and it is the more useful one in both.
+    """
+    logger.error("%s", log_message)
+    if attended:
+        QMessageBox.critical(None, title, message)
+
+
 def _install_memory_profile(
     owner: Any,
     on_timeout: Any,
@@ -9016,13 +9043,19 @@ def main() -> None:
     # mutation. A second launcher must never race the live process's config.
     lock_fd = try_acquire_lock(".launcher.lock")
     if lock_fd is None:
-        QMessageBox.critical(
-            None,
-            "CryoDAQ",
-            "CryoDAQ Launcher уже запущен.\n\n"
-            "Используйте уже открытый экземпляр\n"
-            "или завершите его через иконку в трее → Выход.",
+        _report_startup_refusal(
+            attended=not args.tray,
+            title="CryoDAQ",
+            message=(
+                "CryoDAQ Launcher уже запущен.\n\n"
+                "Используйте уже открытый экземпляр\n"
+                "или завершите его через иконку в трее → Выход."
+            ),
+            log_message="Launcher lock is held by another instance; this one is exiting",
         )
+        # Exit 0 on purpose: another instance IS running, so this is the system
+        # working. Under systemd `Restart=on-failure` therefore does not fire,
+        # which is right — restarting into the same held lock would loop.
         sys.exit(0)
 
     from cryodaq.gui.first_run_config import recover_pending_setup
@@ -9031,13 +9064,15 @@ def main() -> None:
     try:
         recover_pending_setup(get_config_dir())
     except Exception as exc:
-        logger.error("First-run transaction recovery failed (%s)", type(exc).__name__)
-        QMessageBox.critical(
-            None,
-            "CryoDAQ — требуется восстановление настройки",
-            "Не удалось безопасно восстановить незавершённую настройку. "
-            "Запуск остановлен, чтобы не использовать частично обновлённую "
-            "конфигурацию. Проверьте права и свободное место в папке config.",
+        _report_startup_refusal(
+            attended=not args.tray,
+            title="CryoDAQ — требуется восстановление настройки",
+            message=(
+                "Не удалось безопасно восстановить незавершённую настройку. "
+                "Запуск остановлен, чтобы не использовать частично обновлённую "
+                "конфигурацию. Проверьте права и свободное место в папке config."
+            ),
+            log_message=f"First-run transaction recovery failed ({type(exc).__name__})",
         )
         sys.exit(1)
 

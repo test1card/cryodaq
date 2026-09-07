@@ -16,8 +16,11 @@ disabled the same day on review, which was correct: enabling a unit is a
 deployment of machine configuration, and it happened during a watch cycle whose
 standing rule is that the operator deploys.
 
-Two defects had to be fixed before it could be trusted unattended, and one
-decision is still the operator's — see "Before this is enabled" below.
+As of 2026-09-07 the code-side conditions are met: the `--tray` correction
+landed earlier, the modal-on-startup defect is fixed, and the qualification
+condition turned out to describe a tree that no longer exists. What remains is
+not a defect — it is one supervised start on the stand, and the operator's
+decision to enable. See "Before this is enabled" below.
 
 ```
 systemctl --user is-enabled cryodaq    # not installed
@@ -72,16 +75,22 @@ journalctl --user -u cryodaq -f
    **defers first-run setup** rather than opening a modal wizard. Without it, a
    first-run condition blocks acquisition on a dialog. Corrected.
 
-2. **Non-modal lock collision — still open.** See the correction above. This is
-   a production change to `launcher.py` and needs its own review; the unit stays
-   disabled until it lands.
+2. **Non-modal lock collision — FIXED 2026-09-07, awaiting review.** Both
+   refusals on the startup path — a held launcher lock and a failed first-run
+   recovery — now go through `_report_startup_refusal`, which always writes the
+   log line and opens the modal only when a person is there to dismiss it
+   (`attended=not args.tray`, the same flag the first-run wizard already
+   respects). Regression: `tests/test_autostart_never_waits_for_a_click.py`,
+   including a guard that fails if a bare `QMessageBox.critical` is ever added
+   back to `main` — that is how this got disabled the first time.
 
-3. **An operator safety decision — still open.** `start.sh` exports
-   `CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1`. This unit does not energise anything
-   by itself, but it turns an *attended* startup path into an *autonomous* one:
-   the stack would come up, with that override set, with nobody present. That is
-   a change in posture, not just in convenience, and it is the operator's call
-   rather than a side effect of wanting autostart.
+3. **The qualification override — GONE, this condition is retired.** The claim
+   that `start.sh` exports `CRYODAQ_LAB_QUALIFICATION_OVERRIDE=1` was true when
+   written and is not any more: the gate was removed from the SafetyManager on
+   2026-09-04 and pinned by `tests/core/test_qualification_gate_removed.py`.
+   Verified 2026-09-07 — the variable appears **zero** times in `src/`, in
+   `start.sh` and in this unit. There is no posture change left to decide here;
+   this file was simply describing a version of the tree that no longer exists.
 
 4. **An actual test on the stand.** The unit has never been started. Enabling it
    without one supervised start is guessing.
