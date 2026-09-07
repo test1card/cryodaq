@@ -54,6 +54,22 @@ class CooldownAdapter:
             cooldown_active = pred["cooldown_active"]
             if type(n_references) is not int or type(cooldown_active) is not bool:
                 raise ValueError("prediction flags have invalid types")
+            # A null estimate is NOT a malformed reply. On a warm, static stand
+            # the fit has nothing to extrapolate from, so the engine sends null
+            # rather than the infinity that used to kill the whole reply at the
+            # JSON encoder. That is an absent estimate, and it deserves its own
+            # reason: telling the operator the response was malformed would send
+            # them looking for a fault that is not there.
+            if any(
+                value is None
+                for value in (
+                    pred["t_remaining_hours"],
+                    pred["progress"],
+                    interval[0],
+                    interval[1],
+                )
+            ):
+                return self._unavailable("оценка времени охлаждения не рассчитана: стенду не от чего экстраполировать")
             return CooldownETA(
                 t_remaining_hours=float(pred["t_remaining_hours"]),
                 t_remaining_low_68=float(interval[0]),

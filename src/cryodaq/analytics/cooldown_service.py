@@ -291,6 +291,20 @@ def _rates_from_samples(
     )
 
 
+def _finite_or_none(value: object) -> float | None:
+    """A float JSON can carry, or None. Never raises.
+
+    `json.dumps(allow_nan=False)` refuses NaN and infinities, and one of them
+    anywhere fails the entire reply — so a field that cannot be expressed must
+    become an absent field, not a dead command.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 class CooldownService:
     """Асинхронный сервис прогнозирования охлаждения.
 
@@ -876,17 +890,34 @@ class CooldownService:
         if not self._executor_admission_open:
             return
 
-        # Build metadata
+        # Build metadata.
+        #
+        # NON-FINITE VALUES ARE REPLACED BY None. The reply encoder uses
+        # json.dumps(allow_nan=False) — correct, because NaN is not JSON — and a
+        # SINGLE non-finite float anywhere fails the WHOLE reply. On a warm,
+        # static stand the fit has nothing to extrapolate from and returns inf
+        # or NaN for the remaining time, so `cooldown_eta_get` had been dead
+        # since at least 14:02 on 2026-09-07: every call failed to serialise,
+        # the assistant got nothing, and the log said only `exception=
+        # ValueError`. Nobody noticed because nothing that used the command
+        # could complain about not getting an answer.
+        #
+        # None is the honest JSON for "no estimate", and it costs only the field
+        # that has no value instead of the whole prediction — phase, progress
+        # and the reference count still reach the operator.
         metadata: dict[str, Any] = {
-            "t_remaining_hours": pred.t_remaining_hours,
-            "t_remaining_ci68": (pred.t_remaining_low_68, pred.t_remaining_high_68),
-            "progress": pred.progress,
+            "t_remaining_hours": _finite_or_none(pred.t_remaining_hours),
+            "t_remaining_ci68": (
+                _finite_or_none(pred.t_remaining_low_68),
+                _finite_or_none(pred.t_remaining_high_68),
+            ),
+            "progress": _finite_or_none(pred.progress),
             "phase": pred.phase,
             "n_references": pred.n_references,
             "cooldown_active": cooldown_active,
             "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
-            "T_cold": T_cold,
-            "T_warm": T_warm,
+            "T_cold": _finite_or_none(T_cold),
+            "T_warm": _finite_or_none(T_warm),
         }
         self._last_prediction = metadata  # cache for F30 query agent
         # v0.55.3 — keep the raw dataclass so expected_value() can
