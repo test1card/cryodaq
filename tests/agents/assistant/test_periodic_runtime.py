@@ -1492,49 +1492,23 @@ async def test_complete_valid_status_reply_is_unaffected_by_key_presence_check()
         await cache.stop()
 
 
-async def test_live_runtime_consumes_context_receipt_and_expires_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.agents import assistant_main
-    from cryodaq.agents.assistant.shared import context_reader
+async def test_live_runtime_serves_the_reply_the_engine_actually_sends() -> None:
+    """The state cache must work against the real engine, not a generous fake.
 
+    Until 2026-09-07 this cache threw everything away unless the reply carried
+    an eleven-field context receipt. The engine emits no such thing, so the
+    cache was permanently empty: no experiment, no phase, no sensor summary —
+    and the hourly report went out with no context at all while the stand was
+    perfectly healthy. The test that stood here passed because its own fake
+    handed itself the receipt the engine does not write.
+
+    So this reply is shaped like the engine's: `ok`, the fields, and nothing
+    ceremonial. Freshness is not asserted here because it is not this layer's
+    to decide — each reading carries its timestamp and the agent knows the
+    time.
+    """
     published = asyncio.Event()
     park = asyncio.Event()
-    received_at = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
-
-    class _ClockDateTime:
-        current = received_at
-
-        @classmethod
-        def fromisoformat(cls, value: str) -> datetime:
-            return datetime.fromisoformat(value)
-
-        @classmethod
-        def now(cls, tz=None) -> datetime:
-            del tz
-            return cls.current
-
-        @classmethod
-        def fromtimestamp(cls, value: float, tz=None) -> datetime:
-            return datetime.fromtimestamp(value, tz=tz)
-
-    monkeypatch.setattr(context_reader, "datetime", _ClockDateTime)
-    monkeypatch.setattr(assistant_main, "datetime", _ClockDateTime)
-
-    def fresh_receipt(scope: str) -> dict[str, object]:
-        return {
-            "schema": "assistant_context_receipt_v1",
-            "log_scope": scope,
-            "experiment_id": "exp-fresh",
-            "engine_incarnation": "engine-current",
-            "experiment_incarnation": "experiment-current",
-            "revision": 3,
-            "order": 5,
-            "query_start": None,
-            "query_end": None,
-            "received_at": received_at.isoformat(),
-            "freshness_s": 5.0,
-        }
 
     class Client:
         calls = 0
@@ -1545,10 +1519,9 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
                 assert command == {"cmd": "experiment_status"}
                 return {
                     "ok": True,
-                    "active_experiment": {"experiment_id": "exp-fresh"},
+                    "active_experiment": {"experiment_id": "exp-live"},
                     "current_phase": "COOLDOWN",
                     "phases": [{"phase": "COOLDOWN"}],
-                    "scope_receipt": fresh_receipt("experiment_status"),
                 }
             if self.calls == 2:
                 assert command == {"cmd": "get_sensor_diagnostics"}
@@ -1563,7 +1536,6 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
                         "worst_score": 100,
                         "worst_flags": [],
                     },
-                    "scope_receipt": fresh_receipt("sensor_diagnostics"),
                 }
             published.set()
             await park.wait()
@@ -1573,18 +1545,12 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
     await cache.start()
     try:
         await asyncio.wait_for(published.wait(), 1.0)
-        assert cache.active_experiment_id == "exp-fresh"
+        assert cache.active_experiment_id == "exp-live"
         assert cache.get_current_phase() == "COOLDOWN"
         assert cache.get_phase_history() == [{"phase": "COOLDOWN"}]
         summary = cache.get_summary()
-        assert summary is not None
+        assert summary is not None, "the cache refused a reply the engine actually sends"
         assert summary.healthy == 1
-
-        _ClockDateTime.current = datetime(2026, 7, 22, 12, 0, 6, tzinfo=UTC)
-        assert cache.active_experiment_id is None
-        assert cache.get_current_phase() is None
-        assert cache.get_phase_history() == []
-        assert cache.get_summary() is None
     finally:
         await cache.stop()
 

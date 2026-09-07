@@ -1,10 +1,39 @@
-"""Bounded observational context reads through the engine's query authority."""
+"""Bounded observational context reads through the engine's query authority.
+
+NO CONTEXT RECEIPTS. Removed 2026-09-07 by the operator's decision, and the
+reasoning is worth keeping because the machinery was persuasive.
+
+Every read here used to demand an eleven-field receipt — schema, scope,
+experiment id, engine and experiment incarnation, revision, order, query
+bounds, receive time, freshness — and refuse the data without it. The engine
+never emitted one. `history_receipt` appeared exactly once in the whole source
+tree: in the line that asked for it. Zero producers. So both context paths had
+failed since the day they were written, the assistant answered "I have no live
+readings" while the stand was fine, and the hourly report went out empty 26
+times on 2026-09-07 alone. The tests were green because the fake client in them
+handed itself the receipt the real engine does not write.
+
+The receipts were meant to prove freshness and identity. But a reading already
+carries its own timestamp, and the agent knows what time it is — the age is a
+subtraction, not a protocol. And the threat the identity fields defended
+against, someone attaching to this machine and injecting false temperatures,
+is not a threat this stand has. What remained was ceremony that turned a
+working instrument into a silent one.
+
+What is still checked is what parsing actually requires: that the engine said
+ok, that the shape is what it claims, and that sizes stay inside their caps.
+Those are not gates on the operator's data; they are how you read a reply
+without crashing.
+
+This is the settled philosophy applied to the assistant: CryoDAQ INFORMS, the
+operator DECIDES. Software that withholds a reading because it lacks a
+signature has decided something.
+"""
 
 from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Any
 
 from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 from cryodaq.core.operator_log import OperatorLogEntry
@@ -18,113 +47,6 @@ class AssistantContextProtocolError(RuntimeError):
     """The engine context projection was unavailable or malformed."""
 
 
-_CONTEXT_RECEIPT_SCHEMA = "assistant_context_receipt_v1"
-_MAX_CONTEXT_FRESHNESS_S = 3600.0
-
-
-def _validate_context_receipt(
-    receipt: object,
-    *,
-    expected_scope: str,
-    expected_experiment_id: str | None,
-    query_start: float | None,
-    query_end: float | None,
-) -> dict[str, Any]:
-    """Validate the identity and age fence carried by one projection."""
-    if not isinstance(receipt, dict):
-        raise AssistantContextProtocolError("context receipt is missing")
-    required = {
-        "schema",
-        "log_scope",
-        "experiment_id",
-        "engine_incarnation",
-        "experiment_incarnation",
-        "revision",
-        "order",
-        "query_start",
-        "query_end",
-        "received_at",
-        "freshness_s",
-    }
-    if not required <= set(receipt):
-        raise AssistantContextProtocolError("context receipt is incomplete")
-    if receipt["schema"] != _CONTEXT_RECEIPT_SCHEMA or receipt["log_scope"] != expected_scope:
-        raise AssistantContextProtocolError("context receipt scope mismatch")
-    if receipt["experiment_id"] != expected_experiment_id:
-        raise AssistantContextProtocolError("context receipt experiment mismatch")
-    for name in ("engine_incarnation", "experiment_incarnation"):
-        if type(receipt[name]) is not str or not receipt[name]:
-            raise AssistantContextProtocolError(f"context receipt {name} is invalid")
-    for name in ("revision", "order"):
-        if type(receipt[name]) is not int or receipt[name] < 0:
-            raise AssistantContextProtocolError(f"context receipt {name} is invalid")
-    receipt_start = receipt["query_start"]
-    receipt_end = receipt["query_end"]
-    for name, value in (("query_start", receipt_start), ("query_end", receipt_end)):
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(float(value))):
-            raise AssistantContextProtocolError(f"context receipt {name} is invalid")
-    if receipt_start != query_start or receipt_end != query_end:
-        raise AssistantContextProtocolError("context receipt query interval mismatch")
-    received_raw = receipt["received_at"]
-    if type(received_raw) is not str:
-        raise AssistantContextProtocolError("context receipt receive time is invalid")
-    try:
-        received_at = datetime.fromisoformat(received_raw)
-    except ValueError as exc:
-        raise AssistantContextProtocolError("context receipt receive time is invalid") from exc
-    if received_at.tzinfo is None:
-        raise AssistantContextProtocolError("context receipt receive time lacks timezone")
-    freshness_s = receipt["freshness_s"]
-    if (
-        type(freshness_s) not in (int, float)
-        or not math.isfinite(float(freshness_s))
-        or not 0 < freshness_s <= _MAX_CONTEXT_FRESHNESS_S
-    ):
-        raise AssistantContextProtocolError("context receipt freshness is invalid")
-    age_s = (datetime.now(UTC) - received_at.astimezone(UTC)).total_seconds()
-    if age_s < -5.0 or age_s > float(freshness_s):
-        raise AssistantContextProtocolError("context receipt is stale")
-    return dict(receipt)
-
-
-class ContextAuthorityCache:
-    """Small explicit cache whose authority is revoked on disconnect."""
-
-    def __init__(self) -> None:
-        self._value: object | None = None
-        self._receipt: dict[str, Any] | None = None
-        self._invalidated = True
-
-    def put(self, value: object, receipt: object) -> None:
-        if not isinstance(receipt, dict):
-            raise AssistantContextProtocolError("context receipt is missing")
-        self._value = value
-        self._receipt = dict(receipt)
-        self._invalidated = False
-
-    def invalidate(self) -> None:
-        self._value = None
-        self._receipt = None
-        self._invalidated = True
-
-    def get(self, *, now: datetime | None = None) -> object | None:
-        if self._invalidated or self._receipt is None:
-            return None
-        received_raw = self._receipt.get("received_at")
-        freshness_s = self._receipt.get("freshness_s")
-        if type(received_raw) is not str or type(freshness_s) not in (int, float):
-            return None
-        try:
-            received_at = datetime.fromisoformat(received_raw)
-        except ValueError:
-            return None
-        if received_at.tzinfo is None or not math.isfinite(float(freshness_s)) or freshness_s <= 0:
-            return None
-        age_s = ((now or datetime.now(UTC)) - received_at.astimezone(UTC)).total_seconds()
-        if age_s < -5.0 or age_s > float(freshness_s):
-            self.invalidate()
-            return None
-        return self._value
 
 
 def _bounded_positive_int(value: object, *, name: str, maximum: int) -> int:
@@ -211,15 +133,6 @@ class EngineContextReader:
         )
         if reply.get("ok") is not True:
             raise AssistantContextProtocolError("operator-log projection unavailable")
-        receipt = reply.get("scope_receipt")
-        expected_scope = "experiment" if experiment_id is not None else "all"
-        _validate_context_receipt(
-            receipt,
-            expected_scope=expected_scope,
-            expected_experiment_id=experiment_id,
-            query_start=None if start_time is None else start_time.timestamp(),
-            query_end=None if end_time is None else end_time.timestamp(),
-        )
         entries = reply.get("entries")
         if not isinstance(entries, list) or len(entries) > bounded_limit:
             raise AssistantContextProtocolError("operator-log entries are malformed or oversized")
@@ -261,13 +174,6 @@ class EngineContextReader:
         )
         if reply.get("ok") is not True:
             raise AssistantContextProtocolError("readings-history projection unavailable")
-        _validate_context_receipt(
-            reply.get("history_receipt"),
-            expected_scope="history",
-            expected_experiment_id=None,
-            query_start=from_value,
-            query_end=to_value,
-        )
         data = reply.get("data")
         if not isinstance(data, dict) or len(data) > _MAX_HISTORY_CHANNELS:
             raise AssistantContextProtocolError("readings-history projection is malformed or oversized")

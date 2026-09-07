@@ -23,31 +23,6 @@ class _Client:
         return self.reply
 
 
-def _receipt(
-    *,
-    scope: str,
-    experiment_id: str | None,
-    start: float | None = None,
-    end: float | None = None,
-    received_at: str | None = None,
-    freshness_s: float = 3600.0,
-    order: int = 1,
-) -> dict[str, Any]:
-    return {
-        "schema": "assistant_context_receipt_v1",
-        "log_scope": scope,
-        "experiment_id": experiment_id,
-        "engine_incarnation": "engine-1",
-        "experiment_incarnation": "experiment-1",
-        "revision": 3,
-        "order": order,
-        "query_start": start,
-        "query_end": end,
-        "received_at": received_at or datetime.now(UTC).isoformat(),
-        "freshness_s": freshness_s,
-    }
-
-
 async def test_operator_log_read_uses_explicit_all_scope_and_typed_entries() -> None:
     client = _Client(
         {
@@ -64,12 +39,9 @@ async def test_operator_log_read_uses_explicit_all_scope_and_typed_entries() -> 
                 }
             ],
             "scope_receipt": {
-                **_receipt(
-                    scope="all",
-                    experiment_id=None,
-                    start=datetime(2026, 7, 20, tzinfo=UTC).timestamp(),
-                    end=datetime(2026, 7, 21, tzinfo=UTC).timestamp(),
-                ),
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": "all",
+                "experiment_id": None,
             },
         }
     )
@@ -94,13 +66,16 @@ async def test_operator_log_read_uses_explicit_all_scope_and_typed_entries() -> 
     ]
 
 
-async def test_operator_log_read_binds_experiment_scope_receipt() -> None:
+async def test_operator_log_read_passes_the_experiment_scope_to_the_engine() -> None:
+    """Scoping is a QUERY the reader sends, not a claim it audits in the reply."""
     client = _Client(
         {
             "ok": True,
             "entries": [],
             "scope_receipt": {
-                **_receipt(scope="experiment", experiment_id="exp-1"),
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": "experiment",
+                "experiment_id": "exp-1",
             },
         }
     )
@@ -118,16 +93,7 @@ async def test_operator_log_read_binds_experiment_scope_receipt() -> None:
     "reply",
     [
         {"ok": False},
-        {"ok": True, "entries": [], "scope_receipt": {}},
-        {
-            "ok": True,
-            "entries": [{"id": True}],
-            "scope_receipt": {
-                "schema": "operator_log_read_scope_v1",
-                "log_scope": "all",
-                "experiment_id": None,
-            },
-        },
+        {"ok": True, "entries": [{"id": True}]},
     ],
 )
 async def test_operator_log_malformed_projection_fails_closed(reply: dict[str, Any]) -> None:
@@ -140,7 +106,6 @@ async def test_history_read_is_bounded_and_converts_exact_pairs() -> None:
         {
             "ok": True,
             "data": {"T11": [[1, 2.5], [2.0, 2.4]]},
-            "history_receipt": _receipt(scope="history", experiment_id=None, start=1.0, end=2.0),
         }
     )
     reader = EngineContextReader(client)  # type: ignore[arg-type]
@@ -198,23 +163,41 @@ async def test_history_hostile_request_rejected_before_engine_call(kwargs: dict[
     assert client.calls == []
 
 
-async def test_history_receipt_binds_scope_order_and_freshness() -> None:
+async def test_history_is_returned_from_the_reply_the_engine_actually_sends() -> None:
+    """The regression that would have caught the original defect.
+
+    The engine sends `readings_history` with no receipt of any kind — the name
+    `history_receipt` existed in exactly one place in the source tree, the line
+    that demanded it. Every fake in these tests used to hand itself that
+    receipt, so the suite was green while the real reader refused every real
+    reply. A fake must answer the way the engine answers.
+
+    Each point carries its own timestamp, which is what freshness is actually
+    made of: the agent knows the current time and can subtract.
+    """
+    client = _Client({"ok": True, "data": {"T11": [[1000.0, 2.5], [1030.0, 2.4]]}})
+
+    result = await EngineContextReader(client).read_readings_history(  # type: ignore[arg-type]
+        channels=["T11"],
+        from_ts=1000.0,
+        limit_per_channel=20,
+    )
+
+    assert result == {"T11": [(1000.0, 2.5), (1030.0, 2.4)]}
+
+
+async def test_the_operator_log_is_returned_from_a_reply_with_no_receipt() -> None:
+    """Same contract on the other read: the engine sends three fields, not eleven."""
     client = _Client(
         {
             "ok": True,
-            "data": {"T11": [[1.0, 2.0]]},
-            "history_receipt": _receipt(
-                scope="history",
-                experiment_id=None,
-                start=1.0,
-                end=None,
-                received_at="2020-01-01T00:00:00+00:00",
-            ),
+            "entries": [],
+            "scope_receipt": {
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": "all",
+                "experiment_id": None,
+            },
         }
     )
-    with pytest.raises(AssistantContextProtocolError, match="stale"):
-        await EngineContextReader(client).read_readings_history(
-            channels=["T11"],
-            from_ts=1.0,
-            limit_per_channel=20,
-        )
+
+    assert await EngineContextReader(client).get_operator_log() == []  # type: ignore[arg-type]

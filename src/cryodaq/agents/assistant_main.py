@@ -64,7 +64,7 @@ from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
 from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.schemas import QueryAdapters
 from cryodaq.agents.assistant.shared.audit import AuditLogger
-from cryodaq.agents.assistant.shared.context_reader import EngineContextReader, _validate_context_receipt
+from cryodaq.agents.assistant.shared.context_reader import EngineContextReader
 from cryodaq.agents.assistant.shared.engine_client import (
     DEFAULT_ENGINE_CMD_ADDR,
     EngineQueryClient,
@@ -136,9 +136,7 @@ class _RemoteEngineStateCache:
         self._client = client
         self._poll_interval_s = poll_interval_s
         self._experiment_status: dict[str, Any] = {}
-        self._experiment_receipt: dict[str, Any] | None = None
         self._sensor_diagnostics: dict[str, Any] | None = None
-        self._sensor_receipt: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -156,84 +154,40 @@ class _RemoteEngineStateCache:
             try:
                 exp_reply = await self._client.call({"cmd": "experiment_status"})
                 active = (exp_reply.get("active_experiment") or {}).get("experiment_id")
-                experiment_receipt_valid = False
-                if (
+                experiment_is_usable = bool(
                     exp_reply.get("ok")
                     and isinstance(active, str)
                     and active
                     and all(key in exp_reply for key in _REQUIRED_EXPERIMENT_STATUS_KEYS)
-                ):
-                    try:
-                        _validate_context_receipt(
-                            exp_reply.get("scope_receipt"),
-                            expected_scope="experiment_status",
-                            expected_experiment_id=active,
-                            query_start=None,
-                            query_end=None,
-                        )
-                    except Exception:
-                        self._experiment_status = {}
-                        self._experiment_receipt = None
-                        self._sensor_diagnostics = None
-                        self._sensor_receipt = None
-                    else:
-                        experiment_receipt_valid = True
-                        self._experiment_status = exp_reply
-                        self._experiment_receipt = exp_reply.get("scope_receipt")
+                )
+                if experiment_is_usable:
+                    self._experiment_status = exp_reply
                 else:
                     self._experiment_status = {}
-                    self._experiment_receipt = None
                     self._sensor_diagnostics = None
-                    self._sensor_receipt = None
                 diag_reply = await self._client.call({"cmd": "get_sensor_diagnostics"})
                 if (
-                    experiment_receipt_valid
+                    experiment_is_usable
                     and diag_reply.get("ok")
-                    and isinstance(active, str)
-                    and active
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
-                    _validate_context_receipt(
-                        diag_reply.get("scope_receipt"),
-                        expected_scope="sensor_diagnostics",
-                        expected_experiment_id=active,
-                        query_start=None,
-                        query_end=None,
-                    )
                     self._sensor_diagnostics = diag_reply.get("summary")
-                    self._sensor_receipt = diag_reply.get("scope_receipt")
                 else:
                     self._sensor_diagnostics = None
-                    self._sensor_receipt = None
             except Exception:
                 self._experiment_status = {}
-                self._experiment_receipt = None
                 self._sensor_diagnostics = None
-                self._sensor_receipt = None
                 logger.debug("assistant state cache poll failed", exc_info=True)
             await asyncio.sleep(self._poll_interval_s)
 
     def _invalidate(self) -> None:
         self._experiment_status = {}
-        self._experiment_receipt = None
         self._sensor_diagnostics = None
-        self._sensor_receipt = None
 
     def _experiment_is_current(self) -> bool:
         active = self._experiment_status.get("active_experiment") or {}
         experiment_id = active.get("experiment_id")
         if not isinstance(experiment_id, str) or not experiment_id:
-            self._invalidate()
-            return False
-        try:
-            _validate_context_receipt(
-                self._experiment_receipt,
-                expected_scope="experiment_status",
-                expected_experiment_id=experiment_id,
-                query_start=None,
-                query_end=None,
-            )
-        except Exception:
             self._invalidate()
             return False
         return True
@@ -259,17 +213,6 @@ class _RemoteEngineStateCache:
     # --- sensor_diag_provider callable (sync, zero-arg) ---
     def get_summary(self) -> Any | None:
         if self._sensor_diagnostics is None or not self._experiment_is_current():
-            return None
-        try:
-            _validate_context_receipt(
-                self._sensor_receipt,
-                expected_scope="sensor_diagnostics",
-                expected_experiment_id=self._experiment_status["active_experiment"]["experiment_id"],
-                query_start=None,
-                query_end=None,
-            )
-        except Exception:
-            self._invalidate()
             return None
         return types.SimpleNamespace(**self._sensor_diagnostics)
 
