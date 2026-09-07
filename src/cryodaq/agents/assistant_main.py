@@ -65,6 +65,7 @@ from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.schemas import QueryAdapters
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.shared.context_reader import EngineContextReader
+from cryodaq.agents.assistant.shared.conversation import ConversationStore
 from cryodaq.agents.assistant.shared.engine_client import (
     DEFAULT_ENGINE_CMD_ADDR,
     EngineQueryClient,
@@ -756,6 +757,10 @@ async def _run_llm_runtime(
             sensor_diag_provider=state_cache.get_summary,
             alarm_reader=AlarmAdapter(engine_client),
         )
+        # On disk beside the audit, for the same reason: the launcher restarts
+        # this process on failure, and an in-memory transcript would be lost
+        # exactly when the assistant had just been struggling.
+        conversation_store = ConversationStore(_DATA_DIR / "agents" / "assistant" / "conversations")
         audit_logger = AuditLogger(
             _DATA_DIR / "agents" / "assistant" / "audit",
             enabled=config.audit_enabled,
@@ -899,6 +904,7 @@ async def _run_llm_runtime(
                     archive=q_archive,
                     rag=q_rag,
                 ),
+                conversation_store=conversation_store,
                 intent_model=config.query_intent_model,
                 format_model=config.query_format_model,
                 intent_temperature=config.query_intent_temperature,

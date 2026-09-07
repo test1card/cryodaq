@@ -116,9 +116,7 @@ def load_experiment_metadata(experiments_dir: Path) -> list[DocumentChunk]:
             valid_phases = [p for p in phases if isinstance(p, dict)]
             if valid_phases:
                 phase_text = "Фазы: " + "; ".join(
-                    f"{p.get('phase', '?')} "
-                    f"({p.get('started_at', '?')} → "
-                    f"{p.get('ended_at', 'in progress')})"
+                    f"{p.get('phase', '?')} ({p.get('started_at', '?')} → {p.get('ended_at', 'in progress')})"
                     for p in valid_phases
                 )
                 text_parts.append(phase_text)
@@ -202,10 +200,7 @@ def load_operator_log_entries(sqlite_path: Path) -> list[DocumentChunk]:
         return chunks
 
     try:
-        cursor = conn.execute(
-            "SELECT id, timestamp, message, author, experiment_id, tags"
-            " FROM operator_log"
-        )
+        cursor = conn.execute("SELECT id, timestamp, message, author, experiment_id, tags FROM operator_log")
     except sqlite3.OperationalError as exc:
         logger.warning("operator_log table not present in %s: %s", sqlite_path, exc)
         conn.close()
@@ -264,11 +259,7 @@ def load_procedure_documents(
     if not procedures_dir.exists():
         return chunks
 
-    md_files = [
-        p
-        for p in sorted(procedures_dir.rglob("*.md"))
-        if p.is_file() and p.name != "README.md"
-    ]
+    md_files = [p for p in sorted(procedures_dir.rglob("*.md")) if p.is_file() and p.name != "README.md"]
     logger.info(
         "Procedure loader: scanning %s, found %d files",
         procedures_dir,
@@ -387,9 +378,7 @@ def load_reference_documents(
     return chunks
 
 
-def _chunk_changelog(
-    text: str, source_kind: str, document_name: str
-) -> list[DocumentChunk]:
+def _chunk_changelog(text: str, source_kind: str, document_name: str) -> list[DocumentChunk]:
     """Split CHANGELOG by ``## [version]`` so each release is its own chunk."""
     chunks: list[DocumentChunk] = []
     sections = re.split(r"^## \[", text, flags=re.MULTILINE)

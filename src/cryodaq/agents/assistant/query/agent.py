@@ -240,6 +240,7 @@ class AssistantQueryAgent:
         max_queries_per_chat_per_hour: int = 60,
         channel_manager: ChannelManager | None = None,
         chart_dispatcher: ChartDispatcher | None = None,
+        conversation_store: Any | None = None,
     ) -> None:
         self._ollama = ollama_client
         self._audit = audit_logger
@@ -270,6 +271,10 @@ class AssistantQueryAgent:
         self._format_timeout_s = format_timeout_s
         self._max_per_hour = max_queries_per_chat_per_hour
         self._chart_dispatcher = chart_dispatcher
+        # Optional: without it every query is a one-shot, which is what it was
+        # until 2026-09-07. Prepended to the user prompt rather than threaded
+        # through fifteen templates, so every category gets memory at once.
+        self._conversation = conversation_store
         self._rate_buckets: dict[int | str, collections.deque[float]] = {}
         self._next_rate_sweep_at = 0.0
         self._closed = False
@@ -301,6 +306,24 @@ class AssistantQueryAgent:
         self._closed = True
         if self._chart_dispatcher is not None:
             await self._chart_dispatcher.close()
+
+    def _with_conversation(self, user_prompt: str, chat_id: Any) -> str:
+        """Prepend what was already said, if anything was.
+
+        Deliberately a prefix on the assembled prompt rather than a slot in
+        each of fifteen templates: the memory belongs to the conversation, not
+        to whichever bucket this particular question fell into.
+        """
+        if self._conversation is None:
+            return user_prompt
+        try:
+            transcript = self._conversation.replay(chat_id)
+        except Exception as exc:  # noqa: BLE001 - memory never costs an answer
+            logger.debug("conversation replay unavailable: %s", exc)
+            return user_prompt
+        if not transcript:
+            return user_prompt
+        return f"Предыдущий разговор (показания в нём УСТАРЕЛИ — актуальные ниже):\n{transcript}\n\n{user_prompt}"
 
     async def _maybe_retrieve(self, query: str, intent, data: dict):
         """Let the model decide whether the corpus would help, and with what query.
@@ -405,6 +428,7 @@ class AssistantQueryAgent:
             if retrieved is not None:
                 data = {**data, "retrieved_documents": retrieved}
             user_prompt = self._build_format_user_prompt(query, intent.category, data)
+            user_prompt = self._with_conversation(user_prompt, chat_id)
             system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
             # Bound the format LLM call by _format_timeout_s. Without this
             # wrapper a hung Ollama format call (cold model load that never
@@ -435,6 +459,10 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
+                if self._conversation is not None:
+                    # Only what was SAID. The state blocks are rebuilt every
+                    # turn on purpose: a remembered reading is a stale reading.
+                    self._conversation.remember(chat_id, query, response)
         except QueryUnavailableError as exc:
             logger.warning("AssistantQueryAgent: query unavailable for %r: %s", query[:80], exc)
             errors.append(f"query_unavailable: {exc}")

@@ -49,9 +49,7 @@ def load_pdf_documents(
         return chunks
 
     pdf_files = sorted(p for p in pdf_dir.rglob("*.pdf") if p.is_file())
-    logger.info(
-        "PDF loader: scanning %s, found %d PDFs", pdf_dir, len(pdf_files)
-    )
+    logger.info("PDF loader: scanning %s, found %d PDFs", pdf_dir, len(pdf_files))
 
     for pdf_path in pdf_files:
         try:
@@ -71,9 +69,7 @@ def load_pdf_documents(
         try:
             total_pages = len(reader.pages)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "PDF page count failed %s: %s", pdf_path.name, exc
-            )
+            logger.warning("PDF page count failed %s: %s", pdf_path.name, exc)
             continue
 
         for page_idx, page in enumerate(reader.pages, start=1):
@@ -92,9 +88,7 @@ def load_pdf_documents(
             if not page_text:
                 continue
 
-            page_chunks = _chunk_text(
-                page_text, max_chars=max_chars, overlap=overlap
-            )
+            page_chunks = _chunk_text(page_text, max_chars=max_chars, overlap=overlap)
             for chunk_idx, chunk_text in enumerate(page_chunks):
                 chunk_id = f"pdf:{relative_path}:p{page_idx}:c{chunk_idx}"
                 chunks.append(
