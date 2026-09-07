@@ -502,7 +502,36 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             raise PeriodicInputError("periodic caption data reservation failed")
         del admitted
     caption = "\n".join([*prefix, *chosen_data, "", *alarm_tail])
-    return validate_caption_html(caption)
+    return validate_caption_html(_with_summary(caption, snapshot.render.summary))
+
+
+def _with_summary(caption: str, summary: str) -> str:
+    """Append the assistant's own words, but only what still fits.
+
+    The readings come first and are never sacrificed for prose: they are the
+    measurement, the summary is commentary on it. What does not fit is dropped
+    with a visible ellipsis, and if nothing fits the caption is returned exactly
+    as it was — a report must never become unsendable because a language model
+    was verbose.
+
+    Escaped here because this text came from a model in another process and the
+    caption is HTML: an unescaped angle bracket would take the whole report
+    down at Telegram's parser, hours after anyone could connect the two.
+    """
+    if not summary:
+        return caption
+    escaped = _escape(summary)
+    separator = "\n\n"
+    used = len(caption) + len(separator)
+    remaining = MAX_CAPTION_CODEPOINTS - used
+    if remaining < 40:
+        return caption
+    if len(escaped) > remaining:
+        escaped = escaped[: remaining - 1].rstrip() + "…"
+    candidate = caption + separator + escaped
+    if len(candidate.encode("utf-8")) > MAX_CAPTION_BYTES:
+        return caption
+    return candidate
 
 
 def _alarm_tail(alarms: tuple[PeriodicAlarmSnapshot, ...], complete: bool, reserved: list[str]) -> list[str]:

@@ -114,6 +114,12 @@ class PeriodicRenderSnapshot:
     # readable when others sit near room temperature. Default False keeps the
     # full-scale view.
     focus_cold: bool = False
+    # Presentation only: the assistant's own words about this hour, carried so
+    # the operator gets one message instead of a chart and a separate note.
+    # Empty when the assistant said nothing — the caption then reads exactly as
+    # it did before. Bounded here rather than at the caption, because whatever
+    # a language model produced is untrusted text arriving from another process.
+    summary: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +160,31 @@ class PeriodicFileFence:
     size: int
     modified_ns: int
     changed_ns: int
+
+
+#: The whole caption is capped at MAX_CAPTION_CODEPOINTS (1024), and the
+#: readings come first because they are the measurement. The summary gets what
+#: is left, up to this. Truncation is visible rather than silent: a sentence
+#: cut mid-word with no mark reads as a fault in the stand rather than a limit.
+MAX_SUMMARY_CHARS = 420
+
+
+def _summary_text(value: object) -> str:
+    """Bound and sanitise the assistant's summary. Never raises on content.
+
+    A model wrote this in another process, so it is untrusted text: control
+    characters go, the length is capped, and anything that is not a string is
+    simply no summary. It must never be able to make a report unsendable —
+    the caption is HTML, and the escaping happens where the caption is built.
+    """
+    if not isinstance(value, str):
+        return ""
+    cleaned = "".join(char for char in value if char == "\n" or char >= " ").strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= MAX_SUMMARY_CHARS:
+        return cleaned
+    return cleaned[: MAX_SUMMARY_CHARS - 1].rstrip() + "…"
 
 
 def validate_generation_token(value: object, field: str = "generation_id") -> str:
@@ -414,6 +445,7 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
             raise PeriodicInputError("source_errors contains duplicate evidence")
         errors.append(item)
     focus_cold = _boolean(value.get("focus_cold", False), "focus_cold")
+    summary = _summary_text(value.get("summary", ""))
     return PeriodicRenderSnapshot(
         display,
         channels,
@@ -427,6 +459,7 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
         bad,
         tuple(errors),
         focus_cold,
+        summary,
     )
 
 

@@ -233,11 +233,7 @@ def build_run_overview_png(data_dir: Path) -> tuple[bytes, str]:
 
     hours = (now - window.started_at) / 3600.0
     started = datetime.fromtimestamp(window.started_at).strftime("%d.%m.%Y %H:%M")
-    caption = (
-        f"<b>CryoDAQ | Весь прогон</b>\n"
-        f"{_escape(window.title)}\n"
-        f"Начало: {started} ({hours:.1f} ч)"
-    )
+    caption = f"<b>CryoDAQ | Весь прогон</b>\n{_escape(window.title)}\nНачало: {started} ({hours:.1f} ч)"
     logger.info(
         "Обзор прогона построен: каналов=%d, точек=%d, файлов=%d, PNG=%d байт",
         len(channels),

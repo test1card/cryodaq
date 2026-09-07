@@ -28,7 +28,7 @@ from cryodaq.reporting.periodic_input import PeriodicRenderSnapshot
 logger = logging.getLogger(__name__)
 
 # Fields a report may supply that older contracts will not accept.
-_OPTIONAL_FIELDS = frozenset({"channel_labels", "focus_cold"})
+_OPTIONAL_FIELDS = frozenset({"channel_labels", "focus_cold", "summary"})
 
 
 def build_render_snapshot(**fields: Any) -> PeriodicRenderSnapshot:
@@ -37,8 +37,7 @@ def build_render_snapshot(**fields: Any) -> PeriodicRenderSnapshot:
     unsupported = _OPTIONAL_FIELDS & (set(fields) - supported)
     if unsupported:
         logger.info(
-            "Отчёт строится без полей %s: загруженный контракт их не поддерживает "
-            "(процесс запущен до обновления)",
+            "Отчёт строится без полей %s: загруженный контракт их не поддерживает (процесс запущен до обновления)",
             ", ".join(sorted(unsupported)),
         )
         fields = {name: value for name, value in fields.items() if name not in unsupported}
