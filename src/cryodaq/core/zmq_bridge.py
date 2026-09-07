@@ -243,6 +243,75 @@ _PERIODIC_TOKEN_PREFIX = "sha256:"
 PROTOCOL_VERSION = 2
 
 
+_MAX_SERIALIZATION_DETAIL_CHARS = 200
+_MAX_SERIALIZATION_SCAN_NODES = 5000
+# Nodes bound the WIDTH of the walk; depth is a separate resource and runs out
+# first. Caught by its own test: a 10000-deep reply raised RecursionError and
+# the diagnostic reported "<scan failed>" — a second failure on top of the one
+# it was sent to explain.
+_MAX_SERIALIZATION_SCAN_DEPTH = 40
+
+
+def _bounded_serialization_detail(exc: BaseException) -> str:
+    """The exception's own message, bounded. It names the value; the type does not."""
+    try:
+        text = str(exc)
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise
+        return "<unprintable>"
+    text = text.replace("\n", " ")
+    if len(text) > _MAX_SERIALIZATION_DETAIL_CHARS:
+        return text[:_MAX_SERIALIZATION_DETAIL_CHARS] + "…"
+    return text
+
+
+def _first_unserializable_path(reply: object) -> str:
+    """Dotted path to the first value JSON will refuse, or "<not found>".
+
+    Found 2026-09-07 by the assistant, of all things: `cooldown_eta_get` had
+    been failing to serialise since at least 14:02, and the log said only
+    `exception=ValueError`. The type alone cannot be acted on — every
+    non-finite float in every field produces exactly that word — so the
+    failure was undiagnosable from the log it wrote, and nobody had noticed
+    the command was dead because nothing that used it could complain.
+
+    `json.dumps(allow_nan=False)` rejects NaN and infinities, and a single one
+    anywhere fails the WHOLE reply. This walks the structure and names where
+    it is. Bounded in nodes so a large reply cannot turn one failure into a
+    second, slower one; never raises, because it runs on an error path.
+    """
+    import math
+
+    budget = _MAX_SERIALIZATION_SCAN_NODES
+
+    def walk(node: object, path: str, depth: int = 0) -> str | None:
+        nonlocal budget
+        if budget <= 0 or depth > _MAX_SERIALIZATION_SCAN_DEPTH:
+            return None
+        budget -= 1
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                return f"{path}={node!r}"
+            return None
+        if isinstance(node, dict):
+            for key, value in node.items():
+                found = walk(value, f"{path}.{key}" if path else str(key), depth + 1)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                found = walk(value, f"{path}[{index}]", depth + 1)
+                if found is not None:
+                    return found
+            return None
+        return None
+
+    try:
+        return walk(reply, "") or "<not found>"
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise
+        return "<scan failed>"
+
+
 def _bounded_action_label(action: object) -> str:
     """Return a bounded log label that cannot inject control characters."""
 
@@ -2314,9 +2383,11 @@ class ZMQCommandServer:
             except Exception as exc:
                 self._record_dispatched_unknown(dispatch_trace)
                 logger.error(
-                    "ZMQ command reply serialization failed: action=%s exception=%s",
+                    "ZMQ command reply serialization failed: action=%s exception=%s: %s; offending field: %s",
                     _bounded_action_label(raw_action),
                     type(exc).__name__,
+                    _bounded_serialization_detail(exc),
+                    _first_unserializable_path(reply),
                 )
                 try:
                     wire = self._encode_reply(

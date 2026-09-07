@@ -625,3 +625,61 @@ def test_subprocess_req_timeout_exceeds_server_slow_ceiling() -> None:
         f"subprocess REQ socket ({SUBPROCESS_REQ_TIMEOUT_S}s) so the GUI "
         f"never abandons a reply the subprocess would still deliver"
     )
+
+
+def test_a_serialization_failure_names_the_field_that_caused_it() -> None:
+    """The log used to say only `exception=ValueError`, which cannot be acted on.
+
+    Found 2026-09-07: `cooldown_eta_get` had been failing to serialise since at
+    least 14:02 and nobody knew, because the only consumer that could complain —
+    the assistant — was itself broken. When it came back it reported the failure
+    on its first answer, and the log had nothing to offer: every non-finite float
+    in every field produces exactly the word ValueError.
+
+    `json.dumps(allow_nan=False)` refuses the WHOLE reply for one bad value, so
+    the useful diagnostic is WHERE.
+    """
+    from cryodaq.core.zmq_bridge import _first_unserializable_path
+
+    reply = {
+        "ok": True,
+        "prediction": {
+            "t_remaining_hours": 19.3,
+            "t_remaining_ci68": (12.0, float("nan")),
+            "progress": 0.0,
+        },
+    }
+
+    assert _first_unserializable_path(reply) == "prediction.t_remaining_ci68[1]=nan"
+
+
+def test_the_field_scan_survives_everything_an_error_path_can_hand_it() -> None:
+    """It runs while something has already gone wrong, so it must never add to it."""
+    from cryodaq.core.zmq_bridge import _first_unserializable_path
+
+    assert _first_unserializable_path({"ok": True, "value": 1.0}) == "<not found>"
+    assert _first_unserializable_path({"deep": [{"x": float("-inf")}]}) == "deep[0].x=-inf"
+    assert _first_unserializable_path(None) == "<not found>"
+
+    class Hostile:
+        def __repr__(self) -> str:
+            raise RuntimeError("no repr for you")
+
+    assert _first_unserializable_path({"weird": Hostile()}) == "<not found>"
+
+    deep: dict = {}
+    node = deep
+    for _ in range(10_000):
+        node["next"] = {}
+        node = node["next"]
+    node["bad"] = float("nan")
+    # Bounded: it gives up rather than paying an unbounded walk on an error path.
+    assert _first_unserializable_path(deep) == "<not found>"
+
+
+def test_the_exception_message_is_carried_and_bounded() -> None:
+    """The message names the value; the type name never can."""
+    from cryodaq.core.zmq_bridge import _bounded_serialization_detail
+
+    assert "nan" in _bounded_serialization_detail(ValueError("Out of range float values are not JSON compliant: nan"))
+    assert len(_bounded_serialization_detail(ValueError("x" * 5000))) <= 201
