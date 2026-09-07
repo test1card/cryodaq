@@ -141,11 +141,16 @@ class ChannelTrend:
     #: Seconds actually covered, first sample to last.
     span_s: float
     rate_per_hour: float
-    #: Scatter of the samples about the fitted line, in the channel's own unit.
-    #: `direction` needs it: a slope is only a direction if the data supports
-    #: one. Zero when not computed, which reads as "no scatter" and is correct
-    #: for the degenerate cases that set it.
-    residual_std: float = 0.0
+    #: Standard error OF THE SLOPE, in the channel's unit per hour.
+    #:
+    #: Not the per-sample scatter, which is what this field held until review
+    #: on 2026-09-07 showed the gate was unsound: comparing the total fitted
+    #: change against one sample's scatter ignores how many samples there are,
+    #: so a genuine 0.03-unit drift across 3600 noisy points — a 5.17σ slope —
+    #: was reported "стабильно". The standard error of a slope shrinks as the
+    #: square root of the sample count, which is exactly the term that was
+    #: missing. Zero when not computed.
+    slope_stderr_per_hour: float = 0.0
     unit: str = ""
     available: bool = True
     stale: bool = False
@@ -171,11 +176,17 @@ class ChannelTrend:
         the earlier regression asserted only that, and passed while the
         operator-facing word stayed wrong.
 
-        So the claim is gated on significance: the change the fit predicts over
-        the window must stand clear of the scatter about that fit. One spike
-        inflates the scatter far more than it moves the slope, which is exactly
-        the asymmetry needed. Below the gate the honest word is "стабильно" —
-        not "unknown", because the level IS known and steady within noise.
+        So the claim is gated on significance, in the textbook sense: the fitted
+        slope must stand clear of ITS OWN standard error. One spike inflates
+        that error far more than it moves the slope, which is the asymmetry
+        needed — and because the error of a slope falls as the square root of
+        the sample count, a small drift measured over thousands of points is
+        still allowed to be a drift. My first version compared the total change
+        against one sample's scatter and therefore called a 5.17σ ramp steady;
+        review caught it 2026-09-07.
+
+        Below the gate the honest word is "стабильно" — not "unknown", because
+        the level IS known and steady within what the data can resolve.
         """
         if not self.available:
             return "неизвестно"
@@ -183,8 +194,7 @@ class ChannelTrend:
         reference = max(abs(self.first_value), abs(self.last_value), 1e-30)
         if magnitude / reference < 0.01:
             return "стабильно"
-        predicted_change = magnitude * (self.span_s / 3600.0)
-        if predicted_change < _DIRECTION_SIGNIFICANCE * self.residual_std:
+        if self.slope_stderr_per_hour > 0 and magnitude < _DIRECTION_SIGNIFICANCE * self.slope_stderr_per_hour:
             return "стабильно"
         return "растёт" if self.rate_per_hour > 0 else "падает"
 

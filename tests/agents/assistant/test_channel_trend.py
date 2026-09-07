@@ -62,9 +62,13 @@ async def test_one_noisy_endpoint_does_not_decide_the_answer() -> None:
     trend = await adapter.trend("P", 60)
 
     assert trend is not None and trend.available
-    endpoint_rate = (5.0 - 1.0) / 1.0
-    assert abs(trend.rate_per_hour) < endpoint_rate / 2, (
-        f"one spike moved the slope to {trend.rate_per_hour}; endpoints would have said {endpoint_rate}"
+    # The number nobody reads is not the test. Review, 2026-09-07: this
+    # asserted only that the rate was under half the endpoint difference, and
+    # passed while `direction` — the word the operator actually sees — still
+    # said "растёт" on the strength of one bad sample.
+    assert trend.direction == "стабильно", (
+        f"one spike still produced the operator-facing word {trend.direction!r} "
+        f"(rate {trend.rate_per_hour}, slope stderr {trend.slope_stderr_per_hour})"
     )
 
 
@@ -86,3 +90,39 @@ async def test_an_unavailable_history_says_why() -> None:
 
     assert trend is not None and not trend.available
     assert trend.reason
+
+
+async def test_a_small_drift_in_noise_is_still_a_drift() -> None:
+    """The gate must not be deaf, only sober.
+
+    Review, 2026-09-07: the first gate compared the total fitted change against
+    ONE SAMPLE's scatter and so ignored how many samples there were. A genuine
+    0.03-unit drift across 3600 noisy points — a slope more than five standard
+    errors from zero — was reported "стабильно". The standard error of a slope
+    falls as the square root of the sample count, and that term was missing.
+    """
+    import random
+
+    random.seed(7)
+    samples = [[float(t), 1.0 + 0.03 * (t / 3600.0) + random.gauss(0, 0.01)] for t in range(3600)]
+    adapter = SQLiteAdapter(_client({"ok": True, "data": {"P": samples}}))
+
+    trend = await adapter.trend("P", 60)
+
+    assert trend is not None and trend.available
+    assert trend.rate_per_hour == pytest.approx(0.03, abs=0.005)
+    assert trend.direction == "растёт", "a five-sigma drift was called steady"
+
+
+async def test_pure_noise_is_not_a_drift() -> None:
+    """The other half of the same claim, so the gate is not merely permissive."""
+    import random
+
+    random.seed(11)
+    samples = [[float(t), 1.0 + random.gauss(0, 0.01)] for t in range(3600)]
+    adapter = SQLiteAdapter(_client({"ok": True, "data": {"P": samples}}))
+
+    trend = await adapter.trend("P", 60)
+
+    assert trend is not None and trend.available
+    assert trend.direction == "стабильно"

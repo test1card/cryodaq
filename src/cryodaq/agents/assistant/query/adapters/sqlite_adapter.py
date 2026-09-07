@@ -103,10 +103,14 @@ class SQLiteAdapter:
         slope_per_s = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True)) / denominator
         intercept = mean_y - slope_per_s * mean_x
         residuals = [y - (slope_per_s * x + intercept) for x, y in zip(xs, ys, strict=True)]
-        # Population spread about the fit. `direction` compares the predicted
-        # change against it, so a window whose scatter swamps its trend does
-        # not get to claim one.
-        residual_std = (sum(r * r for r in residuals) / len(residuals)) ** 0.5
+        # Standard error of the SLOPE: residual variance on n-2 degrees of
+        # freedom, divided by the spread of the x values. `direction` compares
+        # the slope against this, so a window whose scatter swamps its trend
+        # cannot claim one — while a small drift measured over many samples
+        # still can, because this error falls as the square root of the count.
+        dof = max(len(residuals) - 2, 1)
+        residual_variance = sum(r * r for r in residuals) / dof
+        slope_stderr_per_s = (residual_variance / denominator) ** 0.5
         return ChannelTrend(
             channel=channel,
             window_minutes=window_minutes,
@@ -115,7 +119,7 @@ class SQLiteAdapter:
             last_value=ys[-1],
             span_s=span_s,
             rate_per_hour=slope_per_s * 3600.0,
-            residual_std=residual_std,
+            slope_stderr_per_hour=slope_stderr_per_s * 3600.0,
         )
 
     @staticmethod

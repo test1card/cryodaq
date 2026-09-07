@@ -59,6 +59,9 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 # outer envelope could expire while a legitimate embedding was still in flight,
 # taking the formatting stage's allowance with it. Reviewed 2026-09-07.
 _QUERY_RETRIEVAL_BUDGET_S = 240.0
+#: The retrieval DECISION is a separate stage and was not in this sum at all,
+#: so the configured envelope understated the work by a whole LLM call.
+_QUERY_DECISION_BUDGET_S = 300.0
 
 
 @dataclass
@@ -128,7 +131,12 @@ class AssistantConfig:
         """
         if self.query_command_timeout_s > 0.0:
             return float(self.query_command_timeout_s)
-        return float(self.query_intent_timeout_s + self.query_format_timeout_s + _QUERY_RETRIEVAL_BUDGET_S)
+        return float(
+            self.query_intent_timeout_s
+            + self.query_format_timeout_s
+            + _QUERY_RETRIEVAL_BUDGET_S
+            + _QUERY_DECISION_BUDGET_S
+        )
 
     def get_periodic_report_interval_s(self) -> float:
         """Return interval in seconds, or 0 if periodic reports are disabled."""

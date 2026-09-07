@@ -202,10 +202,7 @@ class RateEstimator:
         insufficient = (
             not buf
             or len(buf) < self._min_points
-            or (
-                self._min_span_s is not None
-                and buf[-1][0] - buf[0][0] < self._min_span_s
-            )
+            or (self._min_span_s is not None and buf[-1][0] - buf[0][0] < self._min_span_s)
         )
         if insufficient:
             # F5: during the post-forward-gap refill, serve the last computed

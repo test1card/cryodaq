@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -58,6 +59,39 @@ class RagSearcher:
         self._table_name = table_name
         self._embeddings = embeddings_client
 
+    def _resolve_table(self):
+        """Open the corpus table, or None. Synchronous: run it off the loop.
+
+        When the CLI or the engine rebuild drops and recreates the table, the
+        cached connection's `list_tables()` view can lag the on-disk manifest,
+        so reconnect once before reporting the index missing — a freshly built
+        index becomes visible without an engine restart.
+        """
+        if self._table_name not in self._db.list_tables().tables:
+            self._db = lancedb.connect(str(self._db_path))
+            if self._table_name not in self._db.list_tables().tables:
+                logger.warning(
+                    "RAG table '%s' not found in %s",
+                    self._table_name,
+                    getattr(self._db, "uri", "?"),
+                )
+                return None
+        return self._db.open_table(self._table_name)
+
+    @staticmethod
+    def _run_query(table, query_vec, source_kind_filter, top_k: int):
+        """The vector search itself. Synchronous: run it off the loop.
+
+        The filter is pushed into LanceDB's WHERE clause so the vector search
+        respects it; applying it after `.limit(top_k)` would silently drop
+        valid matches when other kinds happened to sit closer in vector space.
+        """
+        query_builder = table.search(query_vec)
+        if source_kind_filter:
+            quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in source_kind_filter)
+            query_builder = query_builder.where(f"source_kind IN ({quoted})")
+        return query_builder.limit(top_k).to_list()
+
     async def search(
         self,
         query: str,
@@ -70,17 +104,16 @@ class RagSearcher:
         # list_tables() view can lag the on-disk manifest. Reconnect
         # once before reporting the index as missing so a freshly built
         # index becomes visible without an engine restart.
-        if self._table_name not in self._db.list_tables().tables:
-            self._db = lancedb.connect(str(self._db_path))
-            if self._table_name not in self._db.list_tables().tables:
-                logger.warning(
-                    "RAG table '%s' not found in %s",
-                    self._table_name,
-                    getattr(self._db, "uri", "?"),
-                )
-                return []
-
-        table = self._db.open_table(self._table_name)
+        # LanceDB is synchronous. Until 2026-09-07 every call below ran
+        # directly on the assistant's event loop, so a slow or stuck storage
+        # operation did not raise and did not time out — it blocked the loop
+        # itself, and neither the surrounding exception handling nor any
+        # asyncio deadline could run. The assistant hung rather than died, and
+        # a hang is the one failure the launcher's restart-on-exit cannot
+        # recover. Review found it 2026-09-07. Off the loop it goes.
+        table = await asyncio.to_thread(self._resolve_table)
+        if table is None:
+            return []
         query_vec = await self._embeddings.embed(query)
 
         # Guard the query embedding dim against THE INDEX, not against a
@@ -91,7 +124,7 @@ class RagSearcher:
         # constant here can only ever restate what someone believed on the
         # day they typed it, so read the width the index was actually
         # built at and compare with that.
-        expected_dim = _index_vector_dim(table)
+        expected_dim = await asyncio.to_thread(_index_vector_dim, table)
         if expected_dim is not None and len(query_vec) != expected_dim:
             logger.warning(
                 "RAG search: query embedding dim %d != index dim %d — the "
@@ -107,11 +140,7 @@ class RagSearcher:
         # vector search itself respects the filter — applying it after
         # `.limit(top_k)` would silently drop valid matches when other
         # kinds happened to be closer in vector space.
-        query_builder = table.search(query_vec)
-        if source_kind_filter:
-            quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in source_kind_filter)
-            query_builder = query_builder.where(f"source_kind IN ({quoted})")
-        rows = query_builder.limit(top_k).to_list()
+        rows = await asyncio.to_thread(self._run_query, table, query_vec, source_kind_filter, top_k)
 
         results: list[SearchResult] = []
         for row in rows:

@@ -105,7 +105,7 @@ SUBPROCESS_REQ_TIMEOUT_S = 60.0
 # later. Raising the single constant instead would have made every ordinary
 # command wait half an hour on a hung server, so the tiers are separate, the
 # way the server side already separates them (`HANDLER_TIMEOUT_LLM_S`).
-SUBPROCESS_REQ_TIMEOUT_LLM_S = 1860.0
+SUBPROCESS_REQ_TIMEOUT_LLM_S = 2520.0
 #: Commands that reach a language model. Mirrors `zmq_bridge._LLM_COMMANDS`;
 #: kept as its own set because this module must not import the bridge.
 _LLM_COMMAND_ACTIONS: frozenset[str] = frozenset({"assistant.query", "rag.search", "rag.rebuild"})

@@ -66,7 +66,7 @@ _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 6
 # handler 1740 < REQ 1860 < THIS. Two tiers rather than one raised constant,
 # so an ordinary hung command still fails in about a minute instead of making
 # the operator watch a spinner for half an hour.
-_CMD_REPLY_TIMEOUT_LLM_S = 1920.0
+_CMD_REPLY_TIMEOUT_LLM_S = 2580.0
 _LLM_COMMAND_ACTIONS: frozenset[str] = frozenset({"assistant.query", "rag.search", "rag.rebuild"})
 
 

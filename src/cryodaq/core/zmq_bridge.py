@@ -528,8 +528,10 @@ HANDLER_TIMEOUT_SLOW_S = 55.0  # H7: bumped from 30 — Ollama cold-start
 # query.format_timeout_s, or the handler cancels work the inner stages were
 # still entitled to finish and the operator gets "outcome may be unknown"
 # instead of an answer. Chain: transport 1800 > THIS 1740 > format 1500 >
-# ollama 1400.
-HANDLER_TIMEOUT_LLM_S = 1740.0
+# ollama 1400 — and above the SUM of the configured stages
+# (intent 300 + retrieval 240 + decision 300 + format 1500 = 2340), or the
+# clamp in assistant_main silently truncates a budget the config promised.
+HANDLER_TIMEOUT_LLM_S = 2400.0
 
 _SLOW_COMMANDS: frozenset[str] = frozenset(
     {

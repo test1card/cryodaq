@@ -105,8 +105,7 @@ class SafetyBroker:
         for sub in self._subscribers.values():
             if sub.queue.full():
                 logger.critical(
-                    "SafetyBroker ПЕРЕПОЛНЕНИЕ: подписчик '%s', канал '%s'. "
-                    "Данные безопасности потеряны!",
+                    "SafetyBroker ПЕРЕПОЛНЕНИЕ: подписчик '%s', канал '%s'. Данные безопасности потеряны!",
                     sub.name,
                     reading.channel,
                 )

@@ -104,6 +104,13 @@ def _format_horizons(forecast: dict[str, float] | None) -> str:
     return "Прогноз давления по горизонтам (выведи их столбиком, как есть):\n" + "\n".join(lines)
 
 
+#: Categories that fetch documents but no live state. The motivating question —
+#: "почему давление растёт, если насос выключен?" — lands here, and until
+#: 2026-09-07 it therefore answered about the manuals while the readings it
+#: needed sat one adapter away. It does not need a retrieval DECISION (the
+#: router already retrieves for it); it needs the stand.
+_STATE_HUNGRY_CATEGORIES = frozenset({QueryCategory.KNOWLEDGE_QUERY})
+
 _RETRIEVAL_DECIDING_CATEGORIES = frozenset(
     {
         QueryCategory.COMPOSITE_STATUS,
@@ -119,6 +126,11 @@ _RETRIEVAL_DECIDING_CATEGORIES = frozenset(
 #: The decision is one line. A budget this small also keeps a reasoning model
 #: from thinking its way past the answer.
 _RETRIEVAL_DECISION_MAX_TOKENS = 120
+#: The decision is one line. Giving it the formatting stage's 1500 s — which is
+#: what it took until review on 2026-09-07 — meant an enrichment could spend the
+#: answer's entire budget before the answer began. Generous enough for a cold
+#: model load (measured 23 s) and nothing like generous enough to matter.
+_RETRIEVAL_DECISION_TIMEOUT_S = 300.0
 #: Bounded so a model that ignores the format cannot turn its whole answer into
 #: a search query.
 _MAX_RETRIEVAL_QUERY_CHARS = 200
@@ -141,9 +153,14 @@ def _format_retrieved_documents(result) -> str:
         return f"Документы: по запросу «{asked}» в корпусе ничего не нашлось."
     rows = []
     for index, hit in enumerate(hits, 1):
-        source = getattr(hit, "source_id", None) or getattr(hit, "source", None) or "?"
-        text = (getattr(hit, "text", "") or "").strip().replace("\n", " ")
-        rows.append(f"[{index}] {source}: {text}")
+        # `KnowledgeQueryHit` carries `source` and `snippet`. The first version
+        # read `source_id` and `text`, which do not exist on it, so every
+        # retrieved document rendered as "[1] manual.pdf: " with an empty body —
+        # the model was handed citations with nothing in them. Found by review
+        # 2026-09-07; I had guessed the field names instead of reading the type.
+        source = getattr(hit, "source", None) or getattr(hit, "source_id", None) or "?"
+        body = getattr(hit, "snippet", None) or getattr(hit, "text", "") or ""
+        rows.append(f"[{index}] {source}: {str(body).strip().replace(chr(10), ' ')}")
     return "Документы, которые ты сам запросил (цитируй как [1], [2]):\n" + "\n".join(rows)
 
 
@@ -307,6 +324,41 @@ class AssistantQueryAgent:
         if self._chart_dispatcher is not None:
             await self._chart_dispatcher.close()
 
+    async def _maybe_attach_state(self, intent) -> str:
+        """Live readings for the categories that would otherwise answer blind.
+
+        A documentation answer about this stand is better for knowing what the
+        stand is doing. Contained like every other enrichment: a failure here
+        costs the state block, never the answer.
+        """
+        if intent is None or getattr(intent, "category", None) not in _STATE_HUNGRY_CATEGORIES:
+            return ""
+        composite = getattr(getattr(self._router, "_adapters", None), "composite", None)
+        if composite is None:
+            return ""
+        try:
+            status = await composite.status()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - enrichment never costs the answer
+            logger.debug("state attachment unavailable: %s", exc)
+            return ""
+        digest = self._state_digest({"composite_status": status})
+        return f"Живое состояние стенда прямо сейчас:\n{digest}" if digest else ""
+
+    def _with_documents(self, user_prompt: str, data: dict) -> str:
+        """Attach retrieved documents to whatever prompt was built.
+
+        Appended to the assembled prompt rather than threaded through the
+        templates: the first version put the block in the composite template
+        only, so seven of the eight categories that could ask for documents
+        fetched them and then discarded them. Found by review 2026-09-07.
+        """
+        block = _format_retrieved_documents(data.get("retrieved_documents"))
+        if not block:
+            return user_prompt
+        return f"{user_prompt}\n\n{block}"
+
     def _with_conversation(self, user_prompt: str, chat_id: Any) -> str:
         """Prepend what was already said, if anything was.
 
@@ -358,7 +410,7 @@ class AssistantQueryAgent:
                     temperature=0.0,
                     max_tokens=_RETRIEVAL_DECISION_MAX_TOKENS,
                 ),
-                timeout=self._format_timeout_s,
+                timeout=_RETRIEVAL_DECISION_TIMEOUT_S,
             )
             search_query = _parse_retrieval_decision(getattr(decision, "text", "") or "")
             if not search_query:
@@ -427,7 +479,11 @@ class AssistantQueryAgent:
             retrieved = await self._maybe_retrieve(query, intent, data)
             if retrieved is not None:
                 data = {**data, "retrieved_documents": retrieved}
+            state_block = await self._maybe_attach_state(intent)
             user_prompt = self._build_format_user_prompt(query, intent.category, data)
+            user_prompt = self._with_documents(user_prompt, data)
+            if state_block:
+                user_prompt = f"{user_prompt}\n\n{state_block}"
             user_prompt = self._with_conversation(user_prompt, chat_id)
             system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
             # Bound the format LLM call by _format_timeout_s. Without this

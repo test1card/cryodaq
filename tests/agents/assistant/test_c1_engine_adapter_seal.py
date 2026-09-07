@@ -48,7 +48,19 @@ def _is_engine_call(node: ast.AST) -> bool:
     )
 
 
+#: Containers that carry keywords but are not a typed result. A dict with the
+#: right three keys satisfies every keyword check and satisfies nothing that
+#: matters: `__post_init__` never runs, so the contract those keywords are
+#: supposed to represent is not enforced at all. Review built exactly that
+#: probe on 2026-09-07 and it passed.
+_UNTYPED_CONSTRUCTORS = frozenset({"dict", "OrderedDict", "defaultdict", "SimpleNamespace"})
+
+
 def _has_availability_keywords(call: ast.Call) -> bool:
+    if isinstance(call.func, ast.Name) and call.func.id in _UNTYPED_CONSTRUCTORS:
+        return False
+    if isinstance(call.func, ast.Attribute) and call.func.attr in _UNTYPED_CONSTRUCTORS:
+        return False
     keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
     return (
         isinstance(keywords.get("available"), ast.Constant)
@@ -457,4 +469,42 @@ def test_the_seal_binds_the_helper_to_self() -> None:
     assert failure_returns, "the injection must contain a failure-branch return"
     assert not any(_return_has_availability_contract(node, class_node) for node in failure_returns), (
         "the seal accepted a typed absence built by an object it never inspected"
+    )
+
+
+_UNTYPED_DICT_INJECTION = """
+class Adapter:
+    async def query(self):
+        reply = await self._client.call({"cmd": "readings_history"})
+        if not reply_is_success(reply):
+            return dict(available=False, stale=True, reason="down")
+        return Result(available=True)
+"""
+
+
+def test_the_seal_requires_a_typed_result_not_a_dict() -> None:
+    """Three right keys in a dict enforce nothing.
+
+    A dataclass validates the contract in `__post_init__`; a dict with the same
+    keywords validates nothing and simply looks compliant to an AST check.
+    Review built this probe on 2026-09-07 and the seal accepted it.
+    """
+    tree = ast.parse(_UNTYPED_DICT_INJECTION)
+    class_node = next(node for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "query"
+    )
+    failure_returns = [
+        node
+        for branch in ast.walk(method)
+        if isinstance(branch, ast.If) and _is_failure_branch(branch)
+        for node in ast.walk(branch)
+        if isinstance(node, ast.Return)
+    ]
+
+    assert failure_returns, "the injection must contain a failure-branch return"
+    assert not any(_return_has_availability_contract(node, class_node) for node in failure_returns), (
+        "the seal accepted a bare dict as a typed unavailable result"
     )
