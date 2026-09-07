@@ -238,6 +238,8 @@ FORMAT_COMPOSITE_STATUS_USER = """\
 Ключевые температуры: {temps_text}
 Давление: {pressure_text}
 Динамика: {trends_text}
+
+{documents_text}
 Прогноз захолаживания: {cooldown_eta_text}
 Прогноз вакуума: {vacuum_eta_text}
 Активные тревоги: {alarms_text}
@@ -372,4 +374,42 @@ FORMAT_UNKNOWN_USER = """\
 
 Скажи оператору что не можешь обработать запрос. Предложи примеры
 поддерживаемых запросов: "что сейчас?", "ETA вакуума", "в какой фазе?".
+"""
+
+
+# ---------------------------------------------------------------------------
+# Retrieval decision — the model chooses whether documents would help.
+#
+# The classifier puts a question into exactly one of fifteen buckets and the
+# router then runs exactly one adapter, so a question needing BOTH live data
+# and the manuals could not have both. Measured 2026-09-07: "почему давление
+# растёт, если насос выключен? натекание или газовыделение MLI?" was bucketed
+# as knowledge_query, searched the corpus, found nothing, and asked the
+# OPERATOR to supply the pressure value — which the assistant already had.
+#
+# This does not replace the router. It gives the state-answering paths one
+# extra, cheap decision: you are holding the readings, would the corpus add
+# anything, and if so what should be searched for. The model decides, which is
+# the point — a fixed rule would be the sixteenth bucket.
+# ---------------------------------------------------------------------------
+
+RETRIEVAL_DECISION_SYSTEM = """Ты решаешь ОДИН вопрос: помогут ли документы ответить оператору.
+
+В твоём распоряжении уже есть живое состояние стенда — показания, их
+динамика, фаза, тревоги, прогнозы. Документы — это проиндексированные
+руководства приборов, процедуры, заметки и журналы прошлых экспериментов.
+
+Ответь ровно одной строкой:
+- `НЕТ` — если вопрос про текущее состояние и данных достаточно.
+- `ПОИСК: <запрос>` — если нужна методика, устройство прибора, процедура,
+  критерий, история или что-то ещё, чего в показаниях нет.
+
+Запрос формулируй по-русски, как искал бы человек в документации: суть, а
+не пересказ вопроса. Одна строка, без пояснений.
+"""
+
+RETRIEVAL_DECISION_USER = """Вопрос оператора: {query}
+
+Что у тебя уже есть:
+{state_digest}
 """

@@ -32,6 +32,8 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_RANGE_STATS_USER,
     FORMAT_RESPONSE_SYSTEM,
     FORMAT_UNKNOWN_USER,
+    RETRIEVAL_DECISION_SYSTEM,
+    RETRIEVAL_DECISION_USER,
 )
 from cryodaq.agents.assistant.query.router import QueryRouter, QueryUnavailableError
 from cryodaq.agents.assistant.query.ru_labels import (
@@ -97,6 +99,72 @@ def _format_horizons(forecast: dict[str, float] | None) -> str:
 
     lines = [f"  +{hours} ч: {pressure:.2e} мбар" for hours, pressure in sorted(forecast.items(), key=hours_of)]
     return "Прогноз давления по горизонтам (выведи их столбиком, как есть):\n" + "\n".join(lines)
+
+
+_RETRIEVAL_DECIDING_CATEGORIES = frozenset(
+    {
+        QueryCategory.COMPOSITE_STATUS,
+        QueryCategory.CURRENT_VALUE,
+        QueryCategory.ETA_VACUUM,
+        QueryCategory.ETA_COOLDOWN,
+        QueryCategory.PHASE_INFO,
+        QueryCategory.ALARM_STATUS,
+        QueryCategory.RANGE_STATS,
+        QueryCategory.UNKNOWN,
+    }
+)
+#: The decision is one line. A budget this small also keeps a reasoning model
+#: from thinking its way past the answer.
+_RETRIEVAL_DECISION_MAX_TOKENS = 120
+#: Bounded so a model that ignores the format cannot turn its whole answer into
+#: a search query.
+_MAX_RETRIEVAL_QUERY_CHARS = 200
+
+
+def _format_retrieved_documents(result) -> str:
+    """Corpus extracts the model asked for, or nothing at all.
+
+    Empty when it asked for none — an empty "Документы: —" section invites the
+    model to comment on their absence, which is noise in an answer about the
+    current state.
+    """
+    if result is None:
+        return ""
+    hits = getattr(result, "hits", None) or []
+    if not hits:
+        asked = getattr(result, "query", None)
+        if not asked:
+            return ""
+        return f"Документы: по запросу «{asked}» в корпусе ничего не нашлось."
+    rows = []
+    for index, hit in enumerate(hits, 1):
+        source = getattr(hit, "source_id", None) or getattr(hit, "source", None) or "?"
+        text = (getattr(hit, "text", "") or "").strip().replace("\n", " ")
+        rows.append(f"[{index}] {source}: {text}")
+    return "Документы, которые ты сам запросил (цитируй как [1], [2]):\n" + "\n".join(rows)
+
+
+def _parse_retrieval_decision(text: str) -> str | None:
+    """The search query the model asked for, or None if it asked for nothing.
+
+    Deliberately forgiving about surroundings and strict about the marker: a
+    model that answers the question instead of deciding must not have its
+    answer mistaken for a search query.
+    """
+    if not text:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip().strip("`*").strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith("НЕТ"):
+            return None
+        for marker in ("ПОИСК:", "SEARCH:"):
+            if upper.startswith(marker):
+                query = line[len(marker) :].strip().strip('"').strip()
+                return query[:_MAX_RETRIEVAL_QUERY_CHARS] or None
+    return None
 
 
 def _format_trends(trends) -> str:
@@ -231,6 +299,81 @@ class AssistantQueryAgent:
         if self._chart_dispatcher is not None:
             await self._chart_dispatcher.close()
 
+    async def _maybe_retrieve(self, query: str, intent, data: dict):
+        """Let the model decide whether the corpus would help, and with what query.
+
+        The classifier puts a question into one bucket and the router then runs
+        one adapter, so a question needing both the live readings and the
+        manuals could not have both. On 2026-09-07 "почему давление растёт,
+        если насос выключен? натекание или газовыделение MLI?" was bucketed as
+        knowledge_query, searched the corpus, found nothing, and asked the
+        operator to supply a pressure value the assistant was already holding.
+
+        This is one extra short call on the state-answering paths, and the
+        model decides — a fixed rule about which questions "need documents"
+        would just be a sixteenth bucket.
+
+        Every failure here is silent by design: retrieval is an enrichment, and
+        an enrichment must never cost the operator the answer.
+        """
+        rag = getattr(self._router, "_adapters", None)
+        rag = getattr(rag, "rag", None) if rag is not None else None
+        if rag is None or not getattr(rag, "is_available", False):
+            return None
+        if intent is None or getattr(intent, "category", None) not in _RETRIEVAL_DECIDING_CATEGORIES:
+            return None
+        try:
+            digest = self._state_digest(data)
+            decision = await asyncio.wait_for(
+                self._ollama.generate(
+                    RETRIEVAL_DECISION_USER.format(query=query, state_digest=digest),
+                    model=self._format_model,
+                    system=RETRIEVAL_DECISION_SYSTEM,
+                    temperature=0.0,
+                    max_tokens=_RETRIEVAL_DECISION_MAX_TOKENS,
+                ),
+                timeout=self._format_timeout_s,
+            )
+            search_query = _parse_retrieval_decision(getattr(decision, "text", "") or "")
+            if not search_query:
+                return None
+            logger.info("AssistantQueryAgent: модель запросила поиск — %r", search_query[:120])
+            return await rag.search(search_query)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - enrichment never costs the answer
+            logger.debug("retrieval decision unavailable: %s", exc)
+            return None
+
+    @staticmethod
+    def _state_digest(data: dict) -> str:
+        """What the model already holds, in a few lines.
+
+        Short on purpose. This feeds a yes/no decision, not the answer, and a
+        digest as long as the answer would just pay the cost twice.
+        """
+        cs = data.get("composite_status") or data.get("composite")
+        parts: list[str] = []
+        if cs is not None:
+            phase = getattr(getattr(cs, "experiment", None), "current_phase", None)
+            if phase:
+                parts.append(f"фаза: {phase}")
+            temps = getattr(cs, "key_temperatures", None) or {}
+            if temps:
+                parts.append(f"температур в наличии: {len(temps)}")
+            pressure = getattr(cs, "current_pressure", None)
+            if pressure is not None:
+                parts.append(f"давление: {pressure:.3g} мбар")
+            trends = getattr(cs, "trends", None) or {}
+            if trends:
+                parts.append("динамика: " + _format_trends(trends))
+            alarms = getattr(cs, "active_alarms", None)
+            parts.append(f"активных тревог: {len(alarms) if alarms else 0}")
+        if not parts:
+            keys = ", ".join(sorted(k for k in data if not k.startswith("_"))) or "ничего"
+            parts.append(f"данные под рукой: {keys}")
+        return "\n".join(f"- {line}" for line in parts)
+
     async def _handle_query_inner(
         self,
         query: str,
@@ -255,6 +398,9 @@ class AssistantQueryAgent:
         try:
             intent = await self._classifier.classify(query)
             data = await self._router.fetch(intent, query)
+            retrieved = await self._maybe_retrieve(query, intent, data)
+            if retrieved is not None:
+                data = {**data, "retrieved_documents": retrieved}
             user_prompt = self._build_format_user_prompt(query, intent.category, data)
             system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
             # Bound the format LLM call by _format_timeout_s. Without this
@@ -618,6 +764,7 @@ class AssistantQueryAgent:
                 pressure_text="нет данных",
                 cooldown_eta_text="нет данных",
                 trends_text="нет данных о динамике",
+                documents_text=_format_retrieved_documents(data.get("retrieved_documents")),
                 vacuum_eta_text="нет данных",
                 alarms_text="нет данных",
             )
@@ -705,6 +852,7 @@ class AssistantQueryAgent:
             pressure_text=pressure_text,
             cooldown_eta_text=cd_text,
             trends_text=_format_trends(getattr(cs, "trends", {})),
+            documents_text=_format_retrieved_documents(data.get("retrieved_documents")),
             vacuum_eta_text=vac_text,
             alarms_text=alarms_text,
         )
