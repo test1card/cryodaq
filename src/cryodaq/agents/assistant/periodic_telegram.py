@@ -176,6 +176,16 @@ class _PeriodicTelegramTransport(Protocol):
         timeout_s: float,
     ) -> _CompleteHttpResponse | TelegramDeliveryResult: ...
 
+    async def send_media_group(
+        self,
+        *,
+        token: SecretStr,
+        chat_id: int | str,
+        photos: list[bytes],
+        caption: str,
+        timeout_s: float,
+    ) -> _CompleteHttpResponse | TelegramDeliveryResult: ...
+
     async def close(self) -> None: ...
 
 
@@ -248,6 +258,66 @@ class PeriodicTelegramClient:
                 token=self._token,
                 chat_id=self._chat_id,
                 photo=photo,
+                caption=caption,
+                timeout_s=self._timeout_s,
+            )
+            if isinstance(observed, TelegramDeliveryResult):
+                if observed.outcome not in {TelegramOutcome.NOT_SENT, TelegramOutcome.UNKNOWN}:
+                    return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_internal_unknown")
+                return observed
+            if not isinstance(observed, _CompleteHttpResponse):
+                return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_internal_unknown")
+            return _classify_response(observed, self._chat_id)
+        finally:
+            if not done.done():
+                done.set_result(None)
+            if self._active_done is done:
+                self._active_done = None
+                self._active_task = None
+                self._send_active = False
+
+    async def send_media_group(self, photos: list[bytes], caption: str) -> TelegramDeliveryResult:
+        """Several charts as ONE message, caption on the first.
+
+        Every guard `send_photo` applies is applied here to every photo: a
+        group is not a place where validation gets relaxed because there is
+        more of it. One photo is not a group — the caller sends that through
+        `send_photo`, which is also what happens when only one chart rendered.
+        """
+        loop = self._bind_loop()
+        if self._closing or self._closed:
+            return _fixed_result(TelegramOutcome.NOT_SENT, "client_closed")
+        if self._send_active:
+            return _fixed_result(TelegramOutcome.NOT_SENT, "client_busy")
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Periodic Telegram send requires an asyncio task")
+        done = loop.create_future()
+        self._send_active = True
+        self._active_task = task
+        self._active_done = done
+        try:
+            if not isinstance(photos, list) or not 2 <= len(photos) <= 10:
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_photo")
+            for photo in photos:
+                try:
+                    _validate_png(photo)
+                except (TypeError, ValueError):
+                    return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_photo")
+            if type(caption) is not str or not caption:
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_caption")
+            try:
+                validate_caption_html(caption)
+            except PeriodicInputError:
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_caption")
+            if not isinstance(self._token, SecretStr) or _TOKEN.fullmatch(self._token.get_secret_value()) is None:
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_token")
+            if not _valid_destination(self._chat_id):
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_destination")
+            observed = await self._transport.send_media_group(
+                token=self._token,
+                chat_id=self._chat_id,
+                photos=photos,
                 caption=caption,
                 timeout_s=self._timeout_s,
             )
@@ -353,6 +423,84 @@ class _AiohttpPeriodicTransport:
         response_seen = False
         request_invoked = False
         url = f"{_TELEGRAM_ROOT}/bot{token.get_secret_value()}/sendPhoto"
+        try:
+            request_invoked = True
+            async with asyncio.timeout(timeout_s):
+                async with session.post(url, data=payload, allow_redirects=False) as response:
+                    response_seen = True
+                    return await _read_response(response)
+        except asyncio.CancelledError:
+            if request_invoked:
+                return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_cancelled_unknown")
+            raise
+        except aiohttp.ClientConnectorError:
+            if not response_seen:
+                return _fixed_result(TelegramOutcome.NOT_SENT, "telegram_connect_failed")
+            return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_transport_unknown")
+        except TimeoutError:
+            return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_timeout_unknown")
+        except (aiohttp.ClientError, OSError):
+            return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_transport_unknown")
+        except Exception:
+            return _fixed_result(TelegramOutcome.UNKNOWN, "telegram_internal_unknown")
+        finally:
+            url = ""
+            payload = None
+            form = None
+
+    async def send_media_group(
+        self,
+        *,
+        token: SecretStr,
+        chat_id: int | str,
+        photos: list[bytes],
+        caption: str,
+        timeout_s: float,
+    ) -> _TransportResult:
+        """Several photos as ONE message. Same outcome discipline as sendPhoto.
+
+        The hourly report used to arrive as two separate messages, one per
+        chart, which on a phone is two screens for one hourly glance. Operator's
+        request, 2026-09-07: keep them as separate pictures — they are different
+        charts — but in one message.
+
+        Telegram carries the caption on the first item of the group, so the
+        text the operator reads travels with the first chart. A group must hold
+        between two and ten items; a single photo is not a group and goes back
+        through `sendPhoto`, which is also the fallback when only one chart
+        rendered.
+        """
+        if not 2 <= len(photos) <= 10:
+            return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_request")
+        try:
+            session = await self._get_session(timeout_s)
+            aiohttp = self._aiohttp
+            assert aiohttp is not None
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            media: list[dict[str, Any]] = []
+            for index, photo in enumerate(photos):
+                name = f"file{index}"
+                item: dict[str, Any] = {"type": "photo", "media": f"attach://{name}"}
+                if index == 0 and caption:
+                    item["caption"] = caption
+                    item["parse_mode"] = "HTML"
+                media.append(item)
+                form.add_field(name, photo, filename=f"{name}.png", content_type="image/png")
+            form.add_field("media", json.dumps(media, ensure_ascii=False))
+            payload = form()
+            size = payload.size
+            minimum = sum(len(photo) for photo in photos) + len(caption.encode("utf-8"))
+            if type(size) is not int or size < minimum or size - minimum > _MAX_MULTIPART_OVERHEAD * len(photos):
+                return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_request")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return _fixed_result(TelegramOutcome.NOT_SENT, "invalid_request")
+
+        response_seen = False
+        request_invoked = False
+        url = f"{_TELEGRAM_ROOT}/bot{token.get_secret_value()}/sendMediaGroup"
         try:
             request_invoked = True
             async with asyncio.timeout(timeout_s):

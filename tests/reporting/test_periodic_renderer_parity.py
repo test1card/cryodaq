@@ -208,7 +208,14 @@ def test_ordinary_report_keeps_every_authority_supplied_channel(
     # Pressure is written in scientific notation: it spans decades and is
     # read as an order of magnitude, not as a decimal fraction.
     assert "pressure: 1.00e-05 мбар" in result.caption
-    assert "power: 4 W" in result.caption
+    # Operator's decision, 2026-09-07: the hourly report carries temperatures
+    # and pressure only. The "Прочие каналы" group listed the source meter's
+    # volts, amps, ohms and watts — eight lines of zeroes every hour — and the
+    # Keithley is worked with by hand at the bench, while this report exists to
+    # be read from somewhere else. The channel is still PLOTTED where it has an
+    # axis; it is the caption that stops enumerating it.
+    assert "power: 4 W" not in result.caption
+    assert "Прочие каналы" not in result.caption
 
 
 def test_caption_short_exact_contract(tmp_path: Path) -> None:
@@ -241,7 +248,6 @@ def test_caption_short_exact_contract(tmp_path: Path) -> None:
         "Время: 10.07.2026 04:05\n\n"
         "<b>Температуры:</b>\n  Т1: 4 К\n\n"
         "<b>Давление:</b>\n  P: 1.00e-05 мбар\n\n"
-        "<b>Прочие каналы:</b>\n  voltage: 0.01235 V\n\n"
         "<b>Активные тревоги (1):</b>\n  ⚠ T1_LOW"
     )
 
@@ -384,7 +390,9 @@ def test_empty_other_only_and_all_invalid_pressure_contract(tmp_path: Path, monk
         assert len(capture["figure"].axes) == 2
         assert [text.get_text() for text in capture["figure"].axes[0].texts] == ["Нет данных"]
         assert [text.get_text() for text in capture["figure"].axes[1].texts] == ["Нет данных"]
-        assert "<b>Прочие каналы:</b>\n  V: 1 V" in result.caption
+        assert "Прочие каналы" not in result.caption, (
+            "the hourly report carries temperatures and pressure only since 2026-09-07"
+        )
 
 
 def test_newest_unit_null_row_omits_older_unit_from_chart_and_caption(

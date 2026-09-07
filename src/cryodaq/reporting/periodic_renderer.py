@@ -407,16 +407,19 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
     # wrong: incomplete history and unavailable alarm state.
 
     groups: list[tuple[str, list[tuple[str, str, str, str]]]] = []
+    # Temperatures and pressure only. The "Прочие каналы" group listed the
+    # source meter's volts, amps, ohms and watts — eight lines of zeroes in
+    # every hourly report. Operator's decision, 2026-09-07: the Keithley is
+    # worked with by hand at the bench, and this report exists to be read from
+    # somewhere else. Anything that is not a temperature or a pressure is not
+    # what someone away from the stand needs.
     for unit, heading, rendered_unit in (
         ("K", "<b>Температуры:</b>", "К"),
         ("mbar", "<b>Давление:</b>", "мбар"),
-        ("other", "<b>Прочие каналы:</b>", None),
     ):
         lines: list[tuple[str, str, str, str]] = []
         for item in series:
-            if not item.rows or (unit == "other") != (item.unit not in {"K", "mbar"}):
-                continue
-            if unit != "other" and item.unit != unit:
+            if not item.rows or item.unit != unit:
                 continue
             usable = [candidate for candidate in item.rows if _usable(candidate, item.unit)]
             if not usable:
