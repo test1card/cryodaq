@@ -172,6 +172,19 @@ def _finite_nonnegative(value: object, field: str) -> float:
     return result
 
 
+def _finite_or_none_ts(value: object) -> float | None:
+    """A usable timestamp, or None so the reader falls back to age alone.
+
+    Unlike `_finite_nonnegative` above, this REFUSES rather than raises: it runs
+    while assembling a report payload, where a bad window must cost the summary
+    and nothing else.
+    """
+    if not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 @dataclass(frozen=True, slots=True)
 class LiveSourceCut:
     """One repeatable subscriber barrier and its engine-side evidence."""
@@ -1447,7 +1460,17 @@ class PeriodicPngCoordinator:
                 # thousand characters could push a legal payload over the cap and fail
                 # input creation identically on every retry, losing the report to a
                 # decoration.
-                "summary": read_summary(self._data_dir / "agents" / "assistant")[:MAX_SUMMARY_CHARS],
+                # The chart's own window goes to the reader, which refuses a
+                # note describing a different hour. Age alone could not tell
+                # them apart: at ninety minutes' tolerance a summary of the
+                # PREVIOUS hour is still young enough to be accepted, and it
+                # would sit under this hour's chart reading like a correct
+                # description of it.
+                "summary": read_summary(
+                    self._data_dir / "agents" / "assistant",
+                    window_start=_finite_or_none_ts(active.get("window_start")),
+                    window_end=_finite_or_none_ts(active.get("window_end")),
+                )[:MAX_SUMMARY_CHARS],
             },
             "readings": [
                 {

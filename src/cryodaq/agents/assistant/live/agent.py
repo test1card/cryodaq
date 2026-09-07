@@ -1719,20 +1719,8 @@ class AssistantLiveAgent:
         targets = [t for t in _build_targets(self._config) if t is not OutputTarget.TELEGRAM]
         if result.truncated or not result.text.strip():
             logger.warning("AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id)
-        # Leave the summary where the hourly chart can pick it up. Written
-        # before dispatch on purpose: the note is for the NEXT report, and a
-        # delivery that fails should not also cost the operator the words.
-        # Beside the audit, which is where this process already writes.
-        # Beside the audit logger's REAL directory, not `config.audit_dir`.
-        # Nothing sets that field: assistant_main builds the AuditLogger from
-        # the resolved data dir and leaves the config at its relative default
-        # `data/agents/assistant/audit`, which happens to agree only because
-        # the process runs with the repository as its working directory. The
-        # report reads the note from the resolved data dir, so any deployment
-        # where those two differ would write the note where nothing looks for
-        # it — the producer and the consumer split apart again, silently.
-        write_summary(Path(self._audit.audit_dir).parent, result.text)
-        dispatched_pr, _ = await self._dispatch_with_audit(
+        summary_is_publishable = not result.truncated and bool(result.text.strip())
+        dispatched_pr, outcomes_pr = await self._dispatch_with_audit(
             event=event,
             audit_id=audit_id,
             payload=event.payload,
@@ -1747,8 +1735,36 @@ class AssistantLiveAgent:
             errors=errors,
             targets=targets,
             prefix_suffix=f"(отчёт {_report_window_label(window_minutes)})",
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
+            allow_dispatch=summary_is_publishable,
         )
+        # THE NOTE IS WRITTEN HERE, AFTER THE AUDIT, AND ONLY FOR OUTPUT THAT
+        # WAS ALLOWED TO BE PUBLISHED. It used to be written before dispatch, on
+        # the reasoning that a failed delivery should not also cost the operator
+        # the words. That reasoning was wrong once the caption became a delivery
+        # channel of its own: a TRUNCATED response is blocked from dispatch and
+        # was still written to the note, so half a sentence the agent itself had
+        # judged unusable went on to caption the hourly chart. The same holds for
+        # a response whose durable intent never persisted — the persistence-first
+        # gate exists so nothing reaches the operator unrecorded, and the caption
+        # is reached by the operator.
+        #
+        # The window it DESCRIBES travels with it, so the report can refuse a
+        # paragraph about a different hour. Age alone could not: at ninety
+        # minutes' tolerance a note about the previous hour is still young.
+        #
+        # Beside the audit logger's REAL directory, not `config.audit_dir`.
+        # Nothing sets that field: assistant_main builds the AuditLogger from the
+        # resolved data dir and leaves the config at its relative default, which
+        # agrees only because this process runs with the repository as its
+        # working directory.
+        if summary_is_publishable and outcomes_pr.get("audit") != "failed":
+            written_at = time.time()
+            write_summary(
+                Path(self._audit.audit_dir).parent,
+                result.text,
+                window_start=written_at - window_minutes * 60.0,
+                window_end=written_at,
+            )
         logger.info(
             "AssistantLiveAgent: periodic_report_request обработан "
             "(audit_id=%s, latency=%.1fs, events=%d, dispatched=%s)",
