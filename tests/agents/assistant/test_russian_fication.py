@@ -144,25 +144,38 @@ def test_eta_cooldown_no_ci_english() -> None:
     assert "доверительный" in p.FORMAT_ETA_COOLDOWN_USER
 
 
-def test_composite_prompt_has_anti_pattern_guard() -> None:
-    assert "НЕ начинай" in p.FORMAT_COMPOSITE_STATUS_USER
-    guard = p.FORMAT_COMPOSITE_STATUS_USER
-    assert "Плохой" in guard or "ПЛОХО" in guard or "НЕ ДЕЛАЙ" in guard
+def test_composite_prompt_leaves_the_shape_of_the_answer_to_the_model() -> None:
+    """Operator decision, 2026-09-07: the template was too strict, loosen it.
+
+    It used to forbid opening with a channel name, hand the model a worked
+    example to imitate, and demand 3-5 sentences. What came back was the
+    shape those rules describe: a flat enumeration of every channel, with
+    the one thing that mattered — a vacuum forecast contradicting the
+    direction the pressure was moving — buried at the end as a number.
+
+    This pins the loosening so it is not silently re-tightened. What the
+    template still owes the model is FACTS and their qualifications; how to
+    say them is the model's job.
+    """
+    prompt = p.FORMAT_COMPOSITE_STATUS_USER
+    assert "НЕ начинай" not in prompt, "style prescription came back"
+    assert "Хороший пример" not in prompt, "a worked example invites imitation, not thought"
+    assert "предложени" not in prompt, "a sentence count is not a correctness constraint"
 
 
 def test_composite_prompt_uses_prognoz_not_eta_label() -> None:
     assert "Прогноз захолаживания" in p.FORMAT_COMPOSITE_STATUS_USER
 
 
-def test_composite_prompt_has_good_example() -> None:
-    prompt = p.FORMAT_COMPOSITE_STATUS_USER
-    # "Хороший пример:" marker must exist and precede the example text.
-    assert "Хороший пример:" in prompt
-    marker_pos = prompt.index("Хороший пример:")
-    example_pos = prompt.index("захолаживания", marker_pos)
-    assert example_pos > marker_pos, (
-        "'захолаживания' must appear inside the good-example block, not before it"
-    )
+def test_composite_prompt_says_hidden_channels_are_already_excluded() -> None:
+    """The model must not re-introduce what the adapter filtered out.
+
+    Channels the operator has unchecked (`visible: false`) no longer reach
+    this prompt. Saying so keeps the model from hedging about instruments it
+    cannot see — the previous answer listed Т17-Т24 as "не зафиксированы"
+    purely because the sentinel value arrived.
+    """
+    assert "включённ" in p.FORMAT_COMPOSITE_STATUS_USER
 
 
 def test_eta_cooldown_fallback_uses_russian_bool() -> None:

@@ -465,3 +465,80 @@ async def test_composite_adapter_marks_alarm_data_unavailable() -> None:
     result = await adapter.status()
 
     assert result.alarms_available is False
+
+
+async def test_composite_status_omits_channels_the_operator_unchecked(tmp_path) -> None:
+    """Reported by the operator, 2026-09-07: "почему он видит каналы, которые
+    не отмечены галочками?"
+
+    Asked what was happening, the assistant listed Т17-Т24 — mirrors,
+    suspension and frame, all `visible: false`, all reading the Lakeshore
+    no-sensor sentinel -8.888e+88 — and stated Т4 = 380.00 K as a
+    temperature. Т4 is `visible: false` too; that sensor sits at its rail.
+
+    The rule already existed and two other consumers honoured it. This loop
+    did not, and its own comment admitted as much: "from ALL temperature
+    channels".
+
+    The labels here are built by the REAL BrokerSnapshot against a REAL
+    ChannelManager rather than hand-assembled, because a hand-written fixture
+    is what let the previous contract bug live its whole life green.
+    """
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
+    from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
+    from cryodaq.core.channel_manager import ChannelManager
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    config = tmp_path / "channels.yaml"
+    config.write_text(
+        "channels:\n"
+        "  Т12:\n"
+        "    name: 2-я ступень\n"
+        "    visible: true\n"
+        "  Т4:\n"
+        "    name: '-'\n"
+        "    visible: false\n",
+        encoding="utf-8",
+    )
+    manager = ChannelManager(config_path=config)
+    snapshot = BrokerSnapshot(channel_manager=manager)
+
+    def _reading(channel: str, value: float) -> Reading:
+        return Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="ls",
+            channel=channel,
+            value=value,
+            unit="K",
+            status=ChannelStatus.OK,
+            raw=None,
+            metadata={},
+        )
+
+    snapshot._latest = {
+        "Т12": _reading("Т12", 298.5),
+        "Т4": _reading("Т4", 380.0),
+    }
+
+    idle = MagicMock()
+    idle.eta = AsyncMock(return_value=None)
+    idle.eta_to_target = AsyncMock(return_value=None)
+    idle.active = AsyncMock(return_value=None)
+    idle.status = AsyncMock(return_value=None)
+
+    status = await CompositeAdapter(
+        broker_snapshot=snapshot,
+        cooldown=idle,
+        vacuum=idle,
+        alarms=idle,
+        experiment=idle,
+    ).status()
+
+    reported = status.key_temperatures
+    assert any("ступень" in name for name in reported), "a checked channel must still be reported"
+    assert not any(
+        value == 380.0 for value in reported.values()
+    ), "an unchecked channel reached the operator-facing summary"

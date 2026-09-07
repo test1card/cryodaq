@@ -67,10 +67,27 @@ class CompositeAdapter:
 
         snapshot_empty = len(labeled_data) == 0
 
-        # Build key_temperatures from ALL temperature channels (unit == "K")
+        # Only channels the operator has switched on. Reported 2026-09-07:
+        # asked "what is happening", the assistant listed Т17-Т24 (mirrors,
+        # suspension, frame — `visible: false`, `thermal_zone:
+        # disconnected_reserve`, all reading the Lakeshore no-sensor sentinel
+        # -8.888e+88) and stated Т4 = 380.00 K as a temperature. Т4 is also
+        # `visible: false`; the sensor sits at its rail.
+        #
+        # The rule already exists and two other consumers honour it —
+        # intent_classifier.py and periodic_png.py both ask `is_visible`. This
+        # loop was the one that did not, and its own comment said so: "from ALL
+        # temperature channels". Unchecking a channel is the operator saying
+        # this one is not part of the run; repeating it back as a reading is
+        # not informing, it is noise that buries the four numbers that matter.
+        #
+        # Unknown channels stay visible, so derived and analytics channels,
+        # which are not in channels.yaml, are unaffected.
         key_temps: dict[str, float | None] = {}
         current_pressure: float | None = None
         for ch, info in labeled_data.items():
+            if info.get("visible") is False:
+                continue
             unit = info.get("unit", "")
             val = info.get("value")
             display = info.get("display_name", ch)

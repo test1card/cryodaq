@@ -99,6 +99,36 @@ def _format_horizons(forecast: dict[str, float] | None) -> str:
     return "Прогноз давления по горизонтам (выведи их столбиком, как есть):\n" + "\n".join(lines)
 
 
+def _vacuum_forecast_qualifier(vac) -> str:
+    """What the vacuum forecast is worth, in the operator's words.
+
+    Empty when the forecast carries no warning of its own — a good forecast
+    should not be hedged into uselessness.
+    """
+    parts: list[str] = []
+    trend = (getattr(vac, "trend", "") or "").strip().lower()
+    if trend == "anomaly":
+        parts.append("модель отмечает аномалию")
+    confidence = getattr(vac, "confidence", None)
+    if isinstance(confidence, (int, float)):
+        if confidence < 0:
+            parts.append(f"R²={confidence:.2f}, фит хуже постоянной")
+        elif confidence < 0.5:
+            parts.append(f"R²={confidence:.2f}")
+    current = getattr(vac, "current_mbar", None)
+    target = getattr(vac, "target_mbar", None)
+    eta = getattr(vac, "eta_seconds", None)
+    if (
+        isinstance(current, (int, float))
+        and isinstance(target, (int, float))
+        and isinstance(eta, (int, float))
+        and current > target
+        and eta <= 0
+    ):
+        parts.append("цель НЕ достигнута: давление выше неё, а прогноз нулевой")
+    return "; ".join(parts)
+
+
 class AssistantQueryAgent:
     """Orchestrates the live query pipeline for operator free-text questions."""
 
@@ -610,6 +640,23 @@ class AssistantQueryAgent:
             else:
                 h = vac.eta_seconds / 3600
                 vac_text = f"до {target}: {int(h)}ч {int((h % 1) * 60)}мин"
+            # The forecast's own quality travels WITH the forecast.
+            #
+            # Reported 2026-09-07: asked "what is happening", the assistant said
+            # "до 1e-01 мбар по прогнозу уже сейчас — 0ч 0мин" while the gauge
+            # read 2.02e-01 and RISING with the pump switched off. The engine was
+            # honest about it — trend "anomaly", confidence -1.26e-11, two of
+            # three fit parameters pinned at their bounds, and an identical
+            # forecast at 1, 3, 6, 12, 24 and 48 hours — and this line dropped
+            # every one of those and stated the number.
+            #
+            # The dedicated ETA prompt already carries trend and R² and warns
+            # the model not to read R² as confidence. The composite path handed
+            # it a flattened string instead. Annotating, not suppressing: the
+            # operator gets the number AND what it is worth.
+            qualifier = _vacuum_forecast_qualifier(vac)
+            if qualifier:
+                vac_text = f"{vac_text} [{qualifier}]"
 
         alarms_text = (
             ", ".join(a.alarm_id for a in cs.active_alarms)

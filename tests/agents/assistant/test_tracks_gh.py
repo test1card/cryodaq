@@ -165,10 +165,24 @@ async def test_experiment_adapter_started_human_none_when_no_start_time() -> Non
 
 
 def test_response_system_has_anti_hallucination() -> None:
-    """FORMAT_RESPONSE_SYSTEM must contain explicit anti-hallucination guidance."""
-    assert "НЕ ПРИДУМЫВАЙ" in p.FORMAT_RESPONSE_SYSTEM
+    """The CONSTRAINT must survive, however it is worded.
+
+    The prompt was loosened on 2026-09-07 by operator decision — the style
+    prescriptions went. The anti-invention rules are not style: a made-up
+    reading in a laboratory answer is the worst thing this assistant can do,
+    so they stay whatever the surrounding tone becomes. Asserting one exact
+    slogan pinned the wording rather than the rule, so this checks that the
+    rule is stated at all, in any of the phrasings we would accept.
+    """
     frs = p.FORMAT_RESPONSE_SYSTEM
-    assert "null" in frs or "None" in frs or "пусто" in frs
+    forbids_invention = any(
+        phrase in frs for phrase in ("НЕ ПРИДУМЫВАЙ", "не выдумывай", "Ничего сверх")
+    )
+    assert forbids_invention, "the prompt no longer forbids inventing values"
+    bounds_to_given_data = any(
+        phrase in frs for phrase in ("только то, что есть в данных", "Только то, что есть в данных")
+    )
+    assert bounds_to_given_data, "the prompt no longer bounds the answer to the given data"
 
 
 def test_response_system_no_timestamp_hallucination_instruction() -> None:

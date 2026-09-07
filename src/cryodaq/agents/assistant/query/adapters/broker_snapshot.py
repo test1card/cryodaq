@@ -107,6 +107,17 @@ class BrokerSnapshot:
             return self._channel_manager.get_display_name(channel)
         return channel
 
+    def is_visible(self, channel: str) -> bool:
+        """Whether the operator has this channel switched on. Unknown → visible.
+
+        The default is True on purpose: derived and analytics channels are not
+        in channels.yaml at all, and they must keep flowing. Only a channel the
+        operator has explicitly unchecked answers False.
+        """
+        if self._channel_manager is not None:
+            return self._channel_manager.is_visible(channel)
+        return True
+
     async def latest_with_labels(self) -> dict[str, dict]:
         """Return all cached readings keyed by channel, enriched with display_name and unit."""
         async with self._lock:
@@ -116,6 +127,7 @@ class BrokerSnapshot:
                     "value": reading.value,
                     "unit": reading.unit,
                     "display_name": self.display_name(ch),
+                    "visible": self.is_visible(ch),
                     "timestamp": reading.timestamp,
                 }
             return result
