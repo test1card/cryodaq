@@ -68,8 +68,29 @@ def _safe_chat_key(chat_id: Any) -> str:
     return (cleaned or "local")[:64]
 
 
+def _safe_scope_key(scope: Any) -> str:
+    """The experiment part of a transcript's filename, same hostile treatment."""
+    raw = str(scope).strip() if scope is not None else ""
+    if not raw:
+        return "no-experiment"
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    return (cleaned or "no-experiment")[:64]
+
+
 class ConversationStore:
-    """Append-only transcripts, one file per chat. Never raises."""
+    """Append-only transcripts, one file per chat per experiment. Never raises.
+
+    ONE EXPERIMENT, ONE CONTEXT. The boundary of a conversation is not a day and
+    not a timeout — it is the experiment being run. Questions asked during a
+    cooldown are about that cooldown; carrying them into the next run gives the
+    agent a transcript whose numbers describe a stand that no longer exists,
+    and stale context reads exactly like confident error. Starting the next
+    experiment starts a new transcript, and the previous one stays on disk.
+
+    A gap in TIME is not a boundary and is deliberately not treated as one: an
+    overnight silence inside one experiment leaves yesterday visible, because
+    "почему ты вчера писала что фит плохой?" is a question worth answering.
+    """
 
     def __init__(
         self,
@@ -77,13 +98,30 @@ class ConversationStore:
         *,
         max_turns: int = DEFAULT_MAX_TURNS,
         silence_marker_s: float = DEFAULT_SILENCE_MARKER_S,
+        scope_provider: Any | None = None,
     ) -> None:
         self._root = Path(root)
         self._max_turns = max(1, int(max_turns))
         self._silence_marker_s = float(silence_marker_s)
+        self._scope_provider = scope_provider
+
+    def _scope(self) -> str:
+        """The active experiment, or a stable stand-in.
+
+        A provider that fails must not cost the memory: an unreadable experiment
+        id falls back to one fixed bucket rather than to a new file each turn,
+        which would silently amnesiac the assistant one question at a time.
+        """
+        if self._scope_provider is None:
+            return "no-experiment"
+        try:
+            return _safe_scope_key(self._scope_provider())
+        except Exception as exc:  # noqa: BLE001 - memory is an enrichment
+            logger.debug("conversation scope unavailable: %s", exc)
+            return "no-experiment"
 
     def _path(self, chat_id: Any) -> Path:
-        return self._root / f"{_safe_chat_key(chat_id)}.jsonl"
+        return self._root / f"{_safe_chat_key(chat_id)}__{self._scope()}.jsonl"
 
     def remember(self, chat_id: Any, question: str, answer: str) -> None:
         """Append one exchange. A failure here must never cost the answer."""
@@ -177,7 +215,11 @@ class ConversationStore:
         """Forget one conversation, or all of them. Used on experiment_finalize."""
         try:
             if chat_id is not None:
-                self._path(chat_id).unlink(missing_ok=True)
+                # Every experiment's transcript for this chat, not just the
+                # active one: "забудь" means forget, not "forget this run".
+                prefix = f"{_safe_chat_key(chat_id)}__"
+                for path in self._root.glob(f"{prefix}*.jsonl"):
+                    path.unlink(missing_ok=True)
                 return
             if self._root.is_dir():
                 for path in self._root.glob("*.jsonl"):

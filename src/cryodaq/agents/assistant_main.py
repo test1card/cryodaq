@@ -80,6 +80,7 @@ from cryodaq.core.zmq_bridge import (
     ZMQEventSubscriber,
 )
 from cryodaq.paths import get_config_dir, get_data_dir
+from cryodaq.report_state import load_active_experiment_id
 
 # Headroom between the query handler's own deadline and the REP server's
 # cap, so the handler always wins the race and answers in plain Russian.
@@ -766,7 +767,15 @@ async def _run_llm_runtime(
         # On disk beside the audit, for the same reason: the launcher restarts
         # this process on failure, and an in-memory transcript would be lost
         # exactly when the assistant had just been struggling.
-        conversation_store = ConversationStore(_DATA_DIR / "agents" / "assistant" / "conversations")
+        # One experiment, one context: the transcript is scoped to the run it
+        # belongs to, so questions about a finished cooldown do not follow the
+        # agent into the next one. Read from the state file rather than held as
+        # an object, so a restart picks up the same scope the previous process
+        # was writing under.
+        conversation_store = ConversationStore(
+            _DATA_DIR / "agents" / "assistant" / "conversations",
+            scope_provider=lambda: load_active_experiment_id(_DATA_DIR),
+        )
         audit_logger = AuditLogger(
             _DATA_DIR / "agents" / "assistant" / "audit",
             enabled=config.audit_enabled,

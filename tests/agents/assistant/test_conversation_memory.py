@@ -48,7 +48,9 @@ def test_a_hostile_chat_id_cannot_leave_its_directory(tmp_path) -> None:
 def test_silence_is_marked_rather_than_hidden(tmp_path) -> None:
     """A gap tells the model a follow-up from a new morning."""
     store = ConversationStore(tmp_path, silence_marker_s=3600.0)
-    path = tmp_path / "7.jsonl"
+    # Through the store's own path: the transcript is now scoped to the active
+    # experiment, and this test is about the silence marker, not the naming.
+    path = store._path(7)
     tmp_path.mkdir(parents=True, exist_ok=True)
     now = time.time()
     path.write_text(
@@ -91,7 +93,7 @@ def test_reset_forgets_one_conversation(tmp_path) -> None:
 def test_a_corrupt_line_does_not_lose_the_history(tmp_path) -> None:
     store = ConversationStore(tmp_path)
     store.remember(3, "первый", "ответ")
-    (tmp_path / "3.jsonl").open("a", encoding="utf-8").write("{не json\n")
+    store._path(3).open("a", encoding="utf-8").write("{не json\n")
     store.remember(3, "второй", "ответ два")
 
     transcript = store.replay(3)
