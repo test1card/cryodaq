@@ -131,6 +131,10 @@ _RETRIEVAL_DECISION_MAX_TOKENS = 120
 #: answer's entire budget before the answer began. Generous enough for a cold
 #: model load (measured 23 s) and nothing like generous enough to matter.
 _RETRIEVAL_DECISION_TIMEOUT_S = 300.0
+#: The search stage. Sized so intent + decision + search + format sits under the
+#: handler budget with room to spare; see tests/agents/test_timeout_chain_is_ordered.py,
+#: which asserts the sum rather than only the neighbouring pairs.
+_RETRIEVAL_SEARCH_TIMEOUT_S = 240.0
 #: Bounded so a model that ignores the format cannot turn its whole answer into
 #: a search query.
 _MAX_RETRIEVAL_QUERY_CHARS = 200
@@ -426,7 +430,17 @@ class AssistantQueryAgent:
             if not search_query:
                 return None
             logger.info("AssistantQueryAgent: модель запросила поиск — %r", search_query[:120])
-            return await rag.search(search_query)
+            # BOUNDED. The decision to search was bounded and so is the
+            # formatting, but the search itself was not — and it is the stage
+            # most able to hang rather than fail: the embedding call is HTTP
+            # with its own deadline, but the LanceDB read runs in a thread, and
+            # `asyncio.to_thread` cannot be cancelled. An unbounded stage makes
+            # the handler's budget unenforceable, so the transport gives up
+            # first and the operator is told the outcome is unknown instead of
+            # getting a plain answer.
+            return await asyncio.wait_for(
+                rag.search(search_query), timeout=_RETRIEVAL_SEARCH_TIMEOUT_S
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - enrichment never costs the answer
