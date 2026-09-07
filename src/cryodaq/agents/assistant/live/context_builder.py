@@ -12,6 +12,7 @@ Slice C (campaign) contexts deferred.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time as _time
@@ -160,6 +161,79 @@ class ContextBuilder:
         else:
             context.recent_events = "нет событий за смену"
         return context
+
+    #: Where to sample the day, in hours before now. A leak and an outgassing
+    #: transient look identical over one hour and completely different over a
+    #: day, so the agent cannot answer the only question that matters about a
+    #: pumped-down chamber unless it can see the shape.
+    _HISTORY_ANCHORS_H = (24.0, 12.0, 6.0, 3.0, 1.0)
+    #: Width of the box averaged at each anchor. Wide enough to survive a gap in
+    #: the data, narrow enough that the anchor means the time it claims.
+    _HISTORY_BOX_S = 600.0
+
+    async def _sample_at(self, at_ts: float) -> dict[str, float]:
+        """Mean value per channel in a short box ending at `at_ts`.
+
+        NOT a windowed query. `read_readings_history` is `ORDER BY timestamp
+        DESC LIMIT n`, so asking it for "the last 24 hours" returns the newest n
+        points — about forty minutes at this cadence — and any rate computed
+        from that would be labelled with a span it does not cover. Anchoring
+        with `to_ts` and averaging a narrow box asks for exactly what it says.
+        """
+        try:
+            history = await self._reader.read_readings_history(
+                from_ts=at_ts - self._HISTORY_BOX_S,
+                to_ts=at_ts,
+                limit_per_channel=20,
+            )
+        except Exception as exc:  # noqa: BLE001 - one blind anchor is not a blind report
+            logger.debug("history anchor at %s unavailable: %s", at_ts, exc)
+            return {}
+        if not isinstance(history, dict):
+            return {}
+        out: dict[str, float] = {}
+        for channel, samples in history.items():
+            values = [
+                float(value)
+                for _, value in samples
+                if isinstance(value, int | float)
+            ] if isinstance(samples, list) else []
+            if values:
+                out[channel] = sum(values) / len(values)
+        return out
+
+    async def _build_history_section(self) -> str:
+        """Each channel across the day, so the agent can see the shape itself.
+
+        No slope, no verdict, no "rising steadily" — those are the agent's to
+        say. This hands it the numbers at known times and gets out of the way.
+        """
+        now = datetime.now(UTC).timestamp()
+        anchors = list(self._HISTORY_ANCHORS_H)
+        samples = await asyncio.gather(
+            *(self._sample_at(now - hours * 3600.0) for hours in anchors),
+            self._sample_at(now),
+            return_exceptions=True,
+        )
+        columns: list[tuple[str, dict[str, float]]] = []
+        for label, sample in zip(
+            [f"{h:g}ч назад" for h in anchors] + ["сейчас"], samples, strict=True
+        ):
+            if isinstance(sample, dict) and sample:
+                columns.append((label, sample))
+        if not columns:
+            return "истории за сутки нет"
+        channels = sorted({name for _, sample in columns for name in sample})
+        lines = []
+        for channel in channels:
+            points = [
+                f"{label} {sample[channel]:.4g}"
+                for label, sample in columns
+                if channel in sample
+            ]
+            if len(points) >= 2:
+                lines.append(f"{channel}: " + " → ".join(points))
+        return "; ".join(lines) if lines else "истории за сутки нет"
 
     async def _build_readings_section(self, window_minutes: int) -> str:
         """Every channel, its current value and its rate. No selection.
@@ -320,9 +394,11 @@ class ContextBuilder:
             _ctx_failed = True
 
         readings_section = await self._build_readings_section(window_minutes)
+        history_section = await self._build_history_section()
         return PeriodicReportContext(
             window_minutes=window_minutes,
             readings_section=readings_section,
+            history_section=history_section,
             active_experiment_id=experiment_id,
             active_experiment_phase=phase,
             alarm_entries=alarm_entries,
@@ -823,6 +899,11 @@ class PeriodicReportContext:
     #: constant +0.106 mbar/h for seven hours — the most interesting fact on the
     #: stand — unless an alarm happened to fire. Found by review on 2026-09-07.
     readings_section: str = "нет данных о показаниях"
+    #: The same channels across the DAY. A leak and an outgassing transient are
+    #: indistinguishable over one hour and obvious over twenty-four; without
+    #: this the agent cannot answer the only question a pumped-down chamber
+    #: raises, however good its reasoning is.
+    history_section: str = "истории за сутки нет"
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
@@ -830,6 +911,7 @@ class PeriodicReportContext:
             unavailable = "данные недоступны"
             return {
                 "readings_section": self.readings_section,
+                "history_section": unavailable,
                 "active_experiment_summary": unavailable,
                 "events_section": unavailable,
                 "alarms_section": unavailable,
@@ -859,6 +941,7 @@ class PeriodicReportContext:
 
         return {
             "readings_section": self.readings_section,
+            "history_section": self.history_section,
             "active_experiment_summary": active_exp,
             "events_section": _format_log_entries(self.other_entries, source_saturated=self.source_saturated)
             or "(нет)",
