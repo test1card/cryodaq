@@ -31,6 +31,7 @@ from cryodaq.agents.assistant.periodic_projection import (
     BoundedReadingProjection,
     ProjectionSnapshot,
 )
+from cryodaq.agents.assistant.shared.summary_note import read_summary
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 from cryodaq.periodic_config import (
     PeriodicPngConfig,
@@ -1434,6 +1435,12 @@ class PeriodicPngCoordinator:
                 # others sit near room temperature; the whole-run companion
                 # photo carries the full-scale view.
                 "focus_cold": True,
+                # The assistant's own words about this hour, if it left any.
+                # Read, never awaited: this machine is fenced and reliable and
+                # the agent that writes the note is neither, so they meet
+                # through a file and nothing blocks. Absent or stale means the
+                # caption reads exactly as it did before.
+                "summary": read_summary(self._data_dir / "agents" / "assistant"),
             },
             "readings": [
                 {

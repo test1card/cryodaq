@@ -45,6 +45,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaModelMissingError,
     OllamaUnavailableError,
 )
+from cryodaq.agents.assistant.shared.summary_note import write_summary
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -1742,6 +1743,11 @@ class AssistantLiveAgent:
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning("AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id)
+        # Leave the summary where the hourly chart can pick it up. Written
+        # before dispatch on purpose: the note is for the NEXT report, and a
+        # delivery that fails should not also cost the operator the words.
+        # Beside the audit, which is where this process already writes.
+        write_summary(Path(self._config.audit_dir).parent, result.text)
         dispatched_pr, _ = await self._dispatch_with_audit(
             event=event,
             audit_id=audit_id,

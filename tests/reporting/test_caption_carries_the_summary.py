@@ -73,3 +73,29 @@ def test_the_contract_bounds_the_summary_before_the_renderer_sees_it() -> None:
     long = _summary_text("я" * (MAX_SUMMARY_CHARS + 500))
     assert len(long) <= MAX_SUMMARY_CHARS
     assert long.endswith("…")
+
+
+def test_the_file_contract_accepts_the_field_the_producer_sends() -> None:
+    """A producer field the reader does not declare fails the WHOLE report.
+
+    Found by the suite on 2026-09-07, and it is the exact mistake this session
+    has been finding in other people's code all day: the field was added to the
+    payload and not to the reader's key set, so `present <= _RENDER_KEYS` was
+    false, every input was rejected as `periodic_input_unavailable`, and the
+    machine retried a render that could never succeed — three tests hung.
+
+    Declared AND optional, because this is a cross-process file contract: a
+    producer that predates the field, or a file already queued on disk when the
+    code updated, must still render.
+    """
+    from cryodaq.reporting.periodic_input import _RENDER_KEYS, _RENDER_OPTIONAL_KEYS
+
+    assert "summary" in _RENDER_KEYS, "the reader would reject the producer's payload"
+    assert "summary" in _RENDER_OPTIONAL_KEYS, "an older producer must still render"
+
+
+def test_a_payload_without_the_field_still_reads() -> None:
+    """Absent means the behaviour that existed before the field."""
+    from cryodaq.reporting.periodic_input import _summary_text
+
+    assert _summary_text("") == ""

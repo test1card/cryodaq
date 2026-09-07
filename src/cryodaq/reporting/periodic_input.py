@@ -54,12 +54,13 @@ _RENDER_KEYS = {
     "dropped_points",
     "bad_points",
     "source_errors",
+    "summary",
 }
 # Presentational fields a producer may omit. This is a cross-process file
 # contract: a producer that predates a field, or a file already queued on disk
 # when the code updated, must still render rather than fail the whole report.
 # Absent always means "the behaviour that existed before the field".
-_RENDER_OPTIONAL_KEYS = {"channel_labels", "focus_cold"}
+_RENDER_OPTIONAL_KEYS = {"channel_labels", "focus_cold", "summary"}
 _RENDER_REQUIRED_KEYS = _RENDER_KEYS - _RENDER_OPTIONAL_KEYS
 
 _READING_KEYS = {"ts", "iid", "ch", "v", "u", "st"}
