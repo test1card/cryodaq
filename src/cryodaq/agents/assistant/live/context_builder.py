@@ -269,23 +269,49 @@ class ContextBuilder:
         if not isinstance(history, dict) or not history:
             return "показаний за окно нет"
 
+        now = datetime.now(UTC).timestamp()
         lines: list[str] = []
         for channel, samples in sorted(history.items()):
-            if not isinstance(samples, list) or len(samples) < 2:
+            pairs = (
+                sorted(
+                    (float(ts), float(value))
+                    for ts, value in samples
+                    if isinstance(ts, int | float) and isinstance(value, int | float)
+                )
+                if isinstance(samples, list)
+                else []
+            )
+            if not pairs:
+                # EVERY channel, as promised. A channel that reported nothing
+                # usable is a fact about the stand — quite possibly the most
+                # important one in the hour — and dropping it silently told the
+                # agent the channel did not exist.
+                lines.append(f"{channel}: нет годных значений за окно")
                 continue
-            pairs = [
-                (float(ts), float(value))
-                for ts, value in samples
-                if isinstance(ts, int | float) and isinstance(value, int | float)
-            ]
+            last_ts, last_value = pairs[-1]
+            # How old the newest reading is. Without it a channel that stopped
+            # fifty minutes ago is presented exactly like one reporting now, and
+            # the agent has no way to tell the difference.
+            age_min = max(now - last_ts, 0.0) / 60.0
+            freshness = "" if age_min < 5.0 else f", последнее {age_min:.0f} мин назад"
             if len(pairs) < 2:
+                lines.append(f"{channel}: {last_value:.4g} (одно значение{freshness})")
                 continue
-            pairs.sort()
-            span_h = (pairs[-1][0] - pairs[0][0]) / 3600.0
+            span_h = (last_ts - pairs[0][0]) / 3600.0
             if span_h <= 0:
+                lines.append(f"{channel}: {last_value:.4g} (значения без разброса по времени)")
                 continue
-            rate = (pairs[-1][1] - pairs[0][1]) / span_h
-            lines.append(f"{channel}: {pairs[-1][1]:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч)")
+            rate = (last_value - pairs[0][1]) / span_h
+            # Endpoints give the rate; the spread says whether one spike wrote
+            # it. A rate from two ends of a noisy hour is not a trend, and the
+            # agent should be able to see that rather than take the number.
+            values = [value for _, value in pairs]
+            spread = max(values) - min(values)
+            travelled = abs(last_value - pairs[0][1])
+            noisy = ", разброс шире хода" if spread > 2 * travelled and travelled > 0 else ""
+            lines.append(
+                f"{channel}: {last_value:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч{noisy}{freshness})"
+            )
         if not lines:
             return "показаний за окно нет"
         return "; ".join(lines)

@@ -86,7 +86,15 @@ class SQLiteAdapter:
                 channel, window_minutes, reply_failure_reason(reply, "history query unavailable")
             )
         if reply_declares_empty_sequence(reply, "data", channel):
-            return None
+            # A TYPED absence, not a bare None. An empty history is not the same
+            # as "this channel has no trend to speak of": a channel that is
+            # publishing live while its persistence has stopped produces exactly
+            # this reply, and returning None made the composite drop it silently
+            # and still report itself fresh. The operator would see a channel
+            # with no dynamics and no hint that anything was wrong with it.
+            return self._trend_unavailable(
+                channel, window_minutes, "истории за окно нет — возможно, запись по каналу встала"
+            )
         pairs, reason = self._parse_history_pairs(reply, channel)
         if pairs is None:
             return self._trend_unavailable(channel, window_minutes, reason or "history response is malformed")
