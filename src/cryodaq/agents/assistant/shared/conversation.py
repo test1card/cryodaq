@@ -22,6 +22,7 @@ been struggling — the worst moment to lose the operator's last question.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -54,27 +55,42 @@ _MAX_FILE_TURNS = 500
 #: Rotate when the file exceeds the cap by this much, so a rewrite happens once
 #: per _ROTATE_SLACK turns rather than on every append.
 _ROTATE_SLACK = 100
+#: How many experiments' transcripts to keep per chat. Rotation bounds each
+#: file; this bounds their number, which per-experiment keying made unbounded.
+_MAX_SCOPES_PER_CHAT = 12
+#: Refuse to read a transcript larger than this. Rotation keeps files small, so
+#: reaching it means corruption, and corruption must not stall the event loop.
+_MAX_FILE_BYTES = 4 * 1024 * 1024
+
+
+def _safe_key(raw: str, fallback: str) -> str:
+    """A filename that cannot leave its directory and cannot collide.
+
+    These ids arrive from Telegram and from the experiment state file, so they
+    are treated as hostile input: everything outside a small alphabet becomes
+    `_` and the result is length-bounded.
+
+    That sanitising is lossy, and losing it silently is the danger: `run 1` and
+    `run?1` both become `run_1`, and two ids sharing their first 64 characters
+    become the same file. Either way one run reads another run's transcript and
+    the agent answers with numbers from a stand that was never involved. So a
+    digest of the ORIGINAL string is appended — short, because it only has to
+    separate ids, not authenticate them.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return fallback
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", text)[:48] or fallback
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return f"{cleaned}-{digest}"
 
 
 def _safe_chat_key(chat_id: Any) -> str:
-    """A filename that cannot leave the directory it belongs in.
-
-    `chat_id` arrives from Telegram and from any local caller, so it is treated
-    as hostile input: everything outside a small alphabet is replaced, and the
-    result is length-bounded.
-    """
-    raw = str(chat_id) if chat_id is not None else "local"
-    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
-    return (cleaned or "local")[:64]
+    return _safe_key(str(chat_id) if chat_id is not None else "", "local")
 
 
 def _safe_scope_key(scope: Any) -> str:
-    """The experiment part of a transcript's filename, same hostile treatment."""
-    raw = str(scope).strip() if scope is not None else ""
-    if not raw:
-        return "no-experiment"
-    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
-    return (cleaned or "no-experiment")[:64]
+    return _safe_key(str(scope) if scope is not None else "", "no-experiment")
 
 
 class ConversationStore:
@@ -120,10 +136,44 @@ class ConversationStore:
             logger.debug("conversation scope unavailable: %s", exc)
             return "no-experiment"
 
-    def _path(self, chat_id: Any) -> Path:
-        return self._root / f"{_safe_chat_key(chat_id)}__{self._scope()}.jsonl"
+    def _path(self, chat_id: Any, scope: str | None = None) -> Path:
+        """The transcript file. `scope` pins one experiment for a whole query.
 
-    def remember(self, chat_id: Any, question: str, answer: str) -> None:
+        Without pinning, the provider is consulted afresh for every call — the
+        classifier's replay, the format prompt's replay and the final remember —
+        so an experiment transition during a long question could classify from
+        one run's transcript, format from another's, and file the exchange under
+        a third. One question is one conversation.
+        """
+        resolved = self._scope() if scope is None else scope
+        return self._root / f"{_safe_chat_key(chat_id)}__{resolved}.jsonl"
+
+    def current_scope(self) -> str:
+        """Resolve the experiment once, to be passed back for the whole query."""
+        return self._scope()
+
+    def _prune_scopes(self, chat_id: Any) -> None:
+        """Keep only the most recent transcripts for one chat.
+
+        Per-file rotation bounds each file; it does not bound how MANY there
+        are, and a new one appears for every experiment. On a stand that runs
+        experiments continuously that grows without limit on the same disk the
+        DAQ writes to. Old runs are dropped oldest-first; the current one is
+        never a candidate, because it is the newest by construction.
+        """
+        try:
+            prefix = f"{_safe_chat_key(chat_id)}__"
+            files = sorted(
+                self._root.glob(f"{prefix}*.jsonl"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for stale in files[_MAX_SCOPES_PER_CHAT:]:
+                stale.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never costs an answer
+            logger.debug("conversation scopes not pruned: %s", exc)
+
+    def remember(self, chat_id: Any, question: str, answer: str, *, scope: str | None = None) -> None:
         """Append one exchange. A failure here must never cost the answer."""
         try:
             self._root.mkdir(parents=True, exist_ok=True)
@@ -134,10 +184,11 @@ class ConversationStore:
             }
             if not record["q"] and not record["a"]:
                 return
-            path = self._path(chat_id)
+            path = self._path(chat_id, scope)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._rotate_if_needed(path)
+            self._prune_scopes(chat_id)
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not stored: %s", exc)
 
@@ -155,10 +206,16 @@ class ConversationStore:
         except Exception as exc:  # noqa: BLE001 - rotation is housekeeping
             logger.debug("conversation not rotated: %s", exc)
 
-    def _read(self, chat_id: Any) -> list[dict]:
-        path = self._path(chat_id)
+    def _read(self, chat_id: Any, scope: str | None = None) -> list[dict]:
+        path = self._path(chat_id, scope)
         try:
             if not path.is_file():
+                return []
+            # Size first. This runs on the query handler's event loop, so a
+            # corrupt or absurdly large file must cost the memory, not the
+            # answer: an unbounded read there stalls every deadline above it.
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                logger.debug("conversation ignored: %s is %d bytes", path.name, path.stat().st_size)
                 return []
             lines = path.read_text(encoding="utf-8").splitlines()
         except Exception as exc:  # noqa: BLE001
@@ -174,9 +231,9 @@ class ConversationStore:
                 turns.append(record)
         return turns
 
-    def replay(self, chat_id: Any, *, now: float | None = None) -> str:
+    def replay(self, chat_id: Any, *, now: float | None = None, scope: str | None = None) -> str:
         """The recent conversation, rendered. Empty when there is none."""
-        turns = self._read(chat_id)[-self._max_turns :]
+        turns = self._read(chat_id, scope)[-self._max_turns :]
         if not turns:
             return ""
         current = time.time() if now is None else now

@@ -369,24 +369,39 @@ class AssistantQueryAgent:
             return user_prompt
         return f"{user_prompt}\n\n{block}"
 
-    def _conversation_transcript(self, chat_id: Any) -> str:
+    def _conversation_scope(self) -> str | None:
+        """Pin the experiment ONCE for a whole question.
+
+        The store consults its provider on every call, so without pinning a long
+        question spanning an experiment transition could be classified from one
+        run's transcript, formatted from another's, and filed under a third.
+        """
+        if self._conversation is None:
+            return None
+        try:
+            return self._conversation.current_scope()
+        except Exception as exc:  # noqa: BLE001 - memory never costs an answer
+            logger.debug("conversation scope unavailable: %s", exc)
+            return None
+
+    def _conversation_transcript(self, chat_id: Any, scope: str | None = None) -> str:
         """What was already said, or "" — never raises, never blocks an answer."""
         if self._conversation is None:
             return ""
         try:
-            return self._conversation.replay(chat_id) or ""
+            return self._conversation.replay(chat_id, scope=scope) or ""
         except Exception as exc:  # noqa: BLE001 - memory never costs an answer
             logger.debug("conversation replay unavailable: %s", exc)
             return ""
 
-    def _with_conversation(self, user_prompt: str, chat_id: Any) -> str:
+    def _with_conversation(self, user_prompt: str, chat_id: Any, scope: str | None = None) -> str:
         """Prepend what was already said, if anything was.
 
         Deliberately a prefix on the assembled prompt rather than a slot in
         each of fifteen templates: the memory belongs to the conversation, not
         to whichever bucket this particular question fell into.
         """
-        transcript = self._conversation_transcript(chat_id)
+        transcript = self._conversation_transcript(chat_id, scope)
         if not transcript:
             return user_prompt
         return f"Предыдущий разговор (показания в нём УСТАРЕЛИ — актуальные ниже):\n{transcript}\n\n{user_prompt}"
@@ -496,6 +511,12 @@ class AssistantQueryAgent:
         user_prompt = ""
         result: GenerationResult | None = None
         response = _FALLBACK
+        # ONE QUESTION IS ONE CONVERSATION. Resolved here and carried through
+        # every use below, because the store consults its provider afresh on
+        # each call: a long question spanning an experiment transition could
+        # otherwise be classified from one run's transcript, formatted from
+        # another's, and filed under a third.
+        conversation_scope = self._conversation_scope()
 
         try:
             # The classifier sees the conversation too. It used to get the bare
@@ -506,7 +527,7 @@ class AssistantQueryAgent:
             # hand, and a fluent answer over the wrong numbers is worse than an
             # honest "не знаю".
             intent = await self._classifier.classify(
-                query, conversation=self._conversation_transcript(chat_id)
+                query, conversation=self._conversation_transcript(chat_id, conversation_scope)
             )
             data = await self._router.fetch(intent, query)
             retrieved = await self._maybe_retrieve(query, intent, data)
@@ -517,7 +538,7 @@ class AssistantQueryAgent:
             user_prompt = self._with_documents(user_prompt, data)
             if state_block:
                 user_prompt = f"{user_prompt}\n\n{state_block}"
-            user_prompt = self._with_conversation(user_prompt, chat_id)
+            user_prompt = self._with_conversation(user_prompt, chat_id, conversation_scope)
             system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
             # Bound the format LLM call by _format_timeout_s. Without this
             # wrapper a hung Ollama format call (cold model load that never
@@ -601,7 +622,7 @@ class AssistantQueryAgent:
         # purpose, because a remembered reading is a stale reading.
         if self._conversation is not None and response is not _FALLBACK and response.strip():
             try:
-                self._conversation.remember(chat_id, query, response)
+                self._conversation.remember(chat_id, query, response, scope=conversation_scope)
             except Exception as exc:  # noqa: BLE001 - memory never costs an answer
                 logger.debug("conversation not remembered: %s", exc)
 
