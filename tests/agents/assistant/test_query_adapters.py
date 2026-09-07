@@ -494,13 +494,7 @@ async def test_composite_status_omits_channels_the_operator_unchecked(tmp_path) 
 
     config = tmp_path / "channels.yaml"
     config.write_text(
-        "channels:\n"
-        "  Т12:\n"
-        "    name: 2-я ступень\n"
-        "    visible: true\n"
-        "  Т4:\n"
-        "    name: '-'\n"
-        "    visible: false\n",
+        "channels:\n  Т12:\n    name: 2-я ступень\n    visible: true\n  Т4:\n    name: '-'\n    visible: false\n",
         encoding="utf-8",
     )
     manager = ChannelManager(config_path=config)
@@ -539,6 +533,6 @@ async def test_composite_status_omits_channels_the_operator_unchecked(tmp_path) 
 
     reported = status.key_temperatures
     assert any("ступень" in name for name in reported), "a checked channel must still be reported"
-    assert not any(
-        value == 380.0 for value in reported.values()
-    ), "an unchecked channel reached the operator-facing summary"
+    assert not any(value == 380.0 for value in reported.values()), (
+        "an unchecked channel reached the operator-facing summary"
+    )

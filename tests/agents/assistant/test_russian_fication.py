@@ -92,14 +92,29 @@ def test_ru_bool_none() -> None:
 
 _ALLOWED_ENGLISH = {
     # Units
-    "K", "mbar", "Pa", "Hz", "ETA",
+    "K",
+    "mbar",
+    "Pa",
+    "Hz",
+    "ETA",
     # Technical proper nouns / abbreviations
-    "JSON", "LaTeX", "Unicode", "UUID", "API", "GUI", "F33", "v0",
+    "JSON",
+    "LaTeX",
+    "Unicode",
+    "UUID",
+    "API",
+    "GUI",
+    "F33",
+    "v0",
     # Format parameter names in {braces} — excluded by regex
     # Version numbers like v0.49.0 — excluded by stripping {braces}
     "CryoDAQ",
     # Acceptable abbreviations
-    "R", "min", "max", "URL", "Юникод",
+    "R",
+    "min",
+    "max",
+    "URL",
+    "Юникод",
 }
 
 _PROMPTS_TO_CHECK = [

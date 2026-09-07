@@ -175,9 +175,7 @@ def test_response_system_has_anti_hallucination() -> None:
     rule is stated at all, in any of the phrasings we would accept.
     """
     frs = p.FORMAT_RESPONSE_SYSTEM
-    forbids_invention = any(
-        phrase in frs for phrase in ("НЕ ПРИДУМЫВАЙ", "не выдумывай", "Ничего сверх")
-    )
+    forbids_invention = any(phrase in frs for phrase in ("НЕ ПРИДУМЫВАЙ", "не выдумывай", "Ничего сверх"))
     assert forbids_invention, "the prompt no longer forbids inventing values"
     bounds_to_given_data = any(
         phrase in frs for phrase in ("только то, что есть в данных", "Только то, что есть в данных")
