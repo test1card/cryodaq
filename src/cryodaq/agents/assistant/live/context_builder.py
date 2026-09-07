@@ -161,6 +161,80 @@ class ContextBuilder:
             context.recent_events = "нет событий за смену"
         return context
 
+    #: Below this fraction of the level over the window, a channel is not
+    #: moving — it is being measured. Matches the composite summary's own bar.
+    _REPORT_MOVEMENT_FRACTION = 0.01
+    #: More movers than this and the report is a table, not a summary.
+    _REPORT_MAX_MOVERS = 6
+
+    async def _build_readings_section(self, window_minutes: int) -> str:
+        """What is moving, and how fast. The rest in one line.
+
+        No channel list is configured on purpose. The report shows whatever is
+        actually changing, which is what a watching assistant is for; a fixed
+        list would show the channels someone expected to be interesting when
+        they wrote it.
+        """
+        reader = self._reader
+        if not hasattr(reader, "read_readings_history"):
+            return "нет данных о показаниях: история недоступна"
+        now = datetime.now(UTC).timestamp()
+        try:
+            history = await reader.read_readings_history(
+                from_ts=now - window_minutes * 60,
+                # 500 is the reader's hard cap (_MAX_HISTORY_POINTS_PER_CHANNEL);
+                # 600 was refused outright and the whole section came back as
+                # "показания недоступны". Caught against the live engine, not by
+                # the tests — their mock accepted anything.
+                limit_per_channel=500,
+            )
+        except Exception as exc:  # noqa: BLE001 - the report must survive a blind hour
+            logger.warning("PeriodicReportContext: readings unavailable — %s", exc)
+            return f"показания недоступны: {exc}"
+        if not isinstance(history, dict) or not history:
+            return "показаний за окно нет"
+
+        movers: list[tuple[float, str]] = []
+        steady = 0
+        for channel, samples in sorted(history.items()):
+            if not isinstance(samples, list) or len(samples) < 2:
+                continue
+            pairs = [
+                (float(ts), float(value))
+                for ts, value in samples
+                if isinstance(ts, int | float) and isinstance(value, int | float)
+            ]
+            if len(pairs) < 2:
+                continue
+            pairs.sort()
+            span_h = (pairs[-1][0] - pairs[0][0]) / 3600.0
+            if span_h <= 0:
+                continue
+            change = pairs[-1][1] - pairs[0][1]
+            level = max(abs(pairs[0][1]), abs(pairs[-1][1]), 1e-30)
+            if abs(change) / level < self._REPORT_MOVEMENT_FRACTION:
+                steady += 1
+                continue
+            rate = change / span_h
+            movers.append(
+                (
+                    abs(change) / level,
+                    f"{channel}: {pairs[-1][1]:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч)",
+                )
+            )
+
+        if not movers:
+            return f"ничего не движется: {steady} каналов держат уровень за {window_minutes} мин"
+        movers.sort(reverse=True)
+        shown = [text for _, text in movers[: self._REPORT_MAX_MOVERS]]
+        tail = len(movers) - len(shown)
+        line = "; ".join(shown)
+        if tail > 0:
+            line += f"; и ещё {tail} движущихся"
+        if steady:
+            line += f". Остальные {steady} держат уровень."
+        return line
+
     async def build_periodic_report_context(
         self,
         *,
@@ -264,8 +338,10 @@ class ContextBuilder:
             logger.warning("PeriodicReportContext: sensor health summary malformed — unavailable")
             _ctx_failed = True
 
+        readings_section = await self._build_readings_section(window_minutes)
         return PeriodicReportContext(
             window_minutes=window_minutes,
+            readings_section=readings_section,
             active_experiment_id=experiment_id,
             active_experiment_phase=phase,
             alarm_entries=alarm_entries,
@@ -760,12 +836,19 @@ class PeriodicReportContext:
     physics_alarm_entries: list[Any] = field(default_factory=list)
     sensor_health_alarm_entries: list[Any] = field(default_factory=list)
     sensor_health_summary: Any | None = None
+    #: What the stand is actually DOING, in one rendered block. The hourly
+    #: report read the operator log and the sensor-health digest and nothing
+    #: else, so it was structurally unable to mention a pressure rising at a
+    #: constant +0.106 mbar/h for seven hours — the most interesting fact on the
+    #: stand — unless an alarm happened to fire. Found by review on 2026-09-07.
+    readings_section: str = "нет данных о показаниях"
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
         if self.context_read_failed:
             unavailable = "данные недоступны"
             return {
+                "readings_section": self.readings_section,
                 "active_experiment_summary": unavailable,
                 "events_section": unavailable,
                 "alarms_section": unavailable,
@@ -794,6 +877,7 @@ class PeriodicReportContext:
             total_event_count += " (источник: 50+, неполный контекст)"
 
         return {
+            "readings_section": self.readings_section,
             "active_experiment_summary": active_exp,
             "events_section": _format_log_entries(self.other_entries, source_saturated=self.source_saturated)
             or "(нет)",

@@ -867,6 +867,21 @@ def _is_answered_generation(result: Any) -> bool:
     return True
 
 
+def _readings_are_moving(ctx) -> bool:
+    """Whether the stand did something worth a bulletin, events or not.
+
+    Keeps the skip for genuinely nothing-happening hours — an assistant that
+    pings anyway is one that gets muted — and lifts it when a measurement is
+    actually moving. The section is built by the context builder, which reports
+    movement or says plainly that there is none.
+    """
+    section = getattr(ctx, "readings_section", "") or ""
+    if not section:
+        return False
+    settled = ("ничего не движется", "показаний за окно нет", "недоступн", "нет данных")
+    return not any(marker in section for marker in settled)
+
+
 class AssistantLiveAgent:
     """LLM agent. The operator-facing brand comes from `agent.brand_name`."""
 
@@ -1682,9 +1697,15 @@ class AssistantLiveAgent:
             and ctx.total_event_count < self._config.periodic_report_min_events
             and not ctx.source_saturated
             and (sensor_health_summary is None or sensor_health_summary.critical == 0)
+            # A quiet log is not a quiet stand. Until 2026-09-07 the report was
+            # skipped whenever nobody had typed anything, so an hour in which
+            # the pressure climbed steadily produced no bulletin at all — the
+            # log said "idle: 0 events" while the gauge had been rising at a
+            # constant +0.106 mbar/h for seven hours.
+            and not _readings_are_moving(ctx)
         ):
             logger.debug(
-                "AssistantLiveAgent: periodic report skipped (idle: %d events < min=%d)",
+                "AssistantLiveAgent: periodic report skipped (idle: %d events < min=%d, показания стоят)",
                 ctx.total_event_count,
                 self._config.periodic_report_min_events,
             )
