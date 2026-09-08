@@ -146,3 +146,52 @@ def test_the_fit_check_never_raises_and_never_lies() -> None:
         pass
 
     assert _payload_fits({"x": _Unserialisable()}, 10) is False
+
+
+# --- two edges the review found --------------------------------------------
+
+
+def test_a_cut_that_lands_after_a_whole_word_keeps_that_word() -> None:
+    """`trimmed = cut.rstrip()` removes the space the cut landed on, and the
+    mid-word test then reads the result as a broken word and drops one more
+    word that had fitted. The cut is mid-word only when the raw cut ends inside
+    one — which is what the raw text, before the strip, still says.
+    """
+
+    from cryodaq.reporting.periodic_renderer import _with_summary
+
+    summary = "Вывод: давление растёт ровно, вмешательство пока не требуется совсем"
+    # Derive the caption length so the cut falls exactly on the space before
+    # the last word, rather than guessing a length and hoping.
+    keep = summary.index(" совсем") + 1
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - len("\n\n") - keep - 1)
+
+    tail = _with_summary(caption, summary)[len(caption) :].strip()
+
+    assert tail.startswith("Вывод:")
+    assert "требуется" in tail, f"a whole word that fitted was dropped: {tail[-40:]!r}"
+
+
+def test_a_sentence_ending_in_a_count_is_a_sentence() -> None:
+    """A period after a digit is refused as a severed decimal. That guard is
+    needed only when the period is the last thing there is: with whitespace
+    after it, "Датчиков всего 11. " is an ordinary finished sentence, and
+    refusing it throws away everything back to the previous one.
+    """
+
+    from cryodaq.reporting.periodic_renderer import _last_sentence_end
+
+    text = "Всё спокойно. Датчиков всего 11. Из них десять в норме"
+
+    assert _last_sentence_end(text) == text.index("11.") + 2
+
+
+def test_a_severed_decimal_is_still_not_a_sentence() -> None:
+    """The control for the test above: with nothing after it, a period on a
+    digit may be a number cut in half, and "давление 0. …" is what that reads
+    like to an operator.
+    """
+
+    from cryodaq.reporting.periodic_renderer import _last_sentence_end
+
+    assert _last_sentence_end("Всё спокойно. давление 0.") == len("Всё спокойно")

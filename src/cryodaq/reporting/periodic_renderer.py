@@ -532,7 +532,11 @@ def _last_sentence_end(text: str) -> int:
         following = text[index + 1 : index + 2]
         if following and not following.isspace():
             continue
-        if char == "." and index and text[index - 1].isdigit():
+        # ONLY WHEN NOTHING FOLLOWS. A period on a digit is a severed decimal
+        # when it is the last thing there is — "давление 0." — and an ordinary
+        # sentence end when the text goes on: "Датчиков всего 11. Из них…".
+        # Refusing both threw away everything back to the previous sentence.
+        if char == "." and index and text[index - 1].isdigit() and not following:
             continue
         return index
     return -1
@@ -618,8 +622,12 @@ def _with_summary(caption: str, summary: str) -> str:
         # dropped a complete word for nothing: a prefix ending in "Температура
         # стабильна" became "Температура…". The cut is mid-word only when the
         # character it stopped before is not a space.
+        # JUDGED ON THE RAW CUT, NOT THE STRIPPED ONE. `trimmed` has already
+        # lost the space the cut may have landed on, so asking it whether the
+        # cut ended inside a word gets "yes" for a cut that ended neatly after
+        # one — and another whole word that had fitted is then dropped.
         broke_a_word = (
-            len(cut) < len(summary) and not summary[len(cut)].isspace() and bool(trimmed) and not trimmed[-1].isspace()
+            len(cut) < len(summary) and not summary[len(cut)].isspace() and bool(cut) and not cut[-1].isspace()
         )
         space = trimmed.rfind(" ") if broke_a_word else -1
         if space > 0 and len(trimmed) - space <= _WORD_BOUNDARY_LOOKBACK:
