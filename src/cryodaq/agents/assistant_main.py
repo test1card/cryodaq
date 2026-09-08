@@ -189,13 +189,26 @@ class _RemoteEngineStateCache:
                 # in, not the window between the two QUERIES. The reply names
                 # its own run now, so the pairing is checkable from the data
                 # rather than inferred from timing.
+                # An engine that does not carry the field at all is an OLDER
+                # engine, not a mismatched run. Refusing those outright would
+                # leave sensor health permanently absent through a mixed-version
+                # restart, with nothing saying why — a silent, indefinite loss
+                # of a signal the operator reads. A reply that DOES carry the
+                # field and disagrees is a real mismatch and is withheld.
+                stamped = "experiment_id" in diag_reply
+                belongs = (not stamped) or diag_reply.get("experiment_id") == active
                 if (
                     experiment_is_usable
                     and diag_reply.get("ok")
-                    and diag_reply.get("experiment_id") == active
+                    and belongs
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
                     sensor_diagnostics = diag_reply.get("summary")
+                    if not stamped:
+                        logger.debug(
+                            "assistant state cache: engine reply carries no experiment_id; "
+                            "pairing cannot be verified this cycle"
+                        )
                 elif experiment_is_usable and diag_reply.get("ok"):
                     logger.debug(
                         "assistant state cache: diagnostics belong to %r, not %r — withheld",
@@ -878,13 +891,23 @@ async def _run_llm_runtime(
             # but its CONSTRUCTION was not, so slow storage could still wedge
             # assistant startup — a hang, not a crash, which the launcher's
             # restart-on-exit cannot recover.
-            # BOUNDED. Moving the construction to a thread was said to fix this
-            # and did not: `asyncio.to_thread` without a deadline wedges startup
-            # exactly as a direct call would. If storage blocks, the assistant
-            # process stays alive and never reaches service startup — a hang,
-            # and the launcher's restart-on-exit cannot recover from a process
-            # that has not exited. On timeout the assistant comes up WITHOUT
-            # retrieval, which is a degraded assistant rather than no assistant.
+            # BOUNDED — for the CALLER. Moving the construction to a thread was
+            # said to fix this and did not: `asyncio.to_thread` without a
+            # deadline wedges startup exactly as a direct call would. If storage
+            # blocks, the assistant process stays alive and never reaches
+            # service startup, and the launcher's restart-on-exit cannot recover
+            # from a process that has not exited. On timeout the assistant comes
+            # up WITHOUT retrieval, which is a degraded assistant rather than no
+            # assistant.
+            #
+            # Say plainly what this does NOT do: the deadline abandons the await
+            # and the thread keeps running in the default executor. Startup is
+            # rescued; a permanently blocked probe still occupies a worker, and
+            # can delay a later shutdown while asyncio joins that executor.
+            # Fixing that needs the storage call itself to be interruptible,
+            # which it is not. Recorded rather than papered over — this file has
+            # already carried two comments claiming a problem was handled when
+            # it was not.
             rag_searcher = await asyncio.wait_for(
                 asyncio.to_thread(
                     RagSearcher,

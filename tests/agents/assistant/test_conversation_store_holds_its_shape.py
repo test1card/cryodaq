@@ -147,3 +147,111 @@ def test_an_absurdly_large_transcript_is_not_read(tmp_path: Path) -> None:
     path.write_text("x" * (_MAX_FILE_BYTES + 1), encoding="utf-8")
 
     assert store.replay(7) == ""
+
+
+# --- what the digest change and the threads broke -------------------------
+
+
+def test_a_transcript_written_before_the_naming_changed_is_still_read(tmp_path: Path) -> None:
+    """Two changes moved the filename and neither migrated what was on disk.
+
+    An upgrade therefore dropped every existing conversation silently, and left
+    the old files unreachable by the pruner as well.
+    """
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    # The oldest shape: one file per chat, no scope, no digest.
+    (root / "7.jsonl").write_text('{"ts": 1.0, "q": "старый вопрос", "a": "старый ответ"}\n', encoding="utf-8")
+    store = _store(tmp_path, lambda: "exp-1")
+
+    assert "старый ответ" in store.replay(7, now=2.0)
+
+
+def test_a_scoped_transcript_without_a_digest_is_still_read(tmp_path: Path) -> None:
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7__exp-1.jsonl").write_text(
+        '{"ts": 1.0, "q": "промежуточный", "a": "промежуточный ответ"}\n', encoding="utf-8"
+    )
+    store = _store(tmp_path, lambda: "exp-1")
+
+    assert "промежуточный ответ" in store.replay(7, now=2.0)
+
+
+def test_pruning_excludes_the_file_it_was_just_asked_to_keep() -> None:
+    """Structural, and the reason is worth stating.
+
+    Pruning ranks by modification time, and a comment claimed the live
+    transcript "is never a candidate, because it is the newest by
+    construction". That is true until the clock moves backwards, a file is
+    restored, or a late answer is filed under an older scope. The code now
+    excludes the written file EXPLICITLY.
+
+    Asserted structurally because the triggering condition is a backwards
+    clock: any behavioural test would have to write the file, which updates its
+    modification time and destroys the very situation under test. My first
+    attempt did exactly that and passed with the fix removed.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from cryodaq.agents.assistant.shared.conversation import ConversationStore
+
+    source = textwrap.dedent(inspect.getsource(ConversationStore._prune_scopes))
+    tree = ast.parse(source)
+    assert any(isinstance(node, ast.arg) and node.arg == "keep" for node in ast.walk(tree)), (
+        "pruning cannot be told which transcript is live"
+    )
+    body = ast.unparse(tree)
+    assert "!= keep" in body or "item != keep" in body, (
+        "the live transcript is still identified by modification time alone"
+    )
+
+
+def test_the_append_and_its_rotation_happen_under_one_lock() -> None:
+    """Structural, and the reason is worth stating.
+
+    Writes run in worker threads now, and rotation is a read-modify-write: A
+    can read the file, B can append its exchange, and A can then replace the
+    file with its own earlier snapshot. Losing B's answer needs A and B to
+    interleave inside rotation, which only runs once every hundred turns — my
+    first attempt at forcing it wrote a hundred and sixty exchanges, never
+    rotated, and passed with the lock removed.
+    """
+    import inspect
+
+    from cryodaq.agents.assistant.shared.conversation import ConversationStore
+
+    source = inspect.getsource(ConversationStore.remember)
+    assert "with self._lock:" in source, "the append and its rotation run unlocked; two writers can lose an exchange"
+    guarded = source[source.index("with self._lock:") :]
+    for step in ('path.open("a"', "_rotate_if_needed", "_prune_scopes"):
+        assert step in guarded, f"{step} happens outside the lock"
+
+
+def test_concurrent_appends_neither_crash_nor_drop_lines(tmp_path: Path) -> None:
+    """A smoke test, honestly labelled: it stays below the rotation threshold,
+    so it proves the append path survives four writers — not that the rotation
+    race is closed. That property is asserted structurally above."""
+    import threading
+
+    store = _store(tmp_path, lambda: "exp-1")
+    errors: list[BaseException] = []
+
+    def write(index: int) -> None:
+        try:
+            for step in range(40):
+                store.remember(7, f"в{index}-{step}", f"о{index}-{step}")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    written = store._path(7).read_text(encoding="utf-8").splitlines()
+    assert len(written) >= 40, f"only {len(written)} exchanges survived four concurrent writers"

@@ -79,9 +79,21 @@ class RagSearcher:
         return await asyncio.get_running_loop().run_in_executor(self._pool, fn, *args)
 
     def close(self) -> None:
-        """Release the search threads. Safe to call more than once."""
-        # NOT `wait=True`: a stuck LanceDB call would make shutdown hang, which
-        # is the failure this pool exists to contain.
+        """Release the search threads. Safe to call more than once.
+
+        `wait=False` so a stuck LanceDB call cannot make this CALL hang, and
+        `cancel_futures=True` so queued work is dropped rather than started.
+
+        What this does NOT do, stated because the previous version of this
+        comment claimed otherwise: it does not stop a call already running, and
+        `ThreadPoolExecutor` workers are not daemons, so the interpreter still
+        joins them on exit. If LanceDB blocks forever the process can therefore
+        still fail to exit, which is the one failure the launcher's
+        restart-on-exit cannot recover from. The pool bounds how much of the
+        machine a stuck search can hold and keeps it away from the audit writes
+        that gate delivery; it does not make the search interruptible, because
+        the storage call is not.
+        """
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _resolve_table(self):

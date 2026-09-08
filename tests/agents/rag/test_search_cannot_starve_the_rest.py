@@ -47,9 +47,22 @@ def test_the_pool_is_small_enough_to_be_a_ceiling() -> None:
 
 
 def test_shutdown_does_not_wait_for_a_stuck_call() -> None:
-    """`wait=True` would make shutdown hang on exactly what the pool contains."""
+    """`wait=True` would make the CALL hang on exactly what the pool contains."""
     source = inspect.getsource(module.RagSearcher.close)
     assert "wait=False" in source
+    assert "cancel_futures=True" in source
+
+
+def test_the_docstring_does_not_claim_the_hang_is_contained() -> None:
+    """It is not, and saying so was the mistake worth not repeating.
+
+    Workers are not daemons, so the interpreter joins them at exit: a
+    permanently blocked LanceDB call can still stop the process from exiting.
+    The pool bounds the blast radius; it does not make storage interruptible.
+    """
+    source = inspect.getsource(module.RagSearcher.close)
+    assert "does not stop a call already running" in source
+    assert "not daemons" in source
 
 
 async def test_a_stuck_search_leaves_the_default_executor_free() -> None:

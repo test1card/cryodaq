@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -120,6 +122,12 @@ class ConversationStore:
         self._max_turns = max(1, int(max_turns))
         self._silence_marker_s = float(silence_marker_s)
         self._scope_provider = scope_provider
+        # Appends and rotation now run in worker threads, and rotation is a
+        # read-modify-write: without this, request A can read the file, request
+        # B can append its exchange, and A can then replace the file with its
+        # own earlier snapshot — B's answer silently gone. The temp file used
+        # for the rewrite was shared too.
+        self._lock = threading.Lock()
 
     def _scope(self) -> str:
         """The active experiment, or a stable stand-in.
@@ -135,6 +143,25 @@ class ConversationStore:
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation scope unavailable: %s", exc)
             return "no-experiment"
+
+    def _legacy_paths(self, chat_id: Any, scope: str | None = None) -> list[Path]:
+        """Where this chat's transcript lived before the naming changed.
+
+        Two changes moved it: per-experiment scoping, and then a digest appended
+        to defeat collisions. Neither migrated what was already on disk, so an
+        upgrade silently dropped every conversation and left the old files
+        unreachable by the pruner as well. Read them when the current name has
+        nothing; the next `remember` writes to the current name, which is
+        migration enough for a transcript.
+        """
+        raw_chat = str(chat_id) if chat_id is not None else ""
+        plain_chat = re.sub(r"[^A-Za-z0-9_-]", "_", raw_chat.strip())[:64] or "local"
+        resolved = self._scope() if scope is None else scope
+        plain_scope = resolved.rsplit("-", 1)[0] if "-" in resolved else resolved
+        return [
+            self._root / f"{plain_chat}__{plain_scope}.jsonl",
+            self._root / f"{plain_chat}.jsonl",
+        ]
 
     def _path(self, chat_id: Any, scope: str | None = None) -> Path:
         """The transcript file. `scope` pins one experiment for a whole query.
@@ -152,14 +179,20 @@ class ConversationStore:
         """Resolve the experiment once, to be passed back for the whole query."""
         return self._scope()
 
-    def _prune_scopes(self, chat_id: Any) -> None:
+    def _prune_scopes(self, chat_id: Any, *, keep: Path | None = None) -> None:
         """Keep only the most recent transcripts for one chat.
 
         Per-file rotation bounds each file; it does not bound how MANY there
         are, and a new one appears for every experiment. On a stand that runs
         experiments continuously that grows without limit on the same disk the
-        DAQ writes to. Old runs are dropped oldest-first; the current one is
-        never a candidate, because it is the newest by construction.
+        DAQ writes to.
+
+        `keep` is the transcript just written, and it is excluded EXPLICITLY.
+        The first version relied on it being newest by modification time, and
+        said so in a comment that was stronger than the code: a clock
+        correction, a restored file, or a late answer pinned to an older scope
+        could all leave the live transcript ranked below twelve others and
+        unlinked.
         """
         try:
             prefix = f"{_safe_chat_key(chat_id)}__"
@@ -168,7 +201,12 @@ class ConversationStore:
                 key=lambda item: item.stat().st_mtime,
                 reverse=True,
             )
-            for stale in files[_MAX_SCOPES_PER_CHAT:]:
+            if keep is not None:
+                files = [item for item in files if item != keep]
+                limit = max(_MAX_SCOPES_PER_CHAT - 1, 0)
+            else:
+                limit = _MAX_SCOPES_PER_CHAT
+            for stale in files[limit:]:
                 stale.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 - housekeeping never costs an answer
             logger.debug("conversation scopes not pruned: %s", exc)
@@ -185,10 +223,11 @@ class ConversationStore:
             if not record["q"] and not record["a"]:
                 return
             path = self._path(chat_id, scope)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            self._rotate_if_needed(path)
-            self._prune_scopes(chat_id)
+            with self._lock:
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                self._rotate_if_needed(path)
+                self._prune_scopes(chat_id, keep=path)
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not stored: %s", exc)
 
@@ -200,7 +239,10 @@ class ConversationStore:
             if len(lines) <= _MAX_FILE_TURNS + _ROTATE_SLACK:
                 return
             tail = lines[-_MAX_FILE_TURNS:]
-            temporary = path.with_suffix(".jsonl.tmp")
+            # Per FILE, not one shared name: two rotations at once would
+            # otherwise write the same temporary and one would replace the
+            # other's target with the other's content.
+            temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
             temporary.write_text("".join(tail), encoding="utf-8")
             temporary.replace(path)
         except Exception as exc:  # noqa: BLE001 - rotation is housekeeping
@@ -210,7 +252,12 @@ class ConversationStore:
         path = self._path(chat_id, scope)
         try:
             if not path.is_file():
-                return []
+                for legacy in self._legacy_paths(chat_id, scope):
+                    if legacy.is_file():
+                        path = legacy
+                        break
+                else:
+                    return []
             # Size first. This runs on the query handler's event loop, so a
             # corrupt or absurdly large file must cost the memory, not the
             # answer: an unbounded read there stalls every deadline above it.

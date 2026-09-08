@@ -83,12 +83,14 @@ async def test_a_steady_experiment_still_publishes_both_halves() -> None:
     assert cache.get_summary() is not None
 
 
-async def test_health_without_an_experiment_stamp_is_withheld() -> None:
-    """An engine that does not name the run cannot have its health paired.
+async def test_health_from_an_engine_that_does_not_stamp_is_still_used() -> None:
+    """This test asserted the OPPOSITE, and review showed that was wrong.
 
-    Deliberately strict rather than "an older engine must still work": the
-    engine and the assistant ship from one tree, and the cost of accepting an
-    unstamped reply is a report describing a stand that was never measured.
+    An engine that does not carry the field at all is an OLDER engine, not a
+    mismatched run. Refusing those outright leaves sensor health permanently
+    absent through a mixed-version restart, with nothing saying why — a silent,
+    indefinite loss of a signal the operator reads. What must still be withheld
+    is a reply that DOES name a run and names a different one.
     """
 
     class _Unstamped:
@@ -100,7 +102,9 @@ async def test_health_without_an_experiment_stamp_is_withheld() -> None:
     cache = _RemoteEngineStateCache(_Unstamped(), poll_interval_s=0.01)
     await _one_cycle(cache)
 
-    assert cache.get_summary() is None
+    assert cache.get_summary() is not None, (
+        "an older engine's health is refused forever through a mixed-version restart"
+    )
 
 
 def test_the_engine_stamps_its_diagnostics_reply() -> None:
