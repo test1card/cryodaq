@@ -299,6 +299,11 @@ def serialize_periodic_input(
     return raw, parse_periodic_input_bytes(raw, expected_max_input_bytes=cap)
 
 
+#: The exact tag set the caption may carry. Telegram accepts more; this stays
+#: closed because the text inside it is written by a language model.
+CAPTION_TAGS = ("b", "i", "code")
+
+
 def validate_caption_html(value: object) -> str:
     """Validate the exact renderer-owned Telegram HTML subset and bounds."""
 
@@ -310,21 +315,39 @@ def validate_caption_html(value: object) -> str:
         raise PeriodicInputError("periodic caption contains invalid Unicode") from None
     if len(value) > MAX_CAPTION_CODEPOINTS or len(encoded) > MAX_CAPTION_BYTES:
         raise PeriodicInputError("periodic caption exceeds transport bounds")
-    open_bold = False
+    open_tags: list[str] = []
     index = 0
     while index < len(value):
         char = value[index]
         if (ord(char) < 32 and char != "\n") or ord(char) == 127:
             raise PeriodicInputError("periodic caption contains control characters")
         if char == "<":
-            token = "<b>" if value.startswith("<b>", index) else "</b>" if value.startswith("</b>", index) else None
-            if token is None or (token == "<b>" and open_bold) or (token == "</b>" and not open_bold):
-                raise PeriodicInputError("periodic caption contains invalid markup")
-            if "\n" in token:
-                raise PeriodicInputError("periodic caption tag spans a line")
-            open_bold = token == "<b>"
-            index += len(token)
-            continue
+            # A STACK, NOT A FLAG. Bold alone left the agent's own emphasis
+            # showing as literal asterisks in the operator's message; italic and
+            # monospace are what make a channel name and a number readable. The
+            # set stays closed and the nesting stays checked: this text comes
+            # from a language model, and the caption is HTML at Telegram.
+            opening = closing = None
+            for name in CAPTION_TAGS:
+                if value.startswith(f"<{name}>", index):
+                    opening = name
+                    break
+                if value.startswith(f"</{name}>", index):
+                    closing = name
+                    break
+            if opening is not None:
+                if opening in open_tags:
+                    raise PeriodicInputError("periodic caption nests a tag in itself")
+                open_tags.append(opening)
+                index += len(opening) + 2
+                continue
+            if closing is not None:
+                if not open_tags or open_tags[-1] != closing:
+                    raise PeriodicInputError("periodic caption closes a tag out of order")
+                open_tags.pop()
+                index += len(closing) + 3
+                continue
+            raise PeriodicInputError("periodic caption contains invalid markup")
         if char == ">":
             raise PeriodicInputError("periodic caption contains raw markup")
         if char == "&":
@@ -336,10 +359,10 @@ def validate_caption_html(value: object) -> str:
                 raise PeriodicInputError("periodic caption contains an invalid entity")
             index += len(entity)
             continue
-        if char == "\n" and open_bold:
+        if char == "\n" and open_tags:
             raise PeriodicInputError("periodic caption tag spans a line")
         index += 1
-    if open_bold:
+    if open_tags:
         raise PeriodicInputError("periodic caption contains an unclosed tag")
     return value
 

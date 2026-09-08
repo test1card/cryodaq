@@ -25,6 +25,7 @@ import numpy as np  # noqa: E402
 
 from cryodaq.core.reading_freshness import judge_freshness  # noqa: E402
 from cryodaq.reporting.periodic_input import (  # noqa: E402
+    CAPTION_TAGS,
     MAX_CAPTION_BYTES,
     MAX_CAPTION_CODEPOINTS,
     PeriodicAlarmSnapshot,
@@ -553,6 +554,39 @@ def _last_sentence_end(text: str, *, dropped: str = "") -> int:
 _MIN_SENTENCE_KEPT = 80
 
 
+#: What the agent may write, and what each marker becomes. Anything else it
+#: emits is stripped rather than shown: on 2026-09-08 the operator received a
+#: caption reading "**Сводка за 60 мин**" and "*Датчики:*" with the asterisks
+#: still in it, because the prompt asks for markdown and the caption escapes
+#: everything it is given.
+_SUMMARY_MARKUP = re.compile(
+    r"\*\*(?P<b>[^*\n]+)\*\*|\*(?P<i>[^*\n]+)\*|`(?P<code>[^`\n]+)`"
+)
+
+
+def _render_summary_markup(raw: str) -> str:
+    """Escape the agent's text and turn its markers into the allowed tags.
+
+    Escaping happens per segment, so the model cannot introduce markup of its
+    own: every tag in the result was written here. Pairs may not span a line,
+    because the caption validator refuses a tag that does, and a marker without
+    its partner is dropped rather than shown as punctuation.
+    """
+
+    out: list[str] = []
+    position = 0
+    for match in _SUMMARY_MARKUP.finditer(raw):
+        out.append(_escape(raw[position : match.start()]))
+        for name in CAPTION_TAGS:
+            inner = match.group(name)
+            if inner is not None:
+                out.append(f"<{name}>{_escape(inner)}</{name}>")
+                break
+        position = match.end()
+    out.append(_escape(raw[position:]))
+    return "".join(out).replace("**", "").replace("`", "")
+
+
 def _with_summary(caption: str, summary: str) -> str:
     """Append the assistant's own words, but only what still fits.
 
@@ -568,7 +602,7 @@ def _with_summary(caption: str, summary: str) -> str:
     """
     if not summary:
         return caption
-    escaped = _escape(summary)
+    escaped = _render_summary_markup(summary)
     separator = "\n\n"
     used = len(caption) + len(separator)
     remaining = MAX_CAPTION_CODEPOINTS - used
@@ -583,7 +617,7 @@ def _with_summary(caption: str, summary: str) -> str:
         # matters more here than being clever.
         cut = summary[: max(remaining - 1, 0)]
         while cut:
-            escaped = _escape(cut.rstrip()) + "…"
+            escaped = _render_summary_markup(cut.rstrip()) + "…"
             if len(escaped) <= remaining:
                 break
             cut = cut[:-1]
@@ -620,7 +654,7 @@ def _with_summary(caption: str, summary: str) -> str:
                 # it and execution falls through; assigning to `escaped` here
                 # would leave the refused, oversized text behind as the thing
                 # that gets sent.
-                finished = _escape(whole) + " …"
+                finished = _render_summary_markup(whole) + " …"
                 candidate = caption + separator + finished
                 if len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES and len(
                     caption
@@ -641,7 +675,7 @@ def _with_summary(caption: str, summary: str) -> str:
         if space > 0 and len(trimmed) - space <= _WORD_BOUNDARY_LOOKBACK:
             word_cut = trimmed[:space].rstrip(" ,;:—-")
             if word_cut:
-                escaped = _escape(word_cut) + "…"
+                escaped = _render_summary_markup(word_cut) + "…"
     candidate = caption + separator + escaped
     # BOTH LIMITS. Cyrillic reaches 1024 codepoints at about 2048 of the 4096
     # permitted bytes, so a byte-only check passes text the validator refuses,

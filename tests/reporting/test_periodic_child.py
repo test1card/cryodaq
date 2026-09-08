@@ -390,13 +390,22 @@ def test_closed_result_parser_hostile_types_raise_only_protocol_error(field: str
     "caption",
     [
         "<b>x</b> &amp; &lt; &gt;",
+        # Italic and monospace joined the subset on 2026-09-08: bold alone left
+        # the agent's own emphasis reaching the operator as literal asterisks,
+        # and a channel name needs to stand out inside a sentence.
+        "<i>x</i> и <code>VSP63D_1/pressure</code>",
+        "<b>жирный <i>и курсив внутри</i></b>",
         "Тревог нет ✓",
     ],
 )
 def test_shared_caption_validator_accepts_only_closed_subset(caption: str) -> None:
     assert validate_caption_html(caption) == caption
     for invalid in (
-        "<i>x</i>",
+        "<u>x</u>",
+        "<pre>x</pre>",
+        "<a href=\"http://x\">y</a>",
+        "<b>x <i>y</b> z</i>",
+        "<b>x <b>y</b></b>",
         "<b x>y</b>",
         "x &copy;",
         "<b>x\ny</b>",

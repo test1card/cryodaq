@@ -1089,8 +1089,12 @@ class PeriodicReportContext:
                 "source_completeness": unavailable,
             }
         if self.active_experiment_id:
-            phase_str = f" (фаза: {self.active_experiment_phase})" if self.active_experiment_phase else ""
-            active_exp = f"{self.active_experiment_id}{phase_str}"
+            # THE PHASE, NOT THE IDENTIFIER. `6ce6372c1fb6` is a programme's
+            # signature: nobody reads it, nobody remembers it, and the agent
+            # dutifully printed it into the operator's hourly message because it
+            # was handed it. What the run IS gets described in words by
+            # `run_section` just above this in the prompt.
+            active_exp = self.active_experiment_phase or "фаза не указана"
         else:
             active_exp = "нет активного эксперимента"
 
