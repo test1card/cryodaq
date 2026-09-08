@@ -107,6 +107,11 @@ def _decodes(chunk: bytes) -> bool:
     return True
 
 
+#: Below this an operator's remark is "just now" and the age is noise. Above it
+#: the age is the difference between a fact and a memory.
+_OPERATOR_AGE_MARKER_S = 1800.0
+
+
 class ConversationStore:
     """Append-only transcripts, one file per chat per experiment. Never raises.
 
@@ -404,7 +409,20 @@ class ConversationStore:
             question = str(record.get("q") or "").strip()
             answer = str(record.get("a") or "").strip()
             if question:
-                rows.append(f"Оператор: {question}")
+                # WITH ITS AGE. A thing the operator said is the only source for
+                # facts nothing measures — on 2026-09-08 he said "насос отключен
+                # сейчас", and fourteen hours later the agent repeated "насос
+                # выключен" to him as though it were reading an instrument.
+                # There is no pump channel; there is no way to check. The age is
+                # what lets the answer say how old the claim is, and lets him
+                # notice when it has gone stale.
+                age = current - ts if ts is not None else None
+                stamp = (
+                    f" [{_human_gap(age)} назад]"
+                    if age is not None and age >= _OPERATOR_AGE_MARKER_S
+                    else ""
+                )
+                rows.append(f"Оператор{stamp}: {question}")
             if answer:
                 rows.append(f"Ты: {answer}")
         if previous_ts is not None:
