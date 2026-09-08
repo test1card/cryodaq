@@ -299,23 +299,37 @@ def test_a_complete_final_record_without_a_newline_is_kept(tmp_path: Path) -> No
     assert "новый ответ" in replayed
 
 
-def test_a_line_with_undecodable_bytes_is_dropped_even_when_it_parses(tmp_path: Path) -> None:
-    """U+FFFD is legal inside a JSON string, so the record parses.
+def test_a_line_with_undecodable_bytes_is_dropped(tmp_path: Path) -> None:
+    """Three attempts at this, and the first two were wrong in opposite ways.
 
-    The comment used to claim a damaged line necessarily fails to parse. It does
-    not: it parses and hands the agent a sentence nobody wrote. A plausible
-    wrong answer in memory is worse than a missing one.
+    Decoding the whole file strictly lost every exchange to one bad byte.
+    Decoding it with `errors="replace"` produced U+FFFD, which is legal inside a
+    JSON string — so the damaged record parsed and handed the agent a sentence
+    nobody wrote. Decoding each line on its own separates the cases exactly.
     """
     store = _store(tmp_path, lambda: "exp-1")
     store.remember(7, "целый", "целый ответ")
     path = store._path(7)
     with path.open("ab") as handle:
-        handle.write(b'{"ts": 9.0, "q": "\xd0\xba\xd0", "a": "\xff\xfe\xd0\xbe\xd1\x82\xd0\xb2\xd0\xb5\xd1\x82"}\n')
+        handle.write(b'{"ts": 9.0, "q": "\xff\xfe", "a": "\xd0\xbe\xd1\x82\xd0\xb2"}\n')
+    store.remember(7, "после", "после ответ")
 
     replayed = store.replay(7, now=time.time())
 
     assert "целый ответ" in replayed
-    assert "�" not in replayed, "a corrupted sentence reached the agent's memory"
+    assert "после ответ" in replayed
+    assert "\ufffd" not in replayed, "a corrupted sentence reached the agent's memory"
+
+
+def test_a_legitimately_pasted_replacement_character_is_kept(tmp_path: Path) -> None:
+    """The operator pastes it, or a model emits it. Rejecting every line
+    containing U+FFFD lost that exchange — the mistake after the mistake."""
+    store = _store(tmp_path, lambda: "exp-1")
+    store.remember(7, "оператор вставил \ufffd", "нормальный ответ")
+
+    replayed = store.replay(7, now=time.time())
+
+    assert "нормальный ответ" in replayed, "a legitimate exchange was dropped because its text contains U+FFFD"
 
 
 def test_an_unparseable_tail_is_still_trimmed(tmp_path: Path) -> None:

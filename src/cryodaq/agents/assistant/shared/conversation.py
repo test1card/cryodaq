@@ -98,6 +98,15 @@ def _safe_scope_key(scope: Any) -> str:
     return _safe_key(str(scope) if scope is not None else "", "no-experiment")
 
 
+def _decodes(chunk: bytes) -> bool:
+    """Whether these bytes are valid UTF-8. One line's damage stays its own."""
+    try:
+        chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 class ConversationStore:
     """Append-only transcripts, one file per chat per experiment. Never raises.
 
@@ -348,26 +357,25 @@ class ConversationStore:
             if path.stat().st_size > _MAX_FILE_BYTES:
                 logger.debug("conversation ignored: %s is %d bytes", path.name, path.stat().st_size)
                 return []
-            # `errors="replace"`: a byte left half-written by a killed process
-            # must cost the line it is in, not every exchange in the file.
+            # PER LINE, STRICTLY. A byte left half-written by a killed process
+            # must cost the line it is in and not every exchange in the file,
+            # and the two earlier attempts at that both got it wrong: decoding
+            # the whole file strictly lost everything to one bad byte, and
+            # decoding it with `errors="replace"` produced U+FFFD, which is
+            # legal inside a JSON string — so the damaged record PARSED and
+            # handed the agent a sentence nobody wrote.
             #
-            # The line is then dropped EXPLICITLY, by looking for the
-            # replacement character. The previous comment here claimed such a
-            # line necessarily fails to parse, and that is false: U+FFFD is
-            # perfectly legal inside a JSON string, so the record parsed and
-            # quietly handed the agent a question or answer that is not what
-            # anybody wrote.
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            # Rejecting every line containing U+FFFD was the next mistake: an
+            # operator who pastes that character legitimately would lose the
+            # exchange. Decoding each line on its own separates the two cases
+            # exactly — undecodable BYTES fail here, a legitimately encoded
+            # character does not.
+            lines = [chunk.decode("utf-8") for chunk in path.read_bytes().split(b"\n") if _decodes(chunk)]
         except Exception as exc:  # noqa: BLE001
             logger.debug("conversation not read: %s", exc)
             return []
         turns: list[dict] = []
         for line in lines[-_MAX_FILE_TURNS:]:
-            if "\ufffd" in line:
-                # Undecodable bytes: whatever this says, it is not what was
-                # written, and a plausible-looking wrong sentence in the agent's
-                # memory is worse than a missing one.
-                continue
             try:
                 record = json.loads(line)
             except Exception:  # noqa: BLE001 - one bad line is not a lost history
