@@ -56,7 +56,14 @@ def _bucket_for(window_minutes: int, budget: int = 400) -> float:
     nothing and only coarsen a short window.
     """
     seconds = max(float(window_minutes), 1.0) * 60.0
-    return max(math.ceil(seconds / max(budget, 1)), 2.0)
+    # ONE BUCKET OF HEADROOM. Buckets are global — a reading lands in
+    # `floor(ts / bucket)` — so a window that does not begin on a boundary
+    # straddles a partial bucket at each end and spans one more than its length
+    # divided by the bucket size. Dividing by the budget itself put an hour at
+    # 9 s buckets, which an unaligned hour crosses 401 times against a budget of
+    # 400: the engine drops the earliest and the rate covers less than the
+    # window the text names.
+    return max(math.ceil(seconds / max(budget - 1, 1)), 2.0)
 
 
 class ContextBuilder:
