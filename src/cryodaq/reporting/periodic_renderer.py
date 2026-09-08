@@ -559,8 +559,15 @@ _MIN_SENTENCE_KEPT = 80
 #: caption reading "**Сводка за 60 мин**" and "*Датчики:*" with the asterisks
 #: still in it, because the prompt asks for markdown and the caption escapes
 #: everything it is given.
+#: The opening marker must follow a boundary and the closing one must precede
+#: a boundary. Without that `a*b*c` — a file mask, a formula — became
+#: `a<i>b</i>c`, and this text is full of channel names and numbers.
 _SUMMARY_MARKUP = re.compile(
-    r"\*\*(?P<b>[^*\n]+)\*\*|\*(?P<i>[^*\n]+)\*|`(?P<code>[^`\n]+)`"
+    r"(?<![^\s(\[])(?:"
+    r"\*\*(?P<b>[^*\n]+)\*\*"
+    r"|\*(?P<i>[^*\n]+)\*"
+    r"|`(?P<code>[^`\n]+)`"
+    r")(?![^\s.,;:!?)\]])"
 )
 
 
@@ -573,7 +580,22 @@ def _without_markers(text: str) -> str:
     complained about.
     """
 
-    return text.replace("*", "").replace("`", "")
+    out: list[str] = []
+    for index, char in enumerate(text):
+        if char not in "*`":
+            out.append(char)
+            continue
+        # ONLY WHERE IT LOOKS LIKE MARKUP. Emphasis attaches to a word boundary;
+        # a marker with text pressed against it on BOTH sides is arithmetic.
+        # Stripping unconditionally turned `10**-3` into `10-3` and `2*3` into
+        # `23` — a number silently changed on its way to the operator, which is
+        # worse than the stray asterisk this function exists to remove.
+        before = text[index - 1] if index else " "
+        after = text[index + 1] if index + 1 < len(text) else " "
+        if before.isspace() or after.isspace():
+            continue
+        out.append(char)
+    return "".join(out)
 
 
 def _render_summary_markup(raw: str) -> str:

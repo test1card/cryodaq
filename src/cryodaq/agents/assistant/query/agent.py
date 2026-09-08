@@ -254,7 +254,16 @@ def _format_trends(trends) -> str:
         # mid-rise cannot separate a constant source from a decaying one; their
         # difference lives in the first hour, where a decaying source is
         # steepest. This is that comparison, as ratios rather than a verdict.
-        if trend.shape is not None:
+        # ONLY FOR A PRESSURE. The three laws describe a source filling a closed
+        # volume; on a temperature they describe nothing, and the reading rule in
+        # the prompt would turn a warming sensor's straight line into the
+        # signature of a vacuum leak. Same test the router uses.
+        # THE CHANNEL, NOT THE LABEL. The key here is whatever the caller chose
+        # to display — "давление" as often as the channel id — so testing it
+        # silently switched the shape off for the one channel it is for.
+        identity = f"{getattr(trend, 'channel', '')} {name}".lower()
+        is_pressure = "pressure" in identity or "mbar" in identity
+        if trend.shape is not None and is_pressure:
             linear, root, log = trend.shape
             if linear > 0.0:
                 since = (

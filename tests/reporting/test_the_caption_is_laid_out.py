@@ -141,3 +141,35 @@ def test_a_marker_orphaned_by_truncation_is_dropped() -> None:
 
     validate_caption_html(rendered)
     assert "*" not in rendered, f"markdown leftovers reached the operator: {rendered[-60:]!r}"
+
+
+@pytest.mark.parametrize(
+    "raw, kept",
+    [
+        ("Давление 10**-3 мбар", "10**-3"),
+        ("коэффициент 2*3 равен шести", "2*3"),
+        ("файл a*b*c", "a*b*c"),
+    ],
+)
+def test_arithmetic_outside_monospace_is_not_markup(raw: str, kept: str) -> None:
+    """The second half of the same defect, found after the first was fixed.
+
+    Keeping monospace verbatim saved `10**-3` only when the agent had put it in
+    backticks. Written plainly it still came out as `10-3`, and `2*3` as `23` —
+    a number silently changed on its way to the operator. Emphasis attaches to a
+    word boundary; a marker with text pressed against it on both sides is
+    arithmetic, not markup.
+    """
+
+    rendered = _render_summary_markup(raw)
+
+    assert kept in rendered, rendered
+    validate_caption_html(rendered)
+
+
+def test_an_orphaned_marker_at_a_boundary_is_still_dropped() -> None:
+    """The narrowing must not bring the asterisks back."""
+
+    for raw in ("*Датчики: 11 всего", "Давление стабильно *", "конец **"):
+        rendered = _render_summary_markup(raw)
+        assert "*" not in rendered, f"markdown leftovers survived: {rendered!r}"

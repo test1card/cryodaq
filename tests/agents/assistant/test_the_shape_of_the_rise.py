@@ -267,3 +267,42 @@ async def test_a_falling_pressure_has_no_shape_of_a_rise() -> None:
     assert trend.rate_per_hour < 0.0, "the fixture does not actually fall"
     assert trend.shape is None, "a falling pressure was given the shape of a rise"
     assert "форма подъёма" not in _format_trends({"давление": trend})
+
+
+@pytest.mark.parametrize(
+    "channel, expected",
+    [
+        ("VSP63D_1/pressure", True),
+        ("давление", False),
+        ("Т1", False),
+        ("Т12 2-я ступень", False),
+    ],
+)
+def test_the_shape_is_only_reported_for_a_pressure(channel: str, expected: bool) -> None:
+    """The three laws describe a source filling a closed volume.
+
+    On a temperature they describe nothing — but the formatter printed them for
+    any channel with a shape, and the prompt reads a straight line as a flow
+    that does not decay. A sensor warming steadily would have been handed to the
+    operator wearing the signature of a vacuum leak.
+    """
+
+    from cryodaq.agents.assistant.query.agent import _format_trends
+    from cryodaq.agents.assistant.query.schemas import ChannelTrend
+
+    trend = ChannelTrend(
+        channel=channel,
+        window_minutes=1440,
+        n_samples=2000,
+        first_value=294.0,
+        last_value=298.0,
+        span_s=20 * 3600,
+        rate_per_hour=0.2,
+        slope_stderr_per_hour=0.001,
+        regime_hours=16.0,
+        shape=(0.01, 0.12, 0.30),
+    )
+
+    text = _format_trends({channel: trend})
+
+    assert ("форма подъёма" in text) is expected, text[:160]
