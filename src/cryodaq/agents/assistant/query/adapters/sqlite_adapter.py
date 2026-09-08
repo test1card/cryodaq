@@ -57,6 +57,15 @@ _MIN_REGIME_POINTS = 12
 #: claimed.
 _REGIME_SSE_GAIN = 2.0
 
+#: AND the break must beat a SMOOTH curve, not merely a straight line. Data that
+#: bends is fitted better by two lines than by one wherever it is cut, so on a
+#: pure sqrt rise — a textbook depleting source — the criterion below found a
+#: regime change at 6.9 h that does not exist, and the shape measured from that
+#: false start then reported the straight line as the better fit. A parabola is
+#: the cheapest thing that bends without breaking: if it fits as well, what is
+#: there is curvature and not a change of regime.
+_REGIME_VS_CURVE_GAIN = 1.5
+
 #: AND how differently the two pieces must rise. The residual test alone is not
 #: enough: data that merely CURVES is always fitted better by two lines than by
 #: one, so on the stand's own pressure — falling 3% across a day — it invented a
@@ -135,6 +144,31 @@ def _regime_start(pairs: list[tuple[float, float]]) -> int | None:
         return None
     whole = entire[0]
 
+    # The smooth alternative, fitted once: a parabola by normal equations. Not a
+    # physical model — just something that bends without a corner in it.
+    mean_x = px[n] / n
+    us = [x - mean_x for x in xs]
+    raw_v = [u * u for u in us]
+    mean_v = sum(raw_v) / n
+    vs = [v - mean_v for v in raw_v]
+    suu = sum(u * u for u in us)
+    svv = sum(v * v for v in vs)
+    suv = sum(u * v for u, v in zip(us, vs, strict=True))
+    mean_y = py[n] / n
+    ws = [y - mean_y for y in ys]
+    suy = sum(u * w for u, w in zip(us, ws, strict=True))
+    svy = sum(v * w for v, w in zip(vs, ws, strict=True))
+    det = suu * svv - suv * suv
+    if det <= 0.0:
+        curved = whole
+    else:
+        slope_u = (suy * svv - svy * suv) / det
+        slope_v = (svy * suu - suy * suv) / det
+        curved = sum(
+            (w - slope_u * u - slope_v * v) ** 2
+            for u, v, w in zip(us, vs, ws, strict=True)
+        )
+
     best_index: int | None = None
     best_sse = whole
     best_slopes = (0.0, 0.0)
@@ -149,6 +183,8 @@ def _regime_start(pairs: list[tuple[float, float]]) -> int | None:
             best_index = split
             best_slopes = (left[1], right[1])
     if best_index is None or best_sse * _REGIME_SSE_GAIN > whole:
+        return None
+    if best_sse * _REGIME_VS_CURVE_GAIN > curved:
         return None
     before, after = best_slopes
     scale = max(abs(before), abs(after))
@@ -411,8 +447,15 @@ class SQLiteAdapter:
         # the window as asked for; the shape below describes only what has held
         # since the last change, because that is the stretch whose beginning
         # carries the answer.
+        # ONLY WHEN THE BEGINNING WAS SEEN. The three laws are anchored at the
+        # first sample, so they measure the age of the SOURCE — and a window
+        # that opens long after the source started cannot know that age. A
+        # genuine logarithmic rise that began a hundred hours earlier is very
+        # nearly a straight line across one day, and reporting the ratios then
+        # says "constant flow" about a source that is plainly depleting. When
+        # the start was not observed there is nothing honest to report.
         split = _regime_start(pairs)
-        regime = pairs[split:] if split is not None else pairs
+        regime = pairs[split:] if split is not None else []
         regime_hours = (regime[-1][0] - regime[0][0]) / 3600.0 if len(regime) > 1 else None
         return ChannelTrend(
             channel=channel,
@@ -426,7 +469,7 @@ class SQLiteAdapter:
             segments=_segment_rates(pairs),
             slope_change=_centred_quadratic(pairs),
             regime_hours=regime_hours,
-            shape=_shape_of_rise(regime),
+            shape=_shape_of_rise(regime) if regime else None,
         )
 
     @staticmethod

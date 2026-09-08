@@ -49,6 +49,32 @@ def test_a_flat_stretch_then_a_rise_is_a_change_of_regime() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "curve, what",
+    [
+        (lambda h: 0.09 + 0.105 * h - 0.0000175 * h * h, "the stand's own 3% fall across a day"),
+        (lambda h: 0.09 + 0.4 * math.sqrt(h + 0.5), "a pure sqrt rise — a depleting source"),
+        (lambda h: 0.09 + 0.4 * math.log(h + 100), "a logarithm whose source is old"),
+        (lambda h: 0.09 + 0.02 * h * h, "a rise that accelerates"),
+    ],
+)
+def test_a_smooth_curve_is_never_a_change_of_regime(curve, what: str) -> None:
+    """Review's counterexamples, and the reason the criterion needed a third leg.
+
+    Two straight pieces fit ANY bend better than one straight line, wherever the
+    cut falls — so a residual test, even with a slope test beside it, called a
+    textbook depleting source a change of regime at 6.9 h. From that false start
+    the shape then reported the straight line as the better fit: a sqrt rise
+    turned into evidence for a leak.
+
+    The break must beat a parabola, which bends without breaking.
+    """
+
+    assert _regime_start(_series(curve, hours=24.0)) is None, (
+        f"{what} was reported as a change of regime"
+    )
+
+
 def test_a_curve_is_not_a_change_of_regime() -> None:
     """The control that the first version of this failed.
 
@@ -138,3 +164,34 @@ async def test_the_adapter_fills_the_shape_and_the_text_shows_it() -> None:
     assert "режим идёт" in text
     linear, root, log = trend.shape
     assert f"{log / linear:.1f}" in text, "the ratio that answers the question is missing"
+
+
+async def test_no_observed_beginning_means_no_shape_at_all() -> None:
+    """The deepest of review's two blockers.
+
+    The three laws are anchored at the first sample, so they measure the age of
+    the SOURCE. A window that opens long after the source started cannot know
+    that age: a genuine logarithmic rise begun a hundred hours earlier is very
+    nearly straight across one day, and the ratios then said "linear better by
+    17x" — a constant flow, the signature of a leak — about a source that is
+    plainly depleting.
+
+    There is no fix inside the fit. If the beginning was not seen, the honest
+    output is nothing.
+    """
+
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
+    from cryodaq.agents.assistant.query.agent import _format_trends
+
+    old_source = [[t, v] for t, v in _series(lambda h: 0.09 + 0.4 * math.log(h + 100), hours=24.0)]
+
+    class _Client:
+        async def call(self, _cmd: dict) -> dict:
+            return {"ok": True, "data": {"VSP63D_1/pressure": old_source}}
+
+    trend = await SQLiteAdapter(_Client()).trend("VSP63D_1/pressure", 1440)
+
+    assert trend is not None and trend.available
+    assert trend.shape is None, "a shape was reported for a rise whose start was never seen"
+    assert trend.regime_hours is None, "the window's length was passed off as the regime's age"
+    assert "форма подъёма" not in _format_trends({"давление": trend})
