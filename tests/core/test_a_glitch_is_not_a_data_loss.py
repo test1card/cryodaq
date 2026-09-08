@@ -90,12 +90,11 @@ def test_a_good_reading_after_a_glitch_moves_the_clock_forward() -> None:
 
 def test_the_alarm_asks_one_question_not_two() -> None:
     """Structural: the two-branch form is what let the timeout be bypassed."""
+    import ast
     import inspect
+    import textwrap
 
     from cryodaq.core import alarm_v2
-
-    import ast
-    import textwrap
 
     source = inspect.getsource(alarm_v2.AlarmEvaluator._eval_stale)
     # Parsed, not grepped: the comment explaining the old form CONTAINS the old

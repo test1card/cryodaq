@@ -183,6 +183,10 @@ def _channel_alarms_enabled(channel: str) -> bool:
         return True
 
 
+#: What a stale guard falls back to when its configured timeout cannot be read.
+_DEFAULT_STALE_TIMEOUT_S = 30.0
+
+
 class AlarmEvaluator:
     """Вычисляет условие аларма по текущему состоянию системы.
 
@@ -209,6 +213,9 @@ class AlarmEvaluator:
         self._rate = rate
         self._phase = phase_provider
         self._setpoint = setpoint_provider
+        #: Alarms already complained about, so a broken timeout is reported
+        #: once rather than on every evaluation cycle for as long as it stands.
+        self._unreadable_stale_timeouts: set[str] = set()
 
     def evaluate(
         self,
@@ -591,8 +598,37 @@ class AlarmEvaluator:
     # stale
     # ------------------------------------------------------------------
 
+    def _stale_timeout(self, alarm_id: str, configured: object) -> float:
+        """The configured timeout, or the default when it cannot be read.
+
+        `timeout_s` arrives straight from the alarm YAML. A NaN compares false
+        against everything, so the guard never fires and never says why; a
+        string or a null raises `TypeError`, which `evaluate()` logs and turns
+        into "no event". Both leave a CRITICAL that exists to notice hours of
+        silence sitting quiet through exactly that.
+
+        Refusing the value and keeping the guard is the safer failure: a
+        timeout that is somewhat wrong still fires, a guard that is off does
+        not. The operator is told once, and decides.
+        """
+
+        if type(configured) is not bool and isinstance(configured, (int, float)):
+            value = float(configured)
+            if math.isfinite(value) and value > 0.0:
+                return value
+        if alarm_id not in self._unreadable_stale_timeouts:
+            self._unreadable_stale_timeouts.add(alarm_id)
+            logger.error(
+                "Аларм %s: timeout_s=%r не читается как положительное конечное число; "
+                "страж продолжает работать со значением по умолчанию %.0f с",
+                alarm_id,
+                configured,
+                _DEFAULT_STALE_TIMEOUT_S,
+            )
+        return _DEFAULT_STALE_TIMEOUT_S
+
     def _eval_stale(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
-        timeout = cfg.get("timeout_s", 30.0)
+        timeout = self._stale_timeout(alarm_id, cfg.get("timeout_s", _DEFAULT_STALE_TIMEOUT_S))
         channels = self._resolve_channels(cfg)
         level = cfg.get("level", "WARNING")
         message_tmpl = cfg.get("message", "Stale data: {channel}")
