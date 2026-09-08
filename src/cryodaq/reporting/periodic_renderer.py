@@ -513,7 +513,7 @@ _WORD_BOUNDARY_LOOKBACK = 24
 _SENTENCE_ENDS = (".", "!", "?", "\n")
 
 
-def _last_sentence_end(text: str) -> int:
+def _last_sentence_end(text: str, *, dropped: str = "") -> int:
     """Index of the last real sentence end, or -1.
 
     A bare `rfind(".")` treats the point inside a number as a sentence: with
@@ -530,6 +530,14 @@ def _last_sentence_end(text: str) -> int:
         if char == "\n":
             return index
         following = text[index + 1 : index + 2]
+        if not following:
+            # WHAT THE CUT THREW AWAY. From the prefix alone "Датчиков всего
+            # 11." and "давление 0." are the same shape, and refusing both to be
+            # safe threw away a finished sentence every time one ended in a
+            # number. The character the cut dropped tells them apart: a digit
+            # means the period was inside the number, anything else means the
+            # sentence ended there.
+            following = dropped
         if following and not following.isspace():
             continue
         # ONLY WHEN NOTHING FOLLOWS. A period on a digit is a severed decimal
@@ -597,7 +605,7 @@ def _with_summary(caption: str, summary: str) -> str:
         # survives: a single long paragraph is still better shown cut than
         # dropped, and the word-boundary rule below then keeps it off a word.
         trimmed = cut.rstrip()
-        sentence = _last_sentence_end(trimmed)
+        sentence = _last_sentence_end(trimmed, dropped=summary[len(trimmed) : len(trimmed) + 1])
         if sentence >= _MIN_SENTENCE_KEPT:
             whole = trimmed[: sentence + 1].rstrip()
             if whole:

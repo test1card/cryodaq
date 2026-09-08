@@ -58,6 +58,16 @@ def test_the_composite_asks_for_a_day() -> None:
     assert _TREND_WINDOW_MINUTES >= 1440, "six hours cannot show whether a rate decays"
 
 
+#: Every categorical shape word the deleted `segment_trend` could produce.
+#: Forbidding one of them let the same regression back in wearing another.
+_SHAPE_VERDICTS = ("темп держится", "темп падает", "темп растёт")
+
+
+def _no_verdict(text: str, *, why: str = "") -> None:
+    for verdict in _SHAPE_VERDICTS:
+        assert verdict not in text, f"{why or 'a categorical shape verdict came back'}: {verdict!r}"
+
+
 # --- the shape ------------------------------------------------------------
 
 
@@ -78,6 +88,7 @@ def test_a_constant_rate_reads_as_holding() -> None:
     for rate, err in trend.segments:
         assert f"{rate:+.3g}" in text, f"segment rate {rate} never reached the operator"
         assert f"{err:.2g}" in text, f"segment error {err} was dropped"
+    _no_verdict(text)
 
 
 def test_a_decaying_rate_reads_as_falling() -> None:
@@ -100,6 +111,7 @@ def test_a_decaying_rate_reads_as_falling() -> None:
     for rate, err in trend.segments:
         assert f"{rate:+.3g}" in text
         assert f"{err:.2g}" in text
+    _no_verdict(text)
 
 
 def test_a_change_inside_the_noise_is_not_called_a_trend() -> None:
@@ -120,8 +132,7 @@ def test_a_change_inside_the_noise_is_not_called_a_trend() -> None:
     # These intervals permit a fall of about a third. Saying the rate "holds"
     # turns a failure to measure into a claim of constancy, which is how a
     # decaying source gets mistaken for a steady leak.
-    for verdict in ("темп держится", "темп падает", "темп растёт"):
-        assert verdict not in text, f"a change inside the noise was reported as {verdict!r}"
+    _no_verdict(text)
     for rate, err in trend.segments:
         assert f"{rate:+.3g}" in text
         assert f"{err:.2g}" in text
@@ -142,8 +153,7 @@ def test_one_segment_says_nothing() -> None:
 
     text = _format_trends({"P": trend})
 
-    for verdict in ("темп держится", "темп падает", "темп растёт"):
-        assert verdict not in text, "one segment cannot describe a shape"
+    _no_verdict(text, why="one segment cannot describe a shape")
 
 
 # --- the segments are split by TIME ---------------------------------------
@@ -206,7 +216,7 @@ def test_the_rendered_trend_carries_the_shape() -> None:
     for rate, err in trend.segments:
         assert f"{rate:+.3g}" in rendered
         assert f"{err:.2g}" in rendered
-    assert "темп падает" not in rendered
+    _no_verdict(rendered)
 
 
 def test_an_absurd_sigma_is_words_not_digits() -> None:
@@ -251,10 +261,15 @@ async def test_the_adapter_actually_fills_the_segments() -> None:
     """
     from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
 
+    # Named, because the assertion below is derived from them.
+    _HOURS = 18
+    _RATE0 = 0.11
+    _DECAY = 0.001  # per hour, per hour
+
     pairs = []
     t, value = 1_000_000.0, 0.0
-    for hour in range(18):
-        rate = 0.11 - 0.001 * hour
+    for hour in range(_HOURS):
+        rate = _RATE0 - _DECAY * hour
         for _ in range(60):
             value += rate / 60.0
             t += 60.0
@@ -268,11 +283,17 @@ async def test_the_adapter_actually_fills_the_segments() -> None:
 
     assert trend is not None and trend.available
     assert len(trend.segments) == 3, "the adapter did not compute the segments"
-    # The data above was built with a rate decaying 0.001/ч per hour, so the
-    # first third must sit well above the last. Asserted on the numbers, not on
-    # a verdict: the verdict is what this review removed.
+    # DERIVED, NOT PICKED. The generator above decays the rate by _DECAY per
+    # hour over _HOURS, and the thirds are centred _HOURS/3 apart, so the first
+    # and last centres differ by 2*_HOURS/3 hours of decay. A hand-picked
+    # threshold passes for wrong segment rates and breaks when the generator
+    # changes.
+    expected = _DECAY * 2.0 * _HOURS / 3.0  # decay per hour × hours between the outer centres
     first, last = trend.segments[0][0], trend.segments[-1][0]
-    assert first - last > 0.010, f"the decay did not survive segmentation: {trend.segments}"
+    assert abs((first - last) - expected) < 0.2 * expected, (
+        f"expected a fall of about {expected:.4f} across the thirds, "
+        f"measured {first - last:.4f}: {trend.segments}"
+    )
     # And the quadratic, for the same reason the segments are checked here: a
     # control that removed this line from the adapter left every hand-built
     # ChannelTrend test green.
@@ -369,16 +390,23 @@ def test_consecutive_thirds_do_not_share_a_sample(monkeypatch) -> None:
     # boundary lands on a sample only when that span divides evenly: 31 points
     # spaced 60 s span 1800 s, and the thirds fall exactly on samples 10 and 20.
     pairs = [(float(index) * 60.0, 0.1 * index) for index in range(31)]
-    seen: list[int] = []
+    chunks: list[list[tuple[float, float]]] = []
     real_fit = sqlite_adapter._fit_rate
 
-    def _counting_fit(chunk):
-        seen.append(len(chunk))
+    def _capturing_fit(chunk):
+        chunks.append(list(chunk))
         return real_fit(chunk)
 
-    monkeypatch.setattr(sqlite_adapter, "_fit_rate", _counting_fit)
+    monkeypatch.setattr(sqlite_adapter, "_fit_rate", _capturing_fit)
     sqlite_adapter._segment_rates(pairs, parts=3)
 
-    assert sum(seen) == len(pairs), (
-        f"the thirds used {sum(seen)} samples out of {len(pairs)}: {seen}"
+    # COUNTING IS NOT ENOUGH. A duplicated sample and a lost one cancel in the
+    # total, so compare the partition itself: every sample used exactly once,
+    # nothing invented, nothing dropped, and no two thirds sharing anything.
+    used = [pair for chunk in chunks for pair in chunk]
+    assert sorted(used) == sorted(pairs), (
+        f"the thirds are not a partition: {len(used)} used against {len(pairs)}"
     )
+    for earlier, later in zip(chunks, chunks[1:]):
+        shared = set(earlier) & set(later)
+        assert not shared, f"consecutive thirds share {sorted(shared)}"

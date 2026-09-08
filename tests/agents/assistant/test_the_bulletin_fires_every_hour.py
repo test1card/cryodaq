@@ -75,8 +75,11 @@ async def test_an_hourly_bulletin_fires_once_an_hour(monkeypatch: pytest.MonkeyP
 
     gaps = [b - a for a, b in zip(bus.fired_at, bus.fired_at[1:])]
     assert gaps, "the bulletin never fired twice"
-    assert all(abs(gap - interval) < 60.0 for gap in gaps), (
-        f"gaps between bulletins are {gaps}, expected about {interval} s each"
+    # EXACT. The clock here advances by precisely what each sleep asks for, so
+    # any slack in this assertion is slack that hides a real drift: at ±60 s a
+    # bulletin every 3541 s would still read as hourly.
+    assert all(gap == interval for gap in gaps), (
+        f"gaps between bulletins are {gaps}, expected exactly {interval} s each"
     )
 
 
@@ -99,7 +102,7 @@ async def test_the_bulletin_keeps_the_boundary_it_was_aligned_to(
 
     for fired in bus.fired_at:
         offset = (fired + lead) % interval
-        assert min(offset, interval - offset) < 60.0, (
+        assert min(offset, interval - offset) <= assistant_main._TICK_ARRIVAL_TOLERANCE_S, (
             f"fired at {fired}, which is {offset} s from a boundary minus the lead"
         )
 

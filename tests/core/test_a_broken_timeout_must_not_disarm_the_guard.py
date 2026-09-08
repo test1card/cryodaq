@@ -73,6 +73,8 @@ def test_a_broken_timeout_still_reports_an_hour_of_silence(timeout: object) -> N
     assert event is not None, (
         f"timeout_s={timeout!r} disarmed the guard: an hour of silence raised nothing"
     )
+    assert event.level == "CRITICAL"
+    assert event.channels == ["P"]
 
 
 def _evaluator_with_a_channel_silent_for(seconds: float) -> AlarmEvaluator:
@@ -113,4 +115,33 @@ def test_a_timeout_written_as_a_string_is_still_that_timeout(written: str) -> No
     quiet_for_five = _evaluator_with_a_channel_silent_for(300.0)
     assert quiet_for_five.evaluate("data_loss_pressure", cfg) is not None, (
         f"timeout_s={written!r} did not fire after 300 s"
+    )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [math.nan, "abc", None, -1.0, 0.0, math.inf, True],
+    ids=["nan", "words", "null", "negative", "zero", "infinite", "boolean"],
+)
+def test_an_unreadable_timeout_behaves_exactly_like_the_default(timeout: object) -> None:
+    """Asserting only that SOMETHING fires after an hour is too weak: -1 and 0
+    fired before the fix as well, and an implementation that turned every bad
+    value into zero would pass. What the fallback promises is the DEFAULT
+    threshold, so check both sides of it — quiet for less than the default is
+    not an event, quiet for more is.
+    """
+
+    from cryodaq.core.alarm_v2 import _DEFAULT_STALE_TIMEOUT_S
+
+    cfg = {"alarm_type": "stale", "channel": "P", "timeout_s": timeout, "level": "CRITICAL"}
+
+    below = _evaluator_with_a_channel_silent_for(_DEFAULT_STALE_TIMEOUT_S / 2.0)
+    assert below.evaluate("data_loss_pressure", cfg) is None, (
+        f"timeout_s={timeout!r} fired before the default threshold; a bad value "
+        f"became something shorter than the default rather than the default"
+    )
+
+    above = _evaluator_with_a_channel_silent_for(_DEFAULT_STALE_TIMEOUT_S * 3.0)
+    assert above.evaluate("data_loss_pressure", cfg) is not None, (
+        f"timeout_s={timeout!r} did not fire past the default threshold"
     )

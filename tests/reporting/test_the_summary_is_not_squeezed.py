@@ -12,7 +12,7 @@ The operator's steer on 2026-09-08: "не нужно так заморачива
 from __future__ import annotations
 
 from cryodaq.agents.assistant.live.prompts import PERIODIC_REPORT_SYSTEM
-from cryodaq.reporting.periodic_input import MAX_SUMMARY_CHARS
+from cryodaq.reporting.periodic_input import MAX_SUMMARY_CHARS, MIN_INPUT_BYTES
 from cryodaq.reporting.periodic_renderer import MAX_CAPTION_CODEPOINTS, _with_summary
 
 _BASE = "x" * 330  # roughly what temperatures, pressure and alarms occupy
@@ -147,6 +147,11 @@ def test_the_fit_check_never_raises_and_never_lies() -> None:
 
     assert _payload_fits({"x": _Unserialisable()}, 10) is False
 
+    # AND IT MUST STILL SAY YES TO A FIT. An implementation that answered
+    # "does not fit" to everything would satisfy the line above and shrink
+    # every summary to nothing, silently, forever.
+    assert _payload_fits({"x": 1}, MIN_INPUT_BYTES) is True
+
 
 # --- two edges the review found --------------------------------------------
 
@@ -195,3 +200,49 @@ def test_a_severed_decimal_is_still_not_a_sentence() -> None:
     from cryodaq.reporting.periodic_renderer import _last_sentence_end
 
     assert _last_sentence_end("Всё спокойно. давление 0.") == len("Всё спокойно")
+
+
+def test_a_sentence_ending_in_a_count_survives_a_cut_right_after_it() -> None:
+    """The earlier test handed `_last_sentence_end` a string that still had the
+    space after "11.". The real caller hands it an rstripped prefix, where that
+    space is gone and the period looks exactly like a severed decimal — so the
+    sentence is still thrown away at the one place it matters.
+
+    The prefix alone cannot tell "Датчиков всего 11." from "давление 0.". What
+    can is the character the cut dropped: a digit means the period was inside a
+    number, anything else means the sentence ended there.
+    """
+
+    from cryodaq.reporting.periodic_renderer import _MIN_SENTENCE_KEPT, _with_summary
+
+    # The head must carry a sentence end at or past `_MIN_SENTENCE_KEPT`, or
+    # the sentence branch never runs and the fall-through keeps the text by
+    # accident — which is how the first version of this test passed while the
+    # defect stood.
+    head = "Всё спокойно, вмешательство пока не требуется, за исключением одного места, о котором ниже. "
+    assert head.index(". ") >= _MIN_SENTENCE_KEPT
+    summary = head + "Датчиков всего 11. Из них десять в норме и один не оценён."
+    # Cut exactly after "11." — derive the caption length, do not guess it.
+    keep = summary.index(" Из них")
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - len("\n\n") - keep - 1)
+
+    tail = _with_summary(caption, summary)[len(caption) :].strip()
+
+    assert "11." in tail, f"the sentence ending in a count was dropped: {tail!r}"
+
+
+def test_a_decimal_severed_by_the_cut_is_still_not_a_sentence() -> None:
+    """The control. Same shape, but the dropped character is a digit, so the
+    period belongs to the number and the caption must not end on it."""
+
+    from cryodaq.reporting.periodic_renderer import _with_summary
+
+    head = "Всё спокойно, вмешательство не требуется. "
+    summary = head + "Давление сейчас 0.10 мбар и медленно растёт."
+    keep = summary.index("10 мбар")
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - len("\n\n") - keep - 1)
+
+    tail = _with_summary(caption, summary)[len(caption) :].strip()
+
+    body = tail.rstrip("… ").rstrip()
+    assert not body.endswith("0."), f"a number was cut in half and shown as a thought: {tail!r}"

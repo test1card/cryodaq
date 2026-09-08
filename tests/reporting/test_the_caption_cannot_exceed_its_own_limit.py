@@ -39,8 +39,16 @@ def _summary_whose_cut_lands_on_a_full_stop(caption: str) -> str:
     return "А" * (cut_length - 1) + "." + " " + "Хвост, который не поместится."
 
 
+#: How much room the summary is left. Big enough for the sentence branch to
+#: run at all (`_MIN_SENTENCE_KEPT` plus the two characters of " …"), small
+#: enough that the caption is doing real work. The caption length follows from
+#: it rather than being picked.
+_SUMMARY_ROOM = _MIN_SENTENCE_KEPT + 120
+_CAPTION_LENGTH = MAX_CAPTION_CODEPOINTS - len("\n\n") - _SUMMARY_ROOM
+
+
 def test_a_caption_cut_on_a_sentence_still_fits() -> None:
-    caption = "x" * 822
+    caption = "x" * _CAPTION_LENGTH
     summary = _summary_whose_cut_lands_on_a_full_stop(caption)
 
     result = _with_summary(caption, summary)
@@ -53,7 +61,7 @@ def test_a_caption_cut_on_a_sentence_still_fits() -> None:
 def test_the_call_site_composition_does_not_raise() -> None:
     """This is line 505 of the renderer, verbatim: the validator sees the result."""
 
-    caption = "x" * 822
+    caption = "x" * _CAPTION_LENGTH
     summary = _summary_whose_cut_lands_on_a_full_stop(caption)
 
     try:
