@@ -465,7 +465,20 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
     for heading, lines in groups:
         data_min.extend(["", heading, f"  … (+{len(lines)} каналов)"])
     alarm_tail = _alarm_tail(snapshot.alarms, snapshot.render.alarm_state_complete, prefix + data_min)
-    mandatory = [*prefix, *data_min, "", *alarm_tail]
+    # RESERVED, NOT APPENDED IF IT FITS. Adding this after the data was chosen
+    # dropped it silently on a saturated report — precisely the report where the
+    # operator most needs to know the summary is missing rather than the hour
+    # being quiet, which was the whole point. It rides with the alarm tail now,
+    # so the data yields to it exactly as the data yields to the alarms.
+    absence_tail = [] if snapshot.render.summary else ["", _NO_SUMMARY_LINE]
+    mandatory = [*prefix, *data_min, "", *alarm_tail, *absence_tail]
+    if absence_tail and not _fits(mandatory):
+        # The mandatory core must fit by contract, and on a caption already full
+        # of channels and alarms it can leave no room at all. Then this line is
+        # the thing that goes: it is a note about the report, and the readings
+        # and the alarms are the report.
+        absence_tail = []
+        mandatory = [*prefix, *data_min, "", *alarm_tail]
     if not _fits(mandatory):
         raise PeriodicInputError("mandatory periodic caption truth exceeds bounds")
 
@@ -488,13 +501,13 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
                     prefix=line_prefix,
                     suffix=line_suffix,
                     before=[*prefix, *chosen_data, *candidate_group],
-                    after=[*tail, *remaining_min, "", *alarm_tail],
+                    after=[*tail, *remaining_min, "", *alarm_tail, *absence_tail],
                 )
                 if partial is not None:
                     candidate_group.extend([partial, *tail])
                 else:
                     candidate_group.append(f"  … (+{omitted} каналов)")
-            candidate = [*prefix, *chosen_data, *candidate_group, *remaining_min, "", *alarm_tail]
+            candidate = [*prefix, *chosen_data, *candidate_group, *remaining_min, "", *alarm_tail, *absence_tail]
             if _fits(candidate):
                 admitted = count
                 chosen_data.extend(candidate_group)
@@ -502,23 +515,7 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
         else:  # pragma: no cover - mandatory reservation proves this cannot occur
             raise PeriodicInputError("periodic caption data reservation failed")
         del admitted
-    caption = "\n".join([*prefix, *chosen_data, "", *alarm_tail])
-    # SILENCE IS NOT AN ANSWER. Without a summary the caption used to come out
-    # exactly as it did before summaries existed, and a comment in the producer
-    # called that "already visible". It is not: on 2026-09-08 the operator
-    # received three such reports, could not tell a quiet hour from a failed
-    # agent, and had to send them to someone to ask. One line costs nothing and
-    # says which of the two it is.
-    if not snapshot.render.summary:
-        # ONLY IF IT FITS. The readings are the measurement and this is a note
-        # about a missing note: it must never take room from them. Added after
-        # the data has been chosen and dropped silently when the budget is gone.
-        candidate = caption + "\n\n" + _NO_SUMMARY_LINE
-        if (
-            len(candidate) <= MAX_CAPTION_CODEPOINTS
-            and len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES
-        ):
-            caption = candidate
+    caption = "\n".join([*prefix, *chosen_data, "", *alarm_tail, *absence_tail])
     return validate_caption_html(_with_summary(caption, snapshot.render.summary))
 
 

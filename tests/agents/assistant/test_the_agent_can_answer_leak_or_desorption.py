@@ -475,3 +475,36 @@ def test_agreeing_estimators_still_report_the_change() -> None:
 
     assert "изменение темпа по окну +0.012" in text
     assert "не монотонен" not in text and "расходятся по знаку" not in text
+
+
+def test_a_wobble_inside_the_errors_is_not_a_reversal() -> None:
+    """Judged on point estimates alone, noise suppressed a real measurement.
+
+    0.101 ± 0.02, 0.099 ± 0.02, 0.102 ± 0.02 is flat to within its own errors,
+    and calling it non-monotonic withheld the change of rate over a dip that
+    cannot be distinguished from nothing.
+    """
+
+    text = _format_trends(
+        {"давление": _pressure_trend(
+            ((0.101, 0.02), (0.099, 0.02), (0.102, 0.02)), (0.005, 0.002)
+        )}
+    )
+
+    assert "изменение темпа по окну +0.005" in text
+    assert "не монотонен" not in text
+
+
+def test_a_change_that_did_not_compute_is_named_as_such() -> None:
+    """`nan >= 0` is False, so a non-finite change agreed with falling segments
+    and reached the operator as "+nan". It is withheld now — and the line says
+    it did not compute, which is what happened, rather than blaming a sign."""
+
+    text = _format_trends(
+        {"давление": _pressure_trend(
+            ((0.113, 1e-4), (0.107, 1e-4), (0.101, 1e-4)), (float("nan"), 4e-4)
+        )}
+    )
+
+    assert "не посчиталось" in text
+    assert "nan" not in text.lower()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -250,11 +251,26 @@ def _format_trends(trends) -> str:
         # that it could not resolve it. It could not because both numbers were
         # right about different questions, and only one of them was labelled.
         rates = [rate for rate, _ in trend.segments]
-        monotonic = len(rates) < 2 or all(
-            b >= a for a, b in zip(rates, rates[1:])
-        ) or all(b <= a for a, b in zip(rates, rates[1:]))
+        # A REVERSAL, NOT A WOBBLE. Judged on the point estimates alone,
+        # 0.101 ± 0.02, 0.099 ± 0.02, 0.102 ± 0.02 was called non-monotonic and
+        # the change of rate was withheld over noise that is not distinguishable
+        # from flat. A step counts against monotonicity only when it clears the
+        # two errors it sits between.
+        def _reversals(sign: float) -> bool:
+            for (a, ea), (b, eb) in zip(trend.segments, trend.segments[1:]):
+                step = (b - a) * sign
+                if step < -math.hypot(ea, eb):
+                    return True
+            return False
+
+        monotonic = len(rates) < 2 or not _reversals(1.0) or not _reversals(-1.0)
         agrees = True
-        if trend.slope_change is not None and len(rates) >= 2:
+        finite_change = trend.slope_change is not None and math.isfinite(trend.slope_change[0])
+        if trend.slope_change is not None and not finite_change:
+            # `nan >= 0` is False, so a non-finite change quietly "agreed" with
+            # falling segments and reached the operator as "+nan".
+            agrees = False
+        elif trend.slope_change is not None and len(rates) >= 2:
             # AND IT MUST POINT THE SAME WAY AS THE RATES BESIDE IT. A single
             # number saying the rate fell, printed next to three rates that
             # rose, is the contradiction the operator was handed. Either
@@ -265,11 +281,13 @@ def _format_trends(trends) -> str:
             change, change_err = trend.slope_change
             parts.append(f"изменение темпа по окну {change:+.3g} ± {change_err:.2g}/ч")
         elif trend.slope_change is not None:
-            parts.append(
-                "темп по окну не монотонен, единого изменения нет"
-                if not monotonic
-                else "оценки изменения темпа расходятся по знаку, единого изменения нет"
-            )
+            if not finite_change:
+                reason = "изменение темпа не посчиталось"
+            elif not monotonic:
+                reason = "темп по окну не монотонен, единого изменения нет"
+            else:
+                reason = "оценки изменения темпа расходятся по знаку, единого изменения нет"
+            parts.append(reason)
         if trend.segments:
             # WITH THE ERRORS. Bare rates make a noisy segment and a tight one
             # look alike, and the shape of the curve is exactly what the

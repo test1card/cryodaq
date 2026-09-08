@@ -242,3 +242,33 @@ def test_a_present_summary_says_nothing_about_absence() -> None:
     assert _NO_SUMMARY_LINE not in caption
     assert "<b>Вывод:</b>" in caption
     validate_caption_html(caption)
+
+
+def test_the_absence_line_survives_a_saturated_caption() -> None:
+    """Appending it only when it fitted dropped it silently on a full report.
+
+    That is precisely the report where the operator most needs to know the
+    summary is missing rather than the hour being quiet: a caption crowded with
+    channels and alarms is not a quiet hour. It is reserved now, so the data
+    yields to it exactly as the data yields to the alarms.
+    """
+
+    import copy
+
+    from cryodaq.reporting.periodic_input import serialize_periodic_input
+    from cryodaq.reporting.periodic_renderer import _NO_SUMMARY_LINE, _build_caption
+    from tests.reporting.test_periodic_child import _payload
+
+    payload = copy.deepcopy(_payload())
+    payload["render"]["summary"] = ""
+    row = dict(payload["readings"][0])
+    payload["readings"] = [
+        {**row, "ts": float(100 + index), "ch": f"канал-с-очень-длинным-именем-{index:03d}"}
+        for index in range(60)
+    ]
+    _, validated = serialize_periodic_input(payload, expected_max_input_bytes=65_536)
+
+    caption = _build_caption(validated, [])
+
+    assert _NO_SUMMARY_LINE in caption, "the line was dropped on a crowded caption"
+    validate_caption_html(caption)
