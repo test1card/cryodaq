@@ -205,32 +205,51 @@ class ContextBuilder:
             return {}
         out: dict[str, float] = {}
         for channel, samples in history.items():
-            values = [
-                float(value)
-                for _, value in samples
-                if isinstance(value, int | float)
-            ] if isinstance(samples, list) else []
+            values = (
+                [float(value) for _, value in samples if isinstance(value, int | float)]
+                if isinstance(samples, list)
+                else []
+            )
             if values:
                 out[channel] = sum(values) / len(values)
         return out
 
-    async def _build_history_section(self) -> str:
-        """Each channel across the day, so the agent can see the shape itself.
+    #: Anchors laid across a whole run, as fractions of its length. Six points
+    #: and "now" describe a week as readably as a day.
+    _RUN_ANCHOR_FRACTIONS = (0.0, 0.2, 0.4, 0.6, 0.8, 0.95)
+    #: Below this the run is short enough that the fixed recent anchors say more
+    #: than fractions of it would.
+    _RUN_ANCHOR_MIN_HOURS = 30.0
+
+    async def _build_history_section(self, run_started_at: float | None = None) -> str:
+        """Each channel across the RUN, or across the day when there is no run.
 
         No slope, no verdict, no "rising steadily" — those are the agent's to
         say. This hands it the numbers at known times and gets out of the way.
+
+        The anchors follow the experiment when there is one. This run began on
+        31 August and was eight days old when an operator asked for the hour "in
+        the context of the whole experiment": fixed twenty-four-hour anchors
+        showed the agent one eighth of it, and it had no way to know what it was
+        missing. Fractions of the run scale to a week or to a month; the fixed
+        recent anchors stay for a run too young for fractions to spread out, and
+        for no run at all.
         """
         now = datetime.now(UTC).timestamp()
-        anchors = list(self._HISTORY_ANCHORS_H)
+        elapsed_h = (now - run_started_at) / 3600.0 if run_started_at else 0.0
+        if run_started_at and elapsed_h >= self._RUN_ANCHOR_MIN_HOURS:
+            times = [run_started_at + (now - run_started_at) * f for f in self._RUN_ANCHOR_FRACTIONS]
+            labels = [datetime.fromtimestamp(t, UTC).astimezone().strftime("%d.%m %H:%M") for t in times]
+        else:
+            times = [now - hours * 3600.0 for hours in self._HISTORY_ANCHORS_H]
+            labels = [f"{h:g}ч назад" for h in self._HISTORY_ANCHORS_H]
         samples = await asyncio.gather(
-            *(self._sample_at(now - hours * 3600.0) for hours in anchors),
+            *(self._sample_at(t) for t in times),
             self._sample_at(now),
             return_exceptions=True,
         )
         columns: list[tuple[str, dict[str, float]]] = []
-        for label, sample in zip(
-            [f"{h:g}ч назад" for h in anchors] + ["сейчас"], samples, strict=True
-        ):
+        for label, sample in zip([*labels, "сейчас"], samples, strict=True):
             if isinstance(sample, dict) and sample:
                 columns.append((label, sample))
         if not columns:
@@ -238,11 +257,7 @@ class ContextBuilder:
         channels = sorted({name for _, sample in columns for name in sample})
         lines = []
         for channel in channels:
-            points = [
-                f"{label} {sample[channel]:.4g}"
-                for label, sample in columns
-                if channel in sample
-            ]
+            points = [f"{label} {sample[channel]:.4g}" for label, sample in columns if channel in sample]
             if len(points) >= 2:
                 lines.append(f"{channel}: " + " → ".join(points))
         return "; ".join(lines) if lines else "истории за сутки нет"
@@ -337,9 +352,7 @@ class ContextBuilder:
             spread = max(values) - min(values)
             travelled = abs(last_value - pairs[0][1])
             noisy = ", разброс шире хода" if spread > 2 * travelled and travelled > 0 else ""
-            lines.append(
-                f"{channel}: {last_value:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч{noisy}{freshness})"
-            )
+            lines.append(f"{channel}: {last_value:.4g} ({rate:+.3g}/ч за {span_h:.1f} ч{noisy}{freshness})")
         if not lines:
             return "показаний за окно нет"
         return "; ".join(lines)
@@ -448,11 +461,14 @@ class ContextBuilder:
             _ctx_failed = True
 
         readings_section = await self._build_readings_section(window_minutes)
-        history_section = await self._build_history_section()
+        run_started_at = _run_started_at(self._em)
+        history_section = await self._build_history_section(run_started_at)
+        run_section = _describe_run(self._em, run_started_at)
         return PeriodicReportContext(
             window_minutes=window_minutes,
             readings_section=readings_section,
             history_section=history_section,
+            run_section=run_section,
             active_experiment_id=experiment_id,
             active_experiment_phase=phase,
             alarm_entries=alarm_entries,
@@ -545,6 +561,87 @@ class ContextBuilder:
         except Exception:
             logger.debug("ContextBuilder: pressure trend read failed", exc_info=True)
             return "нет данных"
+
+
+def _run_started_at(em: Any) -> float | None:
+    """When the current run began, as a unix timestamp, or None.
+
+    From the first phase transition, which is where the experiment manager
+    records the run's own beginning.
+    """
+    try:
+        history = em.get_phase_history()
+        if not history:
+            return None
+        first = history[0].get("started_at")
+        if not first:
+            return None
+        return datetime.fromisoformat(first).astimezone(UTC).timestamp()
+    except Exception:  # noqa: BLE001 - the report survives a blind experiment
+        return None
+
+
+def _describe_run(em: Any, started_at: float | None) -> str:
+    """Where we are in the run, so an hour has something to be an hour OF.
+
+    An hourly bulletin about a stand that has been running for eight days says
+    almost nothing on its own: "давление выросло на 0.1" is a different fact on
+    the first morning than on the eighth. The operator asked for the hour in the
+    context of the whole experiment, and this is that context — what is running,
+    for how long, in which phase, and how the phases went.
+    """
+    parts: list[str] = []
+    name = None
+    try:
+        name = getattr(em, "active_experiment_name", None) or getattr(em, "active_experiment_id", None)
+    except Exception:  # noqa: BLE001
+        name = None
+    if not name:
+        return "активного эксперимента нет"
+    parts.append(str(name))
+    if started_at:
+        hours = (datetime.now(UTC).timestamp() - started_at) / 3600.0
+        started_local = datetime.fromtimestamp(started_at, UTC).astimezone()
+        parts.append(f"идёт {_humanise_hours(hours)}, с {started_local:%d.%m %H:%M}")
+    try:
+        phase = em.get_current_phase()
+    except Exception:  # noqa: BLE001
+        phase = None
+    if phase:
+        parts.append(f"фаза {phase}")
+    try:
+        history = em.get_phase_history() or []
+    except Exception:  # noqa: BLE001
+        history = []
+    if phase and history:
+        for entry in reversed(history):
+            if entry.get("phase") == phase and entry.get("started_at"):
+                try:
+                    began = datetime.fromisoformat(entry["started_at"]).astimezone(UTC).timestamp()
+                except Exception:  # noqa: BLE001
+                    break
+                parts.append(f"в ней {_humanise_hours((datetime.now(UTC).timestamp() - began) / 3600.0)}")
+                break
+    if len(history) > 1:
+        names = []
+        for entry in history:
+            label = entry.get("phase")
+            if label and (not names or names[-1] != label):
+                names.append(str(label))
+        if len(names) > 1:
+            parts.append("фазы: " + " → ".join(names))
+    return "; ".join(parts)
+
+
+def _humanise_hours(hours: float) -> str:
+    """ "3.5 ч", "2 сут 4 ч" — a duration a person reads without arithmetic."""
+    if hours < 1.0:
+        return f"{hours * 60:.0f} мин"
+    if hours < 48.0:
+        return f"{hours:.1f} ч"
+    days = int(hours // 24)
+    rest = hours - days * 24
+    return f"{days} сут {rest:.0f} ч"
 
 
 def _compute_experiment_age(em: Any) -> float | None:
@@ -958,6 +1055,11 @@ class PeriodicReportContext:
     #: this the agent cannot answer the only question a pumped-down chamber
     #: raises, however good its reasoning is.
     history_section: str = "истории за сутки нет"
+    #: What run this hour belongs to: name, how long it has been going, the
+    #: phase and how long in it, and how the phases went. An hour is a different
+    #: fact on the first morning of a run than on its eighth day, and without
+    #: this the agent had no way to tell which it was looking at.
+    run_section: str = "активного эксперимента нет"
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
@@ -966,6 +1068,7 @@ class PeriodicReportContext:
             return {
                 "readings_section": self.readings_section,
                 "history_section": unavailable,
+                "run_section": unavailable,
                 "active_experiment_summary": unavailable,
                 "events_section": unavailable,
                 "alarms_section": unavailable,
@@ -996,6 +1099,7 @@ class PeriodicReportContext:
         return {
             "readings_section": self.readings_section,
             "history_section": self.history_section,
+            "run_section": self.run_section,
             "active_experiment_summary": active_exp,
             "events_section": _format_log_entries(self.other_entries, source_saturated=self.source_saturated)
             or "(нет)",
