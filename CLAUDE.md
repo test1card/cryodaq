@@ -16,14 +16,21 @@ Medium → review. Megamind → strategy, nuance, and the final before-merge rev
 |---|---|---|
 | Implement (fast / cheap) | `codex exec -m gpt-5.6-luna`, GLM 5.2 (`opencode run -m zai-coding-plan/glm-5.2 --variant high`), Sonnet subagents | hands-on implementation |
 | Review (medium) | `codex exec -m gpt-5.6-terra` | routine review / verification passes |
-| Strategy + final review (megamind) | `codex exec -m gpt-5.6-sol`, Fable 5 (Agent `model:"fable"`) | strategic insight, clawing through nuances, whole pre-merge review |
+| Strategy + final review (megamind) | `codex exec -m gpt-5.6-sol`, `codex exec -m gpt-6-astra`, Fable 5 (Agent `model:"fable"`) | strategic insight, clawing through nuances, whole pre-merge review |
+
+astra is the one to send a claim to when the claim is quantitative — it corrected four of the
+pressure statements on 2026-09-08 (a σ that was not a σ, block centres 12 h apart not 18, a share
+that did not follow from a slope, and the gauge's actual specified range). sol is stronger on code
+paths; running both on the same slice, without showing either the other's verdict, is cheap.
 
 Discipline:
 
 - codex: `codex exec -m <model> -s read-only|workspace-write --skip-git-repo-check -C <repo> "…"`.
   No `-a` flag (`exec` rejects it). Use absolute `/opt/homebrew/bin/codex` when PATH is flaky.
-  Reasoning effort is high by default. Run **one** `codex exec` at a time — concurrent runs cause
-  DNS/network failures. Always wrap in `timeout` (codex can stall for minutes).
+  Reasoning effort is high by default. `codex exec` runs **concurrently** — launch as many as
+  there is disjoint work for. (An earlier note here claimed concurrent runs cause DNS failures;
+  the operator corrected that on 2026-09-08 — it cost a day of needlessly serialised reviews.)
+  Always wrap in `timeout` (codex can stall for minutes).
 - GLM via opencode is a different backend, so it may run **concurrently** with codex — ideal for
   cross-checking one hard question on two independent experts before touching safety-critical code.
 - Author ≠ verifier: whoever implements does not sign off; a separate model owns the review verdict.
@@ -40,9 +47,9 @@ parallel as there is *logically independent* (disjoint-file) work.
 - **GLM (opencode)** is a different backend from codex, so it runs concurrently with codex and with
   other GLM runs — the main parallel-implementer lane. Give each concurrent worker a **disjoint file
   scope** (or its own git worktree) so parallel writers don't clobber each other.
-- **codex (luna/terra/sol)** must run **one at a time** — concurrent `codex exec` hits DNS/network
-  failures. It is the serial lane: use it for the single most important implement (luna) or review
-  (terra/sol) in flight.
+- **codex (luna/terra/sol/astra)** runs in parallel like everything else. Fan reviews out: several
+  slices of one branch at once, or the same slice to two models for an independent second opinion
+  (give each its own output file, and do not show one reviewer another's verdict).
 - **Sonnet subagents** run in parallel but cost Claude quota; prefer them last, and use worktree
   isolation when several write at once.
 - Cap parallelism at logical independence — more workers than disjoint work just creates merge
