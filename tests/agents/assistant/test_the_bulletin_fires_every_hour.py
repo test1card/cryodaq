@@ -139,8 +139,9 @@ async def test_the_first_bulletin_does_not_wait_three_hours(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("jump", [600.0, 3599.0, 3600.0, 3720.0, 7200.0])
 async def test_a_clock_jump_forward_does_not_publish_twice(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, jump: float
 ) -> None:
     """The rechecks must measure the distance to the boundary already chosen.
 
@@ -159,7 +160,11 @@ async def test_a_clock_jump_forward_does_not_publish_twice(
         clock.now += seconds
         if not jumped["done"]:
             jumped["done"] = True
-            clock.now += 600.0  # the clock steps ten minutes forward mid-sleep
+            # A WHOLE INTERVAL, not ten minutes. A small step leaves the chosen
+            # boundary the nearest one and hides the defect; a step of about an
+            # interval lands the cycle on a boundary already served and the one
+            # after it already due.
+            clock.now += jump
 
     monkeypatch.setattr(assistant_main.time, "time", clock.time)
     bus = _Bus(clock, wanted=2)
@@ -172,4 +177,78 @@ async def test_a_clock_jump_forward_does_not_publish_twice(
     gap = bus.fired_at[1] - bus.fired_at[0]
     assert gap >= interval / 2.0, (
         f"two bulletins {gap:.0f} s apart after a clock step; the second is a duplicate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_starts_a_second_apart_do_not_both_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """astra's second finding: the cold-start rule and the arrival tolerance
+    disagree. `_next_boundary` treats a target as unserved while the delay is
+    still positive, and the loop publishes as soon as the delay is inside five
+    seconds — so a process started in that five-second window publishes at
+    once, and a restart a second later publishes the same bulletin again.
+    """
+
+    interval = 3600.0
+    lead = assistant_main._tick_lead(interval)
+    # Four seconds before the target: inside the arrival tolerance.
+    just_before_target = 1_757_002_800.0 - lead - 4.0
+
+    # Both starts wait for the SAME boundary, so their absolute fire times
+    # coincide — that is correct, not a duplicate. What must not happen is
+    # either of them publishing the moment it starts, which is what makes a
+    # restart inside the window send the bulletin a second time.
+    for offset in (0.0, 1.0):
+        start = just_before_target + offset
+        clock = _Clock(start)
+        monkeypatch.setattr(assistant_main.time, "time", clock.time)
+        bus = _Bus(clock, wanted=1)
+        with pytest.raises(_StopAfterEnough):
+            await assistant_main._periodic_report_tick(
+                _Config(), bus, _Cache(), sleep=clock.sleep
+            )
+        waited = bus.fired_at[0] - start
+        assert waited >= interval / 2.0, (
+            f"a start {offset:.0f} s into the arrival window published after "
+            f"{waited:.0f} s; a restart would send the same bulletin again"
+        )
+
+
+@pytest.mark.parametrize("step_back", [60.0, 1800.0, 3600.0])
+@pytest.mark.asyncio
+async def test_a_clock_step_backwards_does_not_publish_twice(
+    monkeypatch: pytest.MonkeyPatch, step_back: float
+) -> None:
+    """There was a test for this that never called the tick.
+
+    It ran a private copy of the delay arithmetic and counted sleeps, so it
+    stayed green against any tick at all — astra checked by replacing the real
+    one with a function that raises, and it still passed. Drive the real loop
+    and count what reached the bus.
+    """
+
+    interval = 3600.0
+    clock = _Clock(1_757_000_000.0)
+    stepped = {"done": False}
+
+    async def stepping_sleep(seconds: float) -> None:
+        clock.now += seconds
+        if not stepped["done"]:
+            stepped["done"] = True
+            clock.now -= step_back
+
+    monkeypatch.setattr(assistant_main.time, "time", clock.time)
+    bus = _Bus(clock, wanted=2)
+
+    with pytest.raises(_StopAfterEnough):
+        await assistant_main._periodic_report_tick(
+            _Config(), bus, _Cache(), sleep=stepping_sleep
+        )
+
+    gap = bus.fired_at[1] - bus.fired_at[0]
+    assert gap >= interval / 2.0, (
+        f"two bulletins {gap:.0f} s apart after the clock stepped back "
+        f"{step_back:.0f} s; the same hour was reported twice"
     )

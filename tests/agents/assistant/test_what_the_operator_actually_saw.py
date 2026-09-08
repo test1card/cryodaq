@@ -156,10 +156,12 @@ def test_the_tick_rechecks_the_clock_after_sleeping() -> None:
     source = inspect.getsource(assistant_main._periodic_report_tick)
     assert "_TICK_RECHECKS" in source, "the tick sleeps once and never looks again"
     # The point is that the tick looks at the clock again and can stop waiting,
-    # not which helper it names: it now measures to the boundary the cycle
-    # already chose, because recomputing one let a clock step publish twice.
-    at = source.index("time.time()", source.index("_TICK_RECHECKS"))
-    assert "break" in source[at : at + 300]
+    # not which helper it names: it measures to the boundary the cycle already
+    # chose, because recomputing one let a clock step publish twice.
+    at = source.index("for _ in range(_TICK_RECHECKS)")
+    body = source[at:]
+    assert "time.time()" in body, "the recheck never looks at the clock"
+    assert "break" in body, "the recheck can never stop waiting"
 
     from cryodaq.agents.assistant_main import _TICK_RECHECKS
 

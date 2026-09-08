@@ -785,7 +785,12 @@ def _next_boundary(interval_s: float, now: float, served_boundary: float | None)
         # assumed served: take the next one rather than firing immediately,
         # which on a restart would produce two bulletins in a minute.
         lead = _tick_lead(interval_s)
-        while boundary - lead - now <= 0:
+        # THE SAME THRESHOLD THE LOOP PUBLISHES ON. With `<= 0` here and
+        # `<= _TICK_ARRIVAL_TOLERANCE_S` there, a process started inside that
+        # five-second window published at once — and a restart a second later
+        # published the same bulletin again, which is exactly what this rule
+        # exists to prevent.
+        while boundary - lead - now <= _TICK_ARRIVAL_TOLERANCE_S:
             boundary += interval_s
         return boundary
     while boundary <= served_boundary:
@@ -821,14 +826,19 @@ async def _periodic_report_tick(
         boundary = _next_boundary(interval_s, time.time(), served_boundary)
         lead = _tick_lead(interval_s)
         for _ in range(_TICK_RECHECKS):
-            # LOOK AT THE CLOCK AGAIN — but measure to the boundary this cycle
-            # already chose. Recomputing one from the current clock meant a step
-            # forward during the sleep landed the recheck on a LATER boundary
-            # while the loop still published for the earlier one; the next cycle
-            # then found the later one already due and published again with no
-            # gap at all. The recheck exists to notice the step, not to change
-            # which hour is being reported.
-            delay = boundary - lead - time.time()
+            # LOOK AT THE CLOCK AGAIN, measuring to the boundary this cycle
+            # chose. Three outcomes, and the middle one is the one that kept
+            # being missed:
+            now = time.time()
+            delay = boundary - lead - now
+            if delay < -_TICK_ARRIVAL_TOLERANCE_S:
+                # THE STEP FORWARD. The clock moved past this target while we
+                # slept, so the hour this cycle picked is gone. Publishing it
+                # now would date the bulletin an hour late AND leave the next
+                # boundary already due, which published twice in the same
+                # instant. Choose again from the clock we actually have.
+                boundary = _next_boundary(interval_s, now, served_boundary)
+                continue
             if delay <= _TICK_ARRIVAL_TOLERANCE_S:
                 break
             await sleep(delay)
