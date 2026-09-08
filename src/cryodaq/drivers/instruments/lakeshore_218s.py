@@ -259,9 +259,19 @@ class LakeShore218S(InstrumentDriver):
         #
         # The raw value is retained in metadata rather than discarded, so the
         # forensic evidence survives into the archive.
-        if reading.unit == "K" and reading.value == 0.0:
+        # AT OR BELOW ZERO, NOT EXACTLY ZERO. The reasoning above is a physical
+        # floor — absolute zero is unreachable — and a floor is an inequality.
+        # Written as equality it passed everything else that is equally
+        # impossible: the archive holds `Т12 = -8.9e88 K` for 2026-09-01, stored
+        # with status ok because it is neither zero nor non-finite.
+        #
+        # Deliberately NOT a finiteness test. `+inf` is this driver's own
+        # sentinel for OVL, carried with status OVERRANGE — "above the sensor's
+        # range" is a different and more useful thing to tell an operator than
+        # "sensor error", and collapsing them loses that.
+        if reading.unit == "K" and reading.value <= 0.0:
             metadata["rejected_value"] = reading.value
-            metadata["rejected_reason"] = "physically_invalid_zero_kelvin"
+            metadata["rejected_reason"] = "physically_invalid_kelvin"
             return replace(
                 reading,
                 value=float("nan"),

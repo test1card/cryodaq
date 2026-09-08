@@ -74,7 +74,7 @@ def test_zero_kelvin_is_rejected_even_when_rdgst_is_unavailable():
 def test_the_raw_value_survives_for_forensics():
     result = _apply(_driver(), _reading(0.0), bitmap=0)
     assert result.metadata["rejected_value"] == 0.0
-    assert result.metadata["rejected_reason"] == "physically_invalid_zero_kelvin"
+    assert result.metadata["rejected_reason"] == "physically_invalid_kelvin"
 
 
 # ---------------------------------------------------------------------------
@@ -116,3 +116,65 @@ def test_zero_in_sensor_units_is_not_a_temperature_claim():
     result = _apply(_driver(), reading, bitmap=0)
     assert result.status is ChannelStatus.OK
     assert result.value == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# A floor is an inequality
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value, what",
+    [
+        (-8.9e88, "the value the archive actually holds for Т12 on 2026-09-01"),
+        (-1.0, "an ordinary negative"),
+        (-0.001, "a hair below the floor"),
+        (float("-inf"), "negative infinity"),
+    ],
+)
+def test_everything_at_or_below_the_floor_is_refused(value: float, what: str) -> None:
+    """The reasoning was right and the code said `== 0.0`.
+
+    Absolute zero is unreachable, so the guard is a floor — and a floor is an
+    inequality. Written as equality it let through everything else that is
+    equally impossible: the archive holds `Т12 = -8.9e88 K` for 2026-09-01,
+    persisted with status ok because it is neither zero nor non-finite. Any
+    reader that does not filter it will carry it into a calculation.
+    """
+
+    result = _apply(_driver(), _reading(value))
+
+    assert result.status is ChannelStatus.SENSOR_ERROR, f"{what} was accepted"
+    assert result.value != result.value, "the rejected value was left in place"
+    assert result.metadata["rejected_reason"] == "physically_invalid_kelvin"
+    kept = result.metadata["rejected_value"]
+    assert kept == value or kept != kept, "the forensic evidence was discarded"
+
+
+@pytest.mark.parametrize("value", [294.3, 55.4, 380.0, 0.001])
+def test_a_real_temperature_still_passes(value: float) -> None:
+    """The control, including the two rails this stand actually sits on: Т4 at
+    380.00, whose input configuration has never been read here, and the cold
+    stage at 55.4 K measured during the 3 September cooldown."""
+
+    result = _apply(_driver(), _reading(value))
+
+    assert result.status is ChannelStatus.OK
+    assert result.value == value
+    assert "rejected_reason" not in result.metadata
+
+
+def test_the_overrange_sentinel_survives_the_floor() -> None:
+    """`+inf` is this driver's own encoding for OVL, and it must stay OVERRANGE.
+
+    The first version of the floor tested finiteness as well as sign, which
+    turned every over-range channel into a plain sensor error. "Above the
+    sensor's range" tells the operator something "sensor error" does not, and
+    Т4 on this stand sits on exactly such a rail.
+    """
+
+    reading = _reading(float("inf"))
+    result = _apply(_driver(), reading, bitmap=0o032)
+
+    assert result.status is not ChannelStatus.SENSOR_ERROR
+    assert "rejected_reason" not in result.metadata

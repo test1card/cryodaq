@@ -593,3 +593,4 @@ async def test_connect_cancellation_settles_open_transport(monkeypatch) -> None:
 
     assert transport.closed == 1
     assert driver.connected is False
+
