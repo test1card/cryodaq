@@ -198,3 +198,47 @@ def test_truncation_never_orphans_a_marker(room: int) -> None:
 
     validate_caption_html(rendered)
     assert "*" not in rendered, f"a halved pair reached the operator: {rendered[-70:]!r}"
+
+
+# --- absence has to be said, not implied ------------------------------------
+
+
+def _snapshot_with_summary(summary: str):
+    """A validated input whose only interesting field is the summary."""
+
+    import copy
+
+    from cryodaq.reporting.periodic_input import serialize_periodic_input
+    from tests.reporting.test_periodic_child import _payload
+
+    payload = copy.deepcopy(_payload())
+    payload["render"]["summary"] = summary
+    _, validated = serialize_periodic_input(payload, expected_max_input_bytes=65_536)
+    return validated
+
+
+def test_a_missing_summary_is_stated_in_the_caption() -> None:
+    """The producer's comment said an absent summary was "already visible".
+
+    It was not. On 2026-09-08 the operator received three hourly reports with
+    no summary and no explanation, could not tell a quiet hour from a failed
+    agent, and had to send them to someone to ask. That is exactly the work
+    this assistant exists to take off him.
+    """
+
+    from cryodaq.reporting.periodic_renderer import _NO_SUMMARY_LINE, _build_caption
+
+    caption = _build_caption(_snapshot_with_summary(""), [])
+
+    assert _NO_SUMMARY_LINE in caption, "the caption said nothing about the missing summary"
+    validate_caption_html(caption)
+
+
+def test_a_present_summary_says_nothing_about_absence() -> None:
+    from cryodaq.reporting.periodic_renderer import _NO_SUMMARY_LINE, _build_caption
+
+    caption = _build_caption(_snapshot_with_summary("**Вывод:** всё спокойно."), [])
+
+    assert _NO_SUMMARY_LINE not in caption
+    assert "<b>Вывод:</b>" in caption
+    validate_caption_html(caption)

@@ -503,7 +503,29 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             raise PeriodicInputError("periodic caption data reservation failed")
         del admitted
     caption = "\n".join([*prefix, *chosen_data, "", *alarm_tail])
+    # SILENCE IS NOT AN ANSWER. Without a summary the caption used to come out
+    # exactly as it did before summaries existed, and a comment in the producer
+    # called that "already visible". It is not: on 2026-09-08 the operator
+    # received three such reports, could not tell a quiet hour from a failed
+    # agent, and had to send them to someone to ask. One line costs nothing and
+    # says which of the two it is.
+    if not snapshot.render.summary:
+        # ONLY IF IT FITS. The readings are the measurement and this is a note
+        # about a missing note: it must never take room from them. Added after
+        # the data has been chosen and dropped silently when the budget is gone.
+        candidate = caption + "\n\n" + _NO_SUMMARY_LINE
+        if (
+            len(candidate) <= MAX_CAPTION_CODEPOINTS
+            and len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES
+        ):
+            caption = candidate
     return validate_caption_html(_with_summary(caption, snapshot.render.summary))
+
+
+#: Said when the agent produced no words for this hour. Deliberately about the
+#: report and not about the stand: the measurements above are unaffected, and
+#: the operator should not read this as an instrument fault.
+_NO_SUMMARY_LINE = "<i>Сводка за этот час не готова.</i>"
 
 
 #: How far back to look for a word boundary when the summary has to be cut. A

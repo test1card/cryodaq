@@ -248,7 +248,11 @@ def test_caption_short_exact_contract(tmp_path: Path) -> None:
         "Время: 10.07.2026 04:05\n\n"
         "<b>Температуры:</b>\n  Т1: 4 К\n\n"
         "<b>Давление:</b>\n  P: 1.00e-05 мбар\n\n"
-        "<b>Активные тревоги (1):</b>\n  ⚠ T1_LOW"
+        "<b>Активные тревоги (1):</b>\n  ⚠ T1_LOW\n\n"
+        # The payload carries no summary, and silence about that is what sent
+        # three hourly reports to the operator on 2026-09-08 with no way to tell
+        # a quiet hour from a failed agent.
+        "<i>Сводка за этот час не готова.</i>"
     )
 
 
