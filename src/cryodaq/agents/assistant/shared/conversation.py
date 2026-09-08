@@ -63,6 +63,9 @@ _MAX_SCOPES_PER_CHAT = 12
 #: Refuse to read a transcript larger than this. Rotation keeps files small, so
 #: reaching it means corruption, and corruption must not stall the event loop.
 _MAX_FILE_BYTES = 4 * 1024 * 1024
+#: How long one writer waits for another. Short: the work behind it is a few
+#: kilobytes, so anything longer means the disk is not answering.
+_LOCK_WAIT_S = 5.0
 
 
 def _safe_key(raw: str, fallback: str) -> str:
@@ -144,24 +147,24 @@ class ConversationStore:
             logger.debug("conversation scope unavailable: %s", exc)
             return "no-experiment"
 
-    def _legacy_paths(self, chat_id: Any, scope: str | None = None) -> list[Path]:
-        """Where this chat's transcript lived before the naming changed.
+    def _legacy_path(self, chat_id: Any) -> Path:
+        """Where this chat's transcript lived before any of this existed.
 
-        Two changes moved it: per-experiment scoping, and then a digest appended
-        to defeat collisions. Neither migrated what was already on disk, so an
-        upgrade silently dropped every conversation and left the old files
-        unreachable by the pruner as well. Read them when the current name has
-        nothing; the next `remember` writes to the current name, which is
-        migration enough for a transcript.
+        ONE shape, deliberately. Per-experiment scoping and the digest were
+        added the same night and neither was ever deployed, so the only file
+        that can exist on a real disk is the original `<chat>.jsonl`. The
+        intermediate `<chat>__<scope>.jsonl` was also read for a while, and
+        review pointed out the obvious: recovering it means stripping the digest
+        back to the ambiguous form, which is precisely the collision the digest
+        was added to prevent — `run 1` and `run?1` would read each other's
+        conversation. A path that never existed is not worth a collision.
+
+        The chat id alone cannot collide across experiments, because it does not
+        name one.
         """
-        raw_chat = str(chat_id) if chat_id is not None else ""
-        plain_chat = re.sub(r"[^A-Za-z0-9_-]", "_", raw_chat.strip())[:64] or "local"
-        resolved = self._scope() if scope is None else scope
-        plain_scope = resolved.rsplit("-", 1)[0] if "-" in resolved else resolved
-        return [
-            self._root / f"{plain_chat}__{plain_scope}.jsonl",
-            self._root / f"{plain_chat}.jsonl",
-        ]
+        raw = str(chat_id) if chat_id is not None else ""
+        plain = re.sub(r"[^A-Za-z0-9_-]", "_", raw.strip())[:64] or "local"
+        return self._root / f"{plain}.jsonl"
 
     def _path(self, chat_id: Any, scope: str | None = None) -> Path:
         """The transcript file. `scope` pins one experiment for a whole query.
@@ -223,13 +226,40 @@ class ConversationStore:
             if not record["q"] and not record["a"]:
                 return
             path = self._path(chat_id, scope)
-            with self._lock:
+            # BOUNDED. An unbounded acquire piles every later append behind one
+            # stalled filesystem call, and those callers are worker threads that
+            # their async wrappers have already abandoned — the queue grows and
+            # nothing ever drains it. Memory is an enrichment: losing one
+            # exchange beats collecting threads.
+            if not self._lock.acquire(timeout=_LOCK_WAIT_S):
+                logger.debug("conversation not stored: writer busy")
+                return
+            try:
+                # CARRY THE OLD FILE OVER. Reading the legacy name rescued the
+                # first replay after an upgrade and nothing after it: the first
+                # `remember` created the new file, and every later replay found
+                # it and stopped looking. Copy once, on the write that would
+                # otherwise strand it.
+                self._migrate_legacy(chat_id, path)
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 self._rotate_if_needed(path)
                 self._prune_scopes(chat_id, keep=path)
+            finally:
+                self._lock.release()
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not stored: %s", exc)
+
+    def _migrate_legacy(self, chat_id: Any, path: Path) -> None:
+        """Move a pre-upgrade transcript under the current name, once."""
+        try:
+            if path.exists():
+                return
+            legacy = self._legacy_path(chat_id)
+            if legacy.is_file() and legacy != path:
+                path.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - memory is an enrichment
+            logger.debug("conversation not migrated: %s", exc)
 
     def _rotate_if_needed(self, path: Path) -> None:
         """Keep only the recent tail on disk. Never raises."""
@@ -252,12 +282,10 @@ class ConversationStore:
         path = self._path(chat_id, scope)
         try:
             if not path.is_file():
-                for legacy in self._legacy_paths(chat_id, scope):
-                    if legacy.is_file():
-                        path = legacy
-                        break
-                else:
+                legacy = self._legacy_path(chat_id)
+                if not legacy.is_file():
                     return []
+                path = legacy
             # Size first. This runs on the query handler's event loop, so a
             # corrupt or absurdly large file must cost the memory, not the
             # answer: an unbounded read there stalls every deadline above it.

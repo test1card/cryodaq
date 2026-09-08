@@ -83,14 +83,18 @@ async def test_a_steady_experiment_still_publishes_both_halves() -> None:
     assert cache.get_summary() is not None
 
 
-async def test_health_from_an_engine_that_does_not_stamp_is_still_used() -> None:
-    """This test asserted the OPPOSITE, and review showed that was wrong.
+async def test_health_from_an_engine_that_does_not_stamp_is_refused() -> None:
+    """This assertion has now been written both ways, and the record matters.
 
-    An engine that does not carry the field at all is an OLDER engine, not a
-    mismatched run. Refusing those outright leaves sensor health permanently
-    absent through a mixed-version restart, with nothing saying why — a silent,
-    indefinite loss of a signal the operator reads. What must still be withheld
-    is a reply that DOES name a run and names a different one.
+    Round two said refusing an unstamped reply loses sensor health for a whole
+    mixed-version restart. Round three showed that ACCEPTING it restores the
+    mixed-pair defect the stamp exists to prevent — an old engine can return run
+    B's health while the status said run A.
+
+    The premise behind accepting was wrong, not the reasoning: one launcher
+    starts the engine and the assistant from one tree, so a mismatched pair is
+    not a state this deployment reaches. What made refusing dangerous was that
+    it was SILENT, and it no longer is.
     """
 
     class _Unstamped:
@@ -102,9 +106,7 @@ async def test_health_from_an_engine_that_does_not_stamp_is_still_used() -> None
     cache = _RemoteEngineStateCache(_Unstamped(), poll_interval_s=0.01)
     await _one_cycle(cache)
 
-    assert cache.get_summary() is not None, (
-        "an older engine's health is refused forever through a mixed-version restart"
-    )
+    assert cache.get_summary() is None
 
 
 def test_the_engine_stamps_its_diagnostics_reply() -> None:

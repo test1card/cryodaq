@@ -140,6 +140,8 @@ class _RemoteEngineStateCache:
         self._experiment_status: dict[str, Any] = {}
         self._sensor_diagnostics: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
+        #: Said once, not every three seconds.
+        self._warned_unstamped = False
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll_loop(), name="assistant_state_cache")
@@ -189,25 +191,39 @@ class _RemoteEngineStateCache:
                 # in, not the window between the two QUERIES. The reply names
                 # its own run now, so the pairing is checkable from the data
                 # rather than inferred from timing.
-                # An engine that does not carry the field at all is an OLDER
-                # engine, not a mismatched run. Refusing those outright would
-                # leave sensor health permanently absent through a mixed-version
-                # restart, with nothing saying why — a silent, indefinite loss
-                # of a signal the operator reads. A reply that DOES carry the
-                # field and disagrees is a real mismatch and is withheld.
+                # THE STAMP IS REQUIRED, and its absence is said out loud.
+                #
+                # A previous round of review objected that refusing unstamped
+                # replies leaves sensor health absent through a mixed-version
+                # restart, so I accepted them — and the next round showed that
+                # accepting restores the exact defect the stamp exists to
+                # prevent: an older engine returning run B's health while the
+                # status said run A, published as a matched pair.
+                #
+                # The premise was wrong, not the reasoning. The engine and the
+                # assistant are started by one launcher from one tree, so a
+                # mismatched pair is not a state this deployment reaches. What
+                # made refusing dangerous was that it was SILENT. It is not
+                # silent now: an unstamped reply is refused and logged at
+                # warning, once per transition, so an operator who somehow does
+                # run a mismatched pair is told why sensor health is missing
+                # instead of being left to wonder.
                 stamped = "experiment_id" in diag_reply
-                belongs = (not stamped) or diag_reply.get("experiment_id") == active
                 if (
                     experiment_is_usable
                     and diag_reply.get("ok")
-                    and belongs
+                    and stamped
+                    and diag_reply.get("experiment_id") == active
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
                     sensor_diagnostics = diag_reply.get("summary")
-                    if not stamped:
-                        logger.debug(
-                            "assistant state cache: engine reply carries no experiment_id; "
-                            "pairing cannot be verified this cycle"
+                elif experiment_is_usable and diag_reply.get("ok") and not stamped:
+                    if not self._warned_unstamped:
+                        self._warned_unstamped = True
+                        logger.warning(
+                            "Здоровье датчиков не публикуется: движок не сообщает, к какому "
+                            "эксперименту относится диагностика. Похоже, движок и ассистент "
+                            "разных версий — перезапустите стенд целиком."
                         )
                 elif experiment_is_usable and diag_reply.get("ok"):
                     logger.debug(

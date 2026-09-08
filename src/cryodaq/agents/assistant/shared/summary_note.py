@@ -67,6 +67,13 @@ async def write_summary_async(
     a stalled filesystem they do not raise and cannot be interrupted, so the
     assistant's whole event loop stops inside a `try` that can never run its
     `except`. A note is never worth that.
+
+    What this does NOT do, said plainly because two comments in this codebase
+    have already claimed otherwise: the deadline releases the CALLER, not the
+    thread. A filesystem call blocked forever keeps its worker, and enough of
+    them can still delay interpreter shutdown. Making that impossible needs an
+    interruptible write, which the filesystem does not offer. What is bought
+    here is that the event loop keeps running.
     """
     try:
         await asyncio.wait_for(
@@ -176,8 +183,13 @@ def read_summary(
             noted_end = record.get("window_end")
             if not _finite_pair(noted_start, noted_end):
                 return ""
-            if float(noted_end) < float(window_start):
-                return ""  # a period entirely before the charted hour
+            if float(noted_end) <= float(window_start):
+                # A note ending exactly where the chart begins covers none of
+                # it: that is the whole previous hour, which is what the window
+                # check exists to refuse. Strictly positive overlap is required.
+                # The offset cycle this rule was written for still passes — it
+                # produces ten minutes of real overlap, not zero.
+                return ""
             if float(noted_start) >= float(window_end):
                 return ""  # a period that had not started when the chart ended
         return text.strip()

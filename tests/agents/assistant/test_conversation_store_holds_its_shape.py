@@ -167,15 +167,23 @@ def test_a_transcript_written_before_the_naming_changed_is_still_read(tmp_path: 
     assert "старый ответ" in store.replay(7, now=2.0)
 
 
-def test_a_scoped_transcript_without_a_digest_is_still_read(tmp_path: Path) -> None:
+def test_the_intermediate_filename_shape_is_deliberately_NOT_recovered(tmp_path: Path) -> None:
+    """This test asserted the opposite for one round, and that was wrong.
+
+    Recovering `<chat>__<scope>.jsonl` means stripping the digest back to the
+    ambiguous name — precisely the collision the digest was added to prevent,
+    so `run 1` and `run?1` would read each other's conversation. That shape was
+    never deployed and no such file can exist on a real disk, so the collision
+    would be bought for nothing.
+    """
     root = tmp_path / "c"
     root.mkdir(parents=True, exist_ok=True)
     (root / "7__exp-1.jsonl").write_text(
-        '{"ts": 1.0, "q": "промежуточный", "a": "промежуточный ответ"}\n', encoding="utf-8"
+        '{"ts": 1.0, "q": "никогда не существовало", "a": "ответ"}\n', encoding="utf-8"
     )
     store = _store(tmp_path, lambda: "exp-1")
 
-    assert "промежуточный ответ" in store.replay(7, now=2.0)
+    assert store.replay(7, now=2.0) == ""
 
 
 def test_pruning_excludes_the_file_it_was_just_asked_to_keep() -> None:
@@ -224,8 +232,9 @@ def test_the_append_and_its_rotation_happen_under_one_lock() -> None:
     from cryodaq.agents.assistant.shared.conversation import ConversationStore
 
     source = inspect.getsource(ConversationStore.remember)
-    assert "with self._lock:" in source, "the append and its rotation run unlocked; two writers can lose an exchange"
-    guarded = source[source.index("with self._lock:") :]
+    assert "self._lock.acquire(" in source, "the append and its rotation run unlocked; two writers can lose an exchange"
+    assert "self._lock.release()" in source, "the lock is taken and never given back"
+    guarded = source[source.index("self._lock.acquire(") :]
     for step in ('path.open("a"', "_rotate_if_needed", "_prune_scopes"):
         assert step in guarded, f"{step} happens outside the lock"
 

@@ -58,12 +58,18 @@ def test_a_note_that_had_not_started_when_the_chart_ended_is_refused(tmp_path: P
     assert read_summary(tmp_path, window_start=hh - _H, window_end=hh) == ""
 
 
-def test_the_touching_boundary_is_inclusive_on_the_side_that_matters(tmp_path: Path) -> None:
-    """A note ending exactly where the chart begins still describes the run."""
+def test_the_touching_boundary_requires_real_overlap(tmp_path: Path) -> None:
+    """Written the other way first, and review corrected it.
+
+    A note ending exactly where the chart begins covers none of it — that is
+    the whole previous hour, which is what the window check exists to refuse.
+    The offset cycle this rule was built for is unaffected: it produces ten
+    minutes of real overlap, not zero.
+    """
     hh = time.time()
     write_summary(tmp_path, "ровно встык", window_start=hh - 2 * _H, window_end=hh - _H)
 
-    assert read_summary(tmp_path, window_start=hh - _H, window_end=hh) == "ровно встык"
+    assert read_summary(tmp_path, window_start=hh - _H, window_end=hh) == ""
 
 
 def test_a_non_finite_requested_window_refuses_rather_than_falls_open(tmp_path: Path) -> None:
