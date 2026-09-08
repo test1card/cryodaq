@@ -129,11 +129,20 @@ def test_the_fit_check_measures_what_the_writer_writes() -> None:
     assert "ensure_ascii=False" in source
 
 
-def test_the_fit_check_never_raises() -> None:
-    """It runs while assembling a report; a failure here must not cost one."""
+def test_the_fit_check_never_raises_and_never_lies() -> None:
+    """It runs while assembling a report; a failure here must not cost one.
+
+    Not raising is half the requirement. The answer must also be usable: this
+    value decides whether the summary is shortened, and the writer refuses
+    anything it cannot serialise. Answering "fits" to a payload that will be
+    refused stops the shrinking and loses the whole report over the one part
+    of it that was optional. Answering "does not fit" shrinks the summary away
+    and the report goes out without it.
+    """
+
     from cryodaq.agents.assistant.periodic_png import _payload_fits
 
     class _Unserialisable:
         pass
 
-    assert _payload_fits({"x": _Unserialisable()}, 10) is True
+    assert _payload_fits({"x": _Unserialisable()}, 10) is False

@@ -979,3 +979,76 @@ def test_hostile_staging_quarantine_is_bounded_and_non_accumulating(tmp_path: Pa
         child._clear_staging_bounded(staging)
     assert list(parent.glob(".quarantine-*")) == quarantines
     assert staging.exists()
+
+
+# --- the fit check must agree with the writer -------------------------------
+
+
+def test_the_fit_check_counts_the_newline_the_writer_adds() -> None:
+    """`_payload_fits` decides whether the summary must be shortened; the writer
+    then decides whether the file is accepted. When they disagree by the one
+    byte of the trailing newline, a payload of exactly the cap passes the check,
+    is never shortened, and is refused — losing the whole hourly report over the
+    optional part of it.
+    """
+
+    from cryodaq.agents.assistant.periodic_png import _payload_fits
+
+    cap = 65_536
+
+    def _with(readings: int, summary_length: int) -> dict[str, object]:
+        payload = _payload()
+        # Strictly increasing timestamps on one channel: the writer refuses
+        # readings that are not strictly canonical, so duplicates will not do.
+        payload["readings"] = [  # type: ignore[index]
+            {"ts": float(100 + index), "iid": "ls", "ch": "Т1", "v": 4.2, "u": "K", "st": "ok"}
+            for index in range(readings)
+        ]
+        # ONE BYTE PER CHARACTER. The disagreement is exactly one byte wide, so
+        # a two-byte character steps over the single size that exposes it.
+        payload["render"]["summary"] = "a" * summary_length  # type: ignore[index]
+        return payload
+
+    # Grow the readings until an empty summary sits a few hundred bytes below
+    # the cap, so that varying the summary walks the payload across it. The cap
+    # cannot be lowered to meet a small payload: MIN_INPUT_BYTES is 64 KiB.
+    count = 1
+    while True:
+        size = len(
+            serialize_periodic_input(_with(count, 0), expected_max_input_bytes=cap)[0]
+        )
+        if size > cap - 320:
+            break
+        count += 1
+
+    disagreements: list[int] = []
+    for length in range(0, 400):
+        payload = _with(count, length)
+        fits = _payload_fits(payload, cap)
+        try:
+            serialize_periodic_input(payload, expected_max_input_bytes=cap)
+            written = True
+        except PeriodicInputError:
+            written = False
+        if fits != written:
+            disagreements.append(length)
+
+    assert not disagreements, (
+        f"the check and the writer disagree at summary lengths {disagreements}"
+    )
+
+
+def test_a_summary_the_writer_cannot_encode_is_not_declared_to_fit() -> None:
+    """A lone surrogate reads back out of JSON and serialises nowhere. Declaring
+    it a fit stops the shrink loop, and the writer then refuses the payload: the
+    report is lost to text that was never required.
+    """
+
+    from cryodaq.agents.assistant.periodic_png import _payload_fits
+
+    payload = _payload()
+    payload["render"]["summary"] = "\ud800"  # type: ignore[index]
+
+    assert not _payload_fits(payload, 65_536), (
+        "a payload the writer cannot encode was declared to fit"
+    )

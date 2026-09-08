@@ -183,10 +183,21 @@ def _payload_fits(payload: Mapping[str, object], cap: int) -> bool:
     the bytes that will actually be written rather than a guess.
     """
     try:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        return len(encoded.encode("utf-8")) <= cap
-    except Exception:  # noqa: BLE001 - a failure here must not cost the report
-        return True
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        # THE TRAILING NEWLINE COUNTS. `serialize_periodic_input` appends "\n"
+        # before encoding, so a payload measured at exactly the cap here is
+        # written one byte over it and refused — and the summary, being the
+        # only part that shrinks, is never shrunk because this said it fit.
+        return len(encoded.encode("utf-8")) + 1 <= cap
+    except Exception:  # noqa: BLE001 - the caller must not lose the report over this
+        # REFUSE, DO NOT ACCEPT. Text the writer cannot encode — a lone
+        # surrogate survives JSON and dies at UTF-8 — is not a fit. Saying it
+        # fits stops the shrink loop and hands the writer a payload it will
+        # reject, losing the whole report over the one optional field. Saying
+        # it does not shrinks the summary away and the report goes without it.
+        return False
 
 
 def _finite_or_none_ts(value: object) -> float | None:
