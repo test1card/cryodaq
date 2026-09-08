@@ -508,6 +508,12 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
 #: How far back to look for a word boundary when the summary has to be cut. A
 #: long word cut mid-way is still better than dropping a whole clause.
 _WORD_BOUNDARY_LOOKBACK = 24
+#: What ends a sentence. The ellipsis is not here: a summary that already ends
+#: in one was cut by someone else, and cutting it again teaches nothing.
+_SENTENCE_ENDS = (".", "!", "?", "\n")
+#: Below this a "sentence" is a fragment — a heading, a stray initial — and
+#: keeping only it says less than a cut clause would.
+_MIN_SENTENCE_KEPT = 80
 
 
 def _with_summary(caption: str, summary: str) -> str:
@@ -551,11 +557,36 @@ def _with_summary(caption: str, summary: str) -> str:
         # broken mid-word reads as a fault in the message rather than a summary
         # that ran long. Only when a word survives the trim: a single very long
         # word is better shown cut than dropped entirely.
+        # PREFER A WHOLE SENTENCE. The agent puts its conclusion last — the
+        # deployed build's summaries end with a line beginning "Коротко:" — so
+        # cutting the tail throws away exactly the part worth reading. On
+        # 2026-09-08 an operator received a caption ending "Коротко: д…", which
+        # is funny once and useless every hour.
+        #
+        # Backing off to the last complete sentence ends the caption on a
+        # finished thought instead of a severed one. Only when a sentence
+        # survives: a single long paragraph is still better shown cut than
+        # dropped, and the word-boundary rule below then keeps it off a word.
+        trimmed = cut.rstrip()
+        sentence = max(trimmed.rfind(mark) for mark in _SENTENCE_ENDS)
+        if sentence >= _MIN_SENTENCE_KEPT:
+            whole = trimmed[: sentence + 1].rstrip()
+            if whole:
+                # The ellipsis STAYS. Ending on a finished sentence must not
+                # also hide that something was dropped: silent truncation is
+                # the thing this file spends most of its length guarding
+                # against, and an operator who cannot tell text was cut has no
+                # reason to go looking for it.
+                escaped = _escape(whole) + " …"
+                candidate = caption + separator + escaped
+                if len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES and len(
+                    caption
+                ) + len(separator) + len(escaped) <= MAX_CAPTION_CODEPOINTS:
+                    return candidate
         # ONLY WHEN THE CUT IS ACTUALLY MID-WORD. Backing off unconditionally
         # dropped a complete word for nothing: a prefix ending in "Температура
         # стабильна" became "Температура…". The cut is mid-word only when the
         # character it stopped before is not a space.
-        trimmed = cut.rstrip()
         broke_a_word = (
             len(cut) < len(summary) and not summary[len(cut)].isspace() and bool(trimmed) and not trimmed[-1].isspace()
         )

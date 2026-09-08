@@ -167,7 +167,13 @@ class PeriodicFileFence:
 #: readings come first because they are the measurement. The summary gets what
 #: is left, up to this. Truncation is visible rather than silent: a sentence
 #: cut mid-word with no mark reads as a fault in the stand rather than a limit.
-MAX_SUMMARY_CHARS = 420
+#: An outer bound on what a producer may store, NOT the caption's budget. The
+#: caption computes its own room from what the temperatures and alarms leave and
+#: trims to it, ending on a whole sentence; this only stops an absurd payload
+#: from reaching the render input at all. It was 420, which was tighter than the
+#: caption ever needed and squeezed the summary for no reason — the operator's
+#: words on 2026-09-08: "не нужно так заморачиваться на коротковизну".
+MAX_SUMMARY_CHARS = 900
 
 
 def _summary_text(value: object) -> str:
