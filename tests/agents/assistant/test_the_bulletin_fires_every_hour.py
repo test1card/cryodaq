@@ -12,7 +12,6 @@ The bulletin then arrives once every three hours while claiming to be hourly.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 import pytest
@@ -33,7 +32,7 @@ class _Config:
 
 
 class _Bus:
-    def __init__(self, clock: "_Clock", wanted: int) -> None:
+    def __init__(self, clock: _Clock, wanted: int) -> None:
         self._clock = clock
         self._wanted = wanted
         self.fired_at: list[float] = []
@@ -103,3 +102,34 @@ async def test_the_bulletin_keeps_the_boundary_it_was_aligned_to(
         assert min(offset, interval - offset) < 60.0, (
             f"fired at {fired}, which is {offset} s from a boundary minus the lead"
         )
+
+
+@pytest.mark.asyncio
+async def test_the_first_bulletin_does_not_wait_three_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gaps were fixed; the first one was not.
+
+    `served_boundary` is None until something has been published, and the loop
+    consults it on every recheck rather than once per cycle. So the cold-start
+    rule — which treats a target already reached as belonging to a bulletin
+    that went out before the restart — runs again at each of the three
+    rechecks, and each pushes the first bulletin another interval away.
+    """
+
+    interval = 3600.0
+    start = 1_757_000_000.0
+    clock = _Clock(start)
+    monkeypatch.setattr(assistant_main.time, "time", clock.time)
+    bus = _Bus(clock, wanted=1)
+
+    with pytest.raises(_StopAfterEnough):
+        await assistant_main._periodic_report_tick(
+            _Config(), bus, _Cache(), sleep=clock.sleep
+        )
+
+    waited = bus.fired_at[0] - start
+    assert waited <= interval, (
+        f"the first bulletin waited {waited / 3600.0:.2f} h, which is more than "
+        f"the {interval / 3600.0:.0f} h interval it claims"
+    )

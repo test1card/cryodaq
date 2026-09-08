@@ -762,6 +762,37 @@ _TICK_ARRIVAL_TOLERANCE_S = 5.0
 _TICK_RECHECKS = 3
 
 
+def _tick_lead(interval_s: float) -> float:
+    """How far before the boundary the bulletin runs."""
+
+    return min(_PERIODIC_TICK_LEAD_S, interval_s / 4.0)
+
+
+def _next_boundary(interval_s: float, now: float, served_boundary: float | None) -> float:
+    """The boundary whose bulletin is due next.
+
+    Chosen ONCE per cycle, not on every recheck. The cold-start rule below is
+    right for a fresh process and wrong for a second look inside the same wait:
+    consulting it again at each recheck pushed the first bulletin another
+    interval away every time, so a process started at 10:10 published first at
+    12:55 and two bulletins vanished without a trace.
+    """
+
+    boundary = (now // interval_s + 1) * interval_s
+    if served_boundary is None:
+        # COLD START. Nothing here knows whether this boundary's bulletin
+        # already went out before the restart, so a target already passed is
+        # assumed served: take the next one rather than firing immediately,
+        # which on a restart would produce two bulletins in a minute.
+        lead = _tick_lead(interval_s)
+        while boundary - lead - now <= 0:
+            boundary += interval_s
+        return boundary
+    while boundary <= served_boundary:
+        boundary += interval_s
+    return boundary
+
+
 def _seconds_until_next_tick(
     interval_s: float, now: float, *, served_boundary: float | None = None
 ) -> float:
@@ -780,26 +811,11 @@ def _seconds_until_next_tick(
     """
     if interval_s <= 0:
         return 0.0
-    lead = min(_PERIODIC_TICK_LEAD_S, interval_s / 4.0)
-    boundary = (now // interval_s + 1) * interval_s
-    if served_boundary is None:
-        delay = boundary - lead - now
-        # COLD START. Nothing here knows whether this boundary's bulletin
-        # already went out before the restart, so a target already passed is
-        # assumed served: take the next one rather than firing immediately,
-        # which on a restart would produce two bulletins in a minute.
-        while delay <= 0:
-            boundary += interval_s
-            delay = boundary - lead - now
-        return delay
-    # WAKING INSIDE THE LOOP, where the boundary already served IS known.
-    # `asyncio.sleep` never returns early, so an on-time wake lands exactly at
-    # the target or a hair past it, and the cold-start rule then read that as
-    # "already served" and pushed a whole interval away. With three rechecks
-    # doing it in turn, an hourly bulletin went out every three hours.
-    while boundary <= served_boundary:
-        boundary += interval_s
-    return max(boundary - lead - now, 0.0)
+    boundary = _next_boundary(interval_s, now, served_boundary)
+    # Never negative: `asyncio.sleep` never returns early, so an on-time wake
+    # lands exactly at the target or a hair past it, and that is arrival rather
+    # than a reason to wait another interval.
+    return max(boundary - _tick_lead(interval_s) - now, 0.0)
 
 
 async def _periodic_report_tick(
@@ -823,16 +839,19 @@ async def _periodic_report_tick(
         # stepped back, the bulletin fires twice for one report boundary;
         # stepped forward, it fires after the report has already rendered. One
         # more look at the clock costs nothing and catches both.
+        # ONE TARGET PER CYCLE. The rechecks exist to catch a clock step during
+        # the sleep, not to reconsider which boundary is being waited for; when
+        # they reconsidered, the cold-start rule fired again on each and the
+        # first bulletin was pushed three intervals out.
+        boundary = _next_boundary(interval_s, time.time(), served_boundary)
         for _ in range(_TICK_RECHECKS):
-            now = time.time()
-            delay = _seconds_until_next_tick(interval_s, now, served_boundary=served_boundary)
+            delay = _seconds_until_next_tick(
+                interval_s, time.time(), served_boundary=boundary - interval_s
+            )
             if delay <= _TICK_ARRIVAL_TOLERANCE_S:
                 break
             await sleep(delay)
-        # The boundary this bulletin belongs to. The target sits a lead before
-        # it, so the instant of firing is always strictly inside the interval
-        # and rounding up names the boundary exactly.
-        served_boundary = math.ceil(time.time() / interval_s) * interval_s
+        served_boundary = boundary
         try:
             await event_bus.publish(
                 EngineEvent(

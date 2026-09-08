@@ -612,10 +612,21 @@ class AlarmEvaluator:
         not. The operator is told once, and decides.
         """
 
+        value: float | None = None
         if type(configured) is not bool and isinstance(configured, (int, float)):
             value = float(configured)
-            if math.isfinite(value) and value > 0.0:
-                return value
+        elif isinstance(configured, str):
+            # YAML QUOTES NUMBERS ALL THE TIME. `timeout_s: "120"` states a
+            # timeout perfectly clearly, and refusing it silently turned a
+            # 120 s guard into a 30 s one — a CRITICAL after half a minute,
+            # under an operator message that may well claim two minutes of
+            # loss that never happened.
+            try:
+                value = float(configured.strip())
+            except ValueError:
+                value = None
+        if value is not None and math.isfinite(value) and value > 0.0:
+            return value
         if alarm_id not in self._unreadable_stale_timeouts:
             self._unreadable_stale_timeouts.add(alarm_id)
             logger.error(

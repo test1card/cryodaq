@@ -73,3 +73,44 @@ def test_a_broken_timeout_still_reports_an_hour_of_silence(timeout: object) -> N
     assert event is not None, (
         f"timeout_s={timeout!r} disarmed the guard: an hour of silence raised nothing"
     )
+
+
+def _evaluator_with_a_channel_silent_for(seconds: float) -> AlarmEvaluator:
+    state = ChannelStateTracker()
+    state.update(
+        Reading(
+            timestamp=datetime.fromtimestamp(time.time() - seconds, tz=UTC),
+            instrument_id="VSP63D_1",
+            channel="P",
+            value=2.4,
+            unit="mbar",
+        )
+    )
+    return AlarmEvaluator(
+        state,
+        RateEstimator(window_s=120.0, min_points=2),
+        MagicMock(spec=PhaseProvider),
+        SetpointProvider({}),
+    )
+
+
+@pytest.mark.parametrize("written", ["120", "120.0", " 120 "])
+def test_a_timeout_written_as_a_string_is_still_that_timeout(written: str) -> None:
+    """YAML quotes numbers all the time. Refusing the value and falling back to
+    the 30 s default turns a 120 s guard into a 30 s one: a channel quiet for
+    half a minute then raises a CRITICAL, and the operator's own message text
+    may well claim a loss of two minutes that did not happen. A guard that
+    cries wolf is the failure this file was written about.
+    """
+
+    cfg = {"alarm_type": "stale", "channel": "P", "timeout_s": written, "level": "CRITICAL"}
+
+    quiet_for_a_minute = _evaluator_with_a_channel_silent_for(60.0)
+    assert quiet_for_a_minute.evaluate("data_loss_pressure", cfg) is None, (
+        f"timeout_s={written!r} fired after 60 s, so it was not read as 120"
+    )
+
+    quiet_for_five = _evaluator_with_a_channel_silent_for(300.0)
+    assert quiet_for_five.evaluate("data_loss_pressure", cfg) is not None, (
+        f"timeout_s={written!r} did not fire after 300 s"
+    )
