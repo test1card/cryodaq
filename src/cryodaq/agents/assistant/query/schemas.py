@@ -168,6 +168,14 @@ class ChannelTrend:
     #: poorly identified, and a poorly identified parameter still prints as a
     #: number that the reader then believes.
     slope_change: tuple[float, float] | None = None
+    #: Hours of the CURRENT regime, when the window contains a change of one.
+    #: A fixed window that begins mid-rise cannot see the part of the curve that
+    #: separates a constant source from a decaying one, which is its beginning.
+    regime_hours: float | None = None
+    #: RMS residual of three laws over the current regime: linear, sqrt(t),
+    #: log(t). Ratios, not thresholds: a straight source fits the first, a
+    #: depleting one bends toward the others.
+    shape: tuple[float, float, float] | None = None
     unit: str = ""
     available: bool = True
     stale: bool = False

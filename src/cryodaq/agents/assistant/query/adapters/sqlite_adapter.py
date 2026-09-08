@@ -49,6 +49,155 @@ def _fit_rate(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
     return slope * 3600.0, (variance / denominator) ** 0.5 * 3600.0
 
 
+#: A regime is only a regime if enough of it was measured. Below this a split
+#: is fitting noise on one side of itself.
+_MIN_REGIME_POINTS = 12
+
+#: How much better the two-piece fit must be before a change of regime is
+#: claimed.
+_REGIME_SSE_GAIN = 2.0
+
+#: AND how differently the two pieces must rise. The residual test alone is not
+#: enough: data that merely CURVES is always fitted better by two lines than by
+#: one, so on the stand's own pressure — falling 3% across a day — it invented a
+#: regime change at an hour when nothing had happened. A real change of regime
+#: moves the rate by a lot; curvature moves it by a little.
+_REGIME_SLOPE_GAIN = 0.5
+
+
+def _sse(n: int, sx: float, sy: float, sxx: float, sxy: float, syy: float) -> float | None:
+    """Residual sum of squares of the least-squares line, from running sums."""
+
+    if n < 3:
+        return None
+    sxx_c = sxx - sx * sx / n
+    if sxx_c <= 0.0:
+        return None
+    sxy_c = sxy - sx * sy / n
+    syy_c = syy - sy * sy / n
+    return max(syy_c - sxy_c * sxy_c / sxx_c, 0.0)
+
+
+def _regime_start(pairs: list[tuple[float, float]]) -> int | None:
+    """Index where the current regime began, or None if the window is one piece.
+
+    The thing that separates a constant source from a decaying one is the
+    BEGINNING of the rise, where a decaying source is steepest. A fixed window
+    that starts in the middle of a rise cannot see it: on 2026-09-08 the agent
+    was asked whether the pressure was a leak or desorption and answered, from
+    24 hours of the middle, that the two do not separate. They do — twenty
+    minutes after the chamber was isolated the rate was already at its full
+    value and it never decayed. The window has to start where the regime did.
+
+    Two straight pieces against one, by residual. No claim is made unless the
+    split halves the residual, which a split of genuinely straight data does
+    not do.
+    """
+
+    n = len(pairs)
+    if n < 2 * _MIN_REGIME_POINTS:
+        return None
+    t0 = pairs[0][0]
+    xs = [ts - t0 for ts, _ in pairs]
+    ys = [value for _, value in pairs]
+
+    px = [0.0] * (n + 1)
+    py = [0.0] * (n + 1)
+    pxx = [0.0] * (n + 1)
+    pxy = [0.0] * (n + 1)
+    pyy = [0.0] * (n + 1)
+    for i, (x, y) in enumerate(zip(xs, ys, strict=True)):
+        px[i + 1] = px[i] + x
+        py[i + 1] = py[i] + y
+        pxx[i + 1] = pxx[i] + x * x
+        pxy[i + 1] = pxy[i] + x * y
+        pyy[i + 1] = pyy[i] + y * y
+
+    def piece(lo: int, hi: int) -> tuple[float, float] | None:
+        """Residual and slope of the least-squares line over ``pairs[lo:hi]``."""
+
+        count = hi - lo
+        sx = px[hi] - px[lo]
+        sy = py[hi] - py[lo]
+        sxx = pxx[hi] - pxx[lo]
+        sxy = pxy[hi] - pxy[lo]
+        syy = pyy[hi] - pyy[lo]
+        sse = _sse(count, sx, sy, sxx, sxy, syy)
+        if sse is None:
+            return None
+        sxx_c = sxx - sx * sx / count
+        if sxx_c <= 0.0:
+            return None
+        return sse, (sxy - sx * sy / count) / sxx_c
+
+    entire = piece(0, n)
+    if entire is None or entire[0] <= 0.0:
+        return None
+    whole = entire[0]
+
+    best_index: int | None = None
+    best_sse = whole
+    best_slopes = (0.0, 0.0)
+    for split in range(_MIN_REGIME_POINTS, n - _MIN_REGIME_POINTS + 1):
+        left = piece(0, split)
+        right = piece(split, n)
+        if left is None or right is None:
+            continue
+        total = left[0] + right[0]
+        if total < best_sse:
+            best_sse = total
+            best_index = split
+            best_slopes = (left[1], right[1])
+    if best_index is None or best_sse * _REGIME_SSE_GAIN > whole:
+        return None
+    before, after = best_slopes
+    scale = max(abs(before), abs(after))
+    if scale <= 0.0 or abs(after - before) < _REGIME_SLOPE_GAIN * scale:
+        return None
+    return best_index
+
+
+def _shape_of_rise(pairs: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+    """RMS residual of three laws: linear, sqrt(t), log(t). Smaller fits better.
+
+    A constant source gives a straight line; a source that depletes bends. The
+    three together say which, and by how much, without anybody having to pick a
+    threshold: the ratios are the answer.
+    """
+
+    if len(pairs) < 8:
+        return None
+    t0 = pairs[0][0]
+    span = pairs[-1][0] - t0
+    if span <= 0.0:
+        return None
+    # A hair of offset so log and sqrt are defined at the first sample.
+    floor = max(span / len(pairs), 1.0)
+    out: list[float] = []
+    for transform in (
+        lambda dt: dt,
+        lambda dt: math.sqrt(dt + floor),
+        lambda dt: math.log(dt + floor),
+    ):
+        xs = [transform(ts - t0) for ts, _ in pairs]
+        ys = [value for _, value in pairs]
+        n = len(xs)
+        sx = sum(xs)
+        sy = sum(ys)
+        sse = _sse(
+            n,
+            sx,
+            sy,
+            sum(x * x for x in xs),
+            sum(x * y for x, y in zip(xs, ys, strict=True)),
+            sum(y * y for y in ys),
+        )
+        if sse is None:
+            return None
+        out.append((sse / n) ** 0.5)
+    return (out[0], out[1], out[2])
+
+
 def _centred_quadratic(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
     """Fitted CHANGE IN SLOPE across the window, and its standard error.
 
@@ -258,6 +407,13 @@ class SQLiteAdapter:
         dof = max(len(residuals) - 2, 1)
         residual_variance = sum(r * r for r in residuals) / dof
         slope_stderr_per_s = (residual_variance / denominator) ** 0.5
+        # THE CURRENT REGIME, NOT THE WHOLE WINDOW. Everything above describes
+        # the window as asked for; the shape below describes only what has held
+        # since the last change, because that is the stretch whose beginning
+        # carries the answer.
+        split = _regime_start(pairs)
+        regime = pairs[split:] if split is not None else pairs
+        regime_hours = (regime[-1][0] - regime[0][0]) / 3600.0 if len(regime) > 1 else None
         return ChannelTrend(
             channel=channel,
             window_minutes=window_minutes,
@@ -269,6 +425,8 @@ class SQLiteAdapter:
             slope_stderr_per_hour=slope_stderr_per_s * 3600.0,
             segments=_segment_rates(pairs),
             slope_change=_centred_quadratic(pairs),
+            regime_hours=regime_hours,
+            shape=_shape_of_rise(regime),
         )
 
     @staticmethod

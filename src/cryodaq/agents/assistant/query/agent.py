@@ -250,6 +250,22 @@ def _format_trends(trends) -> str:
             # operator reads off this line.
             rates = ", ".join(f"{rate:+.3g} ± {err:.2g}" for rate, err in trend.segments)
             parts.append(f"по третям окна: {rates}")
+        # THE SHAPE OF THE RISE, from where the rise began. A window that starts
+        # mid-rise cannot separate a constant source from a decaying one; their
+        # difference lives in the first hour, where a decaying source is
+        # steepest. This is that comparison, as ratios rather than a verdict.
+        if trend.shape is not None:
+            linear, root, log = trend.shape
+            if linear > 0.0:
+                since = (
+                    f"режим идёт {trend.regime_hours:.1f} ч"
+                    if trend.regime_hours is not None
+                    else "режим не менялся в окне"
+                )
+                parts.append(
+                    f"{since}, форма подъёма: прямая RMS {linear:.3g}, "
+                    f"√t хуже в {root / linear:.1f}, ln t хуже в {log / linear:.1f}"
+                )
         rows.append(f"{name}: {', '.join(parts)}")
     return "; ".join(rows) + f". {caveat}"
 
