@@ -151,3 +151,77 @@ async def test_an_unstamped_engine_leaves_health_absent_not_mispaired() -> None:
     await cache.stop()
 
     assert cache.get_summary() is None
+
+
+# --- round four ------------------------------------------------------------
+
+
+def test_the_legacy_transcript_reaches_exactly_one_experiment(tmp_path: Path) -> None:
+    """Copying left the old file in place, so EVERY run inherited it.
+
+    The pre-upgrade conversation was pulled into experiment A, then again into B
+    on B's first write, and into every run after — the opposite of one
+    experiment, one context, with the oldest run's numbers along for the ride.
+    """
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7.jsonl").write_text('{"ts": 1.0, "q": "до", "a": "доисторический"}\n', encoding="utf-8")
+
+    current = {"id": "exp-A"}
+    store = _store(tmp_path, lambda: current["id"])
+    store.remember(7, "в A", "ответ A")
+    assert "доисторический" in store.replay(7, now=2.0)
+
+    current["id"] = "exp-B"
+    store.remember(7, "в B", "ответ B")
+    replayed = store.replay(7, now=3.0)
+
+    assert "ответ B" in replayed
+    assert "доисторический" not in replayed, "the pre-upgrade conversation was inherited by a second experiment"
+
+
+def test_a_failed_migration_does_not_strand_the_history(tmp_path: Path) -> None:
+    """Creating the new file without the history hides it for good: the
+    fallback read only looks at the legacy name while the current one is
+    absent."""
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7.jsonl").write_text('{"ts": 1.0, "q": "до", "a": "старое"}\n', encoding="utf-8")
+    store = _store(tmp_path, lambda: "exp-1")
+
+    original = ConversationStore._migrate_legacy
+    ConversationStore._migrate_legacy = lambda self, chat_id, path: False  # type: ignore[assignment]
+    try:
+        store.remember(7, "во время сбоя", "новое")
+    finally:
+        ConversationStore._migrate_legacy = original  # type: ignore[assignment]
+
+    assert not store._path(7).exists(), "the exchange was written and the history stranded"
+    assert "старое" in store.replay(7, now=2.0)
+
+
+async def test_the_unstamped_warning_can_fire_again_after_a_repair() -> None:
+    """A stand repaired and later regressed would otherwise say nothing the
+    second time, and the second time is when nobody expects it."""
+    from cryodaq.agents.assistant_main import _RemoteEngineStateCache
+
+    cache = _RemoteEngineStateCache(object(), poll_interval_s=0.01)
+    cache._warned_unstamped = True
+
+    import inspect
+
+    source = inspect.getsource(_RemoteEngineStateCache._poll_loop)
+    at = source.index("sensor_diagnostics = diag_reply")
+    assert "_warned_unstamped = False" in source[at : at + 400], "a good reply does not re-arm the warning"
+
+
+def test_the_module_comment_describes_the_rule_the_code_has() -> None:
+    """A maintainer following a stale contract restores the behaviour it
+    replaced."""
+    import inspect
+
+    from cryodaq.agents.assistant.shared import summary_note
+
+    source = inspect.getsource(summary_note)
+    assert "must OVERLAP" in source
+    assert "The windows must TOUCH" not in source

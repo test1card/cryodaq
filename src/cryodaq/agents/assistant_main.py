@@ -217,6 +217,11 @@ class _RemoteEngineStateCache:
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
                     sensor_diagnostics = diag_reply.get("summary")
+                    # A good reply re-arms the warning. Without this a stand
+                    # that was repaired and later regressed would say nothing
+                    # the second time, and the second time is when nobody is
+                    # expecting it.
+                    self._warned_unstamped = False
                 elif experiment_is_usable and diag_reply.get("ok") and not stamped:
                     if not self._warned_unstamped:
                         self._warned_unstamped = True

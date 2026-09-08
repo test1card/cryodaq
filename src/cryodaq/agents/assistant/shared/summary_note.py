@@ -30,8 +30,11 @@ _FILE = "last_summary.json"
 #: Older than this and the note is not about the hour being reported. Slightly
 #: over one report interval, so a late report still finds its own summary.
 DEFAULT_MAX_AGE_S = 5400.0
-#: The windows must TOUCH: the note's period has to reach the charted window and
-#: have begun before it ended.
+#: The windows must OVERLAP, by more than nothing: the note's period has to
+#: reach INTO the charted window and have begun before it ended. An earlier
+#: wording said "touch", and a note ending exactly where the chart begins
+#: touches while covering none of it — that is the whole previous hour, which is
+#: what this check exists to refuse.
 #:
 #: A fraction-of-overlap rule was tried first and was worse than the bug. The
 #: two cadences are offset by construction — the agent's hour runs from process

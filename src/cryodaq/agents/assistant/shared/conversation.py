@@ -226,11 +226,17 @@ class ConversationStore:
             if not record["q"] and not record["a"]:
                 return
             path = self._path(chat_id, scope)
-            # BOUNDED. An unbounded acquire piles every later append behind one
-            # stalled filesystem call, and those callers are worker threads that
-            # their async wrappers have already abandoned — the queue grows and
-            # nothing ever drains it. Memory is an enrichment: losing one
-            # exchange beats collecting threads.
+            # BOUNDED WAIT FOR A BUSY PEER. An unbounded acquire piles every
+            # later append behind whoever holds the lock, in worker threads
+            # their async wrappers have already abandoned. Memory is an
+            # enrichment: losing one exchange beats collecting threads.
+            #
+            # It does NOT bound the filesystem. A call that stalls while holding
+            # the lock holds it forever and the `finally` never runs, and the
+            # `mkdir` above happens before the lock at all. Bounding that needs
+            # an interruptible write, which the filesystem does not offer. Said
+            # here because the previous wording claimed the accumulation was
+            # prevented, and it is only made less likely.
             if not self._lock.acquire(timeout=_LOCK_WAIT_S):
                 logger.debug("conversation not stored: writer busy")
                 return
@@ -238,9 +244,10 @@ class ConversationStore:
                 # CARRY THE OLD FILE OVER. Reading the legacy name rescued the
                 # first replay after an upgrade and nothing after it: the first
                 # `remember` created the new file, and every later replay found
-                # it and stopped looking. Copy once, on the write that would
-                # otherwise strand it.
-                self._migrate_legacy(chat_id, path)
+                # it and stopped looking. If the move cannot happen, drop THIS
+                # exchange instead of stranding the history behind a new file.
+                if not self._migrate_legacy(chat_id, path):
+                    return
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 self._rotate_if_needed(path)
@@ -250,16 +257,32 @@ class ConversationStore:
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not stored: %s", exc)
 
-    def _migrate_legacy(self, chat_id: Any, path: Path) -> None:
-        """Move a pre-upgrade transcript under the current name, once."""
+    def _migrate_legacy(self, chat_id: Any, path: Path) -> bool:
+        """Move a pre-upgrade transcript under the current name. Once, really.
+
+        RENAMED, not copied. Copying left the old file in place, so the same
+        pre-upgrade conversation was pulled into experiment A, then again into B
+        when B first wrote, and into every run after — the opposite of one
+        experiment, one context, and with the oldest run's numbers along for the
+        ride. A rename consumes it: after the first migration there is nothing
+        left to migrate.
+
+        Returns False only when a migration was needed and did not happen. The
+        caller then skips this exchange rather than creating the new file
+        without the history, which would strand it for good: the fallback read
+        only looks at the legacy name while the current one is absent.
+        """
         try:
             if path.exists():
-                return
+                return True
             legacy = self._legacy_path(chat_id)
-            if legacy.is_file() and legacy != path:
-                path.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+            if not legacy.is_file() or legacy == path:
+                return True
+            legacy.rename(path)
+            return True
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not migrated: %s", exc)
+            return False
 
     def _rotate_if_needed(self, path: Path) -> None:
         """Keep only the recent tail on disk. Never raises."""
