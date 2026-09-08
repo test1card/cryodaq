@@ -33,6 +33,16 @@ class ChannelState:
     instrument_id: str
     is_stale: bool = False
     fault_count_window: int = 0  # количество fault readings в окне (заполняется трекером)
+    #: When this channel last carried a USABLE value. Carried forward across
+    #: unusable readings, so "how long since we last knew this measurement"
+    #: survives a sensor glitch instead of being reset by it.
+    #:
+    #: Without it a stale alarm could only ask "is the NEWEST reading usable",
+    #: which is a question about one sample and not about data loss. On
+    #: 2026-09-08 a pressure channel produced five `sensor_error` samples in a
+    #: day, each one instantly raising a CRITICAL that said "нет данных > 60с"
+    #: while the record showed no gap longer than two seconds.
+    last_usable_ts: float = 0.0
 
     @property
     def is_usable(self) -> bool:
@@ -75,6 +85,12 @@ class ChannelStateTracker:
         """
         ts = reading.timestamp.timestamp()
         unusable = not reading.is_usable()
+        previous = self._states.get(reading.channel)
+        # Carried forward: an unusable sample does not tell us the measurement
+        # became known again, and it must not tell us it became unknown just now
+        # either. A channel that has NEVER been usable starts its clock here, so
+        # one permanently broken from boot still ages into its alarm.
+        last_usable = ts if not unusable else (previous.last_usable_ts if previous else ts)
         state = ChannelState(
             channel=reading.channel,
             value=reading.value,
@@ -85,6 +101,7 @@ class ChannelStateTracker:
             # not a fresh quiet value. Preserve the sample for diagnostics while
             # exposing it to every consumer through the existing stale contract.
             is_stale=unusable,
+            last_usable_ts=last_usable,
         )
         self._states[reading.channel] = state
 

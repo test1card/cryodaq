@@ -603,7 +603,20 @@ class AlarmEvaluator:
             if state is None:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
-            if not state.is_usable or (now - state.timestamp) > timeout:
+            # ONE QUESTION, ASKED ONCE: how long since this channel last carried
+            # a usable value? Silence and a bad status are the same loss to an
+            # operator, and both must outlast the configured timeout.
+            #
+            # This used to read `not state.is_usable or (now - timestamp) >
+            # timeout`, so a SINGLE unusable sample fired immediately and the
+            # timeout applied to one branch only. On 2026-09-08 five
+            # `sensor_error` readings in a day raised four CRITICALs saying "нет
+            # данных давления > 60с" while the record held no gap longer than
+            # two seconds. A CRITICAL that cries wolf is worse than no alarm:
+            # it teaches the operator to disbelieve the channel.
+            last_known = state.last_usable_ts or state.timestamp
+            silent_for = now - last_known
+            if silent_for > timeout:
                 # The channel is stale/unusable — there is no current value.
                 # Rendering 0.0 here told the operator the sensor read zero.
                 msg = self._format_message(message_tmpl, channel=ch, value=UNKNOWN_VALUE)
@@ -613,7 +626,7 @@ class AlarmEvaluator:
                     message=msg,
                     triggered_at=now,
                     channels=[ch],
-                    values={ch: now - state.timestamp},
+                    values={ch: silent_for},
                 )
         return None
 

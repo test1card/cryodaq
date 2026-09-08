@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from cryodaq.core.alarm_v2 import (
@@ -550,12 +550,26 @@ def test_stale_not_fires_fresh() -> None:
     assert ev.evaluate("stale", cfg) is None
 
 
-def test_stale_fires_immediately_on_unusable_reading() -> None:
-    """A fresh timestamp cannot hide a NaN/error reading from stale alarms."""
+def test_a_fresh_timestamp_cannot_hide_a_nan_from_the_stale_alarm() -> None:
+    """The concern this test was written for, kept; its timing, corrected.
+
+    A NaN reading carries a fresh timestamp, so `now - timestamp` stays small
+    and a naive stale check would never fire on a channel producing garbage.
+    That must not happen, and it does not: an unusable reading does not advance
+    the channel's last-usable clock, so a channel emitting only NaN ages into
+    the alarm exactly as a silent one does.
+
+    What changed is that it takes the CONFIGURED TIMEOUT rather than firing on
+    the first bad sample. The old form fired immediately, and on 2026-09-08 five
+    `sensor_error` readings across a whole day raised four CRITICALs reading
+    "Нет данных давления > 60с" while the record held no gap longer than two
+    seconds. A CRITICAL that cries wolf teaches the operator to disbelieve it.
+    """
+    old = datetime.now(UTC) - timedelta(seconds=120)
     ev = _make_evaluator(
         [
             Reading(
-                timestamp=datetime.now(UTC),
+                timestamp=old,
                 instrument_id="LS218",
                 channel="T1",
                 value=math.nan,
@@ -566,6 +580,33 @@ def test_stale_fires_immediately_on_unusable_reading() -> None:
     )
     cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
     assert ev.evaluate("data_stale", cfg) is not None
+
+
+def test_one_bad_sample_after_good_ones_does_not_fire_the_stale_alarm() -> None:
+    """A sensor glitch is not a loss of data, and must not be announced as one."""
+    now = datetime.now(UTC)
+    ev = _make_evaluator(
+        [
+            Reading(
+                timestamp=now - timedelta(seconds=4),
+                instrument_id="LS218",
+                channel="T1",
+                value=294.5,
+                unit="K",
+                status=ChannelStatus.OK,
+            ),
+            Reading(
+                timestamp=now,
+                instrument_id="LS218",
+                channel="T1",
+                value=math.nan,
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            ),
+        ]
+    )
+    cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
+    assert ev.evaluate("data_stale", cfg) is None
 
 
 # ---------------------------------------------------------------------------
