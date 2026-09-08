@@ -65,7 +65,9 @@ class _Client:
         if self._observer is not None:
             self._observer()
         await asyncio.sleep(0)
-        return {"ok": True, "summary": _health(_NEW)}
+        # The reply names the run it describes: the cache refuses to pair
+        # health with an identity it cannot verify.
+        return {"ok": True, "summary": _health(_NEW), "experiment_id": self.experiment_id}
 
 
 async def _one_cycle(cache: _RemoteEngineStateCache) -> None:
@@ -126,7 +128,7 @@ async def test_health_without_a_usable_experiment_is_not_published() -> None:
         async def call(self, cmd: dict[str, Any]) -> dict[str, Any]:
             if cmd["cmd"] == "experiment_status":
                 return {"ok": True, "active_experiment": {}}
-            return {"ok": True, "summary": _health(_NEW)}
+            return {"ok": True, "summary": _health(_NEW), "experiment_id": None}
 
     cache = _RemoteEngineStateCache(_NoExperiment(), poll_interval_s=0.01)
 

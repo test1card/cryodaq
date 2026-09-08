@@ -129,7 +129,6 @@ non-Python path inventory cannot silently describe different bytes.
 | `src/cryodaq/channels/__init__.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/channels/config.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/channels/descriptors.py` | data-flow/config/identity input | yes |
-| `src/cryodaq/channels/live_display.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/channels/persistence.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/core/alarm_config.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/core/alarm_providers.py` | data-flow/config/identity input | yes |

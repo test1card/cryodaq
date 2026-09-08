@@ -1257,6 +1257,7 @@ async def test_engine_disconnect_invalidates_cached_context() -> None:
                         "worst_flags": [],
                     },
                     "scope_receipt": receipt("sensor_diagnostics"),
+                    "experiment_id": "exp-1",
                 }
             await allow_disconnect.wait()
             if self.calls == 3:
@@ -1370,6 +1371,7 @@ async def test_malformed_receipt_valid_diagnostics_summary_is_unavailable_not_ze
                     "ok": True,
                     "summary": {"total_channels": 1, "healthy": 1, "critical": 0},
                     "scope_receipt": _status_receipt("sensor_diagnostics"),
+                    "experiment_id": "exp-1",
                 }
             await park.wait()
             raise AssertionError("parked client unexpectedly resumed")
@@ -1536,6 +1538,11 @@ async def test_live_runtime_serves_the_reply_the_engine_actually_sends() -> None
                         "worst_score": 100,
                         "worst_flags": [],
                     },
+                    # The engine names the run its diagnostics describe, so the
+                    # cache can refuse to pair health with an identity it cannot
+                    # verify. This fixture exists to be shaped like the engine's
+                    # real reply, so it carries the field too.
+                    "experiment_id": "exp-live",
                 }
             published.set()
             await park.wait()

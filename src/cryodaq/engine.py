@@ -6494,11 +6494,19 @@ async def _handle_gui_command(
 
             diag = sensor_diag.get_diagnostics()
             summary = sensor_diag.get_summary()
+            # WHOSE health this is. The assistant caches experiment identity and
+            # sensor health from two separate round-trips; if a run ends between
+            # them, it would pair one run's identity with the other run's health
+            # and produce an hourly report describing a stand it never measured.
+            # Nothing in the pair revealed the mismatch, because this reply did
+            # not say which run it belonged to. Now it does, and the pairing is
+            # checkable from the data instead of inferred from timing.
             return _json_wire_safe(
                 {
                     "ok": True,
                     "channels": {k: asdict(v) for k, v in diag.items()},
                     "summary": asdict(summary),
+                    "experiment_id": getattr(experiment_manager, "active_experiment_id", None),
                 }
             )
         if action == "analytics_health":

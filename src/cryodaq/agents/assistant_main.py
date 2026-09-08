@@ -182,12 +182,26 @@ class _RemoteEngineStateCache:
                 if experiment_is_usable:
                     experiment_status = exp_reply
                 diag_reply = await self._client.call({"cmd": "get_sensor_diagnostics"})
+                # WHOSE health this is. The identity and the health come from
+                # two separate round-trips, so if a run ends between them the
+                # pair is already mixed before it is published — the earlier
+                # "publish together" fix closed the window a READER could land
+                # in, not the window between the two QUERIES. The reply names
+                # its own run now, so the pairing is checkable from the data
+                # rather than inferred from timing.
                 if (
                     experiment_is_usable
                     and diag_reply.get("ok")
+                    and diag_reply.get("experiment_id") == active
                     and is_valid_sensor_health_summary(diag_reply.get("summary"))
                 ):
                     sensor_diagnostics = diag_reply.get("summary")
+                elif experiment_is_usable and diag_reply.get("ok"):
+                    logger.debug(
+                        "assistant state cache: diagnostics belong to %r, not %r — withheld",
+                        diag_reply.get("experiment_id"),
+                        active,
+                    )
             except Exception:
                 experiment_status = {}
                 sensor_diagnostics = None
@@ -645,6 +659,10 @@ async def _handle_assistant_query_command(
 #: allows it 180, so a 30 s outer deadline cancelled valid searches before
 #: their own inner deadline could even expire. Reviewed 2026-09-07.
 _RAG_SEARCH_TIMEOUT_S = 300.0
+#: Startup probes. Generous for a cold spinning disk, finite because a process
+#: that never finishes starting cannot be restarted by anything watching it.
+_RAG_STARTUP_PROBE_TIMEOUT_S = 30.0
+_RAG_STARTUP_CONNECT_TIMEOUT_S = 120.0
 
 
 async def _handle_rag_search_command(
@@ -842,7 +860,9 @@ async def _run_llm_runtime(
             rag_table = str(rag_cfg.get("table_name", "cryodaq_corpus"))
             rag_emb_url = str(rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
             rag_emb_model = str(rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            if not await asyncio.to_thread(rag_db_path.is_dir):
+            if not await asyncio.wait_for(
+                asyncio.to_thread(rag_db_path.is_dir), timeout=_RAG_STARTUP_PROBE_TIMEOUT_S
+            ):
                 raise FileNotFoundError(f"offline RAG index is absent at {rag_db_path}; run cryodaq-rag-index")
             # The retrieval path shares the corpus's embedding model, so it
             # must share its residency policy too — a query that evicts the
@@ -858,8 +878,21 @@ async def _run_llm_runtime(
             # but its CONSTRUCTION was not, so slow storage could still wedge
             # assistant startup — a hang, not a crash, which the launcher's
             # restart-on-exit cannot recover.
-            rag_searcher = await asyncio.to_thread(
-                RagSearcher, db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table
+            # BOUNDED. Moving the construction to a thread was said to fix this
+            # and did not: `asyncio.to_thread` without a deadline wedges startup
+            # exactly as a direct call would. If storage blocks, the assistant
+            # process stays alive and never reaches service startup — a hang,
+            # and the launcher's restart-on-exit cannot recover from a process
+            # that has not exited. On timeout the assistant comes up WITHOUT
+            # retrieval, which is a degraded assistant rather than no assistant.
+            rag_searcher = await asyncio.wait_for(
+                asyncio.to_thread(
+                    RagSearcher,
+                    db_path=rag_db_path,
+                    embeddings_client=rag_emb,
+                    table_name=rag_table,
+                ),
+                timeout=_RAG_STARTUP_CONNECT_TIMEOUT_S,
             )
             # Name what was RESOLVED, not merely which file it came from.
             # On 2026-09-06 the question "which embedding model is the running
@@ -890,6 +923,13 @@ async def _run_llm_runtime(
                     rag_emb_model,
                     rag_emb_url,
                 )
+        except TimeoutError:
+            logger.warning(
+                "RAG searcher: хранилище не ответило за отведённое время — ассистент "
+                "поднимается без поиска по корпусу. Проверьте диск с индексом (%s).",
+                rag_db_path,
+            )
+            rag_searcher = None
         except Exception as exc:
             logger.warning("RAG searcher: ошибка инициализации — %s", exc)
             rag_searcher = None

@@ -348,9 +348,19 @@ def test_real_aiohttp_formdata_has_finite_nonchunked_payload_mechanics() -> None
     assert payload.headers.get("Transfer-Encoding") is None
 
 
-def test_client_exposes_only_outbound_send_photo_surface() -> None:
+def test_client_exposes_only_outbound_sending() -> None:
+    """OUTBOUND ONLY. The property is the direction, not the method count.
+
+    `send_media_group` joined the surface on 2026-09-07 so the hourly report can
+    arrive as one message carrying both charts instead of two messages. That is
+    still sending. What must never appear here is anything that RECEIVES: this
+    process holds a bot token, and a client that can poll updates or read
+    messages is a different and much larger thing to reason about.
+    """
     public = {name for name in dir(PeriodicTelegramClient) if not name.startswith("_")}
-    assert public == {"send_photo", "close"}
+    assert public == {"send_photo", "send_media_group", "close"}
+    forbidden = ("get", "poll", "receive", "read", "updates", "webhook", "listen")
+    assert not [name for name in public if any(word in name.lower() for word in forbidden)]
 
 
 async def test_token_absent_from_attrs_repr_results_and_raw_logs(caplog: pytest.LogCaptureFixture) -> None:
