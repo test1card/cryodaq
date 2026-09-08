@@ -237,3 +237,84 @@ async def test_the_adapter_actually_fills_the_segments() -> None:
     assert trend is not None and trend.available
     assert len(trend.segments) == 3, "the adapter did not compute the segments"
     assert trend.segment_trend == "падает"
+    # And the quadratic, for the same reason the segments are checked here: a
+    # control that removed this line from the adapter left every hand-built
+    # ChannelTrend test green.
+    assert trend.slope_change is not None, "the adapter did not fit the quadratic"
+    change, _ = trend.slope_change
+    assert abs(change - (-0.018)) < 0.003, f"slope change measured {change}"
+
+
+# --- what the review with astra changed ------------------------------------
+
+
+def test_a_straight_line_shows_no_change_in_slope() -> None:
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import _centred_quadratic
+
+    change, _ = _centred_quadratic([(i * 60.0, 0.1 * i / 60.0) for i in range(400)])
+    assert abs(change) < 1e-6
+
+
+def test_a_decaying_ramp_shows_the_slope_change_it_was_built_with() -> None:
+    """0.11 falling by 0.001 per hour over 18 hours is −0.018 mbar/h across it."""
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import _centred_quadratic
+
+    pairs = []
+    t, value = 0.0, 0.0
+    for hour in range(18):
+        rate = 0.11 - 0.001 * hour
+        for _ in range(60):
+            value += rate / 60.0
+            t += 60.0
+            pairs.append((t, value))
+
+    change, _ = _centred_quadratic(pairs)
+    assert abs(change - (-0.018)) < 0.002, f"measured {change}, expected about -0.018"
+
+
+def test_a_window_too_thin_for_a_quadratic_returns_nothing() -> None:
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import _centred_quadratic
+
+    assert _centred_quadratic([(0.0, 1.0), (60.0, 1.1), (120.0, 1.2)]) is None
+
+
+def test_the_rendered_trend_states_the_uncertainty_assumption() -> None:
+    """Pointwise intervals under an independent-residual model, re-examined
+    hourly, do not give simultaneous coverage. Said once, where the numbers are.
+    """
+    trend = ChannelTrend(
+        channel="P",
+        window_minutes=1440,
+        n_samples=2956,
+        first_value=1.5,
+        last_value=2.4,
+        span_s=24 * _H,
+        rate_per_hour=0.1017,
+        slope_stderr_per_hour=0.00007,
+        slope_change=(-0.0083, 0.0031),
+    )
+    rendered = _format_trends({"давление": trend})
+
+    assert "изменение темпа по окну" in rendered
+    assert "независимых остатков" in rendered
+    assert "одновременного покрытия" in rendered
+
+
+def test_the_prompt_forbids_naming_a_mechanism_from_the_curve() -> None:
+    """A nearly straight curve does not exclude a slowly decaying source, and an
+    8% slope change is not an 8% share of one. The agent may describe the shape;
+    it may not name the cause."""
+    from cryodaq.agents.assistant.query.prompts import FORMAT_RESPONSE_SYSTEM
+
+    assert "механизм по этим данным не разделяется" in FORMAT_RESPONSE_SYSTEM
+    assert "не исключает медленно спадающий" in FORMAT_RESPONSE_SYSTEM
+
+
+def test_the_prompt_offers_the_experiment_that_would_discriminate() -> None:
+    """Refusing to answer is only half an answer; the operator can be told what
+    would settle it, with its own caveats."""
+    from cryodaq.agents.assistant.query.prompts import FORMAT_RESPONSE_SYSTEM
+
+    assert "повторить откачку" in FORMAT_RESPONSE_SYSTEM
+    assert "адсорбироваться" in FORMAT_RESPONSE_SYSTEM, "the caveat is missing"
+    assert "трогать железо — нет" in FORMAT_RESPONSE_SYSTEM

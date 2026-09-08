@@ -49,6 +49,69 @@ def _fit_rate(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
     return slope * 3600.0, (variance / denominator) ** 0.5 * 3600.0
 
 
+def _centred_quadratic(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Fitted CHANGE IN SLOPE across the window, and its standard error.
+
+    Fits p(t) = a + b·(t−tc) + c·(t−tc)² about the window centre and reports
+    2·c·T, the slope's change from one end to the other, rather than c itself.
+    A curvature coefficient in units per hour squared is not a quantity anyone
+    reasons with; "the rate fell by 0.008 mbar/h across the window" is.
+
+    Deliberately no exponential or aged-power-law fit. Their parameters are
+    poorly identified over a record this short — slope and curvature are well
+    constrained while the split between a constant term and a decaying one is
+    not — and a poorly identified parameter still prints as a number, which the
+    agent then reports and the reader then believes. This program has already
+    told an operator "сигнал 1495σ" once.
+    """
+    if len(pairs) < 8:
+        return None
+    t0 = pairs[0][0]
+    span = pairs[-1][0] - t0
+    if span <= 0:
+        return None
+    centre = t0 + span / 2.0
+    xs = [(ts - centre) / 3600.0 for ts, _ in pairs]
+    ys = [value for _, value in pairs]
+    n = len(xs)
+    s1 = sum(xs)
+    s2 = sum(x * x for x in xs)
+    s3 = sum(x**3 for x in xs)
+    s4 = sum(x**4 for x in xs)
+    ty = sum(ys)
+    txy = sum(x * y for x, y in zip(xs, ys, strict=True))
+    tx2y = sum(x * x * y for x, y in zip(xs, ys, strict=True))
+    # Normal equations for the quadratic, solved directly: three unknowns.
+    m = [[n, s1, s2], [s1, s2, s3], [s2, s3, s4]]
+    rhs = [ty, txy, tx2y]
+    det = (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+    if abs(det) < 1e-30:
+        return None
+
+    def _solve(column: int) -> float:
+        cols = [[row[i] if i != column else rhs[j] for i in range(3)] for j, row in enumerate(m)]
+        return (
+            cols[0][0] * (cols[1][1] * cols[2][2] - cols[1][2] * cols[2][1])
+            - cols[0][1] * (cols[1][0] * cols[2][2] - cols[1][2] * cols[2][0])
+            + cols[0][2] * (cols[1][0] * cols[2][1] - cols[1][1] * cols[2][0])
+        ) / det
+
+    a, b, c = _solve(0), _solve(1), _solve(2)
+    residuals = [y - (a + b * x + c * x * x) for x, y in zip(xs, ys, strict=True)]
+    variance = sum(r * r for r in residuals) / max(n - 3, 1)
+    # Var(c) is the (2,2) entry of variance·(XᵀX)⁻¹; that cofactor over det.
+    cofactor = m[0][0] * m[1][1] - m[0][1] * m[1][0]
+    if det == 0 or cofactor / det <= 0:
+        return None
+    stderr_c = (variance * cofactor / det) ** 0.5
+    hours = span / 3600.0
+    return 2.0 * c * hours, 2.0 * stderr_c * hours
+
+
 def _segment_rates(pairs: list[tuple[float, float]], parts: int = 3) -> tuple[tuple[float, float], ...]:
     """The rate over consecutive, NON-OVERLAPPING parts of the window.
 
@@ -198,6 +261,7 @@ class SQLiteAdapter:
             rate_per_hour=slope_per_s * 3600.0,
             slope_stderr_per_hour=slope_stderr_per_s * 3600.0,
             segments=_segment_rates(pairs),
+            slope_change=_centred_quadratic(pairs),
         )
 
     @staticmethod

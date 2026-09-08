@@ -157,6 +157,17 @@ class ChannelTrend:
     #: Three rates in a row say which, and say it without the assistant having
     #: to guess.
     segments: tuple[tuple[float, float], ...] = ()
+    #: Fitted CHANGE IN SLOPE from one end of the window to the other, and its
+    #: standard error, from a quadratic about the window centre. `None` when the
+    #: window is too thin to fit one.
+    #:
+    #: The change, not the curvature coefficient: a number in units per hour
+    #: SQUARED is not something anyone reasons with, while "the rate fell by
+    #: 0.008 mbar/h across the window" is. Deliberately no exponential or
+    #: aged-power-law fit either — over a record this short their parameters are
+    #: poorly identified, and a poorly identified parameter still prints as a
+    #: number that the reader then believes.
+    slope_change: tuple[float, float] | None = None
     unit: str = ""
     available: bool = True
     stale: bool = False

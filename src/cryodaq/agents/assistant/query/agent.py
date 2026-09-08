@@ -207,6 +207,14 @@ def _format_trends(trends) -> str:
     """
     if not trends:
         return "нет данных о динамике"
+    # Said once, where the numbers are, because it qualifies all of them: these
+    # are pointwise intervals computed as though the residuals were independent.
+    # They are not simultaneous across a monitoring run, and hourly averaging
+    # does not itself make slow correlations go away.
+    caveat = (
+        "погрешности — поточечные, в предположении независимых остатков; "
+        "при ежечасном пересмотре они не дают одновременного покрытия"
+    )
     rows: list[str] = []
     for name, trend in sorted(trends.items()):
         if not getattr(trend, "available", False):
@@ -233,12 +241,15 @@ def _format_trends(trends) -> str:
         # exhausts its source and decays. One slope cannot tell them apart, and
         # on 2026-09-08 the assistant said exactly that to the operator who
         # asked. Three consecutive rates can.
+        if trend.slope_change is not None:
+            change, change_err = trend.slope_change
+            parts.append(f"изменение темпа по окну {change:+.3g} ± {change_err:.2g}/ч")
         if trend.segments:
             rates = ", ".join(f"{rate:+.3g}" for rate, _ in trend.segments)
             shape = trend.segment_trend
             parts.append(f"по третям окна: {rates}" + (f" — темп {shape}" if shape else ""))
         rows.append(f"{name}: {', '.join(parts)}")
-    return "; ".join(rows)
+    return "; ".join(rows) + f". {caveat}"
 
 
 def _vacuum_forecast_qualifier(vac) -> str:
