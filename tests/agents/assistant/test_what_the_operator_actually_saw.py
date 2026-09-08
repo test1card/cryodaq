@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from cryodaq.agents.assistant_main import _PERIODIC_TICK_LEAD_S, _seconds_until_next_tick
+from cryodaq.agents.assistant_main import _PERIODIC_TICK_LEAD_S, _next_boundary, _tick_lead
 from cryodaq.reporting.periodic_renderer import MAX_CAPTION_CODEPOINTS, _with_summary
 
 _HOUR = 3600.0
@@ -25,6 +25,16 @@ _HOUR = 3600.0
 
 def _at(hhmmss: str) -> float:
     return dt.datetime.strptime("2026-09-08 " + hhmmss, "%Y-%m-%d %H:%M:%S").timestamp()
+
+
+def _seconds_until_next_tick(interval: float, now: float) -> float:
+    """The delay a cold start waits. Was a function in the module; it is one
+    subtraction from the boundary, and keeping a wrapper alive only so tests
+    could call it is how a src function ends up with no caller at all."""
+
+    if interval <= 0:
+        return 0.0
+    return max(_next_boundary(interval, now, None) - _tick_lead(interval) - now, 0.0)
 
 
 def _fires_at(now: float, interval: float = _HOUR) -> str:
@@ -145,7 +155,10 @@ def test_the_tick_rechecks_the_clock_after_sleeping() -> None:
 
     source = inspect.getsource(assistant_main._periodic_report_tick)
     assert "_TICK_RECHECKS" in source, "the tick sleeps once and never looks again"
-    at = source.index("_seconds_until_next_tick")
+    # The point is that the tick looks at the clock again and can stop waiting,
+    # not which helper it names: it now measures to the boundary the cycle
+    # already chose, because recomputing one let a clock step publish twice.
+    at = source.index("time.time()", source.index("_TICK_RECHECKS"))
     assert "break" in source[at : at + 300]
 
     from cryodaq.agents.assistant_main import _TICK_RECHECKS
@@ -158,7 +171,6 @@ async def test_a_clock_step_backwards_does_not_fire_twice() -> None:
     import asyncio
 
     from cryodaq.agents import assistant_main
-    from cryodaq.agents.assistant_main import _seconds_until_next_tick
 
     fired: list[float] = []
     clock = {"t": _at("07:54:00")}

@@ -793,31 +793,6 @@ def _next_boundary(interval_s: float, now: float, served_boundary: float | None)
     return boundary
 
 
-def _seconds_until_next_tick(
-    interval_s: float, now: float, *, served_boundary: float | None = None
-) -> float:
-    """Sleep until just before the next clock boundary, not one interval away.
-
-    The bulletin used to free-run from process start, so its hour and the
-    report's hour drifted apart by however long ago the assistant happened to be
-    restarted. On 2026-09-08 that showed up where an operator could see it: the
-    caption read "Давление: 2.09e+00 мбар" and the summary directly beneath it
-    said 2.051 — the same quantity, twenty-four minutes apart, with nothing
-    explaining why.
-
-    Aligned to the clock and run slightly early, the bulletin describes the hour
-    the chart shows, minus the lead. The two numbers agree to the width of that
-    lead instead of to the width of whenever the process last started.
-    """
-    if interval_s <= 0:
-        return 0.0
-    boundary = _next_boundary(interval_s, now, served_boundary)
-    # Never negative: `asyncio.sleep` never returns early, so an on-time wake
-    # lands exactly at the target or a hair past it, and that is arrival rather
-    # than a reason to wait another interval.
-    return max(boundary - _tick_lead(interval_s) - now, 0.0)
-
-
 async def _periodic_report_tick(
     config: AssistantConfig,
     event_bus: EventBus,
@@ -844,10 +819,16 @@ async def _periodic_report_tick(
         # they reconsidered, the cold-start rule fired again on each and the
         # first bulletin was pushed three intervals out.
         boundary = _next_boundary(interval_s, time.time(), served_boundary)
+        lead = _tick_lead(interval_s)
         for _ in range(_TICK_RECHECKS):
-            delay = _seconds_until_next_tick(
-                interval_s, time.time(), served_boundary=boundary - interval_s
-            )
+            # LOOK AT THE CLOCK AGAIN — but measure to the boundary this cycle
+            # already chose. Recomputing one from the current clock meant a step
+            # forward during the sleep landed the recheck on a LATER boundary
+            # while the loop still published for the earlier one; the next cycle
+            # then found the later one already due and published again with no
+            # gap at all. The recheck exists to notice the step, not to change
+            # which hour is being reported.
+            delay = boundary - lead - time.time()
             if delay <= _TICK_ARRIVAL_TOLERANCE_S:
                 break
             await sleep(delay)

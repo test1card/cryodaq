@@ -35,9 +35,27 @@ def test_the_prompt_forbids_reading_no_change_as_constancy() -> None:
 
 def test_the_prompt_says_the_errors_are_optimistic() -> None:
     """Astra's correction on 2026-09-08: independent residuals are assumed and
-    the sensor does not supply them, so the stated spread is the narrow one."""
+    the sensor does not supply them, so the stated spread is usually narrow."""
 
     assert "независимых остатков" in FORMAT_RESPONSE_SYSTEM
+
+
+def test_the_prompt_compares_the_ends_not_the_neighbours() -> None:
+    """Review's correction: adjacent thirds overlapping proves nothing on its
+    own. A wide middle third can overlap both neighbours while the first and
+    last are cleanly apart — a change that IS established, which a rule about
+    adjacent pairs would order the model to hide."""
+
+    assert "ПЕРВУЮ И ПОСЛЕДНЮЮ" in FORMAT_RESPONSE_SYSTEM
+    assert "Широкая средняя треть" in FORMAT_RESPONSE_SYSTEM
+
+
+def test_the_prompt_does_not_state_the_correlation_as_a_law() -> None:
+    """Positive autocorrelation is the usual case, not a certainty: alternating
+    residuals make the independent estimate conservative instead. The sign is
+    never measured here, so the text must say so rather than assert."""
+
+    assert "правило, а не закон" in FORMAT_RESPONSE_SYSTEM
 
 
 def test_no_code_path_still_hands_out_the_verdict() -> None:

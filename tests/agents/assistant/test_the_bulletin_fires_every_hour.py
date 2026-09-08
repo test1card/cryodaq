@@ -136,3 +136,40 @@ async def test_the_first_bulletin_does_not_wait_three_hours(
         f"the first bulletin waited {waited / 3600.0:.2f} h, which is more than "
         f"the {interval / 3600.0:.0f} h interval it claims"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_clock_jump_forward_does_not_publish_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rechecks must measure the distance to the boundary already chosen.
+
+    They recompute one instead, from the current clock. A step forward during
+    the sleep therefore lands the recheck on a LATER boundary than the cycle is
+    waiting for, the loop still publishes for the earlier one, and the next
+    cycle finds the later one already due — two bulletins back to back, with
+    the first hour's report left without its summary.
+    """
+
+    interval = 3600.0
+    clock = _Clock(1_757_000_000.0)
+    jumped = {"done": False}
+
+    async def stepping_sleep(seconds: float) -> None:
+        clock.now += seconds
+        if not jumped["done"]:
+            jumped["done"] = True
+            clock.now += 600.0  # the clock steps ten minutes forward mid-sleep
+
+    monkeypatch.setattr(assistant_main.time, "time", clock.time)
+    bus = _Bus(clock, wanted=2)
+
+    with pytest.raises(_StopAfterEnough):
+        await assistant_main._periodic_report_tick(
+            _Config(), bus, _Cache(), sleep=stepping_sleep
+        )
+
+    gap = bus.fired_at[1] - bus.fired_at[0]
+    assert gap >= interval / 2.0, (
+        f"two bulletins {gap:.0f} s apart after a clock step; the second is a duplicate"
+    )
