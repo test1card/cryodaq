@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import os
 import re
@@ -173,6 +174,19 @@ def _finite_nonnegative(value: object, field: str) -> float:
     if not math.isfinite(result) or result < 0:
         raise ValueError(f"{field} must be finite and nonnegative")
     return result
+
+
+def _payload_fits(payload: Mapping[str, object], cap: int) -> bool:
+    """Whether this payload serialises within the input cap. Never raises.
+
+    Measured with the same separators the writer uses, so the answer is about
+    the bytes that will actually be written rather than a guess.
+    """
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return len(encoded.encode("utf-8")) <= cap
+    except Exception:  # noqa: BLE001 - a failure here must not cost the report
+        return True
 
 
 def _finite_or_none_ts(value: object) -> float | None:
@@ -1417,7 +1431,16 @@ class PeriodicPngCoordinator:
         # loop also carries the report's heartbeat and alarm refresh. A lost
         # summary costs a caption; a stalled loop costs the report.
         summary = await self._read_summary_note(active)
+        # THE SUMMARY YIELDS TO THE REPORT. A fixed character cap cannot know
+        # how much room the readings leave: a payload with 868 readings and a
+        # 900-character summary serialises to 65601 bytes against a 65536 cap,
+        # input creation fails, and the whole report is lost — for a decoration.
+        # So the payload is measured, and the summary is shortened until it fits
+        # or disappears. It is the only optional part; nothing else may be cut.
         payload = self._input_payload(active, snapshot, summary)
+        while summary and not _payload_fits(payload, self._config.max_input_bytes):
+            summary = summary[: len(summary) * 3 // 4]
+            payload = self._input_payload(active, snapshot, summary)
         await self._run_blocking(
             write_periodic_input_file,
             self._data_dir,

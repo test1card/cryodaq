@@ -511,6 +511,31 @@ _WORD_BOUNDARY_LOOKBACK = 24
 #: What ends a sentence. The ellipsis is not here: a summary that already ends
 #: in one was cut by someone else, and cutting it again teaches nothing.
 _SENTENCE_ENDS = (".", "!", "?", "\n")
+
+
+def _last_sentence_end(text: str) -> int:
+    """Index of the last real sentence end, or -1.
+
+    A bare `rfind(".")` treats the point inside a number as a sentence: with
+    "давление 0.10 мбар" before the cut, the caption came out as "давление 0. …"
+    — a value severed mid-number and presented as a finished thought. A period
+    ends a sentence only when what follows it is whitespace or nothing, and what
+    precedes it is not a digit. Channel names carrying dots are refused the same
+    way, and for the same reason.
+    """
+    for index in range(len(text) - 1, -1, -1):
+        char = text[index]
+        if char not in _SENTENCE_ENDS:
+            continue
+        if char == "\n":
+            return index
+        following = text[index + 1 : index + 2]
+        if following and not following.isspace():
+            continue
+        if char == "." and index and text[index - 1].isdigit():
+            continue
+        return index
+    return -1
 #: Below this a "sentence" is a fragment — a heading, a stray initial — and
 #: keeping only it says less than a cut clause would.
 _MIN_SENTENCE_KEPT = 80
@@ -568,7 +593,7 @@ def _with_summary(caption: str, summary: str) -> str:
         # survives: a single long paragraph is still better shown cut than
         # dropped, and the word-boundary rule below then keeps it off a word.
         trimmed = cut.rstrip()
-        sentence = max(trimmed.rfind(mark) for mark in _SENTENCE_ENDS)
+        sentence = _last_sentence_end(trimmed)
         if sentence >= _MIN_SENTENCE_KEPT:
             whole = trimmed[: sentence + 1].rstrip()
             if whole:

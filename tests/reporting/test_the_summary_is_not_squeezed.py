@@ -77,3 +77,63 @@ def test_the_prompt_asks_for_the_conclusion_first_and_calls_it_a_conclusion() ->
     assert "Вывод:" in PERIODIC_REPORT_SYSTEM
     assert "НАЧИНАЙ С ВЫВОДА" in PERIODIC_REPORT_SYSTEM
     assert "400 символов" not in PERIODIC_REPORT_SYSTEM, "the squeeze is back"
+
+
+# --- what review found in the relaxation -----------------------------------
+
+
+def test_a_period_inside_a_number_is_not_a_sentence_end() -> None:
+    """`rfind(".")` cut "давление 0.10 мбар" into "давление 0. …" — a value
+    severed mid-number and presented as a finished thought."""
+    from cryodaq.reporting.periodic_renderer import _last_sentence_end
+
+    assert _last_sentence_end("давление 0.10 мбар") == -1
+    assert _last_sentence_end("VSP63D_1.pressure растёт") == -1
+    assert _last_sentence_end("Всё тихо. Давление 0.10") == len("Всё тихо")
+
+
+def test_a_caption_cut_near_a_number_does_not_sever_it() -> None:
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - 150)
+    summary = "Вывод: " + "состояние стабильное " * 5 + "давление 0.10 мбар в час " * 5
+
+    tail = _with_summary(caption, summary)[len(caption) :]
+
+    assert "0. …" not in tail, f"a number was cut in half: {tail[-30:]!r}"
+
+
+def test_the_summary_yields_when_the_payload_would_not_fit() -> None:
+    """A fixed character cap cannot know how much room the readings leave.
+
+    868 readings and a 900-character summary serialise past a 65536-byte cap;
+    input creation then fails and the WHOLE report is lost, for a decoration.
+    """
+    import inspect
+
+    from cryodaq.agents.assistant import periodic_png
+
+    source = inspect.getsource(periodic_png.PeriodicPngCoordinator)
+    assert "_payload_fits" in source, "the payload size is never measured"
+    at = source.index("_payload_fits")
+    window = source[max(at - 300, 0) : at + 300]
+    assert "summary" in window and "while" in window, "nothing shortens the summary when the payload is too large"
+
+
+def test_the_fit_check_measures_what_the_writer_writes() -> None:
+    """A guess at the encoding would answer a different question."""
+    import inspect
+
+    from cryodaq.agents.assistant.periodic_png import _payload_fits
+
+    source = inspect.getsource(_payload_fits)
+    assert 'separators=(",", ":")' in source
+    assert "ensure_ascii=False" in source
+
+
+def test_the_fit_check_never_raises() -> None:
+    """It runs while assembling a report; a failure here must not cost one."""
+    from cryodaq.agents.assistant.periodic_png import _payload_fits
+
+    class _Unserialisable:
+        pass
+
+    assert _payload_fits({"x": _Unserialisable()}, 10) is True
