@@ -37,10 +37,16 @@ WorkingDirectory=/home/lab53/cryodaq
 # a dialog nobody is there to click.
 ExecStart=/home/lab53/cryodaq/start.sh --tray
 
-# NOT YET SAFE FOR UNATTENDED USE. A second launcher opens a MODAL
-# QMessageBox before exiting 0 (launcher.py ~8865), so a lock collision under
-# systemd blocks on a dialog nobody is there to dismiss. Until that path is
-# non-modal this unit stays disabled — see README-autostart.md.
+# THE MODAL BLOCKER IS GONE. A second launcher used to open a modal
+# QMessageBox before exiting 0, so a lock collision under systemd hung on a
+# dialog nobody could see. `_report_startup_refusal(attended=not args.tray)`
+# now logs and exits without a dialog whenever `--tray` is in force, which is
+# the mode this unit starts. Enabled 2026-09-08 on the operator's word.
+#
+# WHAT THIS STILL DOES NOT DO: it starts CryoDAQ when a GRAPHICAL SESSION
+# starts, not when the machine boots. Without GDM autologin a rebooted stand
+# stops at the login screen and acquisition does not resume. That is a
+# separate, root-level decision — see README-autostart.md.
 Restart=on-failure
 RestartSec=20
 
