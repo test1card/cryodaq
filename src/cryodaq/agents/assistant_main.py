@@ -762,7 +762,9 @@ _TICK_ARRIVAL_TOLERANCE_S = 5.0
 _TICK_RECHECKS = 3
 
 
-def _seconds_until_next_tick(interval_s: float, now: float) -> float:
+def _seconds_until_next_tick(
+    interval_s: float, now: float, *, served_boundary: float | None = None
+) -> float:
     """Sleep until just before the next clock boundary, not one interval away.
 
     The bulletin used to free-run from process start, so its hour and the
@@ -780,13 +782,24 @@ def _seconds_until_next_tick(interval_s: float, now: float) -> float:
         return 0.0
     lead = min(_PERIODIC_TICK_LEAD_S, interval_s / 4.0)
     boundary = (now // interval_s + 1) * interval_s
-    delay = boundary - lead - now
-    # Already past this boundary's lead — take the next one rather than firing
-    # immediately, which on a restart would produce two bulletins in a minute.
-    while delay <= 0:
-        boundary += interval_s
+    if served_boundary is None:
         delay = boundary - lead - now
-    return delay
+        # COLD START. Nothing here knows whether this boundary's bulletin
+        # already went out before the restart, so a target already passed is
+        # assumed served: take the next one rather than firing immediately,
+        # which on a restart would produce two bulletins in a minute.
+        while delay <= 0:
+            boundary += interval_s
+            delay = boundary - lead - now
+        return delay
+    # WAKING INSIDE THE LOOP, where the boundary already served IS known.
+    # `asyncio.sleep` never returns early, so an on-time wake lands exactly at
+    # the target or a hair past it, and the cold-start rule then read that as
+    # "already served" and pushed a whole interval away. With three rechecks
+    # doing it in turn, an hourly bulletin went out every three hours.
+    while boundary <= served_boundary:
+        boundary += interval_s
+    return max(boundary - lead - now, 0.0)
 
 
 async def _periodic_report_tick(
@@ -801,6 +814,9 @@ async def _periodic_report_tick(
         logger.info("Periodic assistant reports disabled (interval=0)")
         return
     window_minutes = int(config.periodic_report_interval_minutes)
+    #: None until the first bulletin: the first wait must use the cold-start
+    #: rule, because nothing yet knows what a previous incarnation sent.
+    served_boundary: float | None = None
     while True:
         # RE-CHECK AFTER WAKING. The delay is computed from the WALL clock and
         # handed to a monotonic sleep, so a clock step during it goes unnoticed:
@@ -808,10 +824,15 @@ async def _periodic_report_tick(
         # stepped forward, it fires after the report has already rendered. One
         # more look at the clock costs nothing and catches both.
         for _ in range(_TICK_RECHECKS):
-            delay = _seconds_until_next_tick(interval_s, time.time())
+            now = time.time()
+            delay = _seconds_until_next_tick(interval_s, now, served_boundary=served_boundary)
             if delay <= _TICK_ARRIVAL_TOLERANCE_S:
                 break
             await sleep(delay)
+        # The boundary this bulletin belongs to. The target sits a lead before
+        # it, so the instant of firing is always strictly inside the interval
+        # and rounding up names the boundary exactly.
+        served_boundary = math.ceil(time.time() / interval_s) * interval_s
         try:
             await event_bus.publish(
                 EngineEvent(

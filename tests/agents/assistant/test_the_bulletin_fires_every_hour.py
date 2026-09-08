@@ -1,0 +1,105 @@
+"""The aligned bulletin must still fire once per interval.
+
+`_seconds_until_next_tick` returns the time to the next boundary minus a lead,
+and pushes to the following boundary whenever that value is not strictly
+positive.  `asyncio.sleep` never returns early, so on waking the target has
+always just been reached or just passed — the push therefore fires every time,
+the recheck never sees a delay inside the arrival tolerance, and each of the
+three rechecks sleeps another whole interval.
+
+The bulletin then arrives once every three hours while claiming to be hourly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+
+import pytest
+
+from cryodaq.agents import assistant_main
+
+
+class _StopAfterEnough(BaseException):
+    """Not an Exception: the tick catches those from publish and carries on."""
+
+
+@dataclass
+class _Config:
+    periodic_report_interval_minutes: int = 60
+
+    def get_periodic_report_interval_s(self) -> float:
+        return float(self.periodic_report_interval_minutes * 60)
+
+
+class _Bus:
+    def __init__(self, clock: "_Clock", wanted: int) -> None:
+        self._clock = clock
+        self._wanted = wanted
+        self.fired_at: list[float] = []
+
+    async def publish(self, event: object) -> None:
+        self.fired_at.append(self._clock.now)
+        if len(self.fired_at) >= self._wanted:
+            raise _StopAfterEnough
+
+
+class _Cache:
+    active_experiment_id = "run-1"
+
+
+class _Clock:
+    """A clock that a sleep advances exactly, which is the best case."""
+
+    def __init__(self, start: float) -> None:
+        self.now = start
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        assert seconds >= 0
+        self.now += seconds
+
+
+@pytest.mark.asyncio
+async def test_an_hourly_bulletin_fires_once_an_hour(monkeypatch: pytest.MonkeyPatch) -> None:
+    interval = 3600.0
+    clock = _Clock(1_757_000_000.0)
+    monkeypatch.setattr(assistant_main.time, "time", clock.time)
+    bus = _Bus(clock, wanted=4)
+
+    with pytest.raises(_StopAfterEnough):
+        await assistant_main._periodic_report_tick(
+            _Config(), bus, _Cache(), sleep=clock.sleep
+        )
+
+    gaps = [b - a for a, b in zip(bus.fired_at, bus.fired_at[1:])]
+    assert gaps, "the bulletin never fired twice"
+    assert all(abs(gap - interval) < 60.0 for gap in gaps), (
+        f"gaps between bulletins are {gaps}, expected about {interval} s each"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_bulletin_keeps_the_boundary_it_was_aligned_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Firing hourly is not enough: it must fire just before the clock hour."""
+
+    interval = 3600.0
+    lead = min(assistant_main._PERIODIC_TICK_LEAD_S, interval / 4.0)
+    clock = _Clock(1_757_000_000.0)
+    monkeypatch.setattr(assistant_main.time, "time", clock.time)
+    bus = _Bus(clock, wanted=3)
+
+    with pytest.raises(_StopAfterEnough):
+        await assistant_main._periodic_report_tick(
+            _Config(), bus, _Cache(), sleep=clock.sleep
+        )
+
+    for fired in bus.fired_at:
+        offset = (fired + lead) % interval
+        assert min(offset, interval - offset) < 60.0, (
+            f"fired at {fired}, which is {offset} s from a boundary minus the lead"
+        )
