@@ -2930,6 +2930,7 @@ class LauncherWindow(QMainWindow):
             phase,
             getattr(getattr(self, "_engine_proc", None), "pid", None),
             type(failure).__name__,
+            exc_info=failure,
         )
 
     def _start_engine(self) -> None:
@@ -3573,6 +3574,7 @@ class LauncherWindow(QMainWindow):
                 phase,
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             self._show_engine_down_banner(
                 "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
@@ -3746,6 +3748,7 @@ class LauncherWindow(QMainWindow):
                 phase,
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             on_failed(exc)
             return True
@@ -3996,6 +3999,7 @@ class LauncherWindow(QMainWindow):
             logger.critical(
                 "Engine shutdown worker could not be observed; phase=retire exception=%s",
                 type(exc).__name__,
+                exc_info=exc,
             )
             return False
         if not settled:
@@ -4281,6 +4285,7 @@ class LauncherWindow(QMainWindow):
                 "Engine poll failed during the terminal quit decision; phase=normal-quit-refusal owner=%s exception=%s",
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             return LauncherWindow._begin_terminal_quit_bounded_reap(self, owner_id=owner_id)
         if returncode is None:
@@ -4303,6 +4308,7 @@ class LauncherWindow(QMainWindow):
                 "normal-quit-refusal",
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             self._show_engine_down_banner(
                 "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
@@ -5036,6 +5042,7 @@ class LauncherWindow(QMainWindow):
                 "phase=normal-quit-refusal owner=%s exception=%s",
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             return True
 
@@ -5070,6 +5077,7 @@ class LauncherWindow(QMainWindow):
                     "phase=normal-quit-refusal owner=%s exception=%s",
                     owner_id,
                     type(exc).__name__,
+                    exc_info=exc,
                 )
 
             LauncherWindow._begin_deferred_engine_reader_settlement(
@@ -5160,6 +5168,7 @@ class LauncherWindow(QMainWindow):
             phase,
             type(failure).__name__,
             ",".join(unsettled) if unsettled else "phase-owner",
+            exc_info=failure,
         )
         self._show_engine_down_banner(
             f"HOLD: engine restart ownership did not settle exactly during {phase}. Automatic replacement is blocked."
@@ -5743,6 +5752,7 @@ class LauncherWindow(QMainWindow):
             owner_id,
             type(failure).__name__,
             max(0.0, supervision_deadline - time.monotonic()),
+            exc_info=failure,
         )
         QTimer.singleShot(_ENGINE_REPLACEMENT_SUPERVISION_TICK_MS, _supervise_unobservable_process)
         return True
@@ -5937,6 +5947,7 @@ class LauncherWindow(QMainWindow):
                     phase,
                     owner_id,
                     type(exc).__name__,
+                    exc_info=exc,
                 )
 
             LauncherWindow._begin_deferred_engine_reader_settlement(
@@ -5965,6 +5976,7 @@ class LauncherWindow(QMainWindow):
                 phase,
                 owner_id,
                 type(exc).__name__,
+                exc_info=exc,
             )
             return True
 
@@ -6149,6 +6161,7 @@ class LauncherWindow(QMainWindow):
                 "phase=%s failure=%s; operator retry remains available",
                 phase,
                 type(failure).__name__,
+                exc_info=failure,
             )
             self._restart_giving_up = True
             self._show_engine_down_banner(
@@ -6162,6 +6175,7 @@ class LauncherWindow(QMainWindow):
             "Engine restart phase failed after exact cleanup; phase=%s failure=%s; scheduling bounded retry",
             phase,
             type(failure).__name__,
+            exc_info=failure,
         )
         self._restart_giving_up = False
         try:
@@ -6508,6 +6522,7 @@ class LauncherWindow(QMainWindow):
                 "Assistant construction retained an unsettled soak duplicate; primary=%s cleanup=%s",
                 "none" if primary_failure is None else type(primary_failure).__name__,
                 type(cleanup_failure).__name__,
+                exc_info=cleanup_failure,
             )
             raise RuntimeError("assistant soak duplicate settlement remained incomplete") from (
                 primary_failure if primary_failure is not None else cleanup_failure
@@ -6517,6 +6532,7 @@ class LauncherWindow(QMainWindow):
             logger.error(
                 "Assistant construction failed; owner=assistant exception=%s",
                 type(primary_failure).__name__,
+                exc_info=primary_failure,
             )
             if process is not None:
                 self._assistant_unsettled_start_failure = primary_failure
@@ -6571,6 +6587,7 @@ class LauncherWindow(QMainWindow):
                         logger.error(
                             "Assistant shutdown request failed; owner=assistant exception=%s",
                             type(exc).__name__,
+                            exc_info=exc,
                         )
                     else:
                         try:
@@ -7228,6 +7245,7 @@ class LauncherWindow(QMainWindow):
             logger.error(
                 "Theme persistence failed; phase=theme_selection exception=%s",
                 type(exc).__name__,
+                exc_info=exc,
             )
             selected = _selected_theme_name()
             pending_id = (
@@ -7400,6 +7418,7 @@ class LauncherWindow(QMainWindow):
                 "Bridge watchdog replacement failed after exact cleanup; reason=%s failure=%s",
                 reason,
                 type(start_error).__name__,
+                exc_info=start_error,
             )
             self._show_engine_down_banner(
                 "ZMQ bridge replacement failed after exact cleanup; bounded watchdog retry remains pending."
@@ -7821,6 +7840,7 @@ class LauncherWindow(QMainWindow):
                 "Launcher shutdown owner remains unsettled: %s (%s)",
                 label,
                 type(error).__name__,
+                exc_info=error,
             )
         LauncherWindow._set_shutdown_tray_state(self, failed=True)
         engine_refusal_immutable = (
@@ -8246,6 +8266,7 @@ class LauncherWindow(QMainWindow):
                     "deferred-shutdown-refusal",
                     owner_id,
                     type(reader_exc).__name__,
+                    exc_info=reader_exc,
                 )
                 self._show_engine_down_banner(
                     "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
@@ -8498,6 +8519,7 @@ class LauncherWindow(QMainWindow):
                         "Engine reader settlement failed in live-source HOLD; phase=owned-exit owner=%s exception=%s",
                         preserved_id,
                         type(exc).__name__,
+                        exc_info=exc,
                     )
                     self._show_engine_down_banner(
                         "HOLD: engine ownership is unsafe and its process/readers remain unsettled. "
