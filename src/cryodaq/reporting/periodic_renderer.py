@@ -602,11 +602,17 @@ def _with_summary(caption: str, summary: str) -> str:
                 # the thing this file spends most of its length guarding
                 # against, and an operator who cannot tell text was cut has no
                 # reason to go looking for it.
-                escaped = _escape(whole) + " …"
-                candidate = caption + separator + escaped
+                # A SEPARATE NAME, NOT `escaped`. This branch spends " …" —
+                # two codepoints where the loop above budgeted one — so it can
+                # overflow by exactly one. When it does, the guard below refuses
+                # it and execution falls through; assigning to `escaped` here
+                # would leave the refused, oversized text behind as the thing
+                # that gets sent.
+                finished = _escape(whole) + " …"
+                candidate = caption + separator + finished
                 if len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES and len(
                     caption
-                ) + len(separator) + len(escaped) <= MAX_CAPTION_CODEPOINTS:
+                ) + len(separator) + len(finished) <= MAX_CAPTION_CODEPOINTS:
                     return candidate
         # ONLY WHEN THE CUT IS ACTUALLY MID-WORD. Backing off unconditionally
         # dropped a complete word for nothing: a prefix ending in "Температура
@@ -621,7 +627,10 @@ def _with_summary(caption: str, summary: str) -> str:
             if word_cut:
                 escaped = _escape(word_cut) + "…"
     candidate = caption + separator + escaped
-    if len(candidate.encode("utf-8")) > MAX_CAPTION_BYTES:
+    # BOTH LIMITS. Cyrillic reaches 1024 codepoints at about 2048 of the 4096
+    # permitted bytes, so a byte-only check passes text the validator refuses,
+    # and `_build_caption` hands this straight to `validate_caption_html`.
+    if len(candidate.encode("utf-8")) > MAX_CAPTION_BYTES or len(candidate) > MAX_CAPTION_CODEPOINTS:
         return caption
     return candidate
 
