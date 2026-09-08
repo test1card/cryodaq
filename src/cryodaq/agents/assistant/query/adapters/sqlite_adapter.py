@@ -87,6 +87,32 @@ def _sse(n: int, sx: float, sy: float, sxx: float, sxy: float, syy: float) -> fl
     return max(syy_c - sxy_c * sxy_c / sxx_c, 0.0)
 
 
+#: How many times to look again in the tail for a later change. A stand does not
+#: switch regimes dozens of times in one window, and an unbounded search on
+#: noise would keep finding one.
+_REGIME_MAX_CHANGES = 5
+
+
+def _last_regime_start(pairs: list[tuple[float, float]]) -> int | None:
+    """The MOST RECENT change of regime, not the most prominent one.
+
+    A single best split answers the wrong question. Over "plateau, rise,
+    plateau" the clearest break is the start of the rise, so the regime was
+    reported as beginning there and then spanned two physical regimes — and its
+    shape, measured across both, looked like one steady flow.
+    """
+
+    offset = 0
+    found: int | None = None
+    for _ in range(_REGIME_MAX_CHANGES):
+        split = _regime_start(pairs[offset:])
+        if split is None:
+            break
+        offset += split
+        found = offset
+    return found
+
+
 def _regime_start(pairs: list[tuple[float, float]]) -> int | None:
     """Index where the current regime began, or None if the window is one piece.
 
@@ -454,8 +480,15 @@ class SQLiteAdapter:
         # nearly a straight line across one day, and reporting the ratios then
         # says "constant flow" about a source that is plainly depleting. When
         # the start was not observed there is nothing honest to report.
-        split = _regime_start(pairs)
+        split = _last_regime_start(pairs)
         regime = pairs[split:] if split is not None else []
+        # ONLY A RISE HAS A SHAPE WORTH READING. The three laws describe how a
+        # source fills a closed volume; on a FALLING series — the pump working,
+        # or gas condensing on a cold surface — a straight line beats them both
+        # by enormous factors simply because nothing is depleting. The text then
+        # says "форма подъёма" and the prompt reads that as a constant inflow.
+        if len(regime) > 1 and regime[-1][1] <= regime[0][1]:
+            regime = []
         regime_hours = (regime[-1][0] - regime[0][0]) / 3600.0 if len(regime) > 1 else None
         return ChannelTrend(
             channel=channel,

@@ -195,3 +195,75 @@ async def test_no_observed_beginning_means_no_shape_at_all() -> None:
     assert trend.shape is None, "a shape was reported for a rise whose start was never seen"
     assert trend.regime_hours is None, "the window's length was passed off as the regime's age"
     assert "форма подъёма" not in _format_trends({"давление": trend})
+
+
+# --- what the second reviewer found ----------------------------------------
+
+
+def _concatenate(*pieces) -> list[tuple[float, float]]:
+    """Segments laid end to end, each continuing from the last one's value."""
+
+    out: list[tuple[float, float]] = []
+    clock = 0.0
+    for fn, hours in pieces:
+        base = out[-1][1] if out else 0.0
+        for i in range(int(hours * 3600 / _STEP)):
+            out.append((clock, base + fn(i * _STEP / 3600.0)))
+            clock += _STEP
+    return out
+
+
+def test_the_regime_is_the_last_change_not_the_clearest_one() -> None:
+    """A single best split answers the wrong question.
+
+    Over "plateau, rise, plateau" the most prominent break is the START of the
+    rise, so the current regime was reported as beginning there — and then
+    spanned two physical regimes, whose combined shape looks like one steady
+    flow. What is wanted is the most recent change, which is where the current
+    regime actually began.
+    """
+
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import _last_regime_start
+
+    series = _concatenate(
+        (lambda h: 0.0, 6.0),
+        (lambda h: 0.105 * h, 20.0),
+        (lambda h: 0.0, 4.0),
+    )
+    split = _last_regime_start(series)
+
+    assert split is not None
+    hours = series[split][0] / 3600.0
+    assert abs(hours - 26.0) < 1.5, (
+        f"the regime was placed at {hours:.1f} h, which is the start of the rise "
+        f"rather than the plateau that followed it"
+    )
+
+
+async def test_a_falling_pressure_has_no_shape_of_a_rise() -> None:
+    """The pump working is not a leak signature.
+
+    The three laws describe a source filling a closed volume. On a FALLING
+    series a straight line beats sqrt and log by enormous factors simply
+    because nothing is depleting — measured at 70x and 172x on a gentle
+    pump-down. The formatter calls that "форма подъёма" and the prompt reads a
+    straight line as constant inflow, so the agent would report the signature
+    of a leak while the pressure fell.
+    """
+
+    from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
+    from cryodaq.agents.assistant.query.agent import _format_trends
+
+    falling = _concatenate((lambda h: 0.0, 6.0), (lambda h: -0.1 * h, 18.0))
+    pairs = [[t, 3.0 + v] for t, v in falling]
+
+    class _Client:
+        async def call(self, _cmd: dict) -> dict:
+            return {"ok": True, "data": {"VSP63D_1/pressure": pairs}}
+
+    trend = await SQLiteAdapter(_Client()).trend("VSP63D_1/pressure", 1440)
+
+    assert trend is not None and trend.available
+    assert trend.rate_per_hour < 0.0, "the fixture does not actually fall"
+    assert trend.shape is None, "a falling pressure was given the shape of a rise"
+    assert "форма подъёма" not in _format_trends({"давление": trend})
