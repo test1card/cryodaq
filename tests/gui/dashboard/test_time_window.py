@@ -1,6 +1,11 @@
-"""Tests for TimeWindow enum (Phase UI-1 v2 Block B.2)."""
+"""Tests for TimeWindow enum (Phase UI-1 v2 Block B.2).
 
-from cryodaq.gui.dashboard.time_window import TimeWindow
+Imports the CANONICAL module. This used to come through a re-export shim in
+`gui.dashboard`, kept "while repo consumers migrate" — the migration finished
+and the shim had no importer left in the whole tree.
+"""
+
+from cryodaq.gui.state.time_window import TimeWindow
 
 
 def test_default_is_all():
