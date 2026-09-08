@@ -257,8 +257,12 @@ class LakeShore218S(InstrumentDriver):
         # real stationary plateau is constant too, and rejecting it would break
         # the conductivity measurement this stand exists to make.
         #
-        # The raw value is retained in metadata rather than discarded, so the
-        # forensic evidence survives into the archive.
+        # The raw value is retained in metadata rather than discarded. NOT for
+        # the archive, whatever this comment used to claim: the `readings` table
+        # carries value, status and a descriptor hash and nothing else, so
+        # metadata is dropped at persistence and never reaches it. The evidence
+        # is available to whatever handles the reading in this process, and to
+        # the log — and that is the whole of it.
         # AT OR BELOW ZERO, NOT EXACTLY ZERO. The reasoning above is a physical
         # floor — absolute zero is unreachable — and a floor is an inequality.
         # Written as equality it passed everything else that is equally
