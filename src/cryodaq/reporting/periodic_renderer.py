@@ -564,6 +564,18 @@ _SUMMARY_MARKUP = re.compile(
 )
 
 
+def _without_markers(text: str) -> str:
+    """Drop markup characters that never found a partner.
+
+    A lone marker is not punctuation the agent meant: it is half of a pair
+    whose other half was cut away, which happens whenever truncation lands
+    inside correct emphasis. Left in place it is the same asterisk the operator
+    complained about.
+    """
+
+    return text.replace("*", "").replace("`", "")
+
+
 def _render_summary_markup(raw: str) -> str:
     """Escape the agent's text and turn its markers into the allowed tags.
 
@@ -576,15 +588,21 @@ def _render_summary_markup(raw: str) -> str:
     out: list[str] = []
     position = 0
     for match in _SUMMARY_MARKUP.finditer(raw):
-        out.append(_escape(raw[position : match.start()]))
+        out.append(_escape(_without_markers(raw[position : match.start()])))
         for name in CAPTION_TAGS:
             inner = match.group(name)
-            if inner is not None:
-                out.append(f"<{name}>{_escape(inner)}</{name}>")
-                break
+            if inner is None:
+                continue
+            # MONOSPACE IS VERBATIM. Stripping markers across the finished HTML
+            # reached inside it: `10**-3` came out as `10-3`, a number quietly
+            # changed on its way to the operator, and the validator was happy
+            # with the result. Inside code an asterisk is an asterisk.
+            body = inner if name == "code" else _without_markers(inner)
+            out.append(f"<{name}>{_escape(body)}</{name}>")
+            break
         position = match.end()
-    out.append(_escape(raw[position:]))
-    return "".join(out).replace("**", "").replace("`", "")
+    out.append(_escape(_without_markers(raw[position:])))
+    return "".join(out)
 
 
 def _with_summary(caption: str, summary: str) -> str:

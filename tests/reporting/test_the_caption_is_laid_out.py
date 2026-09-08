@@ -102,3 +102,42 @@ def test_the_whole_caption_path_still_validates() -> None:
     assert "<code>VSP63D_1/pressure</code>" in rendered
     assert "<i>+0.14/ч</i>" in rendered
     assert "*" not in rendered and "`" not in rendered
+
+
+# --- what the review found in the first version -----------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, kept",
+    [
+        ("Давление `10**-3` мбар", "10**-3"),
+        ("степень `2**3` равна восьми", "2**3"),
+        ("канал `a*b` и `x`", "a*b"),
+    ],
+)
+def test_monospace_is_verbatim(raw: str, kept: str) -> None:
+    """Stripping unpaired markers across the finished HTML reached inside code.
+
+    `10**-3` came out as `10-3` — a number quietly changed on its way to the
+    operator, with the validator perfectly happy about it. Inside monospace an
+    asterisk is an asterisk.
+    """
+
+    rendered = _render_summary_markup(raw)
+
+    assert f"<code>{kept}</code>" in rendered, rendered
+    validate_caption_html(rendered)
+
+
+def test_a_marker_orphaned_by_truncation_is_dropped() -> None:
+    """The contract says markers do not reach the operator, and a lone `*`
+    survived it. This is not exotic: it happens whenever the cut lands inside
+    correct emphasis, which is exactly what truncation does."""
+
+    caption = "x" * 950
+    summary = "*" + "Давление стабильно " * 10 + "*"
+
+    rendered = _with_summary(caption, summary)
+
+    validate_caption_html(rendered)
+    assert "*" not in rendered, f"markdown leftovers reached the operator: {rendered[-60:]!r}"
