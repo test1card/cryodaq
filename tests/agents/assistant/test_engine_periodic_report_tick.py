@@ -55,7 +55,21 @@ async def test_engine_periodic_report_tick_publishes_event() -> None:
         except asyncio.CancelledError:
             pass
 
-    assert sleep_calls[0] == 15 * 60
+    # ALIGNED TO THE CLOCK, not one interval from process start. The bulletin
+    # used to free-run, so its hour drifted from the report's by however long
+    # ago the assistant was last restarted — visible to the operator on
+    # 2026-09-08 as two different pressures in one message. The delay is
+    # therefore whatever reaches the next quarter-hour boundary, less the lead
+    # that lets the note land before the report renders.
+    import time as _time
+
+    from cryodaq.agents.assistant_main import _PERIODIC_TICK_LEAD_S
+
+    interval = 15 * 60
+    lead = min(_PERIODIC_TICK_LEAD_S, interval / 4.0)
+    assert 0 < sleep_calls[0] <= interval
+    landed = _time.time() + sleep_calls[0] + lead
+    assert abs(landed - round(landed / interval) * interval) < 5.0, "the tick does not land on a clock boundary"
     assert event.event_type == "periodic_report_request"
     assert event.timestamp.tzinfo is UTC
     assert event.payload == {"window_minutes": 15, "trigger": "scheduled"}

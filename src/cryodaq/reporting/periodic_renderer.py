@@ -505,6 +505,11 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
     return validate_caption_html(_with_summary(caption, snapshot.render.summary))
 
 
+#: How far back to look for a word boundary when the summary has to be cut. A
+#: long word cut mid-way is still better than dropping a whole clause.
+_WORD_BOUNDARY_LOOKBACK = 24
+
+
 def _with_summary(caption: str, summary: str) -> str:
     """Append the assistant's own words, but only what still fits.
 
@@ -541,6 +546,17 @@ def _with_summary(caption: str, summary: str) -> str:
             cut = cut[:-1]
         if not cut:
             return caption
+        # BACK OFF TO A WORD BOUNDARY. Cutting by codepoint ended live captions
+        # with "пока скорость не уй…" and "давление чуть дышит,…" — a sentence
+        # broken mid-word reads as a fault in the message rather than a summary
+        # that ran long. Only when a word survives the trim: a single very long
+        # word is better shown cut than dropped entirely.
+        trimmed = cut.rstrip()
+        space = trimmed.rfind(" ")
+        if space > 0 and len(trimmed) - space <= _WORD_BOUNDARY_LOOKBACK:
+            word_cut = trimmed[:space].rstrip(" ,;:—-")
+            if word_cut:
+                escaped = _escape(word_cut) + "…"
     candidate = caption + separator + escaped
     if len(candidate.encode("utf-8")) > MAX_CAPTION_BYTES:
         return caption

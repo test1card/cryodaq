@@ -747,6 +747,39 @@ async def _handle_rag_search_command(
 # ---------------------------------------------------------------------------
 
 
+#: How far before the hour the bulletin runs, so its note is on disk when the
+#: report renders. Long enough for an ordinary generation; if one overruns, the
+#: note simply lands in the next report, which is where it landed before.
+_PERIODIC_TICK_LEAD_S = 300.0
+
+
+def _seconds_until_next_tick(interval_s: float, now: float) -> float:
+    """Sleep until just before the next clock boundary, not one interval away.
+
+    The bulletin used to free-run from process start, so its hour and the
+    report's hour drifted apart by however long ago the assistant happened to be
+    restarted. On 2026-09-08 that showed up where an operator could see it: the
+    caption read "Давление: 2.09e+00 мбар" and the summary directly beneath it
+    said 2.051 — the same quantity, twenty-four minutes apart, with nothing
+    explaining why.
+
+    Aligned to the clock and run slightly early, the bulletin describes the hour
+    the chart shows, minus the lead. The two numbers agree to the width of that
+    lead instead of to the width of whenever the process last started.
+    """
+    if interval_s <= 0:
+        return 0.0
+    lead = min(_PERIODIC_TICK_LEAD_S, interval_s / 4.0)
+    boundary = (now // interval_s + 1) * interval_s
+    delay = boundary - lead - now
+    # Already past this boundary's lead — take the next one rather than firing
+    # immediately, which on a restart would produce two bulletins in a minute.
+    while delay <= 0:
+        boundary += interval_s
+        delay = boundary - lead - now
+    return delay
+
+
 async def _periodic_report_tick(
     config: AssistantConfig,
     event_bus: EventBus,
@@ -760,7 +793,7 @@ async def _periodic_report_tick(
         return
     window_minutes = int(config.periodic_report_interval_minutes)
     while True:
-        await sleep(interval_s)
+        await sleep(_seconds_until_next_tick(interval_s, time.time()))
         try:
             await event_bus.publish(
                 EngineEvent(
@@ -894,9 +927,7 @@ async def _run_llm_runtime(
             rag_table = str(rag_cfg.get("table_name", "cryodaq_corpus"))
             rag_emb_url = str(rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
             rag_emb_model = str(rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            if not await asyncio.wait_for(
-                asyncio.to_thread(rag_db_path.is_dir), timeout=_RAG_STARTUP_PROBE_TIMEOUT_S
-            ):
+            if not await asyncio.wait_for(asyncio.to_thread(rag_db_path.is_dir), timeout=_RAG_STARTUP_PROBE_TIMEOUT_S):
                 raise FileNotFoundError(f"offline RAG index is absent at {rag_db_path}; run cryodaq-rag-index")
             # The retrieval path shares the corpus's embedding model, so it
             # must share its residency policy too — a query that evicts the
