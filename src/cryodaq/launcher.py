@@ -2797,10 +2797,20 @@ class LauncherWindow(QMainWindow):
             raise
         except BaseException as exc:
             self._construction_failure_phase = phase
+            # THE REASON, NOT JUST THE CLASS. This logged `type(exc).__name__`
+            # and threw the rest away, so the operator's stand refused to start
+            # on 2026-09-09 with `exception=RuntimeError` as the entire
+            # diagnosis — nothing in the launcher log, nothing in the systemd
+            # journal, and the process then sat in HOLD where no supervisor
+            # could retry it. A failure that stops acquisition has to say why.
+            # The root logger carries token redaction, so the traceback is safe
+            # to write here.
             logger.critical(
-                "Launcher construction failed; phase=%s exception=%s",
+                "Launcher construction failed; phase=%s exception=%s: %s",
                 phase,
                 type(exc).__name__,
+                exc,
+                exc_info=True,
             )
             if LauncherWindow._do_shutdown(self):
                 raise
