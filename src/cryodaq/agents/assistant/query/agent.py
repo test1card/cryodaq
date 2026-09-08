@@ -135,6 +135,9 @@ _RETRIEVAL_DECISION_TIMEOUT_S = 300.0
 #: handler budget with room to spare; see tests/agents/test_timeout_chain_is_ordered.py,
 #: which asserts the sum rather than only the neighbouring pairs.
 _RETRIEVAL_SEARCH_TIMEOUT_S = 240.0
+#: Reading or appending one small transcript. Generous for a healthy disk,
+#: finite because a stalled read on this loop stops every deadline above it.
+_CONVERSATION_IO_TIMEOUT_S = 5.0
 #: Bounded so a model that ignores the format cannot turn its whole answer into
 #: a search query.
 _MAX_RETRIEVAL_QUERY_CHARS = 200
@@ -384,24 +387,38 @@ class AssistantQueryAgent:
             logger.debug("conversation scope unavailable: %s", exc)
             return None
 
-    def _conversation_transcript(self, chat_id: Any, scope: str | None = None) -> str:
-        """What was already said, or "" — never raises, never blocks an answer."""
+    async def _conversation_transcript(self, chat_id: Any, scope: str | None = None) -> str:
+        """What was already said, or "" — never raises, never stalls the handler.
+
+        OFF THE LOOP, WITH A DEADLINE. The transcript is a small file and this
+        is microseconds on a healthy disk, but it is unbounded on a hung mount,
+        and this loop is carrying a question with a strict budget: a stalled
+        read there does not time out, it stops every deadline above it from
+        firing. Losing the memory for one turn is a worse answer; losing the
+        loop is no answer at all.
+        """
         if self._conversation is None:
             return ""
         try:
-            return self._conversation.replay(chat_id, scope=scope) or ""
+            return (
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._conversation.replay, chat_id, scope=scope),
+                    timeout=_CONVERSATION_IO_TIMEOUT_S,
+                )
+                or ""
+            )
         except Exception as exc:  # noqa: BLE001 - memory never costs an answer
             logger.debug("conversation replay unavailable: %s", exc)
             return ""
 
-    def _with_conversation(self, user_prompt: str, chat_id: Any, scope: str | None = None) -> str:
+    async def _with_conversation(self, user_prompt: str, chat_id: Any, scope: str | None = None) -> str:
         """Prepend what was already said, if anything was.
 
         Deliberately a prefix on the assembled prompt rather than a slot in
         each of fifteen templates: the memory belongs to the conversation, not
         to whichever bucket this particular question fell into.
         """
-        transcript = self._conversation_transcript(chat_id, scope)
+        transcript = await self._conversation_transcript(chat_id, scope)
         if not transcript:
             return user_prompt
         return f"Предыдущий разговор (показания в нём УСТАРЕЛИ — актуальные ниже):\n{transcript}\n\n{user_prompt}"
@@ -527,7 +544,8 @@ class AssistantQueryAgent:
             # hand, and a fluent answer over the wrong numbers is worse than an
             # honest "не знаю".
             intent = await self._classifier.classify(
-                query, conversation=self._conversation_transcript(chat_id, conversation_scope)
+                query,
+                conversation=await self._conversation_transcript(chat_id, conversation_scope),
             )
             data = await self._router.fetch(intent, query)
             retrieved = await self._maybe_retrieve(query, intent, data)
@@ -538,7 +556,7 @@ class AssistantQueryAgent:
             user_prompt = self._with_documents(user_prompt, data)
             if state_block:
                 user_prompt = f"{user_prompt}\n\n{state_block}"
-            user_prompt = self._with_conversation(user_prompt, chat_id, conversation_scope)
+            user_prompt = await self._with_conversation(user_prompt, chat_id, conversation_scope)
             system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
             # Bound the format LLM call by _format_timeout_s. Without this
             # wrapper a hung Ollama format call (cold model load that never
@@ -622,7 +640,16 @@ class AssistantQueryAgent:
         # purpose, because a remembered reading is a stale reading.
         if self._conversation is not None and response is not _FALLBACK and response.strip():
             try:
-                self._conversation.remember(chat_id, query, response, scope=conversation_scope)
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._conversation.remember,
+                        chat_id,
+                        query,
+                        response,
+                        scope=conversation_scope,
+                    ),
+                    timeout=_CONVERSATION_IO_TIMEOUT_S,
+                )
             except Exception as exc:  # noqa: BLE001 - memory never costs an answer
                 logger.debug("conversation not remembered: %s", exc)
 

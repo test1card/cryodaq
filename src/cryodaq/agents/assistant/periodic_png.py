@@ -79,6 +79,9 @@ from cryodaq.reporting.periodic_input import (
 _TOKEN = re.compile(r"[0-9a-f]{32}")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}")
 _MAX_TRANSITIONS_PER_PASS = 12
+#: Reading a small JSON note. Generous for a healthy disk, finite because this
+#: loop also carries the report's heartbeat and its alarm refresh.
+_SUMMARY_READ_TIMEOUT_S = 5.0
 _ALARM_SEAL_ATTEMPTS = 3
 _CONFIG_POLL_S = 5.0
 _ELECTION_BACKOFF = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
@@ -1409,7 +1412,12 @@ class PeriodicPngCoordinator:
             window_start=float(active["window_start"]),
             window_end=float(active["window_end"]),
         )
-        payload = self._input_payload(active, snapshot)
+        # OFF THE LOOP, WITH A DEADLINE. Reading a small JSON file is
+        # microseconds on a healthy disk and unbounded on a hung mount, and this
+        # loop also carries the report's heartbeat and alarm refresh. A lost
+        # summary costs a caption; a stalled loop costs the report.
+        summary = await self._read_summary_note(active)
+        payload = self._input_payload(active, snapshot, summary)
         await self._run_blocking(
             write_periodic_input_file,
             self._data_dir,
@@ -1417,7 +1425,28 @@ class PeriodicPngCoordinator:
             expected_max_input_bytes=self._config.max_input_bytes,
         )
 
-    def _input_payload(self, active: Mapping[str, object], snapshot: ProjectionSnapshot) -> dict[str, object]:
+    async def _read_summary_note(self, active: Mapping[str, object]) -> str:
+        """The agent's words for this hour, or "". Never raises, never stalls."""
+        try:
+            return await asyncio.wait_for(
+                self._run_blocking(
+                    read_summary,
+                    self._data_dir / "agents" / "assistant",
+                    window_start=_finite_or_none_ts(active.get("window_start")),
+                    window_end=_finite_or_none_ts(active.get("window_end")),
+                ),
+                timeout=_SUMMARY_READ_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - a caption is never worth the report
+            # No log line: this module has no logger on purpose. It is a fenced
+            # state machine and reports through its state, not through a stream
+            # nobody reads. An absent summary is already visible — the caption
+            # comes out as it did before there was one.
+            return ""
+
+    def _input_payload(
+        self, active: Mapping[str, object], snapshot: ProjectionSnapshot, summary: str = ""
+    ) -> dict[str, object]:
         return {
             "schema": 1,
             "generation_id": active["generation_id"],
@@ -1466,11 +1495,7 @@ class PeriodicPngCoordinator:
                 # PREVIOUS hour is still young enough to be accepted, and it
                 # would sit under this hour's chart reading like a correct
                 # description of it.
-                "summary": read_summary(
-                    self._data_dir / "agents" / "assistant",
-                    window_start=_finite_or_none_ts(active.get("window_start")),
-                    window_end=_finite_or_none_ts(active.get("window_end")),
-                )[:MAX_SUMMARY_CHARS],
+                "summary": summary[:MAX_SUMMARY_CHARS],
             },
             "readings": [
                 {

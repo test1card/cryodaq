@@ -99,7 +99,7 @@ async def test_a_long_history_is_trimmed_from_the_FRONT() -> None:
 # --- the transcript helper never costs an answer --------------------------
 
 
-def test_a_broken_store_yields_no_transcript_rather_than_raising() -> None:
+async def test_a_broken_store_yields_no_transcript_rather_than_raising() -> None:
     from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
 
     class _Broken:
@@ -108,15 +108,15 @@ def test_a_broken_store_yields_no_transcript_rather_than_raising() -> None:
 
     agent = object.__new__(AssistantQueryAgent)
     agent._conversation = _Broken()
-    assert AssistantQueryAgent._conversation_transcript(agent, 1) == ""
+    assert await AssistantQueryAgent._conversation_transcript(agent, 1) == ""
 
 
-def test_no_store_at_all_yields_no_transcript() -> None:
+async def test_no_store_at_all_yields_no_transcript() -> None:
     from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
 
     agent = object.__new__(AssistantQueryAgent)
     agent._conversation = None
-    assert AssistantQueryAgent._conversation_transcript(agent, 1) == ""
+    assert await AssistantQueryAgent._conversation_transcript(agent, 1) == ""
 
 
 # --- remembering happens past the audit -----------------------------------
