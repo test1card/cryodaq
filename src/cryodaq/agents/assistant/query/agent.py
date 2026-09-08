@@ -245,9 +245,11 @@ def _format_trends(trends) -> str:
             change, change_err = trend.slope_change
             parts.append(f"изменение темпа по окну {change:+.3g} ± {change_err:.2g}/ч")
         if trend.segments:
-            rates = ", ".join(f"{rate:+.3g}" for rate, _ in trend.segments)
-            shape = trend.segment_trend
-            parts.append(f"по третям окна: {rates}" + (f" — темп {shape}" if shape else ""))
+            # WITH THE ERRORS. Bare rates make a noisy segment and a tight one
+            # look alike, and the shape of the curve is exactly what the
+            # operator reads off this line.
+            rates = ", ".join(f"{rate:+.3g} ± {err:.2g}" for rate, err in trend.segments)
+            parts.append(f"по третям окна: {rates}")
         rows.append(f"{name}: {', '.join(parts)}")
     return "; ".join(rows) + f". {caveat}"
 

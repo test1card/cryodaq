@@ -73,7 +73,11 @@ def test_a_constant_rate_reads_as_holding() -> None:
         slope_stderr_per_hour=0.001,
         segments=((0.1054, 0.0011), (0.1049, 0.0020), (0.1051, 0.0017)),
     )
-    assert trend.segment_trend == "держится"
+    text = _format_trends({"P": trend})
+
+    for rate, err in trend.segments:
+        assert f"{rate:+.3g}" in text, f"segment rate {rate} never reached the operator"
+        assert f"{err:.2g}" in text, f"segment error {err} was dropped"
 
 
 def test_a_decaying_rate_reads_as_falling() -> None:
@@ -89,7 +93,13 @@ def test_a_decaying_rate_reads_as_falling() -> None:
         slope_stderr_per_hour=0.001,
         segments=((0.1054, 0.0011), (0.1016, 0.0020), (0.0971, 0.0017)),
     )
-    assert trend.segment_trend == "падает"
+    text = _format_trends({"P": trend})
+
+    # The numbers say it falls; the text must carry the numbers rather than a
+    # word computed from an error model that does not hold on sensor data.
+    for rate, err in trend.segments:
+        assert f"{rate:+.3g}" in text
+        assert f"{err:.2g}" in text
 
 
 def test_a_change_inside_the_noise_is_not_called_a_trend() -> None:
@@ -104,7 +114,17 @@ def test_a_change_inside_the_noise_is_not_called_a_trend() -> None:
         slope_stderr_per_hour=0.05,
         segments=((0.105, 0.02), (0.101, 0.02), (0.098, 0.02)),
     )
-    assert trend.segment_trend == "держится"
+
+    text = _format_trends({"P": trend})
+
+    # These intervals permit a fall of about a third. Saying the rate "holds"
+    # turns a failure to measure into a claim of constancy, which is how a
+    # decaying source gets mistaken for a steady leak.
+    for verdict in ("темп держится", "темп падает", "темп растёт"):
+        assert verdict not in text, f"a change inside the noise was reported as {verdict!r}"
+    for rate, err in trend.segments:
+        assert f"{rate:+.3g}" in text
+        assert f"{err:.2g}" in text
 
 
 def test_one_segment_says_nothing() -> None:
@@ -119,7 +139,11 @@ def test_one_segment_says_nothing() -> None:
         slope_stderr_per_hour=0.001,
         segments=((0.1, 0.001),),
     )
-    assert trend.segment_trend is None
+
+    text = _format_trends({"P": trend})
+
+    for verdict in ("темп держится", "темп падает", "темп растёт"):
+        assert verdict not in text, "one segment cannot describe a shape"
 
 
 # --- the segments are split by TIME ---------------------------------------
@@ -174,7 +198,15 @@ def test_the_rendered_trend_carries_the_shape() -> None:
     rendered = _format_trends({"давление": trend})
 
     assert "по третям окна" in rendered
-    assert "темп падает" in rendered
+    # THE NUMBERS AND THEIR ERRORS, NOT A WORD. A leak holds its rate and
+    # desorption decays, and this line is where the operator reads which. It
+    # used to end "— темп падает", a verdict built from OLS standard errors on
+    # autocorrelated samples; the numbers say the same thing without claiming
+    # a confidence the error model cannot support.
+    for rate, err in trend.segments:
+        assert f"{rate:+.3g}" in rendered
+        assert f"{err:.2g}" in rendered
+    assert "темп падает" not in rendered
 
 
 def test_an_absurd_sigma_is_words_not_digits() -> None:
@@ -236,7 +268,11 @@ async def test_the_adapter_actually_fills_the_segments() -> None:
 
     assert trend is not None and trend.available
     assert len(trend.segments) == 3, "the adapter did not compute the segments"
-    assert trend.segment_trend == "падает"
+    # The data above was built with a rate decaying 0.001/ч per hour, so the
+    # first third must sit well above the last. Asserted on the numbers, not on
+    # a verdict: the verdict is what this review removed.
+    first, last = trend.segments[0][0], trend.segments[-1][0]
+    assert first - last > 0.010, f"the decay did not survive segmentation: {trend.segments}"
     # And the quadratic, for the same reason the segments are checked here: a
     # control that removed this line from the adapter left every hand-built
     # ChannelTrend test green.
@@ -318,3 +354,31 @@ def test_the_prompt_offers_the_experiment_that_would_discriminate() -> None:
     assert "повторить откачку" in FORMAT_RESPONSE_SYSTEM
     assert "адсорбироваться" in FORMAT_RESPONSE_SYSTEM, "the caveat is missing"
     assert "трогать железо — нет" in FORMAT_RESPONSE_SYSTEM
+
+
+def test_consecutive_thirds_do_not_share_a_sample(monkeypatch) -> None:
+    """The docstring promises NON-OVERLAPPING; the slicing was inclusive at both
+    ends, so a sample sitting exactly on an internal boundary was fitted into
+    two thirds at once. Sharing it correlates the errors the caller then treats
+    as independent, and lets one boundary outlier bend two of the three rates.
+    """
+
+    from cryodaq.agents.assistant.query.adapters import sqlite_adapter
+
+    # The parts divide the span between the FIRST and LAST samples, so a
+    # boundary lands on a sample only when that span divides evenly: 31 points
+    # spaced 60 s span 1800 s, and the thirds fall exactly on samples 10 and 20.
+    pairs = [(float(index) * 60.0, 0.1 * index) for index in range(31)]
+    seen: list[int] = []
+    real_fit = sqlite_adapter._fit_rate
+
+    def _counting_fit(chunk):
+        seen.append(len(chunk))
+        return real_fit(chunk)
+
+    monkeypatch.setattr(sqlite_adapter, "_fit_rate", _counting_fit)
+    sqlite_adapter._segment_rates(pairs, parts=3)
+
+    assert sum(seen) == len(pairs), (
+        f"the thirds used {sum(seen)} samples out of {len(pairs)}: {seen}"
+    )

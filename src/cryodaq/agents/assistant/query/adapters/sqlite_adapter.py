@@ -134,7 +134,14 @@ def _segment_rates(pairs: list[tuple[float, float]], parts: int = 3) -> tuple[tu
     for index in range(parts):
         lo = start + width * index
         hi = end if index == parts - 1 else start + width * (index + 1)
-        chunk = [pair for pair in pairs if lo <= pair[0] <= hi]
+        # HALF-OPEN, so a sample sitting exactly on an internal boundary lands
+        # in one part and not in both. Sharing it makes the parts' errors
+        # correlated — the very thing this docstring promises they are not —
+        # and lets one boundary outlier bend two of the three rates.
+        if index == parts - 1:
+            chunk = [pair for pair in pairs if lo <= pair[0] <= hi]
+        else:
+            chunk = [pair for pair in pairs if lo <= pair[0] < hi]
         fitted = _fit_rate(chunk)
         if fitted is None:
             return ()

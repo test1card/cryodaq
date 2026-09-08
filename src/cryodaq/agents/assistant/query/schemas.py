@@ -181,25 +181,26 @@ class ChannelTrend:
         """The window that actually arrived, in hours. Render this one."""
         return self.span_s / 3600.0
 
-    @property
-    def segment_trend(self) -> str | None:
-        """Whether the rate is holding, falling or rising across the window.
-
-        None when there are not enough segments, or when the change across them
-        is inside the noise. Deliberately three plain words and not a number:
-        the number is right there in `segments` for anyone who wants it, and the
-        question the operator asks is not "by how much" but "which of the two".
-        """
-        if len(self.segments) < 2:
-            return None
-        (first, first_err), (last, last_err) = self.segments[0], self.segments[-1]
-        spread = (first_err**2 + last_err**2) ** 0.5
-        if spread <= 0.0:
-            return None
-        change = last - first
-        if abs(change) < 2.0 * spread:
-            return "держится"
-        return "падает" if change < 0 else "растёт"
+    # THERE IS NO `segment_trend` HERE, AND THERE WAS ONE.
+    #
+    # It compared the first and last segment rates against the root of the sum
+    # of their squared standard errors and returned "держится", "падает" or
+    # "растёт". That is the same construction as the `direction` property
+    # deleted on 2026-09-07 one property below, for the same reason: the
+    # standard error of an OLS slope assumes independent residuals, and a
+    # sensor does not supply them. Under stationary AR(1) noise the errors come
+    # out too small and an ordinary wobble is announced as a change of rate.
+    #
+    # The "держится" branch was worse than the other two. It fired when the
+    # change was NOT distinguishable from noise, and reported that as the rate
+    # holding — an assertion of constancy built out of a failure to measure.
+    # With segments of 0.105 ± 0.02 and 0.098 ± 0.02 the operator was told the
+    # rate holds while the interval permits a fall of a third.
+    #
+    # `segments` carries the rates and their errors, and the text renders both.
+    # Describing the shape from numbers whose uncertainty is visible is the
+    # agent's job; manufacturing a verdict from an error model that does not
+    # hold is not.
 
     @property
     def significance(self) -> float | None:
