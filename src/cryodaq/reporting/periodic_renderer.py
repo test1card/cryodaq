@@ -551,8 +551,15 @@ def _with_summary(caption: str, summary: str) -> str:
         # broken mid-word reads as a fault in the message rather than a summary
         # that ran long. Only when a word survives the trim: a single very long
         # word is better shown cut than dropped entirely.
+        # ONLY WHEN THE CUT IS ACTUALLY MID-WORD. Backing off unconditionally
+        # dropped a complete word for nothing: a prefix ending in "Температура
+        # стабильна" became "Температура…". The cut is mid-word only when the
+        # character it stopped before is not a space.
         trimmed = cut.rstrip()
-        space = trimmed.rfind(" ")
+        broke_a_word = (
+            len(cut) < len(summary) and not summary[len(cut)].isspace() and bool(trimmed) and not trimmed[-1].isspace()
+        )
+        space = trimmed.rfind(" ") if broke_a_word else -1
         if space > 0 and len(trimmed) - space <= _WORD_BOUNDARY_LOOKBACK:
             word_cut = trimmed[:space].rstrip(" ,;:—-")
             if word_cut:

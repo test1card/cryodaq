@@ -751,6 +751,15 @@ async def _handle_rag_search_command(
 #: report renders. Long enough for an ordinary generation; if one overruns, the
 #: note simply lands in the next report, which is where it landed before.
 _PERIODIC_TICK_LEAD_S = 300.0
+#: How close to the intended moment counts as arrived. Wider than any scheduling
+#: jitter, far narrower than a clock step worth reacting to.
+_TICK_ARRIVAL_TOLERANCE_S = 5.0
+#: How many times to look at the clock again before firing regardless. BOUNDED
+#: because an unbounded loop spins whenever the sleep returns without time
+#: having passed — a mocked sleep does exactly that, and so does a sleep the
+#: platform cuts short. One extra look catches an ordinary clock step; a stand
+#: whose clock keeps moving under us should still get its bulletin.
+_TICK_RECHECKS = 3
 
 
 def _seconds_until_next_tick(interval_s: float, now: float) -> float:
@@ -793,7 +802,16 @@ async def _periodic_report_tick(
         return
     window_minutes = int(config.periodic_report_interval_minutes)
     while True:
-        await sleep(_seconds_until_next_tick(interval_s, time.time()))
+        # RE-CHECK AFTER WAKING. The delay is computed from the WALL clock and
+        # handed to a monotonic sleep, so a clock step during it goes unnoticed:
+        # stepped back, the bulletin fires twice for one report boundary;
+        # stepped forward, it fires after the report has already rendered. One
+        # more look at the clock costs nothing and catches both.
+        for _ in range(_TICK_RECHECKS):
+            delay = _seconds_until_next_tick(interval_s, time.time())
+            if delay <= _TICK_ARRIVAL_TOLERANCE_S:
+                break
+            await sleep(delay)
         try:
             await event_bus.publish(
                 EngineEvent(

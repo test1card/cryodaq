@@ -105,3 +105,83 @@ def test_one_very_long_word_is_cut_rather_than_dropped() -> None:
     tail = _with_summary(caption, summary)[len(caption) :]
 
     assert "Й" in tail and tail.endswith("…")
+
+
+# --- what review found in the repairs --------------------------------------
+
+
+def test_a_cut_that_already_lands_on_a_word_keeps_that_word() -> None:
+    """Backing off unconditionally dropped a complete word for nothing.
+
+    A prefix ending in "Температура стабильна" became "Температура…" — a word
+    thrown away because the code retreated to the previous space whether or not
+    the cut had broken anything. The boundary is chosen past the forty-character
+    floor below which the summary is dropped entirely.
+    """
+    summary = (
+        "Температура держится ровно, разброс в пределах сотых кельвина, "
+        "и давление растёт с прежней скоростью уже двенадцатый час подряд."
+    )
+    at_boundary = summary.index(" и давление")
+    assert at_boundary > 40, "the cut must sit above the drop-the-summary floor"
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - at_boundary - 3)
+
+    tail = _with_summary(caption, summary)[len(caption) :]
+
+    assert tail, "the summary was dropped entirely"
+    assert "кельвина" in tail, f"a complete word was dropped: {tail!r}"
+
+
+def test_the_tick_rechecks_the_clock_after_sleeping() -> None:
+    """The delay comes from the WALL clock and the sleep is monotonic.
+
+    A step back fires the bulletin twice for one report boundary; a step forward
+    fires it after the report has already rendered. Neither is visible without
+    looking at the clock again.
+    """
+    import inspect
+
+    from cryodaq.agents import assistant_main
+
+    source = inspect.getsource(assistant_main._periodic_report_tick)
+    assert "_TICK_RECHECKS" in source, "the tick sleeps once and never looks again"
+    at = source.index("_seconds_until_next_tick")
+    assert "break" in source[at : at + 300]
+
+    from cryodaq.agents.assistant_main import _TICK_RECHECKS
+
+    assert 1 < _TICK_RECHECKS <= 10, "an unbounded re-check spins whenever the sleep returns without time passing"
+
+
+async def test_a_clock_step_backwards_does_not_fire_twice() -> None:
+    """Simulated: the clock jumps back while the tick sleeps."""
+    import asyncio
+
+    from cryodaq.agents import assistant_main
+    from cryodaq.agents.assistant_main import _seconds_until_next_tick
+
+    fired: list[float] = []
+    clock = {"t": _at("07:54:00")}
+
+    async def fake_sleep(delay: float) -> None:
+        clock["t"] += delay
+        if len(fired) == 0:
+            clock["t"] -= 1800.0  # the clock steps back half an hour mid-sleep
+        fired.append(delay)
+        await asyncio.sleep(0)
+        if len(fired) > 6:
+            raise asyncio.CancelledError
+
+    delays = []
+    try:
+        while len(delays) < 3:
+            delay = _seconds_until_next_tick(_HOUR, clock["t"])
+            if delay <= assistant_main._TICK_ARRIVAL_TOLERANCE_S:
+                break
+            await fake_sleep(delay)
+            delays.append(delay)
+    except asyncio.CancelledError:
+        pass
+
+    assert len(delays) >= 2, "the step back was not noticed"
+    assert sum(delays) > 1800.0, "the tick fired as though no time had been lost"
