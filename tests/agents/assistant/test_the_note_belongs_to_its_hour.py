@@ -41,14 +41,19 @@ def test_a_note_about_this_hour_is_used(tmp_path: Path) -> None:
     assert got == "давление растёт"
 
 
-def test_a_note_about_the_previous_hour_is_refused(tmp_path: Path) -> None:
-    """The defect: still young, but about a different hour."""
+def test_a_note_about_a_period_entirely_before_the_chart_is_refused(tmp_path: Path) -> None:
+    """This test used to demand refusal of the ADJACENT hour, and that was wrong.
+
+    Review showed a half-overlap bar refuses the freshest note that can exist,
+    every hour, silently. The two cadences are offset by construction. What must
+    still be refused is a period that does not reach the charted window at all.
+    """
     now = time.time()
-    write_summary(tmp_path, "прошлый час", window_start=now - 2 * _HOUR, window_end=now - _HOUR)
+    write_summary(tmp_path, "позапрошлый", window_start=now - 3 * _HOUR, window_end=now - 2 * _HOUR)
 
     got = read_summary(tmp_path, window_start=now - _HOUR, window_end=now)
 
-    assert got == "", "a paragraph about the previous hour captioned this hour's chart"
+    assert got == "", "a paragraph about a period the chart does not touch was accepted"
 
 
 def test_an_offset_note_that_mostly_covers_the_hour_is_used(tmp_path: Path) -> None:
@@ -63,11 +68,12 @@ def test_an_offset_note_that_mostly_covers_the_hour_is_used(tmp_path: Path) -> N
     assert read_summary(tmp_path, window_start=now - _HOUR, window_end=now) == "смещённая"
 
 
-def test_a_note_overlapping_only_slightly_is_refused(tmp_path: Path) -> None:
+def test_a_barely_overlapping_note_is_ACCEPTED(tmp_path: Path) -> None:
+    """Ten minutes of overlap is what an offset hourly cycle actually produces."""
     now = time.time()
     write_summary(tmp_path, "почти мимо", window_start=now - 1.9 * _HOUR, window_end=now - 0.9 * _HOUR)
 
-    assert read_summary(tmp_path, window_start=now - _HOUR, window_end=now) == ""
+    assert read_summary(tmp_path, window_start=now - _HOUR, window_end=now) == "почти мимо"
 
 
 def test_a_note_with_no_window_is_refused_when_a_window_is_asked_for(tmp_path: Path) -> None:
@@ -140,9 +146,9 @@ def test_a_truncated_summary_never_reaches_the_note() -> None:
     from cryodaq.agents.assistant.live import agent as module
 
     source = inspect.getsource(module.AssistantLiveAgent)
-    write_at = source.index("write_summary(")
+    write_at = source.index("write_summary_async(")
     dispatch_at = source.index("dispatched_pr, outcomes_pr = await self._dispatch_with_audit")
     assert write_at > dispatch_at, "the note is written before the audit that can block it"
-    guard = source[source.rindex("if ", 0, write_at) : write_at]
+    guard = source[source.rindex("audit_settled", 0, write_at) - 400 : write_at]
     assert "summary_is_publishable" in guard, "a truncated response can still reach the caption"
-    assert "audit" in guard, "a response whose audit failed can still reach the caption"
+    assert 'startswith("audit_")' in guard, "a failed audit SETTLEMENT can still reach the caption"

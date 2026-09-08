@@ -45,7 +45,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaModelMissingError,
     OllamaUnavailableError,
 )
-from cryodaq.agents.assistant.shared.summary_note import write_summary
+from cryodaq.agents.assistant.shared.summary_note import write_summary_async
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -1757,9 +1757,20 @@ class AssistantLiveAgent:
         # resolved data dir and leaves the config at its relative default, which
         # agrees only because this process runs with the repository as its
         # working directory.
-        if summary_is_publishable and outcomes_pr.get("audit") != "failed":
+        # THE AUDIT MUST HAVE SETTLED, not merely started. The first version of
+        # this gate checked outcomes for a failed durable INTENT, which
+        # `_dispatch_with_audit` reports by returning {"audit": "failed"}. A
+        # failed SETTLEMENT is reported differently — it only appends
+        # `audit_settlement_persist_failed` to `errors` — and with Telegram
+        # removed from the periodic targets the outcomes mapping is empty, so
+        # the gate read as "not failed" and published anyway. The caption is a
+        # delivery channel; the persistence-first rule covers it.
+        audit_settled = outcomes_pr.get("audit") != "failed" and not any(
+            error.startswith("audit_") for error in errors
+        )
+        if summary_is_publishable and audit_settled:
             written_at = time.time()
-            write_summary(
+            await write_summary_async(
                 Path(self._audit.audit_dir).parent,
                 result.text,
                 window_start=written_at - window_minutes * 60.0,

@@ -17,6 +17,7 @@ this morning. So it carries its own timestamp and expires.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -29,17 +30,51 @@ _FILE = "last_summary.json"
 #: Older than this and the note is not about the hour being reported. Slightly
 #: over one report interval, so a late report still finds its own summary.
 DEFAULT_MAX_AGE_S = 5400.0
-#: How much of the chart's window the note must actually describe. The agent's
-#: cycle and the report's slot are both hourly but NOT aligned — the agent's
-#: runs an hour from process start, the report's from the clock — so demanding
-#: equal windows would refuse every note ever written. Overlap is the honest
-#: question: does this paragraph describe the hour on the chart, mostly?
-_MIN_WINDOW_OVERLAP = 0.5
+#: The windows must TOUCH: the note's period has to reach the charted window and
+#: have begun before it ended.
+#:
+#: A fraction-of-overlap rule was tried first and was worse than the bug. The
+#: two cadences are offset by construction — the agent's hour runs from process
+#: start, the report's from the clock — and the newest note in existence when a
+#: chart freezes is always the PREVIOUS cycle's. For an agent phased at HH:10,
+#: that note describes HH-2:10..HH-1:10 while the chart shows HH-1:00..HH:00:
+#: ten minutes of overlap out of sixty. A half-overlap bar refuses it, refuses
+#: its successor for the same reason, and the operator silently never sees a
+#: summary at all — indistinguishable from an agent with nothing to say.
+#:
+#: Touching admits the freshest note that can exist and still refuses the two
+#: cases worth refusing: a note about a period entirely before the charted hour,
+#: and a note about a period that had not started when the chart ended.
 #: The caption bounds this again on the way in; this only stops an absurd file.
 _MAX_STORED_CHARS = 4000
 #: Refuse to read more than this. The reader runs on the report's event loop, so
 #: a corrupt multi-gigabyte file must not become a stalled report.
 _MAX_FILE_BYTES = 64 * 1024
+
+
+async def write_summary_async(
+    root: Path,
+    text: str,
+    *,
+    window_start: float | None = None,
+    window_end: float | None = None,
+    timeout_s: float = 5.0,
+) -> None:
+    """`write_summary` off the caller's event loop, with a deadline.
+
+    The read was moved off its loop and the WRITE was left on one — the same
+    defect, one line apart. `mkdir`, `write_text` and `replace` are syscalls: on
+    a stalled filesystem they do not raise and cannot be interrupted, so the
+    assistant's whole event loop stops inside a `try` that can never run its
+    `except`. A note is never worth that.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(write_summary, root, text, window_start=window_start, window_end=window_end),
+            timeout=timeout_s,
+        )
+    except Exception as exc:  # noqa: BLE001 - a note is never worth an incident
+        logger.debug("summary note not written: %s", exc)
 
 
 def write_summary(
@@ -132,16 +167,19 @@ def read_summary(
         if age < 0 or age > max_age_s:
             return ""
         if window_start is not None and window_end is not None:
+            # BOTH boundaries must be real numbers. A non-finite one used to
+            # arrive here as None and drop the check entirely, so corrupt window
+            # data silently disabled the protection instead of failing it.
+            if not _finite_pair(window_start, window_end):
+                return ""
             noted_start = record.get("window_start")
             noted_end = record.get("window_end")
             if not _finite_pair(noted_start, noted_end):
                 return ""
-            asked = float(window_end) - float(window_start)
-            if asked <= 0:
-                return ""
-            overlap = min(float(noted_end), float(window_end)) - max(float(noted_start), float(window_start))
-            if overlap / asked < _MIN_WINDOW_OVERLAP:
-                return ""
+            if float(noted_end) < float(window_start):
+                return ""  # a period entirely before the charted hour
+            if float(noted_start) >= float(window_end):
+                return ""  # a period that had not started when the chart ended
         return text.strip()
     except Exception as exc:  # noqa: BLE001
         logger.debug("summary note not read: %s", exc)
