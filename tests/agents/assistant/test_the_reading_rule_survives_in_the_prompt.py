@@ -46,8 +46,15 @@ def test_the_prompt_compares_the_ends_not_the_neighbours() -> None:
     last are cleanly apart — a change that IS established, which a rule about
     adjacent pairs would order the model to hide."""
 
-    assert "ПЕРВУЮ И ПОСЛЕДНЮЮ" in FORMAT_RESPONSE_SYSTEM
+    assert "ВСЕ ТРИ ПАРЫ" in FORMAT_RESPONSE_SYSTEM
     assert "Широкая средняя треть" in FORMAT_RESPONSE_SYSTEM
+    # sol's counterexample to the previous version: 0.10, 1.00, 0.10 — the ends
+    # agree and the middle is a plain spike, so a rule about the ends alone
+    # would order the model to call it "not established".
+    assert "0.10, 1.00, 0.10" in FORMAT_RESPONSE_SYSTEM
+    # And direction across the window is a narrower claim than "something
+    # changed", so it keeps the ends.
+    assert "ПЕРВАЯ И ПОСЛЕДНЯЯ" in FORMAT_RESPONSE_SYSTEM
 
 
 def test_the_prompt_does_not_state_the_correlation_as_a_law() -> None:
