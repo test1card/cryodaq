@@ -305,7 +305,17 @@ class ConversationStore:
         if not raw or raw.endswith(b"\n"):
             return
         cut = raw.rfind(b"\n")
-        path.write_bytes(raw[: cut + 1] if cut >= 0 else b"")
+        tail = raw[cut + 1 :]
+        # A COMPLETE record merely missing its newline is not damage. Dropping
+        # it unconditionally threw away the last exchange of every transcript
+        # whose file happened not to end in a newline, and emptied a file
+        # holding exactly one — content the previous reader accepted.
+        try:
+            json.loads(tail.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            path.write_bytes(raw[: cut + 1] if cut >= 0 else b"")
+            return
+        path.write_bytes(raw + b"\n")
 
     def _rotate_if_needed(self, path: Path) -> None:
         """Keep only the recent tail on disk. Never raises."""
@@ -339,14 +349,25 @@ class ConversationStore:
                 logger.debug("conversation ignored: %s is %d bytes", path.name, path.stat().st_size)
                 return []
             # `errors="replace"`: a byte left half-written by a killed process
-            # must cost the line it is in, not every exchange in the file. The
-            # damaged line then fails its own json.loads and is skipped below.
+            # must cost the line it is in, not every exchange in the file.
+            #
+            # The line is then dropped EXPLICITLY, by looking for the
+            # replacement character. The previous comment here claimed such a
+            # line necessarily fails to parse, and that is false: U+FFFD is
+            # perfectly legal inside a JSON string, so the record parsed and
+            # quietly handed the agent a question or answer that is not what
+            # anybody wrote.
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception as exc:  # noqa: BLE001
             logger.debug("conversation not read: %s", exc)
             return []
         turns: list[dict] = []
         for line in lines[-_MAX_FILE_TURNS:]:
+            if "\ufffd" in line:
+                # Undecodable bytes: whatever this says, it is not what was
+                # written, and a plausible-looking wrong sentence in the agent's
+                # memory is worse than a missing one.
+                continue
             try:
                 record = json.loads(line)
             except Exception:  # noqa: BLE001 - one bad line is not a lost history

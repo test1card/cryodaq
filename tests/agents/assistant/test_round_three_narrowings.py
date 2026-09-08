@@ -276,3 +276,59 @@ def test_a_damaged_line_costs_only_itself(tmp_path: Path) -> None:
     replayed = store.replay(7, now=time.time())
     assert "первый ответ" in replayed
     assert "второй ответ" in replayed
+
+
+# --- round six: the closing two --------------------------------------------
+
+
+def test_a_complete_final_record_without_a_newline_is_kept(tmp_path: Path) -> None:
+    """Missing a trailing newline is not damage, and the old reader accepted it.
+
+    Dropping it unconditionally threw away the last exchange of every transcript
+    that happened not to end in a newline, and emptied one holding exactly one.
+    """
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7.jsonl").write_text('{"ts": 1.0, "q": "единственный", "a": "единственный ответ"}', encoding="utf-8")
+    store = _store(tmp_path, lambda: "exp-1")
+
+    store.remember(7, "после", "новый ответ")
+    replayed = store.replay(7, now=2.0)
+
+    assert "единственный ответ" in replayed, "a complete record was thrown away for a newline"
+    assert "новый ответ" in replayed
+
+
+def test_a_line_with_undecodable_bytes_is_dropped_even_when_it_parses(tmp_path: Path) -> None:
+    """U+FFFD is legal inside a JSON string, so the record parses.
+
+    The comment used to claim a damaged line necessarily fails to parse. It does
+    not: it parses and hands the agent a sentence nobody wrote. A plausible
+    wrong answer in memory is worse than a missing one.
+    """
+    store = _store(tmp_path, lambda: "exp-1")
+    store.remember(7, "целый", "целый ответ")
+    path = store._path(7)
+    with path.open("ab") as handle:
+        handle.write(b'{"ts": 9.0, "q": "\xd0\xba\xd0", "a": "\xff\xfe\xd0\xbe\xd1\x82\xd0\xb2\xd0\xb5\xd1\x82"}\n')
+
+    replayed = store.replay(7, now=time.time())
+
+    assert "целый ответ" in replayed
+    assert "�" not in replayed, "a corrupted sentence reached the agent's memory"
+
+
+def test_an_unparseable_tail_is_still_trimmed(tmp_path: Path) -> None:
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7.jsonl").write_text(
+        '{"ts": 1.0, "q": "целая", "a": "целый ответ"}\n{"ts": 2.0, "q": "обор',
+        encoding="utf-8",
+    )
+    store = _store(tmp_path, lambda: "exp-1")
+
+    store.remember(7, "после", "новый ответ")
+    replayed = store.replay(7, now=3.0)
+
+    assert "целый ответ" in replayed
+    assert "новый ответ" in replayed
