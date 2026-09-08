@@ -20,6 +20,65 @@ from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 logger = logging.getLogger(__name__)
 
 
+#: Rows to ask for per trend query. The engine's own cap is higher; this is
+#: what the bucket is sized against.
+_TREND_POINT_BUDGET = 3_000
+
+
+def _trend_bucket(window_minutes: int) -> float:
+    """Seconds per bucket so the whole window fits the budget. Rounded up."""
+    seconds = max(float(window_minutes), 1.0) * 60.0
+    return max(math.ceil(seconds / _TREND_POINT_BUDGET), 2.0)
+
+
+def _fit_rate(pairs: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Least-squares rate per hour and its standard error, or None."""
+    if len(pairs) < 4:
+        return None
+    t0 = pairs[0][0]
+    xs = [ts - t0 for ts, _ in pairs]
+    ys = [value for _, value in pairs]
+    mean_x = sum(xs) / len(xs)
+    denominator = sum((x - mean_x) ** 2 for x in xs)
+    if denominator <= 0:
+        return None
+    mean_y = sum(ys) / len(ys)
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True)) / denominator
+    residuals = [y - (mean_y + slope * (x - mean_x)) for x, y in zip(xs, ys, strict=True)]
+    variance = sum(r * r for r in residuals) / max(len(residuals) - 2, 1)
+    return slope * 3600.0, (variance / denominator) ** 0.5 * 3600.0
+
+
+def _segment_rates(pairs: list[tuple[float, float]], parts: int = 3) -> tuple[tuple[float, float], ...]:
+    """The rate over consecutive, NON-OVERLAPPING parts of the window.
+
+    Split by TIME, not by sample count, so an uneven write rate cannot make one
+    part cover twice the hours of another and look like a change that is really
+    a difference in how much was measured.
+
+    Overlapping windows would be worse than useless here: sharing most of their
+    samples, their errors are not independent, and comparing them makes a small
+    difference look significant. That mistake is easy to make by hand — I made
+    it against this very channel before checking.
+    """
+    if len(pairs) < parts * 4:
+        return ()
+    start, end = pairs[0][0], pairs[-1][0]
+    if end <= start:
+        return ()
+    width = (end - start) / parts
+    out: list[tuple[float, float]] = []
+    for index in range(parts):
+        lo = start + width * index
+        hi = end if index == parts - 1 else start + width * (index + 1)
+        chunk = [pair for pair in pairs if lo <= pair[0] <= hi]
+        fitted = _fit_rate(chunk)
+        if fitted is None:
+            return ()
+        out.append(fitted)
+    return tuple(out)
+
+
 class SQLiteAdapter:
     """Range statistics over a time window via the engine's readings history."""
 
@@ -74,7 +133,17 @@ class SQLiteAdapter:
                     "cmd": "readings_history",
                     "channels": [channel],
                     "from_ts": start_ts,
-                    "limit_per_channel": 10_000,
+                    "limit_per_channel": _TREND_POINT_BUDGET,
+                    # BUY THE WINDOW. Ten thousand rows against a channel
+                    # written every two seconds reach back five and a half
+                    # hours, so a six-hour request came back covering 5.6 and a
+                    # twenty-four-hour request would have come back covering the
+                    # same 5.6. The assistant told an operator "+0.1/ч за 5.6 ч"
+                    # and, asked whether the rate was decaying, could not say —
+                    # it had no window long enough to hold an answer. Bucketing
+                    # returns the newest real sample per bucket, never an
+                    # average, so the span is honest and the values are real.
+                    "bucket_s": _trend_bucket(window_minutes),
                 }
             )
         except asyncio.CancelledError:
@@ -128,6 +197,7 @@ class SQLiteAdapter:
             span_s=span_s,
             rate_per_hour=slope_per_s * 3600.0,
             slope_stderr_per_hour=slope_stderr_per_s * 3600.0,
+            segments=_segment_rates(pairs),
         )
 
     @staticmethod

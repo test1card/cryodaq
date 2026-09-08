@@ -144,6 +144,19 @@ class ChannelTrend:
     #: square root of the sample count, which is exactly the term that was
     #: missing. Zero when not computed.
     slope_stderr_per_hour: float = 0.0
+    #: The same slope over consecutive, NON-OVERLAPPING thirds of the window,
+    #: oldest first, each with its own standard error.
+    #:
+    #: One slope over one window cannot answer the only question that matters
+    #: about a chamber standing pumped down. Asked on 2026-09-08 whether the
+    #: pressure was rising from a leak or from moisture coming out of the
+    #: insulation, the assistant answered honestly that it could not tell:
+    #: "я не вижу, замедляется ли темп". It had the slope and not its history.
+    #:
+    #: A leak holds a constant rate; desorption exhausts its source and decays.
+    #: Three rates in a row say which, and say it without the assistant having
+    #: to guess.
+    segments: tuple[tuple[float, float], ...] = ()
     unit: str = ""
     available: bool = True
     stale: bool = False
@@ -156,6 +169,26 @@ class ChannelTrend:
     def span_hours(self) -> float:
         """The window that actually arrived, in hours. Render this one."""
         return self.span_s / 3600.0
+
+    @property
+    def segment_trend(self) -> str | None:
+        """Whether the rate is holding, falling or rising across the window.
+
+        None when there are not enough segments, or when the change across them
+        is inside the noise. Deliberately three plain words and not a number:
+        the number is right there in `segments` for anyone who wants it, and the
+        question the operator asks is not "by how much" but "which of the two".
+        """
+        if len(self.segments) < 2:
+            return None
+        (first, first_err), (last, last_err) = self.segments[0], self.segments[-1]
+        spread = (first_err**2 + last_err**2) ** 0.5
+        if spread <= 0.0:
+            return None
+        change = last - first
+        if abs(change) < 2.0 * spread:
+            return "держится"
+        return "падает" if change < 0 else "растёт"
 
     @property
     def significance(self) -> float | None:

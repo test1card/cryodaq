@@ -135,6 +135,9 @@ _RETRIEVAL_DECISION_TIMEOUT_S = 300.0
 #: handler budget with room to spare; see tests/agents/test_timeout_chain_is_ordered.py,
 #: which asserts the sum rather than only the neighbouring pairs.
 _RETRIEVAL_SEARCH_TIMEOUT_S = 240.0
+#: Beyond this many standard errors the exact number says nothing a person can
+#: use. Reported as words instead.
+_SIGMA_BEYOND_DOUBT = 10.0
 #: Reading or appending one small transcript. Generous for a healthy disk,
 #: finite because a stalled read on this loop stops every deadline above it.
 _CONVERSATION_IO_TIMEOUT_S = 5.0
@@ -216,7 +219,24 @@ def _format_trends(trends) -> str:
         parts = [f"{trend.rate_per_hour:+.3g}/ч за {trend.span_hours:.1f} ч"]
         z = trend.significance
         if z is not None:
-            parts.append(f"наклон {z:.0f}σ" if z >= 1 else "в пределах шума")
+            # CAPPED. A clean ramp over thousands of samples produces four-digit
+            # sigmas — the assistant told an operator "сигнал 1495σ", which is
+            # noise wearing the costume of precision. Past ten sigma the only
+            # honest content is "this is not noise".
+            if z >= _SIGMA_BEYOND_DOUBT:
+                parts.append("наклон уверенный")
+            elif z >= 1:
+                parts.append(f"наклон {z:.0f}σ")
+            else:
+                parts.append("в пределах шума")
+        # THE SHAPE, NOT JUST THE SLOPE. A leak holds its rate; desorption
+        # exhausts its source and decays. One slope cannot tell them apart, and
+        # on 2026-09-08 the assistant said exactly that to the operator who
+        # asked. Three consecutive rates can.
+        if trend.segments:
+            rates = ", ".join(f"{rate:+.3g}" for rate, _ in trend.segments)
+            shape = trend.segment_trend
+            parts.append(f"по третям окна: {rates}" + (f" — темп {shape}" if shape else ""))
         rows.append(f"{name}: {', '.join(parts)}")
     return "; ".join(rows)
 

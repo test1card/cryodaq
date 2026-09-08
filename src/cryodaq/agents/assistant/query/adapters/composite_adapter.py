@@ -16,7 +16,11 @@ _TREND_CHANNELS = frozenset({"Т11", "Т12"})
 #: Six hours: long enough that a slow drift is visible, short enough that the
 #: engine's 10000-sample reply still covers a useful part of it. The result
 #: reports the span that actually arrived, not this number.
-_TREND_WINDOW_MINUTES = 360
+#: A DAY, not six hours. The question a pumped-down chamber raises — leak or
+#: desorption — is answered by whether the rate decays, and six hours is not
+#: enough to see that. It was six because ten thousand rows only reached back
+#: five and a half hours anyway; with bucketing the window is real.
+_TREND_WINDOW_MINUTES = 1440
 
 
 class CompositeAdapter:
