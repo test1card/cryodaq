@@ -16,6 +16,7 @@ import pytest
 
 from cryodaq.reporting.periodic_input import (
     CAPTION_TAGS,
+    MAX_CAPTION_CODEPOINTS,
     PeriodicInputError,
     validate_caption_html,
 )
@@ -41,11 +42,23 @@ def test_no_asterisk_survives_into_the_message() -> None:
     assert "*" not in rendered, f"asterisks reached the operator: {rendered!r}"
 
 
-def test_an_unpaired_marker_is_dropped_not_shown() -> None:
+def test_an_unpaired_marker_is_left_alone_not_guessed_at() -> None:
+    """The contract changed on purpose, after guessing failed three times.
+
+    Stripping "leftover" markers turned `10**-3` into `10-3` and `2*3` into
+    `23`: numbers silently changed on their way to the operator. There is no
+    local rule that tells an orphaned emphasis marker from an arithmetic one,
+    so nothing is guessed any more — an unpaired marker is passed through as
+    the character it is, and the caption still validates.
+
+    The orphans that mattered came from truncation halving a pair, and those
+    are gone at the source: see the truncation tests below.
+    """
+
     for raw in ("**без пары", "конец**", "`код без пары", "**через\nстроку**"):
         rendered = _render_summary_markup(raw)
-        assert "**" not in rendered and "`" not in rendered, repr(rendered)
         validate_caption_html(rendered)
+        assert "<" not in rendered.replace("&lt;", ""), f"a stray marker opened a tag: {rendered!r}"
 
 
 def test_the_model_cannot_write_its_own_markup() -> None:
@@ -141,6 +154,7 @@ def test_a_marker_orphaned_by_truncation_is_dropped() -> None:
 
     validate_caption_html(rendered)
     assert "*" not in rendered, f"markdown leftovers reached the operator: {rendered[-60:]!r}"
+    assert "<i>" in rendered, "the pair was broken instead of being closed at the cut"
 
 
 @pytest.mark.parametrize(
@@ -167,9 +181,20 @@ def test_arithmetic_outside_monospace_is_not_markup(raw: str, kept: str) -> None
     validate_caption_html(rendered)
 
 
-def test_an_orphaned_marker_at_a_boundary_is_still_dropped() -> None:
-    """The narrowing must not bring the asterisks back."""
+@pytest.mark.parametrize("room", [42, 60, 120, 300])
+def test_truncation_never_orphans_a_marker(room: int) -> None:
+    """Whatever the budget, a cut inside a pair closes it rather than halving it.
 
-    for raw in ("*Датчики: 11 всего", "Давление стабильно *", "конец **"):
-        rendered = _render_summary_markup(raw)
-        assert "*" not in rendered, f"markdown leftovers survived: {rendered!r}"
+    The first attempt closed the pair and then the shrink loop chopped the
+    closing marker straight back off, one character at a time, so the orphan
+    returned an iteration later. The loop shrinks a LENGTH now and re-derives
+    the cut, which keeps every pair whole at every step.
+    """
+
+    caption = "x" * (MAX_CAPTION_CODEPOINTS - len("\n\n") - room)
+    summary = "**Вывод:** " + "давление растёт ровно и " * 12 + "конец."
+
+    rendered = _with_summary(caption, summary)
+
+    validate_caption_html(rendered)
+    assert "*" not in rendered, f"a halved pair reached the operator: {rendered[-70:]!r}"

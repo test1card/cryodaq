@@ -563,39 +563,35 @@ _MIN_SENTENCE_KEPT = 80
 #: a boundary. Without that `a*b*c` — a file mask, a formula — became
 #: `a<i>b</i>c`, and this text is full of channel names and numbers.
 _SUMMARY_MARKUP = re.compile(
-    r"(?<![^\s(\[])(?:"
+    r"(?<![^\s(\[«\"'—:,-])(?:"
     r"\*\*(?P<b>[^*\n]+)\*\*"
     r"|\*(?P<i>[^*\n]+)\*"
     r"|`(?P<code>[^`\n]+)`"
-    r")(?![^\s.,;:!?)\]])"
+    r")(?![^\s.,;:!?)\]»\"'—-])"
 )
 
 
-def _without_markers(text: str) -> str:
-    """Drop markup characters that never found a partner.
+def _cut_outside_markup(raw: str, length: int) -> str:
+    """``raw[:length]``, pulled back so the cut never lands inside a pair.
 
-    A lone marker is not punctuation the agent meant: it is half of a pair
-    whose other half was cut away, which happens whenever truncation lands
-    inside correct emphasis. Left in place it is the same asterisk the operator
-    complained about.
+    Orphaned markers exist only because truncation halves a pair. Guessing
+    afterwards which leftover `*` was markup and which was arithmetic went
+    wrong three times running — `10**-3` became `10-3`, `2*3` became `23`, and
+    then a marker next to a quote survived anyway. There is nothing to guess if
+    the cut is not made there in the first place.
     """
 
-    out: list[str] = []
-    for index, char in enumerate(text):
-        if char not in "*`":
-            out.append(char)
+    if length >= len(raw):
+        return raw
+    for match in _SUMMARY_MARKUP.finditer(raw):
+        if not match.start() < length < match.end():
             continue
-        # ONLY WHERE IT LOOKS LIKE MARKUP. Emphasis attaches to a word boundary;
-        # a marker with text pressed against it on BOTH sides is arithmetic.
-        # Stripping unconditionally turned `10**-3` into `10-3` and `2*3` into
-        # `23` — a number silently changed on its way to the operator, which is
-        # worse than the stray asterisk this function exists to remove.
-        before = text[index - 1] if index else " "
-        after = text[index + 1] if index + 1 < len(text) else " "
-        if before.isspace() or after.isspace():
-            continue
-        out.append(char)
-    return "".join(out)
+        # CLOSE THE PAIR, do not retreat to before it. Retreating loses the
+        # whole summary whenever it opens with emphasis, which is exactly what
+        # the agent is told to do — the first line is «**Вывод:** …».
+        opener = "**" if match.group("b") is not None else match.group(0)[0]
+        return raw[:length] + opener
+    return raw[:length]
 
 
 def _render_summary_markup(raw: str) -> str:
@@ -610,7 +606,7 @@ def _render_summary_markup(raw: str) -> str:
     out: list[str] = []
     position = 0
     for match in _SUMMARY_MARKUP.finditer(raw):
-        out.append(_escape(_without_markers(raw[position : match.start()])))
+        out.append(_escape(raw[position : match.start()]))
         for name in CAPTION_TAGS:
             inner = match.group(name)
             if inner is None:
@@ -619,11 +615,11 @@ def _render_summary_markup(raw: str) -> str:
             # reached inside it: `10**-3` came out as `10-3`, a number quietly
             # changed on its way to the operator, and the validator was happy
             # with the result. Inside code an asterisk is an asterisk.
-            body = inner if name == "code" else _without_markers(inner)
+            body = inner
             out.append(f"<{name}>{_escape(body)}</{name}>")
             break
         position = match.end()
-    out.append(_escape(_without_markers(raw[position:])))
+    out.append(_escape(raw[position:]))
     return "".join(out)
 
 
@@ -655,13 +651,36 @@ def _with_summary(caption: str, summary: str) -> str:
         # same broken text until the report is lost. Shrinking one codepoint at
         # a time is bounded by MAX_SUMMARY_CHARS and is obviously correct, which
         # matters more here than being clever.
-        cut = summary[: max(remaining - 1, 0)]
+        # SHRINK THE LENGTH, NOT THE STRING. Chopping a character off the cut
+        # removed the closing marker that `_cut_outside_markup` had just added
+        # to keep a pair whole, so the orphan came back one iteration later.
+        # Re-deriving the cut at each length keeps every pair closed.
+        length = max(remaining - 1, 0)
+        cut = _cut_outside_markup(summary, length)
         while cut:
             escaped = _render_summary_markup(cut.rstrip()) + "…"
             if len(escaped) <= remaining:
                 break
-            cut = cut[:-1]
+            length -= 1
+            cut = _cut_outside_markup(summary, length) if length > 0 else ""
         if not cut:
+            # THE MARKUP DID NOT FIT. Tags cost seven characters a pair and the
+            # budget here can be tighter than that, so shrinking never converged
+            # and the operator got no summary at all. Plain text is worth more
+            # than formatting: drop the markup and try once more.
+            plain = summary[: max(remaining - 1, 0)]
+            while plain:
+                escaped = _escape(plain.rstrip()) + "…"
+                if len(escaped) <= remaining:
+                    break
+                plain = plain[:-1]
+            if not plain:
+                return caption
+            candidate = caption + separator + escaped
+            if len(candidate.encode("utf-8")) <= MAX_CAPTION_BYTES and (
+                len(candidate) <= MAX_CAPTION_CODEPOINTS
+            ):
+                return candidate
             return caption
         # BACK OFF TO A WORD BOUNDARY. Cutting by codepoint ended live captions
         # with "пока скорость не уй…" and "давление чуть дышит,…" — a sentence
