@@ -143,7 +143,18 @@ class EngineContextReader:
         from_ts: float | None = None,
         to_ts: float | None = None,
         limit_per_channel: int = 100,
+        bucket_s: float | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
+        """Readings over a window. `bucket_s` buys the WINDOW, not the last N rows.
+
+        Without it the row budget buys however much recent time the channel's
+        write rate happens to fill: at two seconds a sample, five hundred rows
+        reach back seventeen minutes, and an hourly summary built from them
+        described a sixth of the hour it was labelled with. The engine has
+        supported bucketing since the plots hit the same problem — two series
+        sharing an X axis disagreeing about where history began — and it takes
+        the newest REAL sample in each bucket, never an average.
+        """
         limit = _bounded_positive_int(
             limit_per_channel,
             name="limit_per_channel",
@@ -168,6 +179,11 @@ class EngineContextReader:
                 **({"from_ts": from_value} if from_value is not None else {}),
                 **({"to_ts": to_value} if to_value is not None else {}),
                 "limit_per_channel": limit,
+                **(
+                    {"bucket_s": _finite_number(bucket_s, name="bucket_s")}
+                    if bucket_s is not None
+                    else {}
+                ),
             }
         )
         if reply.get("ok") is not True:

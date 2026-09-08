@@ -47,6 +47,18 @@ class AlarmContext:
     recent_alarms_text: str = ""
 
 
+def _bucket_for(window_minutes: int, budget: int = 400) -> float:
+    """Seconds per bucket so a whole window fits the row budget.
+
+    Rounded UP: a bucket that is a shade too small returns more rows than the
+    budget and the reply is refused outright, which costs the entire section.
+    Never below the stand's own sampling interval, where bucketing would buy
+    nothing and only coarsen a short window.
+    """
+    seconds = max(float(window_minutes), 1.0) * 60.0
+    return max(math.ceil(seconds / max(budget, 1)), 2.0)
+
+
 class ContextBuilder:
     """Assembles engine state for LLM prompt construction."""
 
@@ -235,6 +247,11 @@ class ContextBuilder:
                 lines.append(f"{channel}: " + " → ".join(points))
         return "; ".join(lines) if lines else "истории за сутки нет"
 
+    #: Points per channel to ask for. Under the reader's hard cap of 500 with
+    #: room to spare, because the bucket is sized from it and a bucket that
+    #: lands one sample over the cap loses the whole section.
+    _READINGS_POINT_BUDGET = 400
+
     async def _build_readings_section(self, window_minutes: int) -> str:
         """Every channel, its current value and its rate. No selection.
 
@@ -261,7 +278,18 @@ class ContextBuilder:
                 # 600 was refused outright and the whole section came back as
                 # "показания недоступны". Caught against the live engine, not by
                 # the tests — their mock accepted anything.
-                limit_per_channel=500,
+                limit_per_channel=self._READINGS_POINT_BUDGET,
+                # BUY THE WINDOW, NOT THE LAST N ROWS. Without a bucket the
+                # budget reaches back however far the channel's write rate lets
+                # it: at this stand's two seconds a sample that is seventeen
+                # minutes, so every "сводка за 60 мин" was computed from a sixth
+                # of the hour it claimed. The agent said so honestly — "за 0.3
+                # ч" — while the heading above it said sixty minutes, and the
+                # rate it derived scattered between +0.087 and +0.123/ч where a
+                # twelve-hour fit gives +0.1034 ± 0.0016.
+                #
+                # Seen in seven consecutive live reports, not in any test.
+                bucket_s=_bucket_for(window_minutes, self._READINGS_POINT_BUDGET),
             )
         except Exception as exc:  # noqa: BLE001 - the report must survive a blind hour
             logger.warning("PeriodicReportContext: readings unavailable — %s", exc)
