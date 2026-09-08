@@ -279,10 +279,33 @@ class ConversationStore:
             if not legacy.is_file() or legacy == path:
                 return True
             legacy.rename(path)
+            self._trim_partial_tail(path)
             return True
         except Exception as exc:  # noqa: BLE001 - memory is an enrichment
             logger.debug("conversation not migrated: %s", exc)
             return False
+
+    @staticmethod
+    def _trim_partial_tail(path: Path) -> None:
+        """Drop an unterminated last line and guarantee a trailing newline.
+
+        A transcript is JSONL and is appended to, so a process killed mid-write
+        leaves a partial record with no newline. Migrating that file and then
+        appending the next exchange fuses the two into one invalid line, and
+        both are lost on replay. Worse, if the partial write stopped inside a
+        multi-byte character, decoding the whole file raises and every exchange
+        in it — old and new — becomes unreadable for good.
+
+        Bytes, not text, precisely because the tail may not decode.
+        """
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return
+        if not raw or raw.endswith(b"\n"):
+            return
+        cut = raw.rfind(b"\n")
+        path.write_bytes(raw[: cut + 1] if cut >= 0 else b"")
 
     def _rotate_if_needed(self, path: Path) -> None:
         """Keep only the recent tail on disk. Never raises."""
@@ -315,7 +338,10 @@ class ConversationStore:
             if path.stat().st_size > _MAX_FILE_BYTES:
                 logger.debug("conversation ignored: %s is %d bytes", path.name, path.stat().st_size)
                 return []
-            lines = path.read_text(encoding="utf-8").splitlines()
+            # `errors="replace"`: a byte left half-written by a killed process
+            # must cost the line it is in, not every exchange in the file. The
+            # damaged line then fails its own json.loads and is skipped below.
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception as exc:  # noqa: BLE001
             logger.debug("conversation not read: %s", exc)
             return []

@@ -225,3 +225,54 @@ def test_the_module_comment_describes_the_rule_the_code_has() -> None:
     source = inspect.getsource(summary_note)
     assert "must OVERLAP" in source
     assert "The windows must TOUCH" not in source
+
+
+# --- round five: the last finding ------------------------------------------
+
+
+def test_a_legacy_file_cut_mid_record_does_not_swallow_the_next_exchange(tmp_path: Path) -> None:
+    """A transcript is JSONL and appended to, so a killed process leaves a
+    partial record with no newline. Migrating it and appending the next
+    exchange fuses the two into one invalid line and loses both."""
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "7.jsonl").write_text(
+        '{"ts": 1.0, "q": "целая", "a": "целый ответ"}\n{"ts": 2.0, "q": "обор',
+        encoding="utf-8",
+    )
+    store = _store(tmp_path, lambda: "exp-1")
+
+    store.remember(7, "после переноса", "новый ответ")
+    replayed = store.replay(7, now=3.0)
+
+    assert "целый ответ" in replayed, "the complete record before the partial one was lost"
+    assert "новый ответ" in replayed, "the new exchange was fused into the partial line"
+
+
+def test_a_legacy_file_cut_inside_a_character_is_still_readable(tmp_path: Path) -> None:
+    """A partial write stopping inside a multi-byte character used to make the
+    WHOLE file undecodable — every exchange in it, old and new, gone for good."""
+    root = tmp_path / "c"
+    root.mkdir(parents=True, exist_ok=True)
+    good = '{"ts": 1.0, "q": "целая", "a": "целый ответ"}\n'.encode()
+    (root / "7.jsonl").write_bytes(good + '{"ts": 2.0, "q": "обры'.encode()[:-1])
+    store = _store(tmp_path, lambda: "exp-1")
+
+    store.remember(7, "после", "новый ответ")
+    replayed = store.replay(7, now=3.0)
+
+    assert "целый ответ" in replayed
+    assert "новый ответ" in replayed
+
+
+def test_a_damaged_line_costs_only_itself(tmp_path: Path) -> None:
+    store = _store(tmp_path, lambda: "exp-1")
+    store.remember(7, "первый", "первый ответ")
+    path = store._path(7)
+    with path.open("ab") as handle:
+        handle.write(b"\xff\xfe not json\n")
+    store.remember(7, "второй", "второй ответ")
+
+    replayed = store.replay(7, now=time.time())
+    assert "первый ответ" in replayed
+    assert "второй ответ" in replayed
