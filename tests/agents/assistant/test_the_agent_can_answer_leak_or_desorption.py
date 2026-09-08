@@ -410,3 +410,68 @@ def test_consecutive_thirds_do_not_share_a_sample(monkeypatch) -> None:
     for earlier, later in zip(chunks, chunks[1:]):
         shared = set(earlier) & set(later)
         assert not shared, f"consecutive thirds share {sorted(shared)}"
+
+
+# --- two estimators must not contradict each other in front of the operator ---
+
+
+def _pressure_trend(segments, slope_change):
+    return ChannelTrend(
+        channel="VSP63D_1/pressure",
+        window_minutes=1440,
+        n_samples=2000,
+        first_value=1.0,
+        last_value=3.0,
+        span_s=24 * _H,
+        rate_per_hour=0.104,
+        slope_stderr_per_hour=0.001,
+        segments=segments,
+        slope_change=slope_change,
+    )
+
+
+def test_a_non_monotonic_rate_gets_no_single_change() -> None:
+    """`slope_change` fits ONE bend to the whole window.
+
+    On 2026-09-09 the thirds ran 0.101, 0.0989, 0.113 — down and then up — and
+    the single number came out slightly negative beside three rates whose ends
+    clearly rose. The agent reported the contradiction to the operator and said
+    it could not resolve it. It could not: both numbers were right about
+    different questions and only one of them was labelled.
+    """
+
+    text = _format_trends(
+        {"давление": _pressure_trend(
+            ((0.101, 1e-4), (0.0989, 1e-4), (0.113, 1e-4)), (-0.0028, 4e-4)
+        )}
+    )
+
+    assert "не монотонен" in text
+    assert "изменение темпа по окну" not in text
+
+
+def test_estimators_that_disagree_in_sign_get_no_single_change() -> None:
+    """Monotonic thirds are not enough: the one number must point the same way."""
+
+    text = _format_trends(
+        {"давление": _pressure_trend(
+            ((0.101, 1e-4), (0.107, 1e-4), (0.113, 1e-4)), (-0.0028, 4e-4)
+        )}
+    )
+
+    assert "расходятся по знаку" in text
+    assert "изменение темпа по окну" not in text
+
+
+def test_agreeing_estimators_still_report_the_change() -> None:
+    """The control: suppressing the number whenever it is inconvenient would
+    lose the measurement this line exists to carry."""
+
+    text = _format_trends(
+        {"давление": _pressure_trend(
+            ((0.101, 1e-4), (0.107, 1e-4), (0.113, 1e-4)), (0.012, 4e-4)
+        )}
+    )
+
+    assert "изменение темпа по окну +0.012" in text
+    assert "не монотонен" not in text and "расходятся по знаку" not in text

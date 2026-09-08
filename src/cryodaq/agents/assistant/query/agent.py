@@ -241,9 +241,35 @@ def _format_trends(trends) -> str:
         # exhausts its source and decays. One slope cannot tell them apart, and
         # on 2026-09-08 the assistant said exactly that to the operator who
         # asked. Three consecutive rates can.
-        if trend.slope_change is not None:
+        # ONE CURVATURE ONLY WHEN THERE IS ONE. `slope_change` fits a single
+        # bend to the whole window, so it answers "how much did the rate change"
+        # only while the rate moves one way. On 2026-09-09 the thirds ran
+        # 0.101, 0.0989, 0.113 — down then up — and the single number came out
+        # slightly negative beside three rates whose ends clearly rose. The
+        # agent reported the contradiction to the operator and said, correctly,
+        # that it could not resolve it. It could not because both numbers were
+        # right about different questions, and only one of them was labelled.
+        rates = [rate for rate, _ in trend.segments]
+        monotonic = len(rates) < 2 or all(
+            b >= a for a, b in zip(rates, rates[1:])
+        ) or all(b <= a for a, b in zip(rates, rates[1:]))
+        agrees = True
+        if trend.slope_change is not None and len(rates) >= 2:
+            # AND IT MUST POINT THE SAME WAY AS THE RATES BESIDE IT. A single
+            # number saying the rate fell, printed next to three rates that
+            # rose, is the contradiction the operator was handed. Either
+            # estimator can be the right one; neither is right enough to print
+            # against the other.
+            agrees = (trend.slope_change[0] >= 0) == (rates[-1] >= rates[0])
+        if trend.slope_change is not None and monotonic and agrees:
             change, change_err = trend.slope_change
             parts.append(f"изменение темпа по окну {change:+.3g} ± {change_err:.2g}/ч")
+        elif trend.slope_change is not None:
+            parts.append(
+                "темп по окну не монотонен, единого изменения нет"
+                if not monotonic
+                else "оценки изменения темпа расходятся по знаку, единого изменения нет"
+            )
         if trend.segments:
             # WITH THE ERRORS. Bare rates make a noisy segment and a tight one
             # look alike, and the shape of the curve is exactly what the
