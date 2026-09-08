@@ -1085,6 +1085,11 @@ async def _run_llm_runtime(
         if broker_started and broker_snapshot is not None:
             await _cleanup("broker snapshot", broker_snapshot.stop)
         await _cleanup("Ollama client", ollama.close)
+        if rag_searcher is not None:
+            # Its own threads, so its own shutdown. Non-blocking on purpose: a
+            # stuck LanceDB call must not turn shutdown into the hang the pool
+            # exists to contain.
+            await _cleanup("RAG searcher", rag_searcher.close)
         if rag_emb_client is not None:
             await _cleanup("RAG embeddings client", rag_emb_client.close)
         if telegram_sender is not None:

@@ -5,11 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 import lancedb
+
+#: Enough for one search's stages plus a little overlap. Small on purpose: the
+#: point is a CEILING on how much of this machine stuck storage can hold.
+_SEARCH_POOL_WORKERS = 2
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,26 @@ class RagSearcher:
         self._db = lancedb.connect(str(db_path))
         self._table_name = table_name
         self._embeddings = embeddings_client
+        # ITS OWN THREADS. `asyncio.to_thread` uses the loop's DEFAULT executor,
+        # and a deadline around it cancels the AWAIT, never the thread: LanceDB
+        # keeps running inside a worker that no longer has a caller. Repeated
+        # stuck searches therefore consume the shared pool, and everything else
+        # that reaches for a thread — the audit writes that gate delivery among
+        # them — queues behind storage that is not answering. Retrieval is an
+        # enrichment; it must not be able to starve the paths that are not.
+        #
+        # `thread_name_prefix` so a stuck stack in a dump says whose it is.
+        self._pool = ThreadPoolExecutor(max_workers=_SEARCH_POOL_WORKERS, thread_name_prefix="rag-search")
+
+    async def _in_pool(self, fn, *args):
+        """Run one synchronous storage call in this searcher's own threads."""
+        return await asyncio.get_running_loop().run_in_executor(self._pool, fn, *args)
+
+    def close(self) -> None:
+        """Release the search threads. Safe to call more than once."""
+        # NOT `wait=True`: a stuck LanceDB call would make shutdown hang, which
+        # is the failure this pool exists to contain.
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _resolve_table(self):
         """Open the corpus table, or None. Synchronous: run it off the loop.
@@ -111,7 +136,7 @@ class RagSearcher:
         # asyncio deadline could run. The assistant hung rather than died, and
         # a hang is the one failure the launcher's restart-on-exit cannot
         # recover. Review found it 2026-09-07. Off the loop it goes.
-        table = await asyncio.to_thread(self._resolve_table)
+        table = await self._in_pool(self._resolve_table)
         if table is None:
             return []
         query_vec = await self._embeddings.embed(query)
@@ -124,7 +149,7 @@ class RagSearcher:
         # constant here can only ever restate what someone believed on the
         # day they typed it, so read the width the index was actually
         # built at and compare with that.
-        expected_dim = await asyncio.to_thread(_index_vector_dim, table)
+        expected_dim = await self._in_pool(_index_vector_dim, table)
         if expected_dim is not None and len(query_vec) != expected_dim:
             logger.warning(
                 "RAG search: query embedding dim %d != index dim %d — the "
@@ -140,7 +165,7 @@ class RagSearcher:
         # vector search itself respects the filter — applying it after
         # `.limit(top_k)` would silently drop valid matches when other
         # kinds happened to be closer in vector space.
-        rows = await asyncio.to_thread(self._run_query, table, query_vec, source_kind_filter, top_k)
+        rows = await self._in_pool(self._run_query, table, query_vec, source_kind_filter, top_k)
 
         results: list[SearchResult] = []
         for row in rows:
