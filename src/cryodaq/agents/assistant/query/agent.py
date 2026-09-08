@@ -124,9 +124,20 @@ _RETRIEVAL_DECIDING_CATEGORIES = frozenset(
         QueryCategory.UNKNOWN,
     }
 )
-#: The decision is one line. A budget this small also keeps a reasoning model
-#: from thinking its way past the answer.
-_RETRIEVAL_DECISION_MAX_TOKENS = 120
+#: The decision is one line, but the model reaches it AFTER a reasoning
+#: preamble, and the budget has to cover both. The old comment here claimed a
+#: small budget "keeps a reasoning model from thinking its way past the answer";
+#: it does the opposite. Measured against the deployed qwen3.8:27b on
+#: 2026-09-09, same question, temperature 0:
+#:
+#:     120 -> ""                (the cap lands inside the preamble)
+#:     200 -> "ПОИСК: стук в криомашине возможные причины диагностика"
+#:     300, 400, 600 -> the same line
+#:
+#: An empty decision parses as "do not search", so at 120 the corpus was
+#: unreachable for every question ever asked. 512 leaves real margin over the
+#: measured floor of 200; the decision costs one short generation either way.
+_RETRIEVAL_DECISION_MAX_TOKENS = 512
 #: The decision is one line. Giving it the formatting stage's 1500 s — which is
 #: what it took until review on 2026-09-07 — meant an enrichment could spend the
 #: answer's entire budget before the answer began. Generous enough for a cold
