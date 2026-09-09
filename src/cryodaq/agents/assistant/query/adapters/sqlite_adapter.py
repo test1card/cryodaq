@@ -503,6 +503,11 @@ class SQLiteAdapter:
             slope_change=_centred_quadratic(pairs),
             regime_hours=regime_hours,
             shape=_shape_of_rise(regime) if regime else None,
+            # WHEN, not how long ago. Every clock read here is already stale by
+            # the time the line is written: the composite waits for its other
+            # channels, and retrieval runs before formatting. The subtraction
+            # belongs where the sentence does.
+            last_sample_ts=pairs[-1][0],
         )
 
     @staticmethod

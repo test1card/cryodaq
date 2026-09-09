@@ -176,6 +176,23 @@ class ChannelTrend:
     #: log(t). Ratios, not thresholds: a straight source fits the first, a
     #: depleting one bends toward the others.
     shape: tuple[float, float, float] | None = None
+    #: Epoch seconds of the LAST sample in the window. `None` when unknown.
+    #:
+    #: The window is asked for as "the last N minutes", but the archive returns
+    #: whatever it has: a channel whose persistence stopped yesterday still
+    #: answers a 24-hour request, with samples 23 and 22 hours old, and the rate
+    #: computed from them is real. It is just not a rate about now. Without this
+    #: nothing downstream could tell the two apart, and the dynamics line sat
+    #: under a header that said "прямо сейчас".
+    #:
+    #: AN INSTANT, NOT AN AGE. This field held a duration for three rounds of
+    #: review, and each round found the same defect in a new place: measured at
+    #: the request it was short by the query, measured on arrival it was short
+    #: by however long the composite then waited for its other channels and by
+    #: the retrieval that runs before the line is finally rendered — up to nine
+    #: minutes. Any stored duration is a frozen clock. A timestamp is not: the
+    #: age is subtracted where the sentence is written.
+    last_sample_ts: float | None = None
     unit: str = ""
     available: bool = True
     stale: bool = False

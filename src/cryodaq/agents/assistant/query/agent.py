@@ -277,6 +277,68 @@ def _state_block_header(status) -> str:
     return f"Живое состояние стенда прямо сейчас [возраст показаний до {age:.0f}s]:"
 
 
+def _now_s() -> float:
+    """The one clock read behind every freshness decision in this module.
+
+    A named seam, so a guard can move time forward without sleeping: a test
+    that proves staleness by waiting is a test that is slow when it passes and
+    flaky when the machine is busy.
+    """
+    return datetime.now(UTC).timestamp()
+
+
+def _trend_end_caveat(trend, now_s: float) -> str:
+    """What must be said when the archive window does not reach the present.
+
+    The window is asked for as "the last N minutes"; the archive answers with
+    whatever it holds. A channel whose persistence stopped yesterday still
+    answers a 24-hour request — with samples 23 and 22 hours old — and the rate
+    computed from them is real. It is just not a rate about now, and it was
+    being printed under a header that said "прямо сейчас".
+
+    Fails closed, and beside the number rather than above it, for the same
+    reason `_snapshot_caveat` does: the response prompt keeps a caveat that
+    stands next to the value it qualifies.
+
+    The age is subtracted HERE, from the trend's stored timestamp. Storing the
+    age instead froze the clock at whatever moment the adapter last read it,
+    and the gap between that moment and this one is the composite's other
+    channels plus retrieval — minutes, not milliseconds.
+
+    `now_s` is passed in rather than read here so that every channel in one
+    block is aged against the SAME instant. Read per channel, two trends whose
+    last samples arrived together could straddle the limit and be reported
+    differently, and the difference would be the loop, not the data.
+    """
+    last_ts = getattr(trend, "last_sample_ts", None)
+    unknown = " [до какого момента данные — неизвестно, не считать это темпом на сейчас]"
+    if isinstance(last_ts, bool) or not isinstance(last_ts, (int, float)):
+        return unknown
+    try:
+        age = now_s - float(last_ts)
+    except (OverflowError, ValueError):
+        return unknown
+    # A sample stamped in the future — a clock moved forward on the writer —
+    # gives a negative age. Not clamped to zero anywhere: zero reads as
+    # perfectly fresh, which is the one thing it certainly is not.
+    if not math.isfinite(age) or age < 0.0:
+        return unknown
+    # The same 60 s the snapshot uses, and NOT a fraction of the window: the
+    # length of the history asked for is not a budget for how stale its end may
+    # be. Scaled by a tenth, the composite's own 24-hour window called a trend
+    # that stopped 2 h 24 min ago fresh — which is the defect this exists to
+    # prevent, wearing a threshold. Bucketing returns the newest real sample in
+    # each bucket, so a channel still being written stays well inside 60 s
+    # however long the window is.
+    if age <= _SNAPSHOT_FRESH_S:
+        return ""
+    if age >= 3600.0:
+        how_long = f"{age / 3600.0:.1f} ч"
+    else:
+        how_long = f"{age / 60.0:.0f} мин"
+    return f" [данные обрываются {how_long} назад, это не темп на сейчас]"
+
+
 def _format_trends(trends) -> str:
     """One line per channel that is going somewhere. Empty when nothing is.
 
@@ -295,6 +357,10 @@ def _format_trends(trends) -> str:
         "погрешности — поточечные, в предположении независимых остатков; "
         "при ежечасном пересмотре они не дают одновременного покрытия"
     )
+    # ONE clock read for the whole block. Read per channel, two trends whose
+    # last samples arrived together could land either side of the limit and be
+    # reported differently — a difference made by the loop, not by the data.
+    now_s = _now_s()
     rows: list[str] = []
     for name, trend in sorted(trends.items()):
         if not getattr(trend, "available", False):
@@ -304,7 +370,7 @@ def _format_trends(trends) -> str:
         # collapse this into one of three Russian words and got them wrong on
         # autocorrelated noise and on completed steps; the model reading this
         # has more to work with than the word carried.
-        parts = [f"{trend.rate_per_hour:+.3g}/ч за {trend.span_hours:.1f} ч"]
+        parts = [f"{trend.rate_per_hour:+.3g}/ч за {trend.span_hours:.1f} ч{_trend_end_caveat(trend, now_s)}"]
         z = trend.significance
         if z is not None:
             # CAPPED. A clean ramp over thousands of samples produces four-digit
