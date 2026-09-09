@@ -17,8 +17,11 @@ between days and hours — and it is also why an earlier reading of "the server
 is simply slow" was wrong: a concurrent rebuild was evicting the model between
 the probe calls that were meant to measure it.
 
-The default is deliberately unchanged, so no existing deployment shifts
-underneath itself; the stand states its own policy in config/rag.yaml.
+The client default is deliberately unchanged, so no existing deployment shifts
+underneath itself; the stand states its own policy in config/rag.yaml. That
+policy was reversed on 2026-09-10 when the chat model moved to vLLM and the
+cards no longer had room for both — see the shipped-config test below, which
+carries the cost of the reversal so it is not undone by accident.
 """
 
 from __future__ import annotations
@@ -92,14 +95,27 @@ def test_the_cli_default_is_unchanged_when_config_is_silent() -> None:
     assert _make_embeddings({})._keep_alive is None
 
 
-def test_the_shipped_config_holds_the_model_resident() -> None:
-    """A default is not enough — this stand's server has the room and must use it."""
+def test_the_shipped_config_releases_the_embedder() -> None:
+    """The residency decision was reversed on 2026-09-10, and it cost something.
+
+    This test used to assert the opposite -- that the shipped config HOLDS the
+    embedder resident, because the server had room. It stopped having room: the
+    chat model moved to vLLM, which pins its weights on the same cards for as
+    long as it runs, and 5.0 GB of resident embedder beside it left the two
+    elbowing each other for video memory. The operator observed that and called
+    the trade.
+
+    The price is stated so nobody reverses it back unaware: released, an
+    embedding costs 20-34 s instead of 0.9-1.1 s, because each call reloads 8B
+    of weights. That is paid only while retrieval or indexing actually runs, and
+    it must be raised again before any RAG rebuild -- across the 16,118-chunk
+    corpus it is the difference between hours and days.
+    """
     root = Path(__file__).resolve().parents[3]
     rag = yaml.safe_load((root / "config" / "rag.yaml").read_text(encoding="utf-8"))["rag"]
-    assert rag.get("embed_keep_alive"), (
-        "config/rag.yaml does not hold the embedder resident; on this server that costs ~25x per embedding"
-    )
-    assert rag["embed_keep_alive"] != 0
+
+    assert "embed_keep_alive" in rag, "config/rag.yaml must state its residency policy explicitly"
+    assert rag["embed_keep_alive"] == 0
 
 
 def test_the_retrieval_path_shares_the_residency_policy() -> None:

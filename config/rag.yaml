@@ -56,7 +56,14 @@ rag:
   #
   # Set back to 0 if retrieval ever moves to a card that cannot hold both the
   # embedder and the answering model at once.
-  embed_keep_alive: "30m"
+  #
+  # That is now the case, and it is why this is 0 again. On 2026-09-10 the chat
+  # model moved to vLLM, which pins its weights on the cards for as long as it
+  # runs. Holding 5.0 GB of embedder resident beside it means the two elbow each
+  # other for video memory on the same hardware, which the operator observed and
+  # called. The 20-34 s per embedding above is the price, and it is only paid
+  # when retrieval actually runs; raise it again before any RAG rebuild.
+  embed_keep_alive: 0
   db_path: "data/rag_index"
   vault_dir: "~/CryoDAQ-Vault/experiments"
 

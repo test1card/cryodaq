@@ -480,28 +480,45 @@ def _apply_the_documented_switch(text: str) -> str:
     return "\n".join(switched) + "\n"
 
 
-def test_the_documented_switch_actually_produces_a_working_vllm_config() -> None:
-    """The instructions in the comment are executed, not merely read.
+def test_the_shipped_config_selects_vllm() -> None:
+    """Switched 2026-09-10 on the operator's instruction: vLLM only.
 
-    Indentation is the trap: a commented block whose keys sit two spaces deeper
-    than their neighbours parses fine while commented and raises a YAML
-    ParserError the moment someone follows the instructions.
+    All five keys, not three: the query stages override default_model, so a
+    switch that forgets them points the two interactive stages at a model the
+    server does not have.
     """
-    switched = yaml.safe_load(_apply_the_documented_switch(_shipped_text()))
-    cfg = AssistantConfig.from_dict(switched["agent"])
+    cfg = AssistantConfig.from_dict(yaml.safe_load(_shipped_text())["agent"])
 
     assert cfg.llm_api == "openai"
+    assert cfg.ollama_base_url == "http://100.87.73.25:28001"
     assert cfg.default_model == "qwen38"
-    # The query stages override default_model, so a switch that forgets them
-    # points the two interactive stages at a model the server does not have.
     assert cfg.query_intent_model == "qwen38"
     assert cfg.query_format_model == "qwen38"
 
     client = OllamaClient(base_url=cfg.ollama_base_url, default_model=cfg.default_model, api=cfg.llm_api)
 
     assert client._api == "openai"
-    # The origin guard must accept what the comment tells the operator to write.
+    # The origin guard must accept the literal address the comment specifies.
     assert client._base_url == "http://100.87.73.25:28001"
+
+
+def test_the_documented_rollback_actually_produces_a_working_ollama_config() -> None:
+    """The instructions in the comment are executed, not merely read.
+
+    Ollama is still running and the comment says how to go back. Indentation is
+    the trap: a commented block whose keys sit two spaces deeper than their
+    neighbours parses fine while commented and raises a YAML ParserError the
+    moment someone follows the instructions -- which is exactly when they are
+    least able to debug it.
+    """
+    rolled_back = yaml.safe_load(_apply_the_documented_switch(_shipped_text()))
+    cfg = AssistantConfig.from_dict(rolled_back["agent"])
+
+    assert cfg.llm_api == "ollama"
+    assert cfg.ollama_base_url == "http://100.87.73.25:11437"
+    assert cfg.default_model == "qwen3.8:27b"
+    assert cfg.query_intent_model == "qwen3.8:27b"
+    assert cfg.query_format_model == "qwen3.8:27b"
 
 
 def test_assistant_main_hands_the_configured_backend_to_the_client() -> None:
