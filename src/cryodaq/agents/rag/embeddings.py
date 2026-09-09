@@ -25,8 +25,13 @@ class EmbeddingsClient:
         model: str = "qwen3-embedding:0.6b",
         timeout_s: float = 30.0,
         keep_alive: float | str | None = None,
+        api: str = "ollama",
     ) -> None:
         self._model = model
+        # Which HTTP surface the embedding server speaks. Separate from the
+        # chat model's setting on purpose: the two can live on different
+        # servers, and for most of this project's life they have.
+        self._api = api
         # None keeps the historical behaviour: release the embedder as soon as
         # the vector is returned. Deployments with room to hold it pass a
         # duration; see OllamaClient.embed for the measurements.
@@ -37,7 +42,12 @@ class EmbeddingsClient:
             base_url=base_url,
             default_model=model,
             timeout_s=timeout_s,
+            api=api,
         )
+
+    @property
+    def api(self) -> str:
+        return self._api
 
     @property
     def model(self) -> str:
@@ -109,4 +119,6 @@ def make_embeddings_client(rag_cfg: dict) -> EmbeddingsClient:
         model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
         timeout_s=_positive_float(rag_cfg.get("embed_timeout_s"), DEFAULT_EMBED_TIMEOUT_S),
         keep_alive=rag_cfg.get("embed_keep_alive"),
+        # Defaults to ollama so no existing deployment moves underneath itself.
+        api=str(rag_cfg.get("api", "ollama")),
     )

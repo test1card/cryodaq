@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import math
 import re
+import struct
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +34,7 @@ _EMBEDDINGS_PATH = "/api/embed"
 # switch would be the kind of convenient overstatement this codebase is
 # supposed to refuse.
 _CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+_EMBEDDINGS_OPENAI_PATH = "/v1/embeddings"
 _API_OLLAMA = "ollama"
 _API_OPENAI = "openai"
 _SUPPORTED_APIS = frozenset({_API_OLLAMA, _API_OPENAI})
@@ -295,6 +298,71 @@ def _decode_chat_completion(
         model=reported_model or requested_model,
         truncated=not (answer_was_written and generation_completed),
     )
+
+
+def _decode_embedding(data: dict[str, Any]) -> list[float]:
+    """Turn one OpenAI-shaped embeddings body into a vector, or refuse it.
+
+    A boundary, for the same reason the completion decoder is one: nothing
+    downstream may assume a shape. A wrong vector is worse than no vector: the
+    indexer checks width against the CONFIGURED `rag.embedding_dim` and refuses
+    a mismatch outright, but it cannot check the values, so a response of the
+    right length carrying wrong or unstorable numbers enters the corpus and
+    breaks every distance computed against it without failing loudly.
+    """
+
+    def _refuse(what: str) -> OllamaUnavailableError:
+        return OllamaUnavailableError(f"LLM returned a malformed embedding: {what}")
+
+    payload = data.get("data")
+    if not isinstance(payload, list) or not payload:
+        raise _refuse("no embedding data")
+    # One string was sent, so exactly one result may come back. A second entry,
+    # or an index that is not zero, means the response does not correspond to
+    # the request -- and a vector attached to the wrong text is precisely the
+    # kind of wrong-but-plausible value that poisons a corpus silently.
+    if len(payload) != 1:
+        raise _refuse(f"expected one embedding for one input, got {len(payload)}")
+    first = payload[0]
+    if not isinstance(first, dict):
+        raise _refuse("embedding entry is not an object")
+    index = first.get("index")
+    if index is not None and index != 0:
+        raise _refuse(f"embedding is indexed {index!r}, not 0")
+    vector = first.get("embedding")
+    if not isinstance(vector, list) or not vector:
+        raise _refuse("embedding is not a non-empty list")
+    decoded: list[float] = []
+    for component in vector:
+        # bool is an int subclass; a NaN component would survive into the index
+        # and quietly break every distance computed against it.
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            raise _refuse("embedding contains a non-numeric component")
+        try:
+            value = float(component)
+        except OverflowError as exc:
+            # A JSON integer has no size limit; 10**400 is a valid literal and
+            # float() refuses it.
+            raise _refuse("embedding component is out of floating-point range") from exc
+        if not math.isfinite(value):
+            raise _refuse("embedding contains a non-finite component")
+        # Finite in float64 is not enough. The index stores float32
+        # (rag/indexer.py, _make_schema), so 1e100 arrives finite here and
+        # would become inf in storage -- a value that quietly breaks every
+        # distance computed against it, without ever failing loudly. The
+        # narrowing is PERFORMED rather than compared against a literal bound,
+        # so this cannot drift from what the storage layer actually does.
+        #
+        # struct.pack raises rather than returning inf for an out-of-range
+        # value -- checked, not assumed -- so there is no isfinite() branch
+        # here. An earlier version had one and a negative control proved no
+        # input could reach it.
+        try:
+            struct.pack("<f", value)
+        except (OverflowError, struct.error) as exc:
+            raise _refuse("embedding component does not fit the index's float32 storage") from exc
+        decoded.append(value)
+    return decoded
 
 
 class OllamaClient:
@@ -575,6 +643,8 @@ class OllamaClient:
         leaderboard) but is overridable per call. Embedding model is *not*
         the same as the generation model; pass it per-call.
         """
+        if self._api == _API_OPENAI:
+            return await self._embed_openai(text, model=model)
         url = f"{self._base_url}{_EMBEDDINGS_PATH}"
         # New /api/embed expects "input" (str or list[str]); returns
         # "embeddings": [[float,...]] (always batched, even for one input).
@@ -647,3 +717,61 @@ class OllamaClient:
             return list(embeddings[0])
         # Fallback к legacy single-vector format в case of mixed responses
         return list(data.get("embedding", []))
+
+    async def _embed_openai(self, text: str, *, model: str) -> list[float]:
+        """POST /v1/embeddings and return the vector.
+
+        ``keep_alive`` is accepted and ignored by the caller for the same reason
+        it is on the generation path: vLLM holds its weights for as long as it
+        runs, so there is no residency to schedule. Ignoring it silently is safe;
+        forwarding it would be rejected.
+
+        A timeout returns [] rather than raising, matching the Ollama branch --
+        the indexer turns an empty vector into a recorded failure for that
+        chunk, and one unsearchable chunk is better than a lost rebuild.
+        """
+        url = f"{self._base_url}{_EMBEDDINGS_OPENAI_PATH}"
+        payload = {"model": model, "input": text}
+        session = await self._get_session()
+        t0 = time.monotonic()
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                async with session.post(
+                    url,
+                    json=payload,
+                    allow_redirects=False,
+                    headers={"Authorization": "Bearer cryodaq"},
+                ) as resp:
+                    if 300 <= resp.status < 400:
+                        raise OllamaUnavailableError("LLM server refused an HTTP redirect")
+                    status = resp.status
+                    try:
+                        decoded = await resp.json(content_type=None)
+                    except ValueError as exc:
+                        raise OllamaUnavailableError(f"LLM returned a non-JSON body (HTTP {status}): {exc}") from exc
+        except TimeoutError:
+            logger.warning(
+                "OllamaClient: embed timeout after %.1fs for model %s",
+                time.monotonic() - t0,
+                model,
+            )
+            return []
+        except aiohttp.ClientConnectorError as exc:
+            raise OllamaUnavailableError(f"Cannot connect to LLM server at {self._base_url}: {exc}") from exc
+        except aiohttp.ClientError as exc:
+            raise OllamaUnavailableError(f"LLM HTTP error: {exc}") from exc
+
+        if not isinstance(decoded, dict):
+            raise OllamaUnavailableError(f"LLM returned a non-object body (HTTP {status})")
+        if status >= 400 or "error" in decoded:
+            raw = decoded.get("error", f"HTTP {status}")
+            candidate = raw.get("message") if isinstance(raw, dict) else raw
+            message = candidate if isinstance(candidate, str) else str(raw)
+            lowered = message.casefold()
+            if "does not exist" in lowered or "not found" in lowered:
+                raise OllamaModelMissingError(
+                    model,
+                    remedy="This server serves only the model it was started with; check GET /v1/models.",
+                )
+            raise OllamaUnavailableError(f"LLM error: {message}")
+        return _decode_embedding(decoded)

@@ -25,6 +25,29 @@
 # matching at 0.81+ while still separating topics is the property that matters.
 rag:
   ollama_base_url: "http://100.87.73.25:11437"
+  # Which HTTP surface the EMBEDDING server speaks. Separate from the chat
+  # model's setting in agent.yaml on purpose: the two are different servers.
+  #
+  # This still says ollama, and not by oversight. The operator asked on
+  # 2026-09-10 for Ollama to go entirely and embeddings to move to vLLM. The
+  # client can now do that -- `api: openai` posts /v1/embeddings -- but there is
+  # nothing to point it at: the vLLM instance at :28001 serves only `qwen38`
+  # and answers 404 on the /v1/embeddings ROUTE itself, so it was started for
+  # generation alone.
+  #
+  # Two things must exist before this line changes:
+  #   1. a SEPARATE vLLM instance serving an embedding model. vLLM runs one
+  #      task per instance -- generation and pooling are different runners --
+  #      so :28001 cannot also serve embeddings without giving up generation.
+  #      Its literal address goes here; validate_private_llm_origin refuses
+  #      hostnames and paths.
+  #   2. a decision about the index, and width is NOT the test. Two embedding
+  #      models can produce vectors of the same length and still occupy
+  #      unrelated spaces, in which case indexer.py's width check passes and
+  #      every stored vector silently means something else. Any change of
+  #      `embedding_model` requires a rebuild of the corpus -- 16,118 chunks,
+  #      hours of work -- and the operator owns that call.
+  api: ollama
   embedding_model: "qwen3-embedding:8b"
   embedding_dim: 4096
 
