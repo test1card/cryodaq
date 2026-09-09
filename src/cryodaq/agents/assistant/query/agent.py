@@ -222,6 +222,61 @@ def _parse_retrieval_decision(text: str) -> str | None:
 _PRESSURE_UNITS = frozenset({"mbar", "мбар", "pa", "па", "bar", "бар", "torr", "торр"})
 
 
+#: A reading older than this is not "прямо сейчас". Matches the threshold the
+#: current-value answer has always used for its own staleness marker.
+_SNAPSHOT_FRESH_S = 60.0
+
+
+def _snapshot_caveat(status) -> str | None:
+    """What must be said about every snapshot-derived number, or None if fresh.
+
+    `CompositeStatus.snapshot_age_s` is the age of the OLDEST channel in the
+    snapshot, and it was being discarded while the header asserted "прямо
+    сейчас" over it. An hour-old pressure under that header is not a stale
+    number the operator can discount — it is a current number that happens to
+    be wrong, and nothing in the block said otherwise.
+
+    Fail closed on anything that is not a plain, finite, non-negative number.
+    `age > _SNAPSHOT_FRESH_S` is False for NaN and for a negative age, so a
+    clock moved backwards — the timestamps behind this are never validated —
+    used to come out the far side labelled "прямо сейчас".
+    """
+    if getattr(status, "snapshot_empty", False):
+        return "показаний на шине нет — числа не измерены сейчас"
+    age = getattr(status, "snapshot_age_s", None)
+    if isinstance(age, bool) or not isinstance(age, (int, float)):
+        return "возраст показаний неизвестен — не утверждай, что это текущее"
+    try:
+        # An int too large for a float raises here, and `math.isfinite` raises
+        # on the same value — outside the try that guards this enrichment, so
+        # it would take the whole block down instead of producing a caveat.
+        age = float(age)
+    except (OverflowError, ValueError):
+        return "возраст показаний посчитался неверно — не утверждай, что это текущее"
+    if not math.isfinite(age) or age < 0.0:
+        return "возраст показаний посчитался неверно — не утверждай, что это текущее"
+    if age > _SNAPSHOT_FRESH_S:
+        return f"возраст {age:.0f}s — УСТАРЕЛО, не считать текущим"
+    return None
+
+
+def _state_block_header(status) -> str:
+    """The one line that says how old the block below it is.
+
+    The caveat goes in square brackets because FORMAT_RESPONSE_SYSTEM requires
+    bracketed caveats to survive into the answer; a bare label is something the
+    model can drop while still quoting the value. The header alone is not
+    enough — see `_state_digest`, which repeats it next to each number, because
+    the rule is about a caveat standing beside the value it qualifies and a
+    header stands beside nothing.
+    """
+    caveat = _snapshot_caveat(status)
+    if caveat is not None:
+        return f"Состояние стенда [{caveat}]:"
+    age = getattr(status, "snapshot_age_s", 0.0)
+    return f"Живое состояние стенда прямо сейчас [возраст показаний до {age:.0f}s]:"
+
+
 def _format_trends(trends) -> str:
     """One line per channel that is going somewhere. Empty when nothing is.
 
@@ -496,7 +551,9 @@ class AssistantQueryAgent:
             logger.debug("state attachment unavailable: %s", exc)
             return ""
         digest = self._state_digest({"composite_status": status})
-        return f"Живое состояние стенда прямо сейчас:\n{digest}" if digest else ""
+        if not digest:
+            return ""
+        return f"{_state_block_header(status)}\n{digest}"
 
     def _with_documents(self, user_prompt: str, data: dict) -> str:
         """Attach retrieved documents to whatever prompt was built.
@@ -628,15 +685,26 @@ class AssistantQueryAgent:
         cs = data.get("composite_status") or data.get("composite")
         parts: list[str] = []
         if cs is not None:
-            phase = getattr(getattr(cs, "experiment", None), "current_phase", None)
+            # Beside the number, not only in the header: the response prompt
+            # requires a caveat standing NEXT TO the value it qualifies to
+            # survive into the answer, and a header qualifies nothing in
+            # particular — the model can quote the pressure off its own line
+            # without ever dropping a caveat attached to something else.
+            caveat = _snapshot_caveat(cs)
+            mark = f" [{caveat}]" if caveat else ""
+            # `.phase`, not `.current_phase`: "current_phase" is the key in the
+            # engine's reply, and ExperimentAdapter maps it into a field named
+            # `phase`. Reading the reply's key off the dataclass always found
+            # nothing, so this line has never once rendered in production.
+            phase = getattr(getattr(cs, "experiment", None), "phase", None)
             if phase:
                 parts.append(f"фаза: {phase}")
             temps = getattr(cs, "key_temperatures", None) or {}
             if temps:
-                parts.append(f"температур в наличии: {len(temps)}")
+                parts.append(f"температур в наличии: {len(temps)}{mark}")
             pressure = getattr(cs, "current_pressure", None)
             if pressure is not None:
-                parts.append(f"давление: {pressure:.3g} мбар")
+                parts.append(f"давление: {pressure:.3g} мбар{mark}")
             trends = getattr(cs, "trends", None) or {}
             if trends:
                 parts.append("динамика: " + _format_trends(trends))
