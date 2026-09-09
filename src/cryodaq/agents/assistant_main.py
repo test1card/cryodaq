@@ -903,6 +903,7 @@ async def _run_llm_runtime(
         base_url=config.ollama_base_url,
         default_model=config.default_model,
         timeout_s=config.timeout_s,
+        api=config.llm_api,
     )
     telegram_sender: Any | None = None
     try:

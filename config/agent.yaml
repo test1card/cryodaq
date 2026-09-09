@@ -11,6 +11,38 @@ agent:
     # that range and loopback, and nothing else.
     base_url: http://100.87.73.25:11437
     default_model: qwen3.8:27b
+    # Which HTTP surface the endpoint speaks. "ollama" is /api/generate;
+    # "openai" is /v1/chat/completions, which is what vLLM serves for
+    # generation. Measured 2026-09-09: /api/generate, /api/chat and /api/tags
+    # all answer 404 there, so the Ollama client cannot talk to it at all.
+    api: ollama
+    #
+    # --- vLLM (Qwen 3.8 Flash Next). To switch: comment out the three keys
+    # --- above and strip the leading "# " from the three below, which then
+    # --- land at the same indentation. Then do the SAME for intent_model and
+    # --- format_model in the query section further down — they override
+    # --- default_model, so leaving them behind points the two interactive
+    # --- stages at a model this server does not have. Five keys in total, not
+    # --- three; the shorter claim was wrong and a reviewer caught it before
+    # --- the operator did. Deploy is the operator's call, so this stays inert
+    # --- until they make it. A test performs this substitution on the real
+    # --- file and parses the result, because a switch documented in a comment
+    # --- and never executed is a switch that does not work.
+    #
+    # base_url: http://100.87.73.25:28001
+    # default_model: qwen38
+    # api: openai
+    #
+    # Use the LITERAL address, not `work-pc`: validate_private_llm_origin
+    # refuses hostnames on purpose, so that whoever answers DNS cannot repoint
+    # the endpoint at something else. It also refuses a path, so the base_url
+    # is the bare origin — the client appends /v1/chat/completions itself.
+    #
+    # Measured 2026-09-09 against that server: 76 tok/s against 46 on Ollama,
+    # weights stay resident so there is no cold load and no hourly warm-up, and
+    # the intent stage costs 0.49 s (against 578 ms on Ollama) because
+    # reasoning_effort="none" is accepted there. Concurrency is capped at four
+    # on the server side — a fifth request queues rather than failing.
     # 120 s was sized for LFM2.5-2.6B on the local card and was left behind when
     # the model changed — the first real Telegram question after the 2026-09-05
     # deploy died on it, and the operator got "Произошла внутренняя ошибка".
@@ -98,10 +130,12 @@ agent:
     # 33.6 s and ~1000 tokens on that same decision and overran the 55 s
     # command envelope.
     intent_model: qwen3.8:27b
+    # intent_model: qwen38
     # Same model writes the operator-facing Russian answer, with thinking ON —
     # that is the stage worth paying reasoning for, and keeping one model
     # resident avoids a 23 s reload between the two calls.
     format_model: qwen3.8:27b
+    # format_model: qwen38
     intent_temperature: 0.1
     format_temperature: 0.3
     # 578 ms warm; 23.3 s if the model has been evicted. It exists to catch a

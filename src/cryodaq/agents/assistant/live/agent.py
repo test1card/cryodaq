@@ -71,6 +71,13 @@ class AssistantConfig:
     ollama_base_url: str = "http://127.0.0.1:11434"
     default_model: str = "gemma4:e4b"
     timeout_s: float = 60.0
+    # Which HTTP surface the endpoint speaks: "ollama" (/api/generate) or
+    # "openai" (/v1/chat/completions, what vLLM serves). Defaults to ollama so
+    # no existing deployment moves underneath itself. Switching backends takes
+    # THREE keys, not this one alone -- `api`, `base_url` and `default_model` --
+    # because the two deployments differ in port and model name as well as in
+    # protocol.
+    llm_api: str = "ollama"
     temperature: float = 0.3
     max_tokens: int = 2048  # gemma4:e4b is thinking-first; needs 2048+ for thought + response
     max_concurrent_inferences: int = 2
@@ -152,6 +159,7 @@ class AssistantConfig:
         cfg.ollama_base_url = str(ollama.get("base_url", cfg.ollama_base_url))
         cfg.default_model = str(ollama.get("default_model", cfg.default_model))
         cfg.timeout_s = float(ollama.get("timeout_s", cfg.timeout_s))
+        cfg.llm_api = str(ollama.get("api", cfg.llm_api))
         cfg.temperature = float(ollama.get("temperature", cfg.temperature))
         _num_ctx = ollama.get("num_ctx")
         cfg.num_ctx = int(_num_ctx) if _num_ctx is not None else None
