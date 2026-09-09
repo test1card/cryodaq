@@ -25,6 +25,11 @@ class QueryCategory(Enum):
     ALARM_HISTORY = "alarm_history"
     # F32 Stage 2 (v0.55.7) — semantic search over indexed RAG corpus.
     KNOWLEDGE_QUERY = "knowledge_query"
+    #: "движок жив?", "запись идёт?" — the health of the SOFTWARE, not of the
+    #: cryostat. Measured 2026-09-10 by running the real classifier over
+    #: realistic operator questions: these fell to unknown and out_of_scope,
+    #: which is the operator's own hourly checklist going unanswered.
+    SYSTEM_HEALTH = "system_health"
 
 
 def _validate_availability(available: bool, stale: bool, reason: str | None) -> None:
@@ -430,7 +435,14 @@ class CompositeStatus:
     #: availability, so an unreachable channel says so instead of vanishing.
     trends: dict[str, ChannelTrend] = field(default_factory=dict)
     snapshot_empty: bool = False
+    #: Age of the OLDEST cached reading -- answers "is some channel stale".
     snapshot_age_s: float | None = None
+    #: Seconds since a reading last ARRIVED, on the monotonic clock -- answers
+    #: "is anything arriving now". A different question from the one above, and
+    #: deliberately not derived from producer timestamps: the cache keeps its
+    #: last values forever, a reading stamped in the future reads as fresh once
+    #: wall time catches up, and a clock correction moves every stored age.
+    snapshot_arrival_age_s: float | None = None
     alarms_available: bool = True
     available: bool = True
     stale: bool = False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import TYPE_CHECKING, Any
 
 from cryodaq.agents.assistant.query.schemas import (
@@ -16,6 +17,14 @@ if TYPE_CHECKING:
     from cryodaq.core.channel_manager import ChannelManager
 
 logger = logging.getLogger(__name__)
+
+
+def _as_finite(value: Any) -> float | None:
+    """A number that can be reported, or None. Booleans and NaN are not numbers here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
 
 
 class QueryUnavailableError(RuntimeError):
@@ -153,6 +162,8 @@ class QueryRouter:
                 return await self._fetch_alarm_status()
             if cat == QueryCategory.COMPOSITE_STATUS:
                 return await self._fetch_composite()
+            if cat == QueryCategory.SYSTEM_HEALTH:
+                return await self._fetch_system_health()
             # F33 — read-only archive queries.
             if cat == QueryCategory.ARCHIVE_LIST:
                 return await self._fetch_archive_list(intent)
@@ -256,6 +267,65 @@ class QueryRouter:
     async def _fetch_phase_info(self) -> dict[str, Any]:
         status = await self._adapters.experiment.status()
         return {"experiment_status": status}
+
+    async def _fetch_system_health(self) -> dict[str, Any]:
+        """Report what the assistant OBSERVES, and mark everything else unknown.
+
+        The assistant is a separate process that sees the bus and nothing else.
+        Readings arriving proves the engine is publishing; it proves nothing
+        about the writer, the disk, or the locks, which live on the other side
+        of a process boundary this code cannot cross.
+
+        Every field is a three-state value -- True, False, or None for "not
+        established" -- and never an optimistic default. Two review rounds each
+        found an unknown wearing a reassurance: first a missing field read as
+        "да", then `available is not False` turning an unknown availability into
+        a confident one. Neither is a detail; both are the failure this category
+        exists to prevent.
+        """
+        status = await self._adapters.composite.status()
+
+        def _tristate(name: str) -> bool | None:
+            value = getattr(status, name, None)
+            return value if isinstance(value, bool) else None
+
+        # The adapter marks a status unavailable when it could not read the
+        # snapshot, and stale when the values are cached rather than current.
+        # Unknown stays unknown: a status object that does not say is not a
+        # status object that says yes.
+        available = _tristate("available")
+        stale = _tristate("stale")
+        readable = available if available is not None else None
+        current = None if readable is not True or stale is None else not stale
+
+        key_channels = getattr(status, "key_temperatures", None)
+        if not isinstance(key_channels, dict) or readable is not True:
+            with_values = None
+            total = None
+        else:
+            with_values = sum(1 for value in key_channels.values() if _as_finite(value) is not None)
+            if _as_finite(getattr(status, "current_pressure", None)) is not None:
+                with_values += 1
+            total = len(key_channels) + 1
+
+        return {
+            "status_readable": readable,
+            "values_are_current": current,
+            "unreadable_reason": getattr(status, "reason", None) if readable is not True else None,
+            # Whether the cache holds anything AT ALL -- not whether anything is
+            # arriving. The cache keeps its last values indefinitely.
+            "cache_empty": _tristate("snapshot_empty") if readable is True else None,
+            # Seconds since anything ARRIVED: the only field that separates a
+            # live engine from the last words a stopped one left behind.
+            "arrival_age_s": getattr(status, "snapshot_arrival_age_s", None) if readable is True else None,
+            # Age of the OLDEST: answers whether some channel has gone quiet.
+            "oldest_age_s": getattr(status, "snapshot_age_s", None) if readable is True else None,
+            # Cached entries, NOT an inventory of enabled channels: a channel
+            # that has never published contributes to neither number.
+            "key_channels_with_values": with_values,
+            "key_channels_total": total,
+            "alarms_available": _tristate("alarms_available") if readable is True else None,
+        }
 
     async def _fetch_alarm_status(self) -> dict[str, Any]:
         result = await self._adapters.alarms.active()

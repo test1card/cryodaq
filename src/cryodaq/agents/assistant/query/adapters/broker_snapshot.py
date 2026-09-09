@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,23 @@ if TYPE_CHECKING:
     from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
+
+
+def _elapsed_clock() -> float:
+    """Seconds on a clock that never goes backwards AND counts suspended time.
+
+    `time.monotonic()` excludes the time a laptop or a workstation spends
+    suspended, so an hour of sleep leaves a reading from before it looking a
+    second old. CLOCK_BOOTTIME includes it. The fallback matters only on
+    platforms without it, where the understatement returns.
+    """
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    if boottime is not None:
+        try:
+            return time.clock_gettime(boottime)
+        except OSError:  # pragma: no cover - platform-dependent
+            pass
+    return time.monotonic()
 
 
 class BrokerSnapshot:
@@ -39,12 +57,23 @@ class BrokerSnapshot:
     ) -> None:
         self._channel_manager = channel_manager
         self._latest: dict[str, Reading] = {}
+        #: When the most recent reading ARRIVED, on the monotonic clock.
+        #:
+        #: Not derivable from what is already stored. `Reading.timestamp` is the
+        #: producer's wall clock, so a reading stamped an hour ahead makes the
+        #: cache look fresh for an hour, and every timestamp-derived age moves
+        #: when the system clock is corrected. Arrival is the only thing this
+        #: process observes directly, and it is what "are readings arriving"
+        #: actually means. Caught in review 2026-09-10, after two earlier
+        #: attempts had answered that question from stored values instead.
+        self._newest_arrival: float | None = None
         self._lock = asyncio.Lock()
         self._sub = ZMQSubscriber(pub_addr, callback=self._on_reading)
 
     async def _on_reading(self, reading: Reading) -> None:
         async with self._lock:
             self._latest[reading.channel] = reading
+            self._newest_arrival = _elapsed_clock()
 
     async def start(self) -> None:
         await self._sub.start()
@@ -115,6 +144,36 @@ class BrokerSnapshot:
                 return None
             now = datetime.now(UTC)
             return max((now - r.timestamp).total_seconds() for r in self._latest.values())
+
+    async def arrival_age_s(self) -> float | None:
+        """Seconds since the most recent reading ARRIVED, or None if none has.
+
+        `oldest_age_s` answers "is some channel stale" from producer timestamps.
+        This answers a different question -- is anything arriving at all -- and
+        it must not be answered from producer timestamps at all:
+
+        * the cache retains its last values indefinitely, so a full cache is
+          compatible with an engine that stopped an hour ago;
+        * a reading stamped in the FUTURE makes a timestamp-derived age negative
+          now and comfortably small later, so a stopped stream reads as live as
+          soon as wall time catches up;
+        * correcting the system clock moves every timestamp-derived age.
+
+        The monotonic clock is immune to all three, and arrival is the one thing
+        this process observes with its own eyes.
+        """
+        async with self._lock:
+            if self._newest_arrival is None:
+                return None
+            elapsed = _elapsed_clock() - self._newest_arrival
+            if elapsed < 0.0:
+                # The clock does not run backwards, so this is a paired-clock
+                # violation rather than a fresh reading. Clamping it to 0 would
+                # turn a broken invariant into the strongest possible evidence
+                # of freshness, which is the wrong direction to fail.
+                logger.warning("BrokerSnapshot: arrival clock went backwards by %.1fs", -elapsed)
+                return None
+            return elapsed
 
     def display_name(self, channel: str) -> str:
         """Return display name for channel from ChannelManager, or channel itself."""

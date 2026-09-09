@@ -163,6 +163,16 @@ class CompositeAdapter:
                 snapshot_age_s = await self._snapshot.oldest_age_s()
             except Exception:
                 pass
+        # Arrival answers a DIFFERENT question -- whether anything is arriving
+        # at all -- and only it can distinguish a live engine from the last
+        # values a stopped one left in the cache. Monotonic, so no producer
+        # timestamp or clock correction can make a dead stream look live.
+        snapshot_arrival_age_s: float | None = None
+        if hasattr(self._snapshot, "arrival_age_s"):
+            try:
+                snapshot_arrival_age_s = await self._snapshot.arrival_age_s()
+            except Exception:
+                pass
 
         return CompositeStatus(
             timestamp=datetime.now(UTC),
@@ -175,6 +185,7 @@ class CompositeAdapter:
             trends=trends,
             snapshot_empty=snapshot_empty,
             snapshot_age_s=snapshot_age_s,
+            snapshot_arrival_age_s=snapshot_arrival_age_s,
             alarms_available=alarm_result is not None and getattr(alarm_result, "available", True),
             available=snapshot_reason is None,
             stale=snapshot_reason is not None,

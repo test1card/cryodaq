@@ -32,6 +32,7 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_PHASE_INFO_USER,
     FORMAT_RANGE_STATS_USER,
     FORMAT_RESPONSE_SYSTEM,
+    FORMAT_SYSTEM_HEALTH_USER,
     FORMAT_UNKNOWN_USER,
     RETRIEVAL_DECISION_SYSTEM,
     RETRIEVAL_DECISION_USER,
@@ -72,6 +73,7 @@ _FORMAT_MAX_TOKENS = 6144
 _FORMAT_NUM_CTX = 100_000
 
 logger = logging.getLogger(__name__)
+
 
 _FALLBACK = "Произошла внутренняя ошибка. Попробуй ещё раз или обратись к оператору."
 _RATE_WINDOW_S = 3600.0
@@ -1076,6 +1078,8 @@ class AssistantQueryAgent:
             return self._fmt_alarm_status(query, data)
         if category == QueryCategory.COMPOSITE_STATUS:
             return self._fmt_composite(query, data)
+        if category == QueryCategory.SYSTEM_HEALTH:
+            return self._fmt_system_health(query, data)
         if category == QueryCategory.ARCHIVE_LIST:
             return self._fmt_archive_list(query, data)
         if category == QueryCategory.ARCHIVE_DETAIL:
@@ -1274,6 +1278,75 @@ class AssistantQueryAgent:
             phase_started_text=phase_started,
             experiment_age_text=age_text,
             target_temp=target,
+        )
+
+    def _fmt_system_health(self, query: str, data: dict[str, Any]) -> str:
+        """Report what this process observed, and pass no verdict on the engine.
+
+        Four review rounds established, one level at a time, that no signal here
+        can carry the claim the question invites. The cache proves nothing about
+        a live engine; producer timestamps move with the producer's clock; and
+        arrival -- the last and best of them -- establishes RECENT LOCAL RECEIPT
+        and nothing more. It cannot distinguish a stopped engine from a broken
+        link to a running one, and it says nothing about the channel the
+        operator happened to ask about.
+
+        So the verdict line is gone. What remains is the observation the
+        assistant can actually stand behind -- when it last received anything --
+        stated as its own observation, with the boundary written into the prompt
+        rather than left for the model to infer. That is a smaller answer and a
+        true one, and "последнее показание пришло 2 секунды назад" is what the
+        operator wanted from the question anyway.
+        """
+
+        def _age(key: str) -> str:
+            age = _as_finite(data.get(key))
+            if age is None or age < 0.0:
+                return "неизвестно"
+            return f"{age:.0f} c назад"
+
+        if data.get("status_readable") is not True:
+            reason = data.get("unreadable_reason")
+            return FORMAT_SYSTEM_HEALTH_USER.format(
+                query=query,
+                arrival_age="прочитать не удалось" + (f" ({reason})" if reason else ""),
+                cache_text="неизвестно",
+                oldest_age="неизвестно",
+                key_channels="неизвестно",
+                alarms_readable="неизвестно",
+            )
+
+        empty = data.get("cache_empty")
+        if empty is True:
+            # NOT "there are no readings on the bus" -- this process has not
+            # received any, which is also what a just-started assistant sees.
+            cache_text = "пуст — этот помощник ещё ничего не получал"
+        elif empty is False:
+            cache_text = "не пуст"
+        else:
+            cache_text = "неизвестно"
+
+        if data.get("values_are_current") is not True:
+            arrival_age = "состояние отдано не как прочитанное сейчас — свежесть не установлена"
+        else:
+            arrival_age = _age("arrival_age_s")
+
+        with_values = data.get("key_channels_with_values")
+        total = data.get("key_channels_total")
+        key_channels = (
+            f"{with_values} из {total}" if isinstance(with_values, int) and isinstance(total, int) else "неизвестно"
+        )
+
+        alarms = data.get("alarms_available")
+        alarms_text = {True: "да", False: "НЕТ — прочитать не удалось"}.get(alarms, "неизвестно")
+
+        return FORMAT_SYSTEM_HEALTH_USER.format(
+            query=query,
+            arrival_age=arrival_age,
+            cache_text=cache_text,
+            oldest_age=_age("oldest_age_s"),
+            key_channels=key_channels,
+            alarms_readable=alarms_text,
         )
 
     def _fmt_alarm_status(self, query: str, data: dict[str, Any]) -> str:
