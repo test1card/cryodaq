@@ -143,13 +143,14 @@ async def test_a_snapshot_that_does_not_report_usability_is_not_trusted() -> Non
 # --- the vacuum forecast, the third operator-facing path --------------------
 
 
-async def _vacuum_answer(reading: Reading) -> str:
+async def _vacuum_answer(*readings: Reading) -> str:
     """Through the real router, not through a hand-built payload."""
     from cryodaq.agents.assistant.query.router import QueryRouter
     from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory, QueryIntent
 
     snapshot = BrokerSnapshot()
-    await snapshot._on_reading(reading)
+    for reading in readings:
+        await snapshot._on_reading(reading)
 
     vacuum = MagicMock()
     vacuum.eta_to_target = AsyncMock(return_value=None)
@@ -218,3 +219,62 @@ def test_something_that_cannot_be_asked_is_not_a_usable_reading(stand_in: object
     from cryodaq.agents.assistant.query.agent import _reading_is_usable
 
     assert _reading_is_usable(stand_in) is False
+
+
+async def test_an_unusable_gauge_does_not_hide_a_good_one() -> None:
+    """The gate stopped the search at the first pressure-like channel, so one
+    bad gauge cost the operator a pressure that was sitting right behind it."""
+    answer = await _vacuum_answer(
+        _reading("VSP63D_0/pressure", 9.99e-1, "mbar", ChannelStatus.SENSOR_ERROR),
+        _reading("VSP63D_1/pressure", 1.23e-4, "mbar", ChannelStatus.OK),
+    )
+
+    assert "1.23e-04" in answer or "0.000123" in answer
+    assert "0.999" not in answer and "9.99e-01" not in answer
+
+
+async def test_every_gauge_unusable_still_yields_no_pressure() -> None:
+    """Skipping must not become taking the last one anyway."""
+    answer = await _vacuum_answer(
+        _reading("VSP63D_0/pressure", 9.99e-1, "mbar", ChannelStatus.SENSOR_ERROR),
+        _reading("VSP63D_1/pressure", 1.23e-4, "mbar", ChannelStatus.TIMEOUT),
+    )
+
+    assert "1.23e-04" not in answer and "0.000123" not in answer
+    assert "0.999" not in answer and "9.99e-01" not in answer
+
+
+async def test_the_known_atmospheric_channel_is_not_taken_after_a_broken_gauge() -> None:
+    """`MultiLine_1/env_pressure` is the room's air, declared in hPa with
+    `role: environment`. Selecting by "pressure" in the name admits it. This
+    covers that one channel on this stand; it is not a claim that no
+    atmospheric channel can ever be taken — a barometer configured in mbar
+    would still pass the filter."""
+    answer = await _vacuum_answer(
+        _reading("VSP63D_1/pressure", 1.23e-4, "mbar", ChannelStatus.SENSOR_ERROR),
+        _reading("MultiLine_1/env_pressure", 1013.25, "hPa", ChannelStatus.OK),
+    )
+
+    assert "1013" not in answer and "1.01e+03" not in answer
+
+
+async def test_a_good_gauge_is_still_found_behind_the_atmospheric_channel() -> None:
+    """The unit filter must select, not merely exclude."""
+    answer = await _vacuum_answer(
+        _reading("MultiLine_1/env_pressure", 1013.25, "hPa", ChannelStatus.OK),
+        _reading("VSP63D_1/pressure", 1.23e-4, "mbar", ChannelStatus.OK),
+    )
+
+    assert "1.23e-04" in answer or "0.000123" in answer
+    assert "1013" not in answer
+
+
+async def test_the_known_atmospheric_channel_does_not_win_by_arriving_first() -> None:
+    """Not only after a broken gauge. The loop matched on the channel NAME, so
+    whichever pressure-like channel the snapshot yielded first won — and with
+    `MultiLine_1/env_pressure` publishing before the gauge that was the room's
+    air reported as the chamber, with no fault anywhere to explain it. Measured
+    against the committed code, where this test is red."""
+    answer = await _vacuum_answer(_reading("MultiLine_1/env_pressure", 1013.25, "hPa", ChannelStatus.OK))
+
+    assert "1013" not in answer and "1.01e+03" not in answer

@@ -22,6 +22,29 @@ class QueryUnavailableError(RuntimeError):
     """Raised when the router cannot establish an authoritative query result."""
 
 
+#: Units a reading must already be in to become `VacuumETA.current_mbar`.
+#:
+#: A STOPGAP SPECIFIC TO THIS STAND, not a rule about what a channel is for.
+#: The one vacuum gauge here reports in mbar and the one known atmospheric
+#: channel, `MultiLine_1/env_pressure`, reports in hPa, so the unit happens to
+#: separate them. It does not separate them in general: a barometer configured
+#: in mbar would pass this filter and be reported as the chamber pressure.
+#:
+#: And the hPa case is not a units error — 1 hPa IS 1 mbar. The number is
+#: converted correctly and still wrong, because room air is not the chamber.
+#: Pa would be a genuine factor of 100; that is a different mistake and this
+#: filter excludes it too.
+#:
+#: The authority for "which channel is the vacuum gauge" is the descriptor, and
+#: it takes all three of `quantity: pressure`, `role: primary_measurement` and
+#: `safety_class: safety_critical_input` to name it. The last two alone are not
+#: enough — Т11 and Т12 carry them as well, so a replacement that followed a
+#: shorter rule could make a temperature the chamber pressure. Nothing on this
+#: path can read descriptors yet; until it can, this narrows one confirmed live
+#: path and claims nothing more.
+_VACUUM_UNITS = frozenset({"mbar", "мбар"})
+
+
 def _reading_is_usable(reading: object) -> bool:
     """`Reading.is_usable()`, and False when the object cannot answer.
 
@@ -174,22 +197,41 @@ class QueryRouter:
         # Also get current pressure from snapshot
         snapshot = self._adapters.broker_snapshot
         all_ch = await snapshot.latest_all()
+        # THE NAME OF A CHANNEL IS NOT EVIDENCE OF WHAT IT MEASURES. Matching
+        # "pressure" in the channel id admits `MultiLine_1/env_pressure` — the
+        # room's air, declared `role: environment`, `safety_class:
+        # observational` — and whichever pressure-like channel the snapshot
+        # yielded first won. With the barometer publishing before the gauge,
+        # the operator asking how long the pump-down has left was told the
+        # chamber sat at 1013, with no fault anywhere to explain it. Measured
+        # on the committed code, not supposed.
+        #
+        # The unit filter below narrows that confirmed path on THIS stand,
+        # where the gauge is in mbar and the barometer in hPa. It is not a rule
+        # about purpose: a barometer configured in mbar would still pass. See
+        # `_VACUUM_UNITS`.
+        #
+        # THE STATUS DECIDES WHETHER TO USE IT. `Reading.is_usable()` is the
+        # repository's one predicate for a reading worth acting on, and every
+        # acting path gates on it — the interlock, the alarms, the safety
+        # manager. This path answers "сколько ещё откачивать" and used to take
+        # the value whatever the gauge said about itself, so a SENSOR_ERROR
+        # reading came back as "Давление сейчас: 1.23e-04".
+        #
+        # An unusable gauge is skipped rather than ending the search, so it no
+        # longer hides a good one behind it. Which gauge wins among several
+        # usable ones in millibars is whatever order the snapshot yields, as it
+        # always was; choosing an authoritative channel is its own question.
         current_p = None
-        for ch, reading in all_ch.items():
-            if "pressure" in ch.lower() or "mbar" in ch.lower():
-                # THE STATUS DECIDES, NOT THE NUMBER. `Reading.is_usable()` is
-                # the repository's one predicate for a reading that means
-                # something, and every acting path gates on it — the interlock,
-                # the alarms, the safety manager. This one answers the operator
-                # asking how long the pump-down has left, and it took the value
-                # whatever the gauge said about itself: a SENSOR_ERROR reading
-                # came back as "Давление сейчас: 1.23e-04".
-                if not _reading_is_usable(reading):
-                    break
-                current_p = reading.value
-                if eta is not None:
-                    eta.current_mbar = current_p
-                break
+        for reading in all_ch.values():
+            if (getattr(reading, "unit", "") or "").strip().lower() not in _VACUUM_UNITS:
+                continue
+            if not _reading_is_usable(reading):
+                continue
+            current_p = reading.value
+            if eta is not None:
+                eta.current_mbar = current_p
+            break
         return {"vacuum_eta": eta, "current_pressure": current_p}
 
     async def _fetch_range_stats(self, intent: QueryIntent) -> dict[str, Any]:
