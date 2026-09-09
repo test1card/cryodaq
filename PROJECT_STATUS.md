@@ -280,8 +280,15 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    поглощает opaque evidence и завершает cleanup. Windows-ветка остаётся
    fail-closed unsupported. Открыты чистый integrated 15-minute run на финальном
    SHA, 12/72-hour duration evidence и реальный Windows ONEDIR.
-2. Persistence P1A committed: FIFO, physical-cap и integrity gates,
-   receipt-authorized ack, cancellation и close settlement сохраняются.
+2. Persistence P1A был закоммичен (FIFO, physical-cap и integrity gates,
+   receipt-authorized ack, cancellation и close settlement), но реализация
+   `storage/persistence_spool.py` так и не была подключена: её не импортировал
+   ни один модуль `src/`. Удалена 2026-09-09 как неподключённая, поэтому
+   перечисленные гарантии спула НЕ действуют. Живая долговечность устроена
+   иначе: scheduler ждёт коммит в БД прежде, чем показание попадёт в брокер, а
+   переполнение диска защёлкивает safety-fault. Окно потери при внезапном
+   обесточивании остаётся — базы работают с `synchronous=NORMAL`, это
+   осознанное решение оператора, ИБП планируется.
 3. F35: F35.1 registry/capability и F35.2 shared-bus contracts committed.
    F35.3 D1 manifest authority, D2 persistence activation, D3 owner-issued
    committed receipts, D5 replay parity и D6 reporting parity завершены.

@@ -1217,7 +1217,9 @@ what software tests can prove and what only the apparatus can prove.
 ### Storage and replay
 
 - `src/cryodaq/storage/sqlite_writer.py` — transactional reading/descriptor writes.
-- `src/cryodaq/storage/persistence_spool.py` — bounded FIFO and acknowledgement.
+- src/cryodaq/storage/persistence_spool.py — bounded FIFO and acknowledgement.
+  Удалён 2026-09-09 как неподключённый; путь без обратных кавычек, потому что
+  файла в дереве больше нет.
 - `src/cryodaq/storage/operator_snapshot_revision.py` — durable global revision.
 - `src/cryodaq/storage/archive_reader.py` — bounded trusted archive access.
 - `src/cryodaq/storage/cold_rotation.py` — cold archive lifecycle.

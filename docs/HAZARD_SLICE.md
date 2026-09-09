@@ -11,6 +11,10 @@ future hazard analysis.
 - Base: `f5d6434d20dffae62c9f03fbc12f68b03f48351b`
 - Target: `5f0282b98ddc93da7e89119b10fe01ce2bc75e71`
 - Generator: `tools/generate_hazard_slice.py`
+- Пост-заморозочная поправка: файл src/cryodaq/storage/persistence_spool.py входил в
+  этот срез на цели заморозки, но 2026-09-09 удалён как неподключённый. Строка
+  сохранена, чтобы состав замороженного раунда не менялся задним числом; путь
+  записан без обратных кавычек, потому что файла в дереве больше нет.
 - Changed means present at the target and selected by
   `git diff --name-only --diff-filter=ACMR <base>...<target>`, plus the two
   manifest-lane files while they are untracked during their first generation.
@@ -208,7 +212,7 @@ non-Python path inventory cannot silently describe different bytes.
 | `src/cryodaq/storage/channel_descriptors.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/storage/descriptor_archive.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/storage/operator_snapshot_revision.py` | OFF evidence/operator truth | yes |
-| `src/cryodaq/storage/persistence_spool.py` | data-flow/config/identity input | yes |
+| src/cryodaq/storage/persistence_spool.py (удалён после заморозки, 2026-09-09 — не подключён ни одним модулем src/) | data-flow/config/identity input | yes |
 | `src/cryodaq/storage/replay.py` | data-flow/config/identity input | yes |
 | `src/cryodaq/storage/sqlite_writer.py` | data-flow/config/identity input; callback/registry path | yes |
 | `start.bat` | launcher/shutdown/process-death path | no |
