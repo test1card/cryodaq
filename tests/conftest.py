@@ -89,3 +89,42 @@ _put_environment_library_path_first()
 # module, so the environment's libstdc++ is always bound first, with no order
 # left for a caller to lose.
 import sqlite3 as _sqlite3_bound_before_any_test_module  # noqa: E402,F401
+
+
+def pytest_sessionstart(session: object) -> None:
+    """Refuse to run at all on a SQLite the repository declares corrupting.
+
+    Not a nicety. `_check_sqlite_version` memoised its verdict before running
+    it, so on an unsafe build the FIRST writer was refused and every later one
+    was constructed — and a suite run that way reports hundreds of plausible
+    passes over a SQLite this repository will not let production touch. That is
+    exactly what happened here on 2026-09-09: the tracked `.venv` is the system
+    interpreter (SQLite 3.37.2), while `environment.yml` pins 3.53.2 and
+    `start.sh` runs the conda environment. Every suite figure taken from that
+    `.venv` was measured on a runtime the code refuses to use.
+
+    THE OPERATOR BYPASS IS NOT HONOURED HERE. `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
+    accepts a data-integrity risk on a real stand; it cannot make a test result
+    trustworthy, and reading it here would hand back the same false green under
+    a different name.
+    """
+    from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info
+
+    # BOTH implementations, not just the chosen one. The runtime routes its own
+    # connections through `_sqlite`, but tests and a few modules — for instance
+    # `analytics/pressure_history.py` — import stdlib `sqlite3` directly. A safe
+    # chosen implementation over an unsafe stdlib would let the session run and
+    # hand back exactly the false green this refusal exists to prevent.
+    checked = {"chosen": sqlite_version_info(), "stdlib": _sqlite3_bound_before_any_test_module.sqlite_version_info}
+    unsafe = {name: tuple(v) for name, v in checked.items() if not is_safe_version(tuple(v))}
+    if not unsafe:
+        return
+    import pytest
+
+    named = "; ".join(f"{name} SQLite {v[0]}.{v[1]}.{v[2]}" for name, v in sorted(unsafe.items()))
+    pytest.exit(
+        f"{named} — inside the March 2026 WAL-reset range this repository refuses to run "
+        "on; results from it would be false green. Use the supported environment "
+        "(environment.yml pins python 3.14.6 with sqlite 3.53.2), the one start.sh runs.",
+        returncode=3,
+    )

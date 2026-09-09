@@ -619,15 +619,24 @@ def _check_sqlite_version() -> None:
     fix and are allowed through without requiring CRYODAQ_ALLOW_BROKEN_SQLITE=1.
 
     Set CRYODAQ_ALLOW_BROKEN_SQLITE=1 to bypass with explicit operator acknowledgment.
+
+    THE MEMO REMEMBERS ONLY A PASS. It used to be set before the check ran, so
+    the first writer on a broken build was refused and every writer after it in
+    the same process was waved through: measured on SQLite 3.37.2, attempt one
+    raised and attempts two and three constructed. A gate that disarms itself
+    the first time it fires is worse than no gate, because the refusal in the
+    log says it is working. Anything that swallows that first exception — a
+    retry, a supervisor, a test fixture — then gets an unguarded writer on a
+    version this repository declares corrupting.
     """
     global _SQLITE_VERSION_CHECKED
     if _SQLITE_VERSION_CHECKED:
         return
-    _SQLITE_VERSION_CHECKED = True
     version = sqlite_version_info()  # chosen impl, e.g. (3, 37, 2)
     lo, hi = SQLITE_BROKEN_RANGE
     if lo <= version < hi:
         if version in SQLITE_BACKPORT_SAFE:
+            _SQLITE_VERSION_CHECKED = True
             return
         bypass = os.environ.get("CRYODAQ_ALLOW_BROKEN_SQLITE", "").strip()
         if bypass == "1":
@@ -639,6 +648,9 @@ def _check_sqlite_version() -> None:
                 version[1],
                 version[2],
             )
+            # Deliberately NOT memoised: the operator asked for one bypass of a
+            # known-corrupting build, and the warning that says so must appear
+            # for every writer, not once.
             return
         raise RuntimeError(
             f"SQLite {version[0]}.{version[1]}.{version[2]} is affected by the "
@@ -648,6 +660,7 @@ def _check_sqlite_version() -> None:
             "(3.44.6 or 3.50.7), or set CRYODAQ_ALLOW_BROKEN_SQLITE=1 "
             "to bypass with explicit operator acknowledgment."
         )
+    _SQLITE_VERSION_CHECKED = True
 
 
 # Locked-DB persistence-failure parity (roadmap A6). See _write_day_batch:
