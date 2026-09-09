@@ -68,3 +68,29 @@ def test_a_verdict_after_a_preamble_is_still_read() -> None:
 )
 def test_a_refusal_after_a_preamble_is_still_a_refusal(text: str) -> None:
     assert _parse_retrieval_decision(text) is None
+
+
+def test_the_last_verdict_wins_not_the_first() -> None:
+    """Raising the budget let the reasoning through, and reasoning quotes the
+    instruction it was given. Read from the top, the quoted "НЕТ" was taken as
+    the answer and the corpus went unsearched again — one line above the search
+    the model had actually asked for.
+    """
+
+    # The quoted instruction has to START the line, or the old parser never
+    # looked at it and the test proves nothing. This is what the model emits.
+    text = (
+        "НЕТ — если вопрос про текущее состояние и данных достаточно.\n"
+        "Здесь данных не хватает: показания не говорят о механике.\n"
+        "ПОИСК: диагностика стука\n"
+    )
+
+    assert _parse_retrieval_decision(text) == "диагностика стука"
+
+
+def test_a_search_overruled_by_a_later_refusal_is_a_refusal() -> None:
+    """The rule is "the last verdict", not "a search anywhere in the text"."""
+
+    text = "ПОИСК: что-то\nПередумал, данных достаточно.\nНЕТ\n"
+
+    assert _parse_retrieval_decision(text) is None

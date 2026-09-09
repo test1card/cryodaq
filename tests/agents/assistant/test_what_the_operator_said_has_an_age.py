@@ -69,7 +69,13 @@ def test_the_marker_is_the_boundary(tmp_path: Path, age: float) -> None:
 
 
 def test_a_turn_without_a_timestamp_is_not_guessed_at(tmp_path: Path) -> None:
-    """A record with no `ts` gets no age rather than an invented one."""
+    """No age is invented — but the absence is NAMED.
+
+    This test first asserted a bare `Оператор:` line, which review showed to be
+    the defect rather than the fix: an unstamped line is exactly what a remark
+    from a minute ago looks like, so an undated one was handed to the model as
+    current.
+    """
 
     now = time.time()
     store = ConversationStore(tmp_path)
@@ -79,7 +85,7 @@ def test_a_turn_without_a_timestamp_is_not_guessed_at(tmp_path: Path) -> None:
 
     replay = store.replay("chat", now=now)
 
-    assert "Оператор: Насос отключен" in replay
+    assert "Оператор [время неизвестно]: Насос отключен" in replay
     assert "назад]" not in replay
 
 
@@ -92,3 +98,46 @@ def test_the_prompt_requires_attribution() -> None:
     assert "канала\nнасоса не существует" in FORMAT_RESPONSE_SYSTEM
     # And the inverse: a hardware state must never be inferred from readings.
     assert "НИКОГДА не выводи состояние железа" in FORMAT_RESPONSE_SYSTEM
+
+
+@pytest.mark.parametrize(
+    "ts, expected",
+    [
+        (None, "[время неизвестно]"),
+        ("не число", "[время неизвестно]"),
+        (float("nan"), "[время неизвестно]"),
+    ],
+)
+def test_an_unknown_age_says_so_rather_than_looking_fresh(
+    tmp_path: Path, ts, expected: str
+) -> None:
+    """No stamp is exactly what a remark from a minute ago looks like.
+
+    So a record with a missing, non-numeric or NaN timestamp came back to the
+    model dressed as current, and an arbitrarily old "насос выключен" would be
+    repeated as fact — the defect the stamp exists to prevent, re-entering
+    through the one case the stamp did not cover.
+    """
+
+    store = ConversationStore(tmp_path)
+    path = store._path("chat")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"q": "Насос отключен", "a": "Понял."}
+    if ts is not None:
+        record["ts"] = ts
+    path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    replay = store.replay("chat", now=time.time())
+
+    assert expected in replay, replay
+
+
+def test_a_timestamp_from_the_future_is_named_as_broken(tmp_path: Path) -> None:
+    """A clock that ran backwards is not freshness either."""
+
+    now = time.time()
+    store = _store_with(tmp_path, [(now + 3 * _HOUR, "Насос отключен", "Понял.")])
+
+    replay = store.replay("chat", now=now)
+
+    assert "[время сбито]" in replay, replay

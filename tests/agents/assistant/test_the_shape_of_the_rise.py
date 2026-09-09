@@ -270,15 +270,24 @@ async def test_a_falling_pressure_has_no_shape_of_a_rise() -> None:
 
 
 @pytest.mark.parametrize(
-    "channel, expected",
+    "channel, unit, expected",
     [
-        ("VSP63D_1/pressure", True),
-        ("давление", False),
-        ("Т1", False),
-        ("Т12 2-я ступень", False),
+        # The unit decides when there is one, and it decides BOTH ways: a
+        # pressure whose name says nothing, and a temperature whose name says
+        # pressure. Without these two rows the unit branch is never exercised
+        # and the parametrisation passes with the branch removed.
+        ("P1", "mbar", True),
+        ("pressure_shield_temperature", "K", False),
+        ("VSP63D_1/pressure", "", True),
+        # A channel actually named "давление" IS a pressure. This case asserted
+        # False while the gate read only the display label and a Russian one was
+        # not recognised; recognising it is the fix, not the regression.
+        ("давление", "", True),
+        ("Т1", "", False),
+        ("Т12 2-я ступень", "", False),
     ],
 )
-def test_the_shape_is_only_reported_for_a_pressure(channel: str, expected: bool) -> None:
+def test_the_shape_is_only_reported_for_a_pressure(channel: str, unit: str, expected: bool) -> None:
     """The three laws describe a source filling a closed volume.
 
     On a temperature they describe nothing — but the formatter printed them for
@@ -299,6 +308,7 @@ def test_the_shape_is_only_reported_for_a_pressure(channel: str, expected: bool)
         span_s=20 * 3600,
         rate_per_hour=0.2,
         slope_stderr_per_hour=0.001,
+        unit=unit,
         regime_hours=16.0,
         shape=(0.01, 0.12, 0.30),
     )

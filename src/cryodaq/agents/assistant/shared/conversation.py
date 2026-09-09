@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -416,12 +417,20 @@ class ConversationStore:
                 # There is no pump channel; there is no way to check. The age is
                 # what lets the answer say how old the claim is, and lets him
                 # notice when it has gone stale.
+                # AN UNKNOWN AGE IS NOT A FRESH ONE. A record with a missing,
+                # non-numeric, NaN or future `ts` produced no stamp, and no
+                # stamp is exactly what a remark from a minute ago looks like —
+                # so an arbitrarily old "насос выключен" came back to the model
+                # dressed as current. Unknown says unknown.
                 age = current - ts if ts is not None else None
-                stamp = (
-                    f" [{_human_gap(age)} назад]"
-                    if age is not None and age >= _OPERATOR_AGE_MARKER_S
-                    else ""
-                )
+                if age is None or not math.isfinite(age):
+                    stamp = " [время неизвестно]"
+                elif age < 0.0:
+                    stamp = " [время сбито]"
+                elif age >= _OPERATOR_AGE_MARKER_S:
+                    stamp = f" [{_human_gap(age)} назад]"
+                else:
+                    stamp = ""
                 rows.append(f"Оператор{stamp}: {question}")
             if answer:
                 rows.append(f"Ты: {answer}")

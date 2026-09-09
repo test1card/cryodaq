@@ -195,18 +195,31 @@ def _parse_retrieval_decision(text: str) -> str | None:
     """
     if not text:
         return None
+    # THE LAST VERDICT, NOT THE FIRST. Now that the budget lets the model finish
+    # thinking, its reasoning reaches the output — and reasoning quotes the
+    # instruction it was given: "НЕТ — если хватит показаний … ПОИСК: …". Read
+    # from the top, the quoted "НЕТ" was taken as the answer and the corpus went
+    # unsearched again, one line above the search it had asked for.
+    verdict: str | None = None
     for raw in text.splitlines():
         line = raw.strip().strip("`*").strip()
         if not line:
             continue
         upper = line.upper()
         if upper.startswith("НЕТ"):
-            return None
+            verdict = None
+            continue
         for marker in ("ПОИСК:", "SEARCH:"):
             if upper.startswith(marker):
                 query = line[len(marker) :].strip().strip('"').strip()
-                return query[:_MAX_RETRIEVAL_QUERY_CHARS] or None
-    return None
+                verdict = query[:_MAX_RETRIEVAL_QUERY_CHARS] or None
+                break
+    return verdict
+
+
+#: Units that mean a pressure. Checked before the channel name, which is a
+#: guess: an operator's label is not a contract.
+_PRESSURE_UNITS = frozenset({"mbar", "мбар", "pa", "па", "bar", "бар", "torr", "торр"})
 
 
 def _format_trends(trends) -> str:
@@ -316,8 +329,21 @@ def _format_trends(trends) -> str:
         # THE CHANNEL, NOT THE LABEL. The key here is whatever the caller chose
         # to display — "давление" as often as the channel id — so testing it
         # silently switched the shape off for the one channel it is for.
-        identity = f"{getattr(trend, 'channel', '')} {name}".lower()
-        is_pressure = "pressure" in identity or "mbar" in identity
+        # THE UNIT DECIDES WHEN THERE IS ONE. The name is a fallback, and on its
+        # own it gets both directions wrong: `P1` in mbar loses the analysis,
+        # and `pressure_shield_temperature` in kelvin gains it. The unit is not
+        # populated by today's adapter — the history reply carries timestamps
+        # and values only — so the fallback still runs, with the one exclusion
+        # that costs nothing: a name saying temperature is a temperature.
+        unit = (getattr(trend, "unit", "") or "").strip().lower()
+        if unit:
+            is_pressure = unit in _PRESSURE_UNITS
+        else:
+            identity = f"{getattr(trend, 'channel', '')} {name}".lower()
+            looks_thermal = "temp" in identity or "термо" in identity
+            is_pressure = not looks_thermal and (
+                "pressure" in identity or "mbar" in identity or "давлен" in identity
+            )
         if trend.shape is not None and is_pressure:
             linear, root, log = trend.shape
             if linear > 0.0:
