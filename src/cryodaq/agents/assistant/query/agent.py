@@ -227,6 +227,23 @@ _PRESSURE_UNITS = frozenset({"mbar", "мбар", "pa", "па", "bar", "бар", 
 _SNAPSHOT_FRESH_S = 60.0
 
 
+def _as_finite(value: object) -> float | None:
+    """The value as a plain finite float, or None when it is not one.
+
+    Never raises. `math.isfinite` throws `OverflowError` on an int too large to
+    become a float, and the digest is built outside the try that guards state
+    enrichment — so one oversized integer took down the whole answer rather
+    than producing "нет данных" for one channel.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _snapshot_caveat(status) -> str | None:
     """What must be said about every snapshot-derived number, or None if fresh.
 
@@ -745,8 +762,12 @@ class AssistantQueryAgent:
     def _state_digest(data: dict) -> str:
         """What the model already holds, in a few lines.
 
-        Short on purpose. This feeds a yes/no decision, not the answer, and a
-        digest as long as the answer would just pay the cost twice.
+        Short on purpose — but short is not the same as contentless. This began
+        as input to one yes/no decision ("would documents help?"), where a COUNT
+        of temperatures is enough. It is now also the live-state block attached
+        to a knowledge answer, and there a count answers "почему Т12 не падает"
+        with the number eleven. Eleven short pairs are not a long digest; a
+        count that cannot answer anything is not a cheap one.
         """
         cs = data.get("composite_status") or data.get("composite")
         parts: list[str] = []
@@ -767,15 +788,56 @@ class AssistantQueryAgent:
                 parts.append(f"фаза: {phase}")
             temps = getattr(cs, "key_temperatures", None) or {}
             if temps:
-                parts.append(f"температур в наличии: {len(temps)}{mark}")
+                # THE VALUES, NOT HOW MANY THERE ARE. A channel present in the
+                # snapshot but carrying no reading keeps its name and says so:
+                # dropping it reads as "no such channel" rather than "no value
+                # right now", and the operator asks about channels by name.
+                # THE MARK GOES ON EACH ENTRY, not once at the end of the line.
+                # "Т11 298.6 K, Т12 271.4 K [УСТАРЕЛО]" lets the model quote
+                # Т11 without ever dropping a caveat of its own: the response
+                # prompt keeps a caveat that stands beside the fact it
+                # qualifies, and one at the end stands beside the last fact.
+                #
+                # Absences are marked too. "Т12 нет данных" is a statement
+                # about the stand, and an hour-old absence is not an absence
+                # now — the same reason the numbers are marked.
+                shown = []
+                for name in sorted(temps):
+                    value = temps[name]
+                    number = _as_finite(value)
+                    if number is not None:
+                        shown.append(f"{name} {number:.4g} K{mark}")
+                    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                        shown.append(f"{name} значение не число{mark}")
+                    else:
+                        shown.append(f"{name} нет данных{mark}")
+                parts.append("температуры: " + ", ".join(shown))
             pressure = getattr(cs, "current_pressure", None)
             if pressure is not None:
-                parts.append(f"давление: {pressure:.3g} мбар{mark}")
+                # The same validation the temperatures get. `current_pressure`
+                # arrives from the snapshot without passing `Reading.is_usable`,
+                # so a NaN sentinel from a driver reached the model as
+                # "давление: nan мбар" — a reading-shaped thing that is not one.
+                number = _as_finite(pressure)
+                if number is not None:
+                    parts.append(f"давление: {number:.3g} мбар{mark}")
+                elif isinstance(pressure, (int, float)) and not isinstance(pressure, bool):
+                    parts.append(f"давление: значение не число{mark}")
+                else:
+                    parts.append(f"давление: нет данных{mark}")
             trends = getattr(cs, "trends", None) or {}
             if trends:
                 parts.append("динамика: " + _format_trends(trends))
-            alarms = getattr(cs, "active_alarms", None)
-            parts.append(f"активных тревог: {len(alarms) if alarms else 0}")
+            # A FAILURE TO READ IS NOT A COUNT OF ZERO. `alarms_available` is
+            # False when the alarm source could not be reached at all, and this
+            # line reported that as "активных тревог: 0" — an assertion that
+            # nothing is wrong, made out of not having looked. It is the exact
+            # thing the assistant must never do.
+            if not getattr(cs, "alarms_available", True):
+                parts.append("тревоги: прочитать не удалось, это НЕ значит, что их нет")
+            else:
+                alarms = getattr(cs, "active_alarms", None)
+                parts.append(f"активных тревог: {len(alarms) if alarms else 0}")
         if not parts:
             keys = ", ".join(sorted(k for k in data if not k.startswith("_"))) or "ничего"
             parts.append(f"данные под рукой: {keys}")
