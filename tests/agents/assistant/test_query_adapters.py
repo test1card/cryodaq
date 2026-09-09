@@ -364,6 +364,12 @@ async def _make_composite_adapter(
                 "unit": getattr(reading, "unit", "K"),
                 "display_name": ch,
                 "timestamp": getattr(reading, "timestamp", datetime.now(UTC)),
+                # Production reports whether the reading passed
+                # `Reading.is_usable()`, and the composite refuses a value
+                # without it. These stand for good readings; a stub that
+                # omitted the field would be testing the fail-closed path
+                # instead of the parallel fetch it exists for.
+                "usable": True,
             }
         snap.latest_with_labels = AsyncMock(return_value=labeled)
     snap.oldest_age_s = AsyncMock(return_value=None)

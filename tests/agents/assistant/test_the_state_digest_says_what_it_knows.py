@@ -166,8 +166,10 @@ def test_the_phase_is_still_rendered_beside_them() -> None:
     ],
 )
 def test_a_pressure_that_is_not_a_number_is_not_printed_as_one(value: object, expected: str) -> None:
-    """`current_pressure` reaches the digest without passing `Reading.is_usable`,
-    so a driver's NaN sentinel arrived as "давление: nan мбар"."""
+    """Second line of defence. The adapters now gate on `Reading.is_usable()`,
+    so a driver's NaN sentinel no longer reaches here through them — but a
+    `CompositeStatus` built by hand or by a future adapter that forgets must
+    still not put "давление: nan мбар" in front of the operator."""
     digest = _digest(_status(current_pressure=value))
 
     pressure = next(line for line in digest.splitlines() if "давление" in line)

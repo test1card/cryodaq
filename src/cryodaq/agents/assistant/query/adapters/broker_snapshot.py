@@ -144,5 +144,12 @@ class BrokerSnapshot:
                     "display_name": self.display_name(ch),
                     "visible": self.is_visible(ch),
                     "timestamp": reading.timestamp,
+                    # CARRIED, because the value alone cannot be judged
+                    # downstream. `Reading.is_usable()` is the repository's one
+                    # predicate for a reading that means something — status OK
+                    # and a finite value — and dropping it here is why a
+                    # SENSOR_ERROR reading with a plausible number reached the
+                    # operator as an ordinary measurement.
+                    "usable": reading.is_usable(),
                 }
             return result

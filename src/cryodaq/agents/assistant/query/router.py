@@ -22,6 +22,21 @@ class QueryUnavailableError(RuntimeError):
     """Raised when the router cannot establish an authoritative query result."""
 
 
+def _reading_is_usable(reading: object) -> bool:
+    """`Reading.is_usable()`, and False when the object cannot answer.
+
+    Fails closed: a stand-in without the predicate must not pass for a good
+    reading merely because it could not be asked.
+    """
+    predicate = getattr(reading, "is_usable", None)
+    if not callable(predicate):
+        return False
+    try:
+        return predicate() is True
+    except Exception:  # noqa: BLE001 - an unanswerable reading is not a usable one
+        return False
+
+
 class QueryRouter:
     """Dispatches a classified QueryIntent to the appropriate ServiceAdapter.
 
@@ -162,6 +177,15 @@ class QueryRouter:
         current_p = None
         for ch, reading in all_ch.items():
             if "pressure" in ch.lower() or "mbar" in ch.lower():
+                # THE STATUS DECIDES, NOT THE NUMBER. `Reading.is_usable()` is
+                # the repository's one predicate for a reading that means
+                # something, and every acting path gates on it — the interlock,
+                # the alarms, the safety manager. This one answers the operator
+                # asking how long the pump-down has left, and it took the value
+                # whatever the gauge said about itself: a SENSOR_ERROR reading
+                # came back as "Давление сейчас: 1.23e-04".
+                if not _reading_is_usable(reading):
+                    break
                 current_p = reading.value
                 if eta is not None:
                     eta.current_mbar = current_p

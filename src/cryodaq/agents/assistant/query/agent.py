@@ -244,6 +244,22 @@ def _as_finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _reading_is_usable(reading: object) -> bool:
+    """`Reading.is_usable()`, and False when the object cannot answer.
+
+    Fails closed on purpose. A stand-in without the predicate — a stub, an
+    older cached object — must not be taken for a good reading merely because
+    it could not be asked.
+    """
+    predicate = getattr(reading, "is_usable", None)
+    if not callable(predicate):
+        return False
+    try:
+        return predicate() is True
+    except Exception:  # noqa: BLE001 - an unanswerable reading is not a usable one
+        return False
+
+
 def _snapshot_caveat(status) -> str | None:
     """What must be said about every snapshot-derived number, or None if fresh.
 
@@ -814,10 +830,13 @@ class AssistantQueryAgent:
                 parts.append("температуры: " + ", ".join(shown))
             pressure = getattr(cs, "current_pressure", None)
             if pressure is not None:
-                # The same validation the temperatures get. `current_pressure`
-                # arrives from the snapshot without passing `Reading.is_usable`,
-                # so a NaN sentinel from a driver reached the model as
-                # "давление: nan мбар" — a reading-shaped thing that is not one.
+                # The same validation the temperatures get. The adapters now
+                # gate on `Reading.is_usable()` before a value gets this far,
+                # so this is the second line of defence: a `CompositeStatus`
+                # assembled by hand, by an older caller, or by a future adapter
+                # that forgets, still cannot put "давление: nan мбар" — a
+                # reading-shaped thing that is not one — in front of the
+                # operator.
                 number = _as_finite(pressure)
                 if number is not None:
                     parts.append(f"давление: {number:.3g} мбар{mark}")
@@ -1084,8 +1103,22 @@ class AssistantQueryAgent:
             stale_lines = []
             for ch in channels:
                 r = readings.get(ch)
-                unit = getattr(r, "unit", "") if r is not None else ""
-                val_lines.append(f"  {ch}: {r.value:.4g} {unit}" if r else f"  {ch}: нет данных")
+                if r is None:
+                    val_lines.append(f"  {ch}: нет данных")
+                elif not _reading_is_usable(r):
+                    # A READING THAT ARRIVED IS NOT A READING THAT MEANS
+                    # SOMETHING. `Reading.is_usable()` is the repository's one
+                    # predicate for that — status OK and a finite value — and
+                    # the interlock, the alarms, the safety manager and even the
+                    # Telegram command path all gate on it. This path, the one
+                    # that answers "какая сейчас температура", did not: a
+                    # LakeShore OVERRANGE reached the operator as "inf K", and a
+                    # finite value carrying SENSOR_ERROR as an ordinary number.
+                    status = getattr(getattr(r, "status", None), "name", None) or "не указан"
+                    val_lines.append(f"  {ch}: датчик не даёт годного показания (статус {status})")
+                else:
+                    unit = getattr(r, "unit", "") or ""
+                    val_lines.append(f"  {ch}: {r.value:.4g} {unit}".rstrip())
                 age = ages.get(ch)
                 if age is None:
                     stale_lines.append(f"  {ch}: нет данных")

@@ -182,7 +182,13 @@ async def test_composite_adapter_snapshot_not_empty_when_has_data() -> None:
     snapshot = MagicMock()
     snapshot.latest_with_labels = AsyncMock(
         return_value={
-            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
+            "Т7": {
+                "value": 3.9,
+                "unit": "K",
+                "display_name": "Т7 Детектор",
+                "timestamp": datetime.now(UTC),
+                "usable": True,
+            },
         }
     )
     snapshot.oldest_age_s = AsyncMock(return_value=2.0)
@@ -212,9 +218,27 @@ async def test_composite_adapter_builds_key_temps_from_k_channels() -> None:
     snapshot = MagicMock()
     snapshot.latest_with_labels = AsyncMock(
         return_value={
-            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
-            "Т1": {"value": 78.2, "unit": "K", "display_name": "Т1 Криостат верх", "timestamp": datetime.now(UTC)},
-            "P1": {"value": 1e-6, "unit": "mbar", "display_name": "P1", "timestamp": datetime.now(UTC)},
+            "Т7": {
+                "value": 3.9,
+                "unit": "K",
+                "display_name": "Т7 Детектор",
+                "timestamp": datetime.now(UTC),
+                "usable": True,
+            },
+            "Т1": {
+                "value": 78.2,
+                "unit": "K",
+                "display_name": "Т1 Криостат верх",
+                "timestamp": datetime.now(UTC),
+                "usable": True,
+            },
+            "P1": {
+                "value": 1e-6,
+                "unit": "mbar",
+                "display_name": "P1",
+                "timestamp": datetime.now(UTC),
+                "usable": True,
+            },
         }
     )
     snapshot.oldest_age_s = AsyncMock(return_value=1.0)

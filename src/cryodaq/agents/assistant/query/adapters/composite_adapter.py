@@ -105,11 +105,20 @@ class CompositeAdapter:
             if info.get("visible") is False:
                 continue
             unit = info.get("unit", "")
-            val = info.get("value")
             display = info.get("display_name", ch)
+            # AN UNUSABLE READING IS NOT A VALUE. The snapshot now says whether
+            # the reading passed `Reading.is_usable()`; taking the number
+            # regardless is how a driver's error sentinel became a temperature
+            # in the operator's summary. Absent rather than wrong: the channel
+            # keeps its place and reads as having no value, which is true.
+            #
+            # Missing key, not False, is the fail-closed case for the pressure:
+            # an older snapshot that does not report usability must not have its
+            # silence read as "fine".
+            val = info.get("value") if info.get("usable") is True else None
             if unit == "K":
                 key_temps[display] = val
-            elif unit in ("mbar", "Pa") and current_pressure is None:
+            elif unit in ("mbar", "Pa") and current_pressure is None and val is not None:
                 current_pressure = val
 
         # Trends for the channels worth a derivative: the gauge, and the two
