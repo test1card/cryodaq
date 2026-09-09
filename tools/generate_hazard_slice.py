@@ -71,7 +71,6 @@ DATA_FLOW_PATHS = {
     "src/cryodaq/storage/channel_descriptors.py",
     "src/cryodaq/storage/broker_replay.py",
     "src/cryodaq/storage/descriptor_archive.py",
-    "src/cryodaq/storage/persistence_spool.py",
     "src/cryodaq/storage/replay.py",
     "src/cryodaq/storage/sqlite_writer.py",
     "src/cryodaq/replay_engine/legacy_channel_maps.py",
