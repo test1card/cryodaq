@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import math
@@ -861,6 +862,115 @@ async def _periodic_report_tick(
 # ---------------------------------------------------------------------------
 
 
+async def _run_cleanup_step(label: str, operation) -> None:
+    """Run one shutdown step, whether it is a coroutine function or not.
+
+    MEASURED on lab53, 2026-09-10, in the assistant's own log after a redeploy:
+
+        ERROR │ cryodaq.assistant │ Optional assistant cleanup failed: RAG searcher
+        TypeError: 'NoneType' object can't be awaited
+
+    The step did `await operation()`, and `RagSearcher.close` is SYNCHRONOUS --
+    it returns None.
+
+    WHAT THAT DID, precisely, because an earlier version of this comment said
+    something stronger and a reviewer corrected it: `await operation()` calls
+    `operation()` FIRST, so the close DID run and the pool WAS shut down. What
+    the mismatch produced was a false ERROR whenever execution REACHED
+    `RagSearcher.close()` and it returned None -- the TypeError was logged after
+    the close had run, so a succeeding step was reported as failed and a reader
+    had no way to tell that report from a real one. Not "every stop": ordinary cleanup-step exceptions are
+    caught, but a failed periodic task or a cancellation of the caller can end
+    the sequence before it gets here.
+    Every OTHER target is a coroutine function, which is what made the odd one
+    out easy to miss; why it stayed missed is not something this comment can
+    establish.
+
+    A returned awaitable is awaited; anything else is already done.
+
+    AT MODULE LEVEL on purpose. It was a closure inside the run function, so it
+    could not be invoked from a test DIRECTLY. Driving the run function was
+    always possible, and the repository does have a runtime shutdown test -- so
+    the honest statement is that nothing reached THIS step on its own, and the
+    defect lived in a log line instead of a red run.
+    """
+    try:
+        result = operation()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.exception("Optional assistant cleanup failed: %s", label)
+
+
+async def _run_shutdown_sequence(
+    *,
+    periodic_task,
+    query_agent,
+    live_agent,
+    output_router,
+    audit_logger,
+    cmd_server,
+    event_sub,
+    state_cache,
+    broker_snapshot,
+    ollama,
+    rag_searcher,
+    rag_emb_client,
+    telegram_sender,
+) -> None:
+    """Stop everything the assistant started, in order.
+
+    Ordinary component-cleanup exceptions are tolerated and reported; a failed
+    periodic task or a cancellation of the caller can still end the sequence
+    early, and that is unchanged from before this function existed.
+
+    AT MODULE LEVEL for the same reason `_run_cleanup_step` is: this sequence
+    was inline in the run function, so the step helper was all a test reached on
+    its own -- and a reviewer showed that reverting the RAG line here to a bare
+    `await rag_searcher.close()` would restore the false error with every test
+    still green. The sequence and the wiring INTO it are both driven by tests
+    now -- the first claim of "same path" covered only the sequence, and a
+    reviewer replaced `rag_searcher=rag_searcher` at the call site with None
+    while everything stayed green.
+
+    The FOUR flag-gated owners -- command server, event subscriber, state cache,
+    broker snapshot -- arrive as None when their start was not attempted, and
+    are skipped. That is what the `*_started` flags said at the call site: they
+    were set BEFORE awaiting each `start()`, so a component whose start raised
+    is still cleaned up, which is the behaviour this preserves. The others are None when they are not
+    RETAINED by this runtime -- never constructed, or abandoned, as a
+    RagSearcher whose construction timed out can be while its thread runs on.
+    """
+    if periodic_task is not None:
+        periodic_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await periodic_task
+    if query_agent is not None:
+        await _run_cleanup_step("query agent", query_agent.close)
+    await _run_cleanup_step("live agent", live_agent.stop)
+    await _run_cleanup_step("output router", output_router.close)
+    await _run_cleanup_step("audit logger", audit_logger.close)
+    if cmd_server is not None:
+        await _run_cleanup_step("command server", cmd_server.stop)
+    if event_sub is not None:
+        await _run_cleanup_step("event subscriber", event_sub.stop)
+    if state_cache is not None:
+        await _run_cleanup_step("state cache", state_cache.stop)
+    if broker_snapshot is not None:
+        await _run_cleanup_step("broker snapshot", broker_snapshot.stop)
+    await _run_cleanup_step("Ollama client", ollama.close)
+    if rag_searcher is not None:
+        # Its own threads, so its own shutdown. Non-blocking on purpose: a stuck
+        # LanceDB call must not turn shutdown into the hang the pool exists to
+        # contain. Its `close` is SYNCHRONOUS -- the one target here that is.
+        await _run_cleanup_step("RAG searcher", rag_searcher.close)
+    if rag_emb_client is not None:
+        await _run_cleanup_step("RAG embeddings client", rag_emb_client.close)
+    if telegram_sender is not None:
+        await _run_cleanup_step("Telegram sender", telegram_sender.close)
+    logger.info("cryodaq-assistant остановлен")
+
+
 async def _run_llm_runtime(
     *,
     engine_cmd_addr: str = DEFAULT_ENGINE_CMD_ADDR,
@@ -1166,12 +1276,6 @@ async def _run_llm_runtime(
     broker_started = False
     periodic_task: asyncio.Task[None] | None = None
 
-    async def _cleanup(label: str, operation) -> None:
-        try:
-            await operation()
-        except Exception:
-            logger.exception("Optional assistant cleanup failed: %s", label)
-
     try:
         if broker_snapshot is not None:
             broker_started = True
@@ -1192,34 +1296,21 @@ async def _run_llm_runtime(
         await shutdown_event.wait()
     finally:
         logger.info("═══ Завершение cryodaq-assistant ═══")
-        if periodic_task is not None:
-            periodic_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await periodic_task
-        if query_agent is not None:
-            await _cleanup("query agent", query_agent.close)
-        await _cleanup("live agent", live_agent.stop)
-        await _cleanup("output router", output_router.close)
-        await _cleanup("audit logger", audit_logger.close)
-        if command_started:
-            await _cleanup("command server", cmd_server.stop)
-        if event_started:
-            await _cleanup("event subscriber", event_sub.stop)
-        if state_started:
-            await _cleanup("state cache", state_cache.stop)
-        if broker_started and broker_snapshot is not None:
-            await _cleanup("broker snapshot", broker_snapshot.stop)
-        await _cleanup("Ollama client", ollama.close)
-        if rag_searcher is not None:
-            # Its own threads, so its own shutdown. Non-blocking on purpose: a
-            # stuck LanceDB call must not turn shutdown into the hang the pool
-            # exists to contain.
-            await _cleanup("RAG searcher", rag_searcher.close)
-        if rag_emb_client is not None:
-            await _cleanup("RAG embeddings client", rag_emb_client.close)
-        if telegram_sender is not None:
-            await _cleanup("Telegram sender", telegram_sender.close)
-        logger.info("cryodaq-assistant остановлен")
+        await _run_shutdown_sequence(
+            periodic_task=periodic_task,
+            query_agent=query_agent,
+            live_agent=live_agent,
+            output_router=output_router,
+            audit_logger=audit_logger,
+            cmd_server=cmd_server if command_started else None,
+            event_sub=event_sub if event_started else None,
+            state_cache=state_cache if state_started else None,
+            broker_snapshot=broker_snapshot if broker_started else None,
+            ollama=ollama,
+            rag_searcher=rag_searcher,
+            rag_emb_client=rag_emb_client,
+            telegram_sender=telegram_sender,
+        )
 
 
 async def run(

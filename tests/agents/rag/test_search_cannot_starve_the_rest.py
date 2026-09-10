@@ -94,9 +94,42 @@ async def test_a_stuck_search_leaves_the_default_executor_free() -> None:
     searcher._pool.shutdown(wait=False, cancel_futures=True)
 
 
-def test_the_assistant_closes_the_searcher() -> None:
-    """A pool nobody shuts down outlives the thing it belonged to."""
-    from cryodaq.agents import assistant_main
+async def test_the_assistant_closes_the_searcher() -> None:
+    """A pool nobody shuts down outlives the thing it belonged to.
 
-    source = inspect.getsource(assistant_main._run_llm_runtime)
-    assert "rag_searcher.close" in source
+    This used to read the SOURCE of the run function for the string
+    "rag_searcher.close", which a legitimate refactor broke while the behaviour
+    was intact -- and which would equally have passed if the call had been
+    changed to something that never ran. It drives the shutdown sequence now.
+    """
+    from cryodaq.agents.assistant_main import _run_shutdown_sequence
+
+    closed: list[str] = []
+
+    class _Searcher:
+        def close(self) -> None:
+            closed.append("searcher")
+
+    class _Noop:
+        async def close(self) -> None:
+            return None
+
+        stop = close
+
+    await _run_shutdown_sequence(
+        periodic_task=None,
+        query_agent=None,
+        live_agent=_Noop(),
+        output_router=_Noop(),
+        audit_logger=_Noop(),
+        cmd_server=None,
+        event_sub=None,
+        state_cache=None,
+        broker_snapshot=None,
+        ollama=_Noop(),
+        rag_searcher=_Searcher(),
+        rag_emb_client=None,
+        telegram_sender=None,
+    )
+
+    assert closed == ["searcher"]
