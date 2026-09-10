@@ -55,6 +55,38 @@ _INTENT_RESUME_MAX_AGE_S = 900.0
 _CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
 
 
+_MAX_REASON_CHARS = 200
+
+
+def _bounded_reason(exc: BaseException) -> str:
+    """One bounded, single-line, encodable rendering of an exception.
+
+    This text is put in an operator warning that the engine serializes into a
+    command reply, and `encode_command_reply` requires valid UTF-8. An exception
+    whose text holds a lone UTF-16 surrogate would make the encoder raise AFTER
+    the Start had proceeded, so a successful run would come back as an unknown
+    outcome. Truncation alone does not prevent that; this also drops what cannot
+    be encoded and flattens what would break one line.
+    """
+
+    try:
+        text = str(exc)
+    except Exception:  # noqa: BLE001 - a __str__ that raises must not cost the warning
+        return type(exc).__name__
+    # One pass, not two. An earlier version also ran encode("utf-8", "replace")
+    # first; measured over the whole surrogate range plus assorted control and
+    # zero-width code points, NO character is accepted by str.isprintable() and
+    # rejected by the UTF-8 encoder, so that step could not fail a test and was
+    # removed rather than kept for comfort. The printable filter earns its place
+    # separately: U+0007 and friends are not whitespace, so split() alone leaves
+    # them in an operator-facing string.
+    text = "".join(char if char.isprintable() else " " for char in text)
+    text = " ".join(text.split())
+    if not text:
+        return type(exc).__name__
+    return text[:_MAX_REASON_CHARS]
+
+
 class SafetyConfigError(RuntimeError):
     """Raised when safety.yaml cannot be loaded in a fail-closed manner.
 
@@ -1613,6 +1645,15 @@ class SafetyManager:
                             _answer = await _answer
                         _recovered = bool(_answer)
                     except Exception as exc:
+                        # Deliberately the class alone here, and it is not an
+                        # oversight: the engine's `_persistence_can_write`
+                        # converts every probe failure to False before it can
+                        # reach this handler (engine.py, `except Exception:
+                        # return False`), so anything richer written here would
+                        # be decoration on a branch production does not take.
+                        # The diagnosis is lost at that boundary and in
+                        # SQLiteWriter.probe_can_commit, which is where it has
+                        # to be recovered -- a separate change.
                         logger.error(
                             "persistence_recovered query failed: %s; keeping the latch",
                             type(exc).__name__,
@@ -1764,10 +1805,24 @@ class SafetyManager:
                         if _unconfirmed_interlocks
                         else "имена ранее сработавших управляющих интерлоков недоступны"
                     )
+                    # Guards may be blind after this, and a class name alone
+                    # does not say whether that is a wiring fault, a config
+                    # fault, or a transient one. The re-arm hook reads internal
+                    # interlock records and receives no command payload, so its
+                    # exception carries no capability material.
+                    #
+                    # The traceback does expose local source paths, and the
+                    # root logger's redaction applies only to handlers hardened
+                    # by logging_setup -- it is not an invariant of this logger.
+                    # Both are accepted here: the engine hardens its handlers
+                    # before this code can run, and a blind interlock is worth
+                    # more than a hidden path.
                     logger.error(
-                        "interlock re-arm hook failed: %s; guards may remain blind: %s",
+                        "interlock re-arm hook failed: %s: %s; guards may remain blind: %s",
                         type(exc).__name__,
+                        exc,
                         _unconfirmed_label,
+                        exc_info=exc,
                     )
                     operator_warnings.append(
                         {
@@ -1779,7 +1834,17 @@ class SafetyManager:
                                 "Пуск продолжен по решению оператора; названные интерлоки "
                                 "могут не оценивать показания этого запуска"
                             ),
-                            "reason": (f"hook={type(exc).__name__}; unconfirmed_interlocks={_unconfirmed_label}"),
+                            # Operator-facing AND serialized into the command
+                            # reply, so slicing is not enough: a lone surrogate
+                            # in the exception text makes encode_command_reply
+                            # raise UnicodeEncodeError after the Start has
+                            # already proceeded, turning a successful run into
+                            # an unknown outcome. Same shape as
+                            # gui/zmq_client._bounded_public_error.
+                            "reason": (
+                                f"hook={type(exc).__name__}: {_bounded_reason(exc)}; "
+                                f"unconfirmed_interlocks={_unconfirmed_label}"
+                            ),
                         }
                     )
                 else:
