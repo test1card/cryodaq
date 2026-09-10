@@ -2291,7 +2291,7 @@ def test_construction_rollback_never_suppresses_over_a_live_engine(
     construction-rollback retry was suppressed over a still-live engine that
     the bounded reaper never touched and whose readers no pass ever settled.
     The construction HOLD window depends on the retry ladder staying alive
-    ("Keep the Qt loop alive so bounded settlement retries can finish"), so
+    ("Keep the Qt loop alive so settlement retries can finish"), so
     the exemption defeated the mechanism it claimed to serve. Driving the
     real ``_do_shutdown`` with the failure phase set must bound the child
     through the owned non-blocking reap machine exactly as a normal quit
@@ -3475,7 +3475,7 @@ def test_construction_rollback_binds_a_plain_retained_raising_poll_child_to_the_
     must bind the SAME retained handle to the owned non-blocking reap machine
     -- terminate, budgeted kill escalation, explicit bounded failure with the
     handle retained -- while the ladder stays armed for the HOLD window's
-    bounded settlement retries.
+    settlement retries.
 
     Falsification: reverting the predicate's plain-shape branch leaves
     ``_terminal_quit_reap_state`` unarmed and the attempt counters at zero

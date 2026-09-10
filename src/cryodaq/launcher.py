@@ -9162,8 +9162,23 @@ def main() -> None:
         )
     except _LauncherConstructionHold as hold:
         # HOLD owns the partially constructed window, all acquired children,
-        # the soak owners, and the process-wide instance lock. Keep the Qt
-        # loop alive so bounded settlement retries can finish.
+        # the soak owners, and the process-wide instance lock. Keep the Qt loop
+        # alive so settlement retries can finish.
+        #
+        # Those retries back off through _SHUTDOWN_RETRY_DELAYS_MS and then
+        # repeat at the last delay for as long as the failure stays
+        # retry-eligible: the delay index saturates and there is no attempt cap.
+        # This comment used to call them "bounded", which is true of the
+        # interval and false of the count.
+        #
+        # "Retry-eligible" is the qualifier that matters: `_shutdown_incomplete`
+        # deliberately stops scheduling for an immutably refused engine once its
+        # terminal readers have settled, and such a launcher sits in a stable
+        # HOLD with no further attempts. So there are two HOLDs, not one -- a
+        # retrying one and a settled-refusal one -- and both keep the process
+        # alive. Retaining ownership is the fail-closed part; the uncapped
+        # retrying is not what makes it fail-closed, and reading it as a bound
+        # is how somebody concludes the process will give up on its own.
         construction_hold = True
         window = hold.window
         logger.critical(
