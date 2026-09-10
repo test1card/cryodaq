@@ -6840,12 +6840,18 @@ class SQLiteWriter:
                 read=False,
                 name="sqlite_persistence_recovery_probe",
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            logger.warning("persistence recovery probe could not be scheduled: %s: %s", type(exc).__name__, exc)
             return False
         try:
             return bool(await self._await_owned_task(owner))
         except Exception as exc:
-            logger.warning("persistence recovery probe failed: %s", type(exc).__name__)
+            logger.warning(
+                "persistence recovery probe failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=exc,
+            )
             return False
 
     def _probe_can_commit_sync(self) -> bool:
@@ -6860,8 +6866,10 @@ class SQLiteWriter:
             conn = self._ensure_connection(self._current_date or datetime.now(UTC).date())
         except Exception as exc:
             logger.warning(
-                "persistence recovery probe could not reach the database: %s",
+                "persistence recovery probe could not reach the database: %s: %s",
                 type(exc).__name__,
+                exc,
+                exc_info=exc,
             )
             return False
         stamp = datetime.now(UTC).isoformat()

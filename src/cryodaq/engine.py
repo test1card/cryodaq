@@ -2874,13 +2874,28 @@ async def _persistence_can_write(writer: Any) -> bool:
     structural guards that read this file.
     """
 
+    # Every path below answers False, and until now every one of them did so in
+    # SILENCE. That answer keeps the persistence latch, which keeps acquisition
+    # blocked, so the operator sees a refused Start with no reason for it -- the
+    # same defect the launcher's construction failure had. The answers do not
+    # change here; only the record of why.
     probe = getattr(writer, "probe_can_commit", None)
     if probe is None:
         # A writer that cannot be asked has not answered yes.
+        logger.warning(
+            "Persistence probe unavailable on %s; the latch stays and Start stays refused",
+            type(writer).__name__,
+        )
         return False
     try:
         outcome = probe()
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "Persistence probe refused to start: %s: %s; the latch stays",
+            type(exc).__name__,
+            exc,
+            exc_info=exc,
+        )
         return False
     if not inspect.isawaitable(outcome):
         return bool(outcome)
@@ -2892,10 +2907,24 @@ async def _persistence_can_write(writer: Any) -> bool:
     done, _pending = await asyncio.wait({task}, timeout=_PERSISTENCE_PROBE_BOUND_S)
     if task not in done:
         task.add_done_callback(_consume_late_persistence_probe)
+        logger.warning(
+            "Persistence probe did not answer within %.1fs; the latch stays and Start stays refused",
+            _PERSISTENCE_PROBE_BOUND_S,
+        )
         return False
     try:
         return bool(task.result())
-    except Exception:
+    except Exception as exc:
+        # The message here is the one that names the actual condition -- the
+        # writer latches on "database is full", "disk quota exceeded" and a
+        # sustained "database is locked", and those three need different actions
+        # from the operator. A class name cannot tell them apart.
+        logger.error(
+            "Persistence probe failed: %s: %s; the latch stays",
+            type(exc).__name__,
+            exc,
+            exc_info=exc,
+        )
         return False
 
 
