@@ -30,6 +30,43 @@ class QueryCategory(Enum):
     #: realistic operator questions: these fell to unknown and out_of_scope,
     #: which is the operator's own hourly checklist going unanswered.
     SYSTEM_HEALTH = "system_health"
+    #: "что ты умеешь?" — the assistant describing itself. An operator who does
+    #: not know what can be asked asks nothing, so this is the one question that
+    #: gates every other. It fell to out_of_scope_general in the same 2026-09-10
+    #: measurement.
+    CAPABILITIES = "capabilities"
+
+
+#: What the operator can ask, keyed by the category that answers it.
+#:
+#: Derived from the enum rather than written out as prose, and guarded by a test
+#: that every answerable category appears here. A hand-written list of features
+#: is wrong the first time a category is added and nobody remembers to update
+#: it -- and an assistant that describes itself wrongly is worse than one that
+#: says nothing, because the operator stops trusting the rest of its answers.
+CAPABILITY_DESCRIPTIONS: dict[QueryCategory, str] = {
+    QueryCategory.CURRENT_VALUE: "текущее значение канала — «какая сейчас Т12», «давление?»",
+    QueryCategory.ETA_COOLDOWN: "прогноз охлаждения — «когда выйдем на 4 К»",
+    # NOT "когда будет 1e-6": the targets are configured (0.1 / 0.05 / 0.01
+    # mbar) and anything below the Pirani's 1e-4 floor is unpredictable on this
+    # stand, so promising it would be advertising an answer that cannot come.
+    QueryCategory.ETA_VACUUM: "прогноз откачки до ближайшего настроенного рубежа — «когда будет 0.01 мбар»",
+    QueryCategory.RANGE_STATS: "разброс за период — «в каком диапазоне давление за час»",
+    QueryCategory.PHASE_INFO: "фаза эксперимента — «в какой фазе сейчас»",
+    QueryCategory.ALARM_STATUS: "активные тревоги — «есть ли тревоги»",
+    QueryCategory.COMPOSITE_STATUS: "сводка по стенду — «что сейчас», «как дела»",
+    # NOT "здоровье системы сбора". That category spent four review rounds
+    # learning it can report only what this process received, and cannot tell a
+    # stopped engine from a broken link to a running one -- so advertising it as
+    # a health check would put the overstatement back in through the blurb.
+    QueryCategory.SYSTEM_HEALTH: "получает ли помощник показания и когда пришло последнее",
+    QueryCategory.ARCHIVE_LIST: "список прошлых экспериментов — «что было за неделю»",
+    QueryCategory.ARCHIVE_DETAIL: "детали одного эксперимента — «сколько длился cooldown в <ID>»",
+    QueryCategory.ALARM_HISTORY: "история тревог — «сколько раз сработал overheat»",
+    QueryCategory.KNOWLEDGE_QUERY: (
+        "поиск по документации, процедурам и журналу — «процедура аварийного отключения», «какая команда у Lakeshore»"
+    ),
+}
 
 
 def _validate_availability(available: bool, stale: bool, reason: str | None) -> None:

@@ -22,6 +22,7 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_ALARM_STATUS_USER,
     FORMAT_ARCHIVE_DETAIL_USER,
     FORMAT_ARCHIVE_LIST_USER,
+    FORMAT_CAPABILITIES_USER,
     FORMAT_COMPOSITE_STATUS_USER,
     FORMAT_CURRENT_VALUE_USER,
     FORMAT_ETA_COOLDOWN_USER,
@@ -44,6 +45,7 @@ from cryodaq.agents.assistant.query.ru_labels import (
 )
 from cryodaq.agents.assistant.query.schemas import (
     ARCHIVE_DETAIL_INVALID_REQUEST_REASON,
+    CAPABILITY_DESCRIPTIONS,
     QueryAdapters,
     QueryCategory,
 )
@@ -1080,6 +1082,8 @@ class AssistantQueryAgent:
             return self._fmt_composite(query, data)
         if category == QueryCategory.SYSTEM_HEALTH:
             return self._fmt_system_health(query, data)
+        if category == QueryCategory.CAPABILITIES:
+            return self._fmt_capabilities(query)
         if category == QueryCategory.ARCHIVE_LIST:
             return self._fmt_archive_list(query, data)
         if category == QueryCategory.ARCHIVE_DETAIL:
@@ -1279,6 +1283,18 @@ class AssistantQueryAgent:
             experiment_age_text=age_text,
             target_temp=target,
         )
+
+    @staticmethod
+    def _fmt_capabilities(query: str) -> str:
+        """List what the assistant can answer, from the categories themselves.
+
+        Built from CAPABILITY_DESCRIPTIONS rather than written out as prose, so
+        a category added without a description fails a test instead of quietly
+        going unmentioned. An assistant that describes itself wrongly is worse
+        than one that says nothing: the operator stops trusting the rest.
+        """
+        listing = "\n".join(f"- {text}" for text in CAPABILITY_DESCRIPTIONS.values())
+        return FORMAT_CAPABILITIES_USER.format(query=query, capabilities=listing)
 
     def _fmt_system_health(self, query: str, data: dict[str, Any]) -> str:
         """Report what this process observed, and pass no verdict on the engine.
