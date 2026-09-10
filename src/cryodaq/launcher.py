@@ -425,9 +425,40 @@ class _EngineShutdownWorker(ZmqCommandWorker):
 class _LauncherConstructionHold(RuntimeError):
     """Carry a partially constructed launcher that must retain process ownership."""
 
-    def __init__(self, window: LauncherWindow, phase: str) -> None:
-        super().__init__(f"launcher construction failed during {phase}; ownership remains in HOLD")
+    def __init__(self, window: LauncherWindow, phase: str, *, stop_requested: bool = False) -> None:
+        # The message says WHICH of the two this is. Calling an operator's stop
+        # "construction failed" put a fault in the journal for something nobody
+        # got wrong -- and this text is what a reader sees first.
+        reason = "stop requested during" if stop_requested else "launcher construction failed during"
+        super().__init__(f"{reason} {phase}; ownership remains in HOLD")
         self.window = window
+        self.phase = phase
+        #: True when the HOLD came from an operator's stop rather than a fault.
+        #: `_do_shutdown` returns false whenever its worker is still running
+        #: after 200 ms -- the ORDINARY case for a stop once the engine is up --
+        #: so without this the retry could settle everything, quit cleanly, and
+        #: the process would still exit 1 and be restarted by
+        #: `Restart=on-failure`. A reviewer traced that whole path.
+        self.stop_requested = stop_requested
+
+
+class _LauncherStartupStop(RuntimeError):
+    """The operator asked the process to stop while it was still constructing.
+
+    NOT a construction failure, and the difference is not cosmetic: a failure
+    leaves `main` through a non-zero exit, and the unit carries
+    `Restart=on-failure` -- so a direct `kill -TERM` during startup would have
+    RESTARTED CryoDAQ, while the same signal a second later stops it for good. A
+    reviewer found that; before the latch existed the signal killed the process
+    outright, which systemd reads as a clean stop, so this was a regression the
+    latch introduced.
+
+    Settled, this leaves with exit code 0. Unsettled, it takes the HOLD road
+    like any other step that could not give its children back.
+    """
+
+    def __init__(self, phase: str) -> None:
+        super().__init__(f"stop signal received during construction phase {phase!r}")
         self.phase = phase
 
 
@@ -2369,7 +2400,7 @@ def _request_engine_ready_reply(command: dict[str, Any], *, address: str | None 
         context.term()
 
 
-def _launcher_exit_code(*, construction_hold: bool, qt_exit_code: int) -> int:
+def _launcher_exit_code(*, construction_hold: bool, qt_exit_code: int, stop_completed: bool = False) -> int:
     """What this process should report to whatever started it.
 
     A run that never finished constructing did not succeed, whatever Qt returns
@@ -2391,6 +2422,16 @@ def _launcher_exit_code(*, construction_hold: bool, qt_exit_code: int) -> int:
     precisely than this could.
     """
     if construction_hold and qt_exit_code == 0:
+        if stop_completed:
+            # AN OPERATOR'S STOP THAT FINISHED. It held only because the first
+            # `_do_shutdown` pass came back before its worker did, and the retry
+            # then settled every owner and quit. Reporting failure here would
+            # have `Restart=on-failure` bring back a launcher the operator
+            # deliberately stopped -- the same restart this commit's earlier
+            # round closed for the synchronous case, arriving by the slower
+            # road. A reviewer traced it.
+            logger.info("Launcher exiting after a completed stop requested during startup; reporting success")
+            return 0
         logger.critical("Launcher exiting from construction HOLD; reporting failure rather than success")
         return 1
     return qt_exit_code
@@ -2699,6 +2740,11 @@ class LauncherWindow(QMainWindow):
         # must not start a bridge until its own engine wins the port race.
         if self._replay_source is None:
             self._run_construction_step("bridge", self._bridge.start)
+            # ORDERING THIS FILE DEPENDS ON. `_wait_engine_ready` tells a
+            # construction start from a runtime restart by whether the health
+            # timer exists, and the health-timer step below runs AFTER this one.
+            # Moving either past the other silently restores the short window a
+            # cold start cannot fit into.
             self._run_construction_step("engine", self._start_engine)
         else:
             self._run_construction_step("engine", self._start_engine)
@@ -2740,6 +2786,9 @@ class LauncherWindow(QMainWindow):
                 callback=self._poll_bridge_data,
             ),
         )
+        # ORDERING: this step must stay AFTER the "engine" step above --
+        # `_wait_engine_ready` reads the absence of this timer as "construction
+        # is still building the engine". See the note at that step.
         self._run_construction_step(
             "health_timer",
             lambda: self._start_runtime_timer(
@@ -2819,9 +2868,45 @@ class LauncherWindow(QMainWindow):
         """Run one constructor phase or transfer the live owner into HOLD."""
 
         try:
+            # A STOP ALREADY ASKED FOR DOES NOT START ANOTHER OWNER. The latch
+            # was only read inside `_wait_engine_ready`, so a signal delivered
+            # at an EARLIER step still let `_start_engine` spawn a child -- a
+            # reviewer reproduced it -- and the stop then had to tear down an
+            # engine that should never have been started; on a stand that engine
+            # can begin acquiring first.
+            #
+            # INSIDE the try, deliberately. Raising above it skipped the handler
+            # below, so the launcher exited with whatever it had already
+            # acquired UNSETTLED -- the very outcome the latch exists to
+            # prevent. Here it takes the route a failed step takes: the reason
+            # logged, `_do_shutdown`, then re-raise or HOLD.
+            #
+            # Checked BEFORE each step and not after: a signal that arrives
+            # during a step is caught at the start of the next one, and one that
+            # arrives during the LAST step is carried by
+            # `_dispatch_latched_startup_signal` once the loop exists.
+            if _STARTUP_SIGNALS_RECEIVED:
+                raise _LauncherStartupStop(phase)
             return action()
         except _LauncherConstructionHold:
             raise
+        except _LauncherStartupStop:
+            # THE OPERATOR'S OWN REQUEST, logged as such: `critical` with
+            # "construction failed" would put a false alarm in the journal for
+            # every deliberate stop during startup.
+            # "на шаге", not "до шага": the readiness wait raises this from
+            # INSIDE the engine step, after the child was already spawned.
+            logger.info("Остановка по сигналу на шаге %s: завершаю штатно", phase)
+            self._construction_failure_phase = phase
+            if LauncherWindow._do_shutdown(self):
+                raise
+            logger.critical("Stop during construction could not settle at phase %s; holding", phase)
+            try:
+                self.setWindowTitle("CryoDAQ — HOLD: incomplete startup settlement")
+                self.show()
+            except RuntimeError:
+                logger.critical("Construction HOLD could not render a window")
+            raise _LauncherConstructionHold(self, phase, stop_requested=True) from None
         except BaseException as exc:
             self._construction_failure_phase = phase
             # THE REASON, NOT JUST THE CLASS. This logged `type(exc).__name__`
@@ -3210,12 +3295,55 @@ class LauncherWindow(QMainWindow):
         self._child_ready_write_fd_owner = ready_write_fd
         env[_CHILD_READY_CHANNEL_ENV] = ready_channel
         try:
+            # STOPPING BEFORE THE CHILD EXISTS. Checking only before the
+            # construction step left a window: a signal delivered DURING this
+            # method's preparation -- the port inspection, the pipe, the log
+            # owners -- was recorded and then ignored, and `Popen` ran anyway. A
+            # reviewer reproduced it by latching from `_is_port_busy` and got
+            # `child_spawned: True` for a launcher that had been told to stop.
+            #
+            # The check below sits inside this try, so the readiness owners
+            # created just above are settled by the same handler a failed spawn
+            # uses. After the spawn the child exists and stopping means tearing
+            # it down instead.
             if sys.platform == "win32":
                 _set_owned_fd_inheritable_exact(
                     ready_write_fd,
                     True,
                     label="child readiness writer for engine spawn",
                 )
+            # THE STATEMENT BEFORE THE SPAWN, with nothing between. It first sat
+            # above the Windows inheritance call, and a reviewer showed a signal
+            # handled DURING that call still reaching `Popen`: `popen_called:
+            # True, latch_was_set_when_popen_began: True`. Any work between the
+            # check and the spawn reopens that window, so the test asserts
+            # ADJACENCY rather than order.
+            #
+            # WHAT THIS DOES NOT DO. Adjacency narrows the window; it cannot
+            # close it. A signal handled between this condition and the call
+            # still spawns a child -- the same reviewer disassembled the two
+            # statements to show the bytecodes in between, and no check-then-act
+            # can do better. What bounds it is what happens NEXT: the readiness
+            # wait looks at the latch before its first probe and raises, and the
+            # construction step then settles the child through `_do_shutdown`.
+            # So the child is torn down rather than orphaned.
+            #
+            # NOT "strictly better than before" for THIS interval, and an
+            # earlier version of this comment said exactly that and was wrong.
+            # A reviewer corrected it: without the latch, a signal here killed
+            # the launcher BEFORE `Popen`, so no child existed at all. Inside
+            # this window the latch trades "no child" for "a child that starts,
+            # may begin acquiring, and is then settled". That is a real cost,
+            # measured in the microseconds between a conditional jump and a
+            # call, and it is stated here rather than argued away.
+            #
+            # Closing it completely means the child must not begin acquiring
+            # until the parent authorises it -- a startup handshake between two
+            # processes, not a check. That is a change of protocol and belongs
+            # to its own commit; it is NOT done here, and this comment exists so
+            # nobody reads adjacency as atomicity.
+            if _STARTUP_SIGNALS_RECEIVED:
+                raise _LauncherStartupStop("engine spawn")
             process = subprocess.Popen(
                 cmd,
                 env=env,
@@ -3917,10 +4045,149 @@ class LauncherWindow(QMainWindow):
             if context is not None:
                 context.term()
 
-    def _wait_engine_ready(self, max_attempts: int = 10, interval_s: float = 0.5) -> None:
+    #: How long the launcher waits for the engine child to declare readiness.
+    #:
+    #: MEASURED on lab53, 2026-09-10, during a full redeploy:
+    #:
+    #:     cold start  12:56:37 -> 12:56:46   VacuumTrendPredictor restoring the
+    #:                                        pump-down start from the archive
+    #:                                        took 9 s; readiness would have
+    #:                                        landed near 12:56:48
+    #:     warm start  12:58:45 -> 12:58:46   the same read took 1 s; readiness
+    #:                                        was established at 12:58:48
+    #:
+    #: The budget was 10 attempts x 0.5 s = 5 s OF SLEEPING; each probe costs its
+    #: own time on top, so the runtime path is bounded by attempts and not by the
+    #: clock. The warm start took 4.0 s of it
+    #: -- attempt 8 of 10 -- and the COLD start did not fit at all: the launcher
+    #: declared "live engine child did not establish exact live engine
+    #: readiness" at 12:56:41 and shut down an engine that was ACQUIRING and had
+    #: already written 132 readings. One second of margin on the good path, and
+    #: none on the path a machine takes after a reboot, when the page cache is
+    #: cold every time.
+    #:
+    #: WHY THIS IS SAFE AT CONSTRUCTION AND NOT EVERYWHERE. The wait is a
+    #: BLOCKING loop on the Qt thread. During construction it starves nothing:
+    #: `LauncherWindow.__init__` runs before `app.exec()`, so there is no event
+    #: loop to starve. The only handler installed by then is the startup LATCH,
+    #: which records a signal and returns -- it dispatches nothing, precisely
+    #: because there is no loop yet to dispatch onto. A reviewer corrected
+    #: an earlier claim of mine that the bound "costs nothing when the child is
+    #: broken". It always costs startup delay; what construction does not pay is
+    #: a starved event loop. At RUNTIME it costs a frozen window, because `_start_engine`
+    #: is also reached from the tray restart and from the supervisor, and there
+    #: the loop is running.
+    #:
+    #: So the wide window is the CONSTRUCTION default, and the runtime paths
+    #: keep the window they already had. A runtime restart follows a read the
+    #: engine has just done, so its cache is USUALLY warm -- not guaranteed,
+    #: after a long run or under memory pressure it is not; and leaving that
+    #: path unchanged means this commit cannot make
+    #: an operator-visible freeze longer than it is today. Making the runtime
+    #: wait non-blocking is the real answer there and is NOT done here.
+    _ENGINE_READY_ATTEMPTS = 60
+    _ENGINE_READY_INTERVAL_S = 0.5
+    #: The window the runtime restart paths keep: 10 x 0.5 s, exactly what every
+    #: caller had before this commit.
+    _ENGINE_READY_RUNTIME_ATTEMPTS = 10
+
+    def _wait_engine_ready(
+        self,
+        max_attempts: int | None = None,
+        interval_s: float | None = None,
+    ) -> None:
         """Wait for exact child/session readiness, never port occupancy alone."""
+        if max_attempts is None:
+            # WHICH window applies is decided by the CONSTRUCTION ORDERING --
+            # the health timer's presence -- and not by the caller. It is not an
+            # event-loop probe; the two coincide for every engine-start path
+            # reachable today. Passing it from the call sites was
+            # tried first and reverted: `_restart_engine` reaches `_start_engine`
+            # through fakes across thirteen tests whose stand-ins take no
+            # keyword, and the added argument turned every one of those restarts
+            # into a recovery path.
+            #
+            # The health timer is the signal, rather than a flag of this
+            # method's own: it is created by a construction step that runs AFTER
+            # the engine step, so it is absent exactly while construction is
+            # still building the engine and present for every later restart.
+            # A flag would be one more line someone can forget to set; this
+            # keeps the two from drifting. It is an ORDERING dependency, not an
+            # event-loop detector: it holds for the engine-start paths that are
+            # reachable today and would need revisiting if that ordering moved.
+            max_attempts = (
+                LauncherWindow._ENGINE_READY_RUNTIME_ATTEMPTS
+                if getattr(self, "_health_timer", None) is not None  # construction ordering, not a loop probe
+                else LauncherWindow._ENGINE_READY_ATTEMPTS
+            )
+        interval_s = LauncherWindow._ENGINE_READY_INTERVAL_S if interval_s is None else interval_s
+        # An ABSOLUTE deadline, because attempts x interval is not the wall
+        # clock: a reviewer measured that each probe can enter two bounded ZMQ
+        # exchanges with independent 500 ms send and receive timeouts, so an
+        # alive child whose endpoint accepts a send and never replies stretched
+        # "30 seconds" past sixty. The deadline counts probe time too.
+        # The elapsed-time deadline applies to the WIDE window only -- which in
+        # practice means construction, since no production caller passes an
+        # override, though an explicit `max_attempts >= _ENGINE_READY_ATTEMPTS`
+        # would receive it too. A reviewer measured what happens otherwise: with the runtime
+        # window of 10 x 0.5 s, the parent kept probing for ten attempts and
+        # accepted readiness at 6.0 s, while a deadline rejects at 5.0 s after
+        # five -- so a restart that used to succeed would enter failure
+        # recovery. This commit promised not to change the runtime path, and a
+        # deadline there would have changed it.
+        #
+        # A zero interval means "count attempts, ignore the clock" -- two
+        # existing tests ask for exactly that, and a deadline of `now + 0`
+        # would cut them to a single attempt. It masked a mutation in the
+        # negative control, which is how that interaction was noticed.
+        bounded_by_clock = interval_s > 0 and max_attempts >= LauncherWindow._ENGINE_READY_ATTEMPTS
+        deadline = time.monotonic() + max_attempts * interval_s if bounded_by_clock else None
+
+        def _stop_if_signalled() -> None:
+            """Give up the wait when the operator has asked the process to stop.
+
+            Otherwise the latch is only READ after construction, and a stop
+            delivered one second into a cold start still waits out the full
+            thirty before anything acts on it. NOT a claim about SIGKILL: the
+            unit gives `TimeoutStopSec=120`, so thirty seconds does not reach
+            it. What thirty seconds of silence costs is the operator watching a
+            stop that looks ignored, and an engine that keeps acquiring through
+            it.
+            """
+            if not _STARTUP_SIGNALS_RECEIVED:
+                return
+            # `_replay_engine_failed` is deliberately NOT set: it makes the
+            # runtime show "the replay engine could not start", and a stop the
+            # operator asked for is not a failure to report back to them.
+            raise _LauncherStartupStop("engine readiness")
+
         for attempt in range(max_attempts):
+            _stop_if_signalled()
+            # NOT `if attempt and ...`: guarding both checks on a non-zero
+            # attempt let iteration zero ignore the deadline entirely, so a
+            # first sleep that returns past the whole budget -- suspend/resume,
+            # or a badly delayed scheduler -- still started a probe. A reviewer
+            # found that; the deadline binds from the first look now.
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             time.sleep(interval_s)
+            # AND AGAIN after sleeping. Checking only before it did not support
+            # the claim that no new probe starts past the deadline: a reviewer
+            # drove a clock advancing 0.5 s per sleep and 0.8 s per probe and
+            # got a final probe STARTING at 30.4 s. The probe already running
+            # may still finish past the deadline -- that is the bound this
+            # offers, and it is not a strict wall-clock cap.
+            #
+            # THE STOP IS ASKED FIRST. It used to come after the deadline check,
+            # and a second reviewer showed what that cost when the two coincide:
+            # a stop delivered during the last sleep of a 30-second wait broke on
+            # the deadline instead, so the launcher called it a readiness FAILURE
+            # -- exit 1, and `Restart=on-failure` brings back a launcher the
+            # operator signalled directly. The stop is the more specific fact
+            # about why this wait is ending, so it is the one that must win.
+            _stop_if_signalled()
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             if self._replay_source is not None:
                 process = self._engine_proc
                 if process is None or process.poll() is not None:
@@ -8999,6 +9266,78 @@ async def _tick_coro() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: Stop signals that arrived before the Qt event loop and the real handlers did.
+#:
+#: Construction SPAWNS THE ENGINE CHILD and then waits for it -- up to
+#: `_ENGINE_READY_ATTEMPTS` x `_ENGINE_READY_INTERVAL_S`, thirty seconds since
+#: this commit widened the window a cold start needs. The handlers below are
+#: installed only after `LauncherWindow(...)` RETURNS, so across that whole span
+#: SIGTERM kept its default action: `systemctl --user stop cryodaq` terminated
+#: the launcher outright, skipping `_do_shutdown` and the ownership settlement
+#: the unit's `KillMode=mixed` exists to provide -- it sends the initial signal
+#: to the launcher alone precisely so that path runs. A reviewer found this: the
+#: hazard predates the commit, and the commit made its window six times wider.
+_STARTUP_SIGNALS_RECEIVED: list[int] = []
+
+
+def _install_startup_signal_latch() -> None:
+    """Record a stop signal that arrives before anything can act on one.
+
+    LATCH, not shutdown. There is no window to shut down yet -- it is being
+    built on this very thread -- and a handler that tried would run teardown
+    from inside a signal frame, re-entering the construction it interrupted.
+    So the signal is only recorded, and one of these carries it out:
+
+      * the NEXT construction step sees the latch and stops there --
+        `_run_construction_step` settles the acquired children through
+        `_do_shutdown` and `main` leaves with exit 0. This is the ordinary
+        route, and the readiness wait is not special: it takes the same one,
+        from inside the engine step;
+      * that settlement did not finish in one pass -- the usual case once the
+        engine is up, since `_do_shutdown` waits 200 ms for its worker -- so
+        the launcher HOLDs, keeps the loop alive, and
+        `_dispatch_latched_startup_signal` queues the retry that finishes it;
+      * the signal arrived during the LAST construction step, with no later
+        step left to notice the latch, and the dispatch is what acts on it.
+    """
+
+    def _latch(signum: int, _frame: object) -> None:
+        _STARTUP_SIGNALS_RECEIVED.append(signum)
+        logger.info(
+            "Получен сигнал %d во время запуска; корректное завершение отложено до конца конструирования",
+            signum,
+        )
+
+    signal.signal(signal.SIGINT, _latch)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _latch)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _latch)
+
+
+def _dispatch_latched_startup_signal(window: LauncherWindow) -> bool:
+    """Perform the shutdown a startup signal asked for. True if one was pending.
+
+    Once, however many signals were latched. NOT necessarily the first attempt:
+    a construction step that saw the latch has already asked `_do_shutdown` to
+    settle -- through `_LauncherStartupStop`, which is a STOP and not a
+    construction failure. If that pass finished, `main` left before reaching
+    here. What is left for this line is the pass that did not finish and now
+    HOLDs, where this queues the retry, and a signal that arrived during the
+    last construction step with no later step to notice it. `_do_shutdown` is
+    idempotent, which is what keeps the two from doing the work twice.
+    """
+    if not _STARTUP_SIGNALS_RECEIVED:
+        return False
+    logger.info(
+        "Сигнал %d, полученный во время запуска, исполняется сейчас: завершаю работу",
+        _STARTUP_SIGNALS_RECEIVED[0],
+    )
+    _STARTUP_SIGNALS_RECEIVED.clear()
+    QTimer.singleShot(0, window._do_shutdown)
+    return True
+
+
 def main() -> None:
     """Точка входа cryodaq (лаунчер).
 
@@ -9184,7 +9523,13 @@ def main() -> None:
     else:
         logger.info("Первичная настройка отложена: launcher запущен в --tray режиме")
 
+    # BEFORE the window, because the window's construction is what spawns the
+    # engine child and then waits up to thirty seconds for it. From here on a
+    # stop signal is recorded rather than fatal.
+    _install_startup_signal_latch()
+
     construction_hold = False
+    stop_hold = False
     try:
         window = LauncherWindow(
             app,
@@ -9200,6 +9545,17 @@ def main() -> None:
             soak_bridge_handshake=soak_bridge_handshake,
             soak_artifact_capability=soak_artifact_capability,
         )
+    except _LauncherStartupStop:
+        # SETTLED. Exit 0, so `Restart=on-failure` does not bring back a
+        # launcher the operator just stopped. An UNSETTLED stop never arrives
+        # here: it is re-raised as _LauncherConstructionHold and keeps the
+        # process alive on purpose.
+        if soak_bridge_handshake is not None:
+            soak_bridge_handshake.close()
+        if soak_artifact_capability is not None:
+            soak_artifact_capability.close()
+        logger.info("Запуск прерван сигналом остановки; владельцы отданы, выходим с кодом 0")
+        sys.exit(0)
     except _LauncherConstructionHold as hold:
         # HOLD owns the partially constructed window, all acquired children,
         # the soak owners, and the process-wide instance lock. Keep the Qt loop
@@ -9220,6 +9576,7 @@ def main() -> None:
         # retrying is not what makes it fail-closed, and reading it as a bound
         # is how somebody concludes the process will give up on its own.
         construction_hold = True
+        stop_hold = hold.stop_requested
         window = hold.window
         logger.critical(
             "Launcher retained all construction owners in HOLD after phase %s.",
@@ -9255,6 +9612,21 @@ def main() -> None:
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _signal_handler)
 
+    # A signal that arrived DURING construction was only latched -- nothing
+    # could dispatch it then. Now something can: the loop below carries it.
+    #
+    # WHAT IS LEFT FOR THIS LINE. A signal delivered during construction is
+    # normally settled by the NEXT construction step, which sees the latch and
+    # takes the stop road; `main` then leaves through `_LauncherStartupStop`
+    # with exit 0 and never reaches here. Two cases do reach it:
+    #
+    #   * the settlement FAILED and the launcher is in HOLD, owners retained on
+    #     purpose -- here this queues a real retry, exactly what the ordinary
+    #     SIGTERM handler above would do if the signal came a moment later;
+    #   * the signal arrived during the LAST construction step, so no later step
+    #     was left to notice the latch.
+    _dispatch_latched_startup_signal(window)
+
     try:
         exit_code = app.exec()
     finally:
@@ -9262,7 +9634,17 @@ def main() -> None:
         # lock until Qt has actually returned. Keep the inode stable so another
         # process cannot acquire a replacement path while this process is live.
         release_lock_exact(lock_fd, ".launcher.lock")
-    sys.exit(_launcher_exit_code(construction_hold=construction_hold, qt_exit_code=exit_code))
+    # The phase is read HERE and not when the HOLD was raised: the retry that
+    # settles it runs on the event loop, so the only honest moment to ask
+    # whether the stop finished is after that loop has returned.
+    stop_completed = stop_hold and getattr(window, "_shutdown_phase", None) is _ShutdownPhase.COMPLETE
+    sys.exit(
+        _launcher_exit_code(
+            construction_hold=construction_hold,
+            qt_exit_code=exit_code,
+            stop_completed=stop_completed,
+        )
+    )
 
 
 if __name__ == "__main__":

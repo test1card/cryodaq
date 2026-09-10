@@ -83,14 +83,24 @@ def test_the_launcher_actually_exits_through_this_rule() -> None:
     assert through_the_rule, "the final exit does not consult the construction-hold rule"
     for call in through_the_rule:
         passed = {keyword.arg: keyword.value for keyword in call.args[0].keywords}
-        assert set(passed) == {"construction_hold", "qt_exit_code"}, (
-            "the rule must be given both the hold state and Qt's own code"
+        # `stop_completed` joined the rule when a stop requested during startup
+        # stopped being a construction failure: a stop that settles late still
+        # HOLDs, and reporting failure for it would have `Restart=on-failure`
+        # bring back a launcher the operator stopped. Required here rather than
+        # merely tolerated -- dropping it silently restores that restart.
+        assert set(passed) == {"construction_hold", "qt_exit_code", "stop_completed"}, (
+            "the rule must be given the hold state, Qt's own code and whether a startup stop finished"
         )
         # Names, not just argument names: passing `construction_hold=False`
         # satisfies a check on the keywords alone and restores the defect in
         # full, which is exactly how this guard first failed.
+        expected_names = {
+            "construction_hold": "construction_hold",
+            "qt_exit_code": "exit_code",
+            "stop_completed": "stop_completed",
+        }
         for name, node in passed.items():
-            expected = "construction_hold" if name == "construction_hold" else "exit_code"
+            expected = expected_names[name]
             assert isinstance(node, ast.Name) and node.id == expected, (
                 f"{name} must be the run's own {expected}, not a literal"
             )
