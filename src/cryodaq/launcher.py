@@ -6994,7 +6994,40 @@ class LauncherWindow(QMainWindow):
         self._status_uptime = QLabel("")
 
     def _build_tray(self) -> None:
-        """Создать иконку в системном трее."""
+        """Создать иконку в системном трее.
+
+        Says so when there is no tray to build into. `QSystemTrayIcon` can be
+        constructed and shown on a desktop that provides no system tray -- Qt
+        does not raise, the icon simply never appears -- so without this the
+        launcher would report nothing while having no way to show anything.
+
+        In `--tray` mode that is the WHOLE interface: no window is shown, so a
+        missing tray leaves a process that is running, acquiring, and entirely
+        invisible. `deploy/cryodaq.service` starts exactly that mode, which is
+        why the consequence is named rather than left to be inferred.
+
+        It is not a refusal. Acquisition does not need a tray, and refusing to
+        start would trade a missing icon for missing data. `TrayController` in
+        gui/tray_status.py already returns early on the same condition; this
+        call site did not check at all, and nothing tested it.
+
+        Measured on this stand 2026-09-10: the tray IS available here
+        (DISPLAY=:1), so this is a latent defect rather than the cause of the
+        autostart unit not working -- a hypothesis this measurement refuted.
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            if self._tray_only:
+                # The whole interface is gone, so this is not a degraded
+                # feature: the operator has no way to see the launcher at all.
+                logger.critical(
+                    "No system tray on this desktop; --tray mode therefore has NO visible interface at all "
+                    "(acquisition continues; use the GUI or the journal)"
+                )
+            else:
+                logger.warning(
+                    "No system tray on this desktop; the tray icon will be absent. "
+                    "The window will not hide on close while that is true."
+                )
         self._tray_icon_green = tray_icon_for_level(TrayLevel.HEALTHY)
         self._tray_icon_yellow = tray_icon_for_level(TrayLevel.CAUTION)
         self._tray_icon_red = tray_icon_for_level(TrayLevel.FAULT)
@@ -8939,6 +8972,13 @@ class LauncherWindow(QMainWindow):
             # UI construction precedes tray construction. If construction
             # entered HOLD in that interval, this window is the only visible
             # owner of the failure and retry state.
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            # Hiding here would leave the operator with nothing: the window is
+            # gone and the icon it hides behind cannot appear. Availability is
+            # queried NOW rather than remembered from construction, because a
+            # tray can arrive or leave while the launcher runs.
+            logger.warning("Close ignored: no system tray to minimise into; the window stays up")
             return
         self.hide()
         if tray.isVisible():
