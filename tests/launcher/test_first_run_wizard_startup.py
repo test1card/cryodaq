@@ -144,12 +144,85 @@ def test_main_retains_constructor_hold_lock_through_event_loop(phase: str) -> No
     ):
         launcher.main()
 
-    assert exited.value.code == 0
+    # NOT 0. This test is about the lock surviving the event loop, and the exit
+    # code used to be incidental to it -- which is how a construction HOLD came
+    # to report success. Under `deploy/cryodaq.service` (Type=simple,
+    # Restart=on-failure) a run that never finished constructing and then exits
+    # 0 is recorded as clean, and nothing retries.
+    assert exited.value.code == 1
     assert events == ["exec", "release"]
     registered = {call.args[0] for call in register_signal.call_args_list}
     assert signal.SIGINT in registered
     if launcher.sys.platform != "win32":
         assert signal.SIGTERM in registered
+
+
+def test_a_settled_startup_still_exits_with_qt_s_own_code() -> None:
+    """The hold rule must not turn every run into a failure.
+
+    Driven through the real main() with Qt mocked, because that is where the
+    defect lived: the rule can be correct in isolation while main() exits
+    around it. Two mutations a reviewer demonstrated -- setting the hold flag to
+    False, and exiting with Qt's code before the rule is consulted -- pass every
+    unit test of the rule and fail here.
+    """
+    from cryodaq import launcher
+
+    app = MagicMock()
+    app.exec.return_value = 0
+    window = MagicMock()
+
+    with (
+        patch("sys.argv", ["cryodaq", "--tray", "--mock"]),
+        patch("cryodaq.logging_setup.setup_logging"),
+        patch("cryodaq.logging_setup.resolve_log_level", return_value="INFO"),
+        patch("cryodaq.launcher._consume_soak_bridge_handshake", return_value=None),
+        patch("cryodaq.launcher._consume_soak_artifact_capability", return_value=None),
+        patch("cryodaq.launcher.QApplication", return_value=app),
+        patch("cryodaq.gui.app._load_bundled_fonts"),
+        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
+        patch("cryodaq.launcher.try_acquire_lock", return_value=73),
+        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
+        patch("cryodaq.launcher.LauncherWindow", return_value=window),
+        patch("cryodaq.launcher.signal.signal"),
+        patch("cryodaq.launcher.release_lock_exact"),
+        pytest.raises(SystemExit) as exited,
+    ):
+        launcher.main()
+
+    assert exited.value.code == 0
+
+
+def test_a_held_startup_does_not_overwrite_a_failure_qt_already_reported() -> None:
+    """A non-zero Qt code says failure more precisely than the rule could."""
+    from cryodaq import launcher
+
+    app = MagicMock()
+    app.exec.return_value = 3
+    held_window = SimpleNamespace(_do_shutdown=MagicMock())
+
+    def construct(*_args, **_kwargs):
+        raise launcher._LauncherConstructionHold(held_window, "ui")
+
+    with (
+        patch("sys.argv", ["cryodaq", "--tray", "--mock"]),
+        patch("cryodaq.logging_setup.setup_logging"),
+        patch("cryodaq.logging_setup.resolve_log_level", return_value="INFO"),
+        patch("cryodaq.launcher._consume_soak_bridge_handshake", return_value=None),
+        patch("cryodaq.launcher._consume_soak_artifact_capability", return_value=None),
+        patch("cryodaq.launcher.QApplication", return_value=app),
+        patch("cryodaq.gui.app._load_bundled_fonts"),
+        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
+        patch("cryodaq.launcher.try_acquire_lock", return_value=73),
+        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
+        patch("cryodaq.launcher.LauncherWindow", side_effect=construct),
+        patch("cryodaq.launcher.signal.signal"),
+        patch("cryodaq.launcher.release_lock_exact"),
+        pytest.raises(SystemExit) as exited,
+    ):
+        launcher.main()
+
+    assert exited.value.code == 3
 
 
 def test_replay_constructor_hold_preserves_fail_loud_title_through_main() -> None:
@@ -191,6 +264,6 @@ def test_replay_constructor_hold_preserves_fail_loud_title_through_main() -> Non
     ):
         launcher.main()
 
-    assert exited.value.code == 0
+    assert exited.value.code == 1
     assert titles == ["CryoDAQ — HOLD: incomplete startup settlement"]
     assert events == ["show", "release"]

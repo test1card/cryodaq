@@ -2369,6 +2369,33 @@ def _request_engine_ready_reply(command: dict[str, Any], *, address: str | None 
         context.term()
 
 
+def _launcher_exit_code(*, construction_hold: bool, qt_exit_code: int) -> int:
+    """What this process should report to whatever started it.
+
+    A run that never finished constructing did not succeed, whatever Qt returns
+    when its window is finally closed. Reporting 0 tells a supervisor the
+    opposite, and `deploy/cryodaq.service` is Type=simple with
+    Restart=on-failure -- so a HOLD that a person eventually closes is recorded
+    as a clean exit and nothing retries. The same shape as the modal-dialog
+    defect that kept that unit disabled: a startup that did not happen must not
+    be reported as one that did.
+
+    This does NOT release the HOLD, deliberately. HOLD is entered only when
+    `_do_shutdown` did not settle, which means acquired children may be in an
+    unknown state and exiting early could orphan them. Whether an unattended
+    launcher should exit at once instead of holding is a real decision with
+    real risk, and it is not this function's to make. What is unambiguous is
+    that the process must not claim success.
+
+    A non-zero code from Qt is left alone: it already says failure, and more
+    precisely than this could.
+    """
+    if construction_hold and qt_exit_code == 0:
+        logger.critical("Launcher exiting from construction HOLD; reporting failure rather than success")
+        return 1
+    return qt_exit_code
+
+
 def _report_startup_refusal(
     *,
     attended: bool,
@@ -9180,7 +9207,7 @@ def main() -> None:
         # lock until Qt has actually returned. Keep the inode stable so another
         # process cannot acquire a replacement path while this process is live.
         release_lock_exact(lock_fd, ".launcher.lock")
-    sys.exit(exit_code)
+    sys.exit(_launcher_exit_code(construction_hold=construction_hold, qt_exit_code=exit_code))
 
 
 if __name__ == "__main__":
