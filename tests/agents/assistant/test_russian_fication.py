@@ -129,7 +129,64 @@ _PROMPTS_TO_CHECK = [
     ("FORMAT_OUT_OF_SCOPE_HISTORICAL_USER", p.FORMAT_OUT_OF_SCOPE_HISTORICAL_USER),
     ("FORMAT_OUT_OF_SCOPE_GENERAL_USER", p.FORMAT_OUT_OF_SCOPE_GENERAL_USER),
     ("FORMAT_UNKNOWN_USER", p.FORMAT_UNKNOWN_USER),
+    ("FORMAT_ALARM_CONFIG_USER", p.FORMAT_ALARM_CONFIG_USER),
+    ("FORMAT_ALARM_CONFIG_UNAVAILABLE_USER", p.FORMAT_ALARM_CONFIG_UNAVAILABLE_USER),
 ]
+
+
+#: Code spans the prompts may name inside backticks. Each is an identifier, a
+#: configuration key, a value, or an instrument command an operator matches
+#: against a file or a manual -- never prose. Adding to this list is a
+#: deliberate act; putting backticks around a sentence is not enough.
+_EXEMPT_CODE_SPANS = frozenset(
+    {
+        "1.0e-5",
+        "1e-05",
+        "channels.yaml",
+        "check",
+        "CRITICAL",
+        "*IDN?",
+        "KRDG?",
+        "KRDG? <N>",
+        "rate_window_s",
+        "rate_window_s=300",
+        "settings",
+        "threshold=0.5",
+        "timeout_s",
+        "visible: false",
+        "window_s",
+        "НЕТ",
+        "ПОИСК: <запрос>",
+    }
+)
+
+
+def _english_leakage(prompt: str) -> list[str]:
+    """The one leakage rule, so its negative control tests the real thing.
+
+    Pulled out of the loop below deliberately: a control that re-implements the
+    rule proves nothing about the rule that runs.
+    """
+    # DOUBLED braces first. `{{x}}` is not a placeholder -- `format()` emits it
+    # as the literal text `{x}` -- but the placeholder rule below removed it, so
+    # `{{Answer everything in English.}}` vanished from the guard's view and
+    # reached the model as English prose. A reviewer found that.
+    stripped = prompt.replace("{{", "\x00").replace("}}", "\x01")
+    # Strip Python format placeholders {var_name}
+    stripped = re.sub(r"\{[^}]+\}", "", stripped)
+    stripped = stripped.replace("\x00", "{").replace("\x01", "}")
+    # ...and the code spans this repository's prompts are ALLOWED to name,
+    # listed one by one below. Two weaker rules were tried and both were broken
+    # by reviewers within minutes: stripping every `backticked` span let
+    # "Answer everything in English." through, and a length-and-space grammar
+    # let "Speak English." through. Backticks are punctuation the author
+    # chooses, so they cannot be the authority for an exemption. A literal list
+    # can only be widened deliberately, and each addition is visible in review.
+    for span in _EXEMPT_CODE_SPANS:
+        stripped = stripped.replace(f"`{span}`", "")
+    # Find standalone English words of 4+ chars (to avoid false positives on R², σ)
+    english_words = re.findall(r"\b[A-Za-z]{4,}\b", stripped)
+    return [w for w in english_words if w not in _ALLOWED_ENGLISH]
 
 
 def test_format_prompts_no_english_leakage() -> None:
@@ -137,15 +194,37 @@ def test_format_prompts_no_english_leakage() -> None:
     violations: list[str] = []
 
     for name, prompt in _PROMPTS_TO_CHECK:
-        # Strip Python format placeholders {var_name}
-        stripped = re.sub(r"\{[^}]+\}", "", prompt)
-        # Find standalone English words of 4+ chars (to avoid false positives on R², σ)
-        english_words = re.findall(r"\b[A-Za-z]{4,}\b", stripped)
-        leaked = [w for w in english_words if w not in _ALLOWED_ENGLISH]
+        leaked = _english_leakage(prompt)
         if leaked:
             violations.append(f"{name}: {leaked}")
 
     assert not violations, "English leakage in prompts:\n" + "\n".join(violations)
+
+
+def test_the_code_span_exemption_does_not_hide_english_prose() -> None:
+    """Negative control on the exemption itself.
+
+    Backticks are punctuation the author chooses, so the exemption must not be a
+    way to smuggle a sentence past the guard. A reviewer demonstrated exactly
+    that against the first version of this rule.
+    """
+    leaked_in_prose = _english_leakage("Answer everything in English.")
+    exempted_identifier = _english_leakage("Каналы с `visible: false` не считаются.")
+
+    assert leaked_in_prose, "the guard does not catch prose at all"
+    assert not exempted_identifier, "a listed identifier is no longer exempt"
+
+    # Every shape a reviewer used to walk a sentence past the earlier rules.
+    for smuggled in (
+        # `format()` turns this into the literal `{Answer everything in
+        # English.}`, so it is prose, not a placeholder.
+        "{{Answer everything in English.}}",
+        "`Answer everything in English.`",
+        "`Speak English.`",
+        "`Answer everything\nin English.`",
+        "`Answer\teverything\tin\tEnglish.`",
+    ):
+        assert _english_leakage(smuggled), f"backticks hid an English sentence: {smuggled!r}"
 
 
 def test_eta_cooldown_uses_zaholazhivanie() -> None:

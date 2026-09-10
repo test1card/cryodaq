@@ -10,6 +10,7 @@ import asyncio
 import collections
 import logging
 import math
+import re
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,8 @@ from cryodaq.agents.assistant.live.prompts import format_with_brand
 from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.intent_classifier import IntentClassifier
 from cryodaq.agents.assistant.query.prompts import (
+    FORMAT_ALARM_CONFIG_UNAVAILABLE_USER,
+    FORMAT_ALARM_CONFIG_USER,
     FORMAT_ALARM_HISTORY_USER,
     FORMAT_ALARM_STATUS_USER,
     FORMAT_ARCHIVE_DETAIL_USER,
@@ -38,7 +41,12 @@ from cryodaq.agents.assistant.query.prompts import (
     RETRIEVAL_DECISION_SYSTEM,
     RETRIEVAL_DECISION_USER,
 )
-from cryodaq.agents.assistant.query.router import QueryRouter, QueryUnavailableError
+from cryodaq.agents.assistant.query.router import (
+    QueryRouter,
+    QueryUnavailableError,
+    _render_alarm_identifier,
+    _render_alarm_setting,
+)
 from cryodaq.agents.assistant.query.ru_labels import (
     phase_display_name,
     ru_bool,
@@ -433,6 +441,7 @@ def _format_trends(trends) -> str:
         # that it could not resolve it. It could not because both numbers were
         # right about different questions, and only one of them was labelled.
         rates = [rate for rate, _ in trend.segments]
+
         # A REVERSAL, NOT A WOBBLE. Judged on the point estimates alone,
         # 0.101 ± 0.02, 0.099 ± 0.02, 0.102 ± 0.02 was called non-monotonic and
         # the change of rate was withheld over noise that is not distinguishable
@@ -499,9 +508,7 @@ def _format_trends(trends) -> str:
         else:
             identity = f"{getattr(trend, 'channel', '')} {name}".lower()
             looks_thermal = "temp" in identity or "термо" in identity
-            is_pressure = not looks_thermal and (
-                "pressure" in identity or "mbar" in identity or "давлен" in identity
-            )
+            is_pressure = not looks_thermal and ("pressure" in identity or "mbar" in identity or "давлен" in identity)
         if trend.shape is not None and is_pressure:
             linear, root, log = trend.shape
             if linear > 0.0:
@@ -546,6 +553,32 @@ def _vacuum_forecast_qualifier(vac) -> str:
     ):
         parts.append("цель НЕ достигнута: давление выше неё, а прогноз нулевой")
     return "; ".join(parts)
+
+
+#: Every line boundary ``str.splitlines`` recognises, each with its own visible
+#: escape. Not one shared marker: a reviewer showed ids differing only in the
+#: KIND of boundary rendering as the same row, so the mapping has to be
+#: reversible. A test derives this set from ``splitlines`` and fails if Python's
+#: notion of a boundary ever moves away from this table.
+_LINE_BOUNDARIES = {
+    # NO CRLF ENTRY. It looked necessary and is not: escaping CR and LF
+    # separately produces the same four characters as one combined escape, so
+    # the two spellings cannot be told apart -- and the negative control proved
+    # it by leaving a mutation that reordered the alternation completely
+    # invisible. A rule nothing can distinguish is a rule that should not be
+    # written down.
+    "\n": "\\n",
+    "\r": "\\r",
+    "\v": "\\v",
+    "\f": "\\f",
+    "\x1c": "\\x1c",
+    "\x1d": "\\x1d",
+    "\x1e": "\\x1e",
+    "\x85": "\\x85",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+_LINE_BOUNDARY_RE = re.compile("|".join(re.escape(boundary) for boundary in _LINE_BOUNDARIES))
 
 
 class AssistantQueryAgent:
@@ -769,9 +802,7 @@ class AssistantQueryAgent:
             # the handler's budget unenforceable, so the transport gives up
             # first and the operator is told the outcome is unknown instead of
             # getting a plain answer.
-            return await asyncio.wait_for(
-                rag.search(search_query), timeout=_RETRIEVAL_SEARCH_TIMEOUT_S
-            )
+            return await asyncio.wait_for(rag.search(search_query), timeout=_RETRIEVAL_SEARCH_TIMEOUT_S)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - enrichment never costs the answer
@@ -1057,8 +1088,18 @@ class AssistantQueryAgent:
         try:
             return self._format_dispatch(query, category, data)
         except Exception as exc:
-            logger.warning("_build_format_user_prompt failed for %s: %s", category, exc)
-            return FORMAT_UNKNOWN_USER.format(query=query)
+            # brand_name was missing here, so the fallback raised KeyError on the
+            # way out and a formatter failure took the whole answer down instead
+            # of degrading to "не могу обработать". Found by a reviewer while
+            # reproducing a configuration value the renderer could not serialise.
+            logger.warning(
+                "_build_format_user_prompt failed for %s: %s: %s",
+                category,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return FORMAT_UNKNOWN_USER.format(query=query, brand_name=self._config.brand_name)
 
     def _format_dispatch(
         self,
@@ -1082,6 +1123,8 @@ class AssistantQueryAgent:
             return self._fmt_composite(query, data)
         if category == QueryCategory.SYSTEM_HEALTH:
             return self._fmt_system_health(query, data)
+        if category == QueryCategory.ALARM_CONFIG:
+            return self._fmt_alarm_config(query, data)
         if category == QueryCategory.CAPABILITIES:
             return self._fmt_capabilities(query)
         if category == QueryCategory.ARCHIVE_LIST:
@@ -1363,6 +1406,228 @@ class AssistantQueryAgent:
             oldest_age=_age("oldest_age_s"),
             key_channels=key_channels,
             alarms_readable=alarms_text,
+        )
+
+    #: The characters this block's row grammar is built from. A value carrying
+    #: one of them, unescaped, is indistinguishable from the structure itself.
+    _ROW_GRAMMAR = ("|", ";", "=")
+
+    @staticmethod
+    def _one_line(value: Any) -> str:
+        """Flatten one value onto a single line, escaping what would forge a row.
+
+        The block is line-oriented: one alarm per indented line, fields
+        separated by " | ". A reviewer showed that a message containing a line
+        break followed by "  forged_alarm [CRITICAL] | каналы: FAKE" produces a
+        second alarm-looking row while the count above still says one -- a
+        definition the file does not contain, presented to the model as one that
+        does. The configuration is hand-written, so nothing upstream prevents it.
+
+        Which characters count: a first version replaced only CR and LF, and the
+        same reviewer walked a forged row straight past it with U+2028, U+2029
+        and U+0085. The table below is ``str.splitlines``'s own set -- the
+        notion of a line boundary that anything reading this block back will
+        use -- and a test derives that set from ``splitlines`` itself and fails
+        if the two ever disagree.
+
+        EACH KIND KEEPS ITS OWN ESCAPE. An earlier version sent every boundary
+        to `\\n`, and a reviewer showed the cost: ids `probe\\nbreak` and
+        `probe\\rbreak` are two definitions the loader keeps apart and this
+        block rendered as one row, twice. The substitution is reversible now --
+        `\\r`, `\\r\\n`, `\\u2028` and the rest each read back to exactly what
+        the file held.
+        """
+        text = value if isinstance(value, str) else str(value)
+        # Backslash first, so the escapes below cannot be spoofed by a value
+        # that already contains one; then EVERY character this block's grammar
+        # uses. A value carrying one of them forges a field the way a line break
+        # forges a row, and a reviewer showed two DIFFERENT definitions --
+        # `metadata: "ok; min_fault_count=999"` and `metadata: "ok"` beside a
+        # real `min_fault_count: 999` -- rendering to identical text. Escaping
+        # only the row separator left the field grammar ambiguous.
+        text = text.replace("\\", "\\\\")
+        for delimiter in AssistantQueryAgent._ROW_GRAMMAR:
+            text = text.replace(delimiter, "\\" + delimiter)
+        # A trailing boundary needs no special case here: substitution keeps
+        # what ``splitlines`` used to drop, and the branch that put it back --
+        # an earlier version of which handed the RAW separator into the block --
+        # is gone with it.
+        return _LINE_BOUNDARY_RE.sub(lambda match: _LINE_BOUNDARIES[match.group(0)], text)
+
+    @staticmethod
+    def _one_line_header(value: Any) -> str:
+        """Flatten a value that goes into the row HEADER, `  <id> [<level>]`.
+
+        The brackets are grammar THERE and nowhere else: a reviewer showed an id
+        of `probe [CRITICAL]` producing `  probe [CRITICAL] [WARNING] | ...`,
+        where a reader takes the first bracket group for the level. They are not
+        escaped inside settings, because there they are JSON -- `range=[1.0,
+        350.0]` must stay readable, and escaping them everywhere damaged far
+        more than the hazard.
+        """
+        text = AssistantQueryAgent._one_line(value)
+        return text.replace("[", "\\[").replace("]", "\\]")
+
+    @staticmethod
+    def _join_config_values(values: list[Any]) -> str:
+        """Comma-join whatever the loader produced, including non-strings.
+
+        Phase names, channels and notification targets are NOT type-validated by
+        the alarm loader, so `phase_alarms: {2026-09-10: ...}` reaches here as a
+        ``datetime.date`` and a bare ``", ".join`` raises -- dropping the whole
+        answer into the "запрос непонятен" fallback over a value the loader
+        accepted.
+        """
+        # THROUGH THE IDENTIFIER RULE, like ids and setting keys. `str()` was
+        # what stood here, and a reviewer walked the same collision through it:
+        # the loader turns an unquoted `phase_alarms: {2026-09-10: ...}` into a
+        # ``datetime.date`` and the quoted spelling into a ``str``, and two
+        # otherwise identical alarms under those two phases produced identical
+        # rows. Channels, phases and notification targets all arrive here, so
+        # this is the ONE place that has to know the rule -- three of the five
+        # positions had it and two did not, which is how the class survived a
+        # round.
+        #
+        # The comma is escaped HERE and not in ``_one_line``: it is grammar for a
+        # list and nothing else. Escaping it everywhere would put a backslash
+        # into every ordinary message with a comma in it, and would break the
+        # canonical JSON of a nested setting -- damage far wider than the hazard,
+        # which is a single channel or phase name that contains ", ".
+        return ", ".join(
+            AssistantQueryAgent._one_line(_render_alarm_identifier(value)).replace(",", "\\,") for value in values
+        )
+
+    def _fmt_alarm_config(self, query: str, data: dict[str, Any]) -> str:
+        """Quote the configuration file, and say which file was quoted.
+
+        An unreadable file and a file with no alarms are opposite facts, so they
+        take different branches here rather than sharing an empty list: the
+        first must never be rendered as the second. Everything below is the PARSED
+        configuration -- ids, levels, channels, phase filters and the remaining
+        settings as the loader produced them -- because this answer's whole
+        value is that the operator does not have to open the file, and a
+        paraphrased threshold would send them to open it anyway. Parsed is not
+        verbatim: channel groups are already expanded, some keys are dropped,
+        and neither the original number spelling nor the comments survive.
+        """
+        if data.get("config_readable") is not True:
+            # A SEPARATE template, not the success one with the numbers replaced.
+            # Two reviewers reproduced the same contradiction in the shared one:
+            # it said "прочитать конфигурацию не удалось" and then, further down,
+            # that a name absent from the list is absent from the configuration
+            # and that saying "я не знаю" is forbidden. A failed read must carry
+            # no membership claim at all.
+            return FORMAT_ALARM_CONFIG_UNAVAILABLE_USER.format(
+                query=self._one_line(query),
+                reason=self._one_line(data.get("config_error") or "причина не установлена"),
+                config_path=self._one_line(data.get("config_path") or "не установлен"),
+            )
+
+        alarms = data.get("alarms")
+        alarms = alarms if isinstance(alarms, list) else []
+        if not alarms:
+            # NOT "тревог нет" as a reassurance: an empty alarm section is a
+            # fail-open configuration and the operator has to hear it as such.
+            return FORMAT_ALARM_CONFIG_USER.format(
+                query=self._one_line(query),
+                alarm_count="0 — в файле не заведено ни одной тревоги",
+                alarms_text="список пуст: ни одной тревоги в конфигурации нет",
+                config_path=self._one_line(data.get("config_path") or "не установлен"),
+            )
+
+        lines = []
+        for alarm in alarms:
+            if not isinstance(alarm, dict):
+                continue
+            # NOT ``or``: a YAML key of `0:` loads as the integer 0, which is a
+            # perfectly good identifier and a falsy one. It rendered as "без
+            # идентификатора" while the block below told the model that a name
+            # missing from this list is missing from the configuration -- so the
+            # alarm was both present and deniable.
+            raw_id = alarm.get("id")
+            # THROUGH the identifier rule, because `str()` on the way in was
+            # the same loss the settings had: a reviewer showed one mapping
+            # carrying both `0:` and `"0":` -- the loader keeps an int and a
+            # str -- and both rows reading `0 [WARNING]`. Two definitions, one
+            # row a reader could tell nothing apart in.
+            # NO SENTINEL. "без идентификатора" was a bare Russian string, so an
+            # alarm actually KEYED `без идентификатора` rendered identically to
+            # one keyed `null` and to one keyed `""` -- a reviewer drove all
+            # three through the loader and got one distinct row out of three.
+            # The same collision class the rest of this block was rebuilt to
+            # end, surviving inside the one value that had been carved out of
+            # the rule. Now nothing is carved out: `null` reads `NoneType:null`,
+            # an empty key reads `""`, and a real string reads itself.
+            alarm_id = self._one_line_header(_render_alarm_identifier(raw_id))
+            # The level keeps its sentinel: unlike the id, it is not what tells
+            # two definitions apart, and "уровень не указан" reads better in a
+            # row than `NoneType:null`. A level that IS the string "уровень не
+            # указан" renders the same as an absent one -- stated, not hidden:
+            # the row's identity is its id, and that is now injective.
+            raw_level = alarm.get("level")
+            level = self._one_line_header(
+                "уровень не указан" if raw_level is None or raw_level == "" else _render_alarm_identifier(raw_level)
+            )
+            parts = [f"  {alarm_id} [{level}]"]
+            channels = alarm.get("channels")
+            condition_channels = alarm.get("condition_channels")
+            has_top_level = isinstance(channels, list) and bool(channels)
+            has_nested = isinstance(condition_channels, list) and bool(condition_channels)
+            if has_top_level:
+                parts.append(f"каналы: {self._join_config_values(channels)}")
+            if has_nested:
+                # Reported ALONGSIDE the top-level list, not instead of it: a
+                # rate alarm can carry channel A at the top and channel B in an
+                # additional_condition, and an ``elif`` here rendered "каналы: A"
+                # while B survived only buried inside the serialised settings.
+                parts.append(f"каналы в условиях: {self._join_config_values(condition_channels)}")
+            ignored_channels = alarm.get("ignored_channels")
+            if isinstance(ignored_channels, list) and ignored_channels:
+                parts.append(f"каналы, не читаемые при оценке: {self._join_config_values(ignored_channels)}")
+            if not has_top_level and not has_nested:
+                parts.append("каналы: не указаны")
+            phases = alarm.get("phase_filter")
+            if isinstance(phases, list) and phases:
+                parts.append(f"только в фазах: {self._join_config_values(phases)}")
+            settings = alarm.get("settings")
+            if isinstance(settings, dict) and settings:
+                # The KEY takes the identifier rule and the VALUE the setting
+                # rule: `2026` and `"2026"` are two different keys the loader
+                # accepts, and `str()` made them one.
+                rendered = "; ".join(
+                    f"{self._one_line(_render_alarm_identifier(key))}={self._one_line(_render_alarm_setting(value))}"
+                    for key, value in settings.items()
+                )
+                parts.append(f"настройки: {rendered}")
+            notify = alarm.get("notify")
+            if isinstance(notify, list) and notify:
+                # "настроенные получатели", not "уведомляет": this establishes
+                # only that the file names these destinations, never that a
+                # message was or would be delivered to any of them.
+                parts.append(f"настроенные получатели уведомлений: {self._join_config_values(notify)}")
+            message = alarm.get("message")
+            if message is not None and message != "":
+                # NOT `isinstance(message, str)`: the loader accepts
+                # `message: 123`, and a reviewer showed such a message vanishing
+                # from the row entirely -- the one field of the definition that
+                # the operator reads as prose, gone without a word.
+                # The identifier rule here too: a `message: 2026-09-10` and a
+                # `message: "2026-09-10"` are two different definitions, and the
+                # prose the operator reads is untouched because a plain string
+                # passes through the rule unchanged.
+                parts.append(f"текст: {self._one_line(_render_alarm_identifier(message))}")
+            lines.append(" | ".join(parts))
+
+        # THE QUERY TOO. It arrives from Telegram, so it is the one value here
+        # an outsider writes: a reviewer sent a question containing a line break
+        # and a row-shaped tail and got two alarm rows out of a configuration
+        # holding one. `alarms_text` is the only value that may carry newlines,
+        # because this code puts them there.
+        return FORMAT_ALARM_CONFIG_USER.format(
+            query=self._one_line(query),
+            alarm_count=f"{len(lines)} шт.",
+            alarms_text="\n".join(lines),
+            config_path=self._one_line(data.get("config_path") or "не установлен"),
         )
 
     def _fmt_alarm_status(self, query: str, data: dict[str, Any]) -> str:

@@ -35,6 +35,19 @@ class QueryCategory(Enum):
     #: gates every other. It fell to out_of_scope_general in the same 2026-09-10
     #: measurement.
     CAPABILITIES = "capabilities"
+    #: "какие тревоги включены", "на каком пороге сработает vacuum_loss_cold" —
+    #: which alarm definitions the configuration file CARRIES -- not which are
+    #: firing, and not which are effectively watching: the engine's loaded
+    #: revision, the current phase and the operator's channel selection are all
+    #: outside what this can see. Measured 2026-09-10 by
+    #: running the real classifier: "какие тревоги сейчас включены, а какие
+    #: отключены" fell to alarm_status, whose prompt says only "Активные тревоги
+    #: (N шт.)" and "если тревог нет — скажи что всё спокойно". So the operator
+    #: asking which alarms exist was told "всё спокойно" — a confident
+    #: answer to a different question. The live reason to ask is on the record:
+    #: vacuum_stall was disabled on the owner's ruling 2026-08-31, and the
+    #: assistant could not say so.
+    ALARM_CONFIG = "alarm_config"
 
 
 #: What the operator can ask, keyed by the category that answers it.
@@ -54,6 +67,23 @@ CAPABILITY_DESCRIPTIONS: dict[QueryCategory, str] = {
     QueryCategory.RANGE_STATS: "разброс за период — «в каком диапазоне давление за час»",
     QueryCategory.PHASE_INFO: "фаза эксперимента — «в какой фазе сейчас»",
     QueryCategory.ALARM_STATUS: "активные тревоги — «есть ли тревоги»",
+    # NOT "настройка тревог" and NOT "какие тревоги следят": the source is the
+    # configuration FILE, which this process cannot prove the engine loaded, and
+    # a configured alarm carrying a phase_filter is not watching outside those
+    # phases. The blurb promises the file's contents and nothing more.
+    # Worded WITHOUT "включены" on purpose: the guard against descriptions that
+    # promise an action bans that stem, and it is right to -- the query path has
+    # no control authority. "Заведены" is also the more precise word, and the
+    # one the answer itself uses.
+    # NOT "на каком пороге сработает": the answer reports the fields WRITTEN in
+    # a definition, and which of them the evaluator reads depends on the alarm
+    # type and check -- which this path deliberately does not model, because a
+    # second copy of the evaluator's semantics would drift and then lie. So the
+    # blurb promises the fields, not a single operative number.
+    QueryCategory.ALARM_CONFIG: (
+        "какие тревоги заведены в конфигурации и какие пороги в них записаны — "
+        "«список тревог», «что записано в vacuum_loss_cold»"
+    ),
     QueryCategory.COMPOSITE_STATUS: "сводка по стенду — «что сейчас», «как дела»",
     # NOT "здоровье системы сбора". That category spent four review rounds
     # learning it can report only what this process received, and cannot tell a
