@@ -21,7 +21,7 @@ import cryodaq.engine as engine_module
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_manager import SafetyManager, _AdmittedIntent
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -685,6 +685,152 @@ async def test_failed_target_update_waits_for_already_latched_external_off() -> 
         await manager.stop()
 
 
+async def _release_then_stop(manager: object, *clients: object) -> None:
+    """Stop a manager whose client may be blocked inside `set_power`.
+
+    THE ORDER IS THE WHOLE CONTENT. A client blocked in `set_power` holds
+    `_mock_power_sync_lock`, and `manager.stop()` waits for a stop-sources task
+    that needs it, so stopping first turns a failing test into a wedged suite --
+    measured twice, killed from outside both times. Releasing first cannot wedge:
+    setting an event never awaits.
+
+    IT IS A HELPER because a reviewer pointed out the alternative was
+    false-green. Written inline in each `finally`, the line is unreachable on the
+    normal path -- the body has already released -- so deleting it left every
+    test passing. One helper has one test, and
+    `test_cleanup_releases_the_client_before_it_stops_the_manager` runs its
+    exceptional order against a fake manager, instantly and with no lock in
+    sight.
+    """
+
+    for client in clients:
+        client.release_target.set()
+    await manager.stop()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "test_cancelled_target_update_settles_external_zero_before_cancellation",
+        "test_target_update_cannot_report_success_after_emergency_off_authority",
+    ],
+)
+def test_an_exceptional_exit_fails_instead_of_wedging(scenario: str) -> None:
+    """Each real cleanup path, driven through the failure that used to hang it.
+
+    THE HELPER'S OWN TEST IS NOT ENOUGH, and a reviewer said why: both scenarios
+    release the client on their NORMAL path, so a `finally` rewritten back to a
+    bare `await manager.stop()` leaves every test green -- and wedges the suite the
+    next time an assertion above it fails. What has to be exercised is the
+    exceptional exit itself.
+
+    So it is, in a CHILD PROCESS, and the reproduction is the reviewer's own from
+    an earlier round: `asyncio.wait_for` raises at the boundary after the event it
+    was waiting for is already set, which is exactly "the body failed while the
+    client is blocked". A process can be killed; a thread holding
+    `_mock_power_sync_lock` cannot, and this suite has twice been stopped from
+    outside rather than failed. `subprocess.run(timeout=...)` is the only bound
+    that actually binds -- the same shape `tests/analytics/test_vacuum_fit_cost.py`
+    settled on for the same reason.
+    """
+
+    import textwrap
+
+    probe = textwrap.dedent(
+        f"""
+        import asyncio
+        import sys
+
+        import tests.drivers.test_thermal_simulator as suite
+
+
+        class _Injected(Exception):
+            '''A PRIVATE sentinel, not TimeoutError.
+
+            The first version raised TimeoutError, which `real_wait_for` can raise
+            all by itself -- so a probe where the event was never signalled exited
+            0 having never reached the injection, and a reviewer reproduced
+            exactly that for both parameters. A type nothing else raises cannot be
+            confused for the thing being provoked.
+            '''
+
+
+        real_wait_for = asyncio.wait_for
+        seen = {{"waits": 0, "injected": 0, "cleanup_entered": 0, "cleanup_done": 0}}
+
+        async def _raises_at_the_boundary(awaitable, timeout=None):
+            seen["waits"] += 1
+            if seen["waits"] == 1:
+                # AWAITED FIRST, so the client really is blocked and really has
+                # set its event -- then the body fails anyway. That is the
+                # boundary case, not a fabricated one.
+                await real_wait_for(awaitable, timeout)
+                seen["injected"] += 1
+                raise _Injected("injected at the wait_for boundary")
+            return await real_wait_for(awaitable, timeout)
+
+        real_release = suite._release_then_stop
+
+        async def _watched_release(manager, *clients):
+            seen["cleanup_entered"] += 1
+            await real_release(manager, *clients)
+            seen["cleanup_done"] += 1
+
+        asyncio.wait_for = _raises_at_the_boundary
+        suite._release_then_stop = _watched_release
+        try:
+            asyncio.run(suite.{scenario}())
+        except _Injected:
+            pass
+        else:
+            print("NO FAILURE SURFACED", seen)
+            sys.exit(2)
+        # POSITIVE PROOF, not merely the absence of a hang: the injection was
+        # reached, the cleanup was entered, and the cleanup RETURNED. Without the
+        # last of those a `finally` that omits the release still exits 0, because
+        # the sentinel propagates the same way either way.
+        if seen["injected"] == 1 and seen["cleanup_entered"] == 1 and seen["cleanup_done"] == 1:
+            print("SCENARIO OK", seen)
+            sys.exit(0)
+        print("WRONG PATH", seen)
+        sys.exit(3)
+        """
+    )
+
+    try:
+        done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=90, cwd=ROOT)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"{scenario} wedged on its exceptional exit instead of failing") from None
+
+    assert "SCENARIO OK" in done.stdout, f"the probe did not take the intended path: {done.stdout[-400:]}"
+    assert done.returncode == 0, f"the injected failure did not surface: rc={done.returncode} {done.stderr[-600:]}"
+
+
+async def test_cleanup_releases_the_client_before_it_stops_the_manager() -> None:
+    """The order, checked where it is decided rather than where it is used."""
+
+    class _Client:
+        def __init__(self) -> None:
+            self.release_target = asyncio.Event()
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self) -> None:
+            assert client.release_target.is_set(), "the manager was stopped while the client was still blocked"
+            self.stopped = True
+
+    client = _Client()
+    manager = _Manager()
+
+    await _release_then_stop(manager, client)
+
+    # BOTH halves: without this, deleting the `await manager.stop()` from the
+    # helper would leave the assertion above unreached and the test green.
+    assert manager.stopped, "the manager was never stopped"
+
+
 async def test_cancelled_target_update_settles_external_zero_before_cancellation() -> None:
     client = _TargetOutcomeClient("block_after")
     manager, driver = await _running_external_safety_manager(client)
@@ -702,7 +848,14 @@ async def test_cancelled_target_update_settles_external_zero_before_cancellation
         assert runtime.p_target == 0.0
         assert client.applied[-2:] == [0.35, 0.0]
     finally:
-        await manager.stop()
+        # RELEASE FIRST HERE TOO. This test blocks the same client on the same
+        # `_mock_power_sync_lock`, and a reviewer showed the hang is reachable
+        # without touching production: if `target_entered` is set right at the
+        # `wait_for` boundary and the wait raises anyway, the client is blocked
+        # and this `finally` called `manager.stop()`, which waits for a
+        # stop-sources task that needs that lock. The injected deadline hit the
+        # outer five-second timeout. A test must fail, not stop the world.
+        await _release_then_stop(manager, client)
 
 
 async def test_target_update_cannot_report_success_after_emergency_off_authority() -> None:
@@ -713,15 +866,91 @@ async def test_target_update_cannot_report_success_after_emergency_off_authority
         await asyncio.wait_for(client.target_entered.wait(), timeout=1.0)
         abort_registered = asyncio.Event()
         register_abort_intent = manager._register_abort_intent
+        observed: list[dict[str, object]] = []
+        abort_generation_before = manager._abort_generation
+        full_abort_generation_before = manager._full_abort_generation
+        manager._admitted_intent["smub"] = _AdmittedIntent(
+            p_target=0.1,
+            v_comp=1.0,
+            i_comp=0.1,
+            admitted_monotonic_s=time.monotonic(),
+            abort_generation=manager._abort_generation,
+        )
 
-        def observe_abort_intent(*, full: bool) -> int:
-            generation = register_abort_intent(full=full)
+        def observe_abort_intent(**kwargs: object) -> int:
+            # **kwargs, NOT a copy of the production signature. This spy took
+            # `(*, full)` while `emergency_off` had grown a second keyword
+            # (`revoke=...`), so every call raised TypeError: the abort intent
+            # was never registered, `abort_registered` never set, and the
+            # release the cleanup needed never came -- the suite HUNG and had to
+            # be killed from outside. A reviewer found it.
+            #
+            # A spy that forwards whatever it is given cannot go stale that way
+            # again; copying the signature is what created a second place to
+            # keep in step with the first.
+            #
+            # FORWARDING IS NOT THE SAME AS CHECKING. A reviewer pointed out that
+            # `**kwargs` also made the CONTENT of the call invisible, and named
+            # the two defects that stayed green because of it: `full=True` would
+            # report a channel-scoped emergency as a global abort and push
+            # unrelated in-flight channels into global-OFF reconciliation, and
+            # `revoke=None` with `full=False` would leave the targeted intent
+            # recorded, so a reconnect could restore power the operator stopped.
+            # Nothing else in the suite covers this registration.
+            observed.append(dict(kwargs))
+            generation = register_abort_intent(**kwargs)
             abort_registered.set()
             return generation
 
         manager._register_abort_intent = observe_abort_intent  # type: ignore[method-assign]
         off_task = asyncio.create_task(manager.emergency_off(channel="smua"))
         await asyncio.wait_for(abort_registered.wait(), timeout=1.0)
+        # CHECKED HERE, before anything is released, because this is the state the
+        # emergency was registered WITH -- read after the gather it would also be
+        # consistent with a registration that was corrected afterwards.
+        #
+        # THE LITERAL, not `manager._resolve_channels("smua")`. Comparing a
+        # production call against the same production helper is circular: a
+        # reviewer made that helper return {"smua", "smub"} and this assertion
+        # stayed green, which is exactly the revocation of an unrelated channel's
+        # intent it is meant to forbid. `SmuChannel` is a string literal type, so
+        # the independent value is writable here.
+        assert observed == [{"full": False, "revoke": {"smua"}}], observed
+        # AND WHAT THE CALL DID, not only what it was given. A reviewer noted the
+        # assertion above stays green if `_register_abort_intent` accepts those
+        # arguments and revokes nothing -- and final state cannot substitute,
+        # because the OFF path does not clear admitted intent and `manager.stop()`
+        # revokes globally at the end anyway.
+        assert manager._abort_generation == abort_generation_before + 1, "the abort generation did not advance once"
+        assert manager._full_abort_generation == full_abort_generation_before, (
+            "a channel-scoped emergency advanced the FULL abort generation"
+        )
+        assert "smua" not in manager._admitted_intent, "the targeted intent was left recorded"
+        # AND ONLY THE TARGET. A reviewer pointed out that everything above still
+        # passes if the registration replaces its scoped revocation with
+        # `_admitted_intent.clear()` -- which would silently discard an intent for
+        # the OTHER physical output. `smub`'s entry is planted rather than earned
+        # because what is under test is the SCOPE, and scope is keyed by channel:
+        # the entry's numbers play no part in it.
+        assert "smub" in manager._admitted_intent, "a channel-scoped emergency revoked the other channel's intent"
+        # WHAT THIS DOES *NOT* ESTABLISH, and a reviewer measured it rather than
+        # arguing it: the entry survives as a KEY, but `_register_abort_intent`
+        # advances the GLOBAL abort generation, so the retained intent keeps its
+        # old epoch and `request_run` refuses to resume it -- "Safety authority
+        # changed before source start". Whether an unrelated channel's intent
+        # should survive a targeted emergency in a RESUMABLE state is a question
+        # about hazardous source-control semantics, not about this test, and it is
+        # not decided here: changing it would mean rebasing unaffected intents or
+        # making abort epochs channel-scoped. Written up for the operator in the
+        # WORKSPACE evidence directory (cryodaq-workspace/evidence/, which is a
+        # separate repository -- a reviewer looked for it inside this one and
+        # rightly reported the pointer as dead), under
+        # lab53-2026-09-11-the-budget-that-guarded-nothing.md. The assertion above
+        # is worth having on its own: it is what fails if the revocation is
+        # widened to `clear()`.
+        assert manager._admitted_intent["smub"].abort_generation == abort_generation_before, (
+            "the planted intent's epoch changed in a way this test did not expect"
+        )
         client.release_target.set()
         update_result, off_result = await asyncio.gather(update_task, off_task)
         runtime = driver._channels["smua"]
@@ -735,7 +964,13 @@ async def test_target_update_cannot_report_success_after_emergency_off_authority
         assert 0.35 in client.applied
         assert client.applied[-1] == 0.0
     finally:
-        await manager.stop()
+        # RELEASE THE CLIENT FIRST, always. It blocks inside `set_power` while
+        # holding `_mock_power_sync_lock`, and `manager.stop()` waits for a
+        # stop-sources task that needs that lock -- so a test that fails before
+        # its own release line used to hang here rather than fail. Bounding the
+        # awaits with `wait_for` was tried and did not help: cancelling a
+        # coroutine that holds the lock does not free it. Releasing does.
+        await _release_then_stop(manager, client)
 
 
 class _DelayedPowerClient(ExternalMockInstrumentClient):
