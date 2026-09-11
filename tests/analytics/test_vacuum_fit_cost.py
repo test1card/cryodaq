@@ -8,8 +8,11 @@ second LakeShore died too. The run lost its temperature data overnight.
 """
 
 import ast
+import pathlib
 import time
 from pathlib import Path
+
+import pytest
 
 from cryodaq.analytics.vacuum_trend import _MAX_FIT_POINTS, VacuumTrendPredictor, _thin_for_fitting
 
@@ -78,29 +81,55 @@ def test_the_tick_never_runs_the_fit_on_the_event_loop():
     assert any(isinstance(arg, ast.Attribute) and arg.attr == "update" for node in offloaded for arg in node.args)
 
 
-def test_samples_survive_a_writer_running_during_a_fit():
-    """push() is on the event loop, update() is now in a worker thread.
+#: How long the parent waits for the whole scenario. Three fits take about
+#: 1.2 s with the writer yielding; thirty seconds is generous, and it is a real
+#: bound because the parent kills the child rather than asking it to stop.
+_CONCURRENT_FIT_TIMEOUT_S = 30.0
 
-    That makes the sample buffer genuinely shared. Taking a list() of a deque
-    while another thread appends raises "deque mutated during iteration", so
-    the copy has to be guarded — and the guard must not be held across the fit
-    itself, which is the entire point of moving it off the loop.
+
+def run_concurrent_fit_scenario() -> None:
+    """The scenario itself: a writer thread against three fits.
+
+    Module level, because the test runs it in a CHILD PROCESS. A reviewer
+    showed why that matters: an assertion after the three fits is only an
+    observation, and with the yield removed it reports at 3 x 118.51 s, not in
+    the half minute I claimed. Python cannot terminate a running fit from
+    another thread, so the only bound that holds is a process the parent can
+    kill.
     """
     import threading
+    import time
     import traceback
 
     predictor = _six_hours_of_samples()
     errors: list[str] = []
     stop = threading.Event()
+    pushes = 0
 
     def writer() -> None:
+        nonlocal pushes
         t = 30000.0
         while not stop.is_set():
             t += 2.0
             try:
                 predictor.push(t, 0.05 + 40.0 * (t + 600.0) ** -1.0)
+                pushes += 1
             except Exception:  # pragma: no cover - recorded, asserted below
                 errors.append(traceback.format_exc())
+            # A YIELD, and the suite hung without it -- for a reason that is not
+            # about locks. MEASURED 2026-09-11: one `update()` takes 0.40 s with
+            # this sleep and 118.51 s without, and in the second case the writer
+            # got through 212,866,205 pushes. The fit's residual function is
+            # PYTHON (`_exponential_model`), called thousands of times from
+            # inside scipy, so an unthrottled pure-Python writer starves it
+            # through the GIL: a 296x slowdown, three fits, and a run that reads
+            # as frozen. `maxfev` is set, the deque is bounded, nothing
+            # deadlocks.
+            #
+            # It also models nothing: the engine pushes one reading per poll
+            # interval, about one every two seconds. 232 pushes still land
+            # inside a single fit, which is the concurrency this exercises.
+            time.sleep(0.001)
 
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
@@ -113,4 +142,72 @@ def test_samples_survive_a_writer_running_during_a_fit():
         stop.set()
         thread.join(timeout=5)
 
-    assert errors == []
+    assert not thread.is_alive(), "the writer thread did not stop"
+    assert errors == [], errors
+    # The concurrency the scenario is about actually happened.
+    assert pushes > 50, f"only {pushes} pushes landed during three fits"
+    print("SCENARIO OK")
+
+
+def test_samples_survive_a_writer_running_during_a_fit():
+    """push() is on the event loop, update() is now in a worker thread.
+
+    That makes the sample buffer genuinely shared. Taking a list() of a deque
+    while another thread appends raises "deque mutated during iteration", so
+    the copy has to be guarded -- and the guard must not be held across the fit
+    itself, which is the entire point of moving it off the loop.
+
+    IN A CHILD PROCESS, with the parent holding the clock. This test used to
+    hang the whole suite and had to be killed from outside: `pytest --timeout`
+    printed its banner and the process stayed alive, because the hang outlived
+    the cancellation. An assertion on elapsed time does not fix that -- it runs
+    after the fits return, which is exactly when a starved run is not returning.
+    A process can be killed; a thread running scipy cannot.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    # THIS file, by its own path: the child re-imports the module it is running
+    # from, so the scenario and the bound never drift apart.
+    here = str(pathlib.Path(__file__).resolve())
+    probe = textwrap.dedent(
+        f"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fit_scenario", {here!r})
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.run_concurrent_fit_scenario()
+        """
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=_CONCURRENT_FIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            f"three fits did not finish in {_CONCURRENT_FIT_TIMEOUT_S}s — the writer is starving the fit again"
+        ) from None
+
+    assert done.returncode == 0, f"the scenario failed: {done.stdout[-600:]}{done.stderr[-600:]}"
+    assert "SCENARIO OK" in done.stdout, done.stdout[-400:]
+
+
+def test_the_parent_actually_enforces_its_bound(monkeypatch):
+    """The boundary is only a boundary if the parent kills what overruns it.
+
+    Removing the parent's timeout cannot be caught by the healthy case -- the
+    scenario finishes in about a second either way, so the run stays green and
+    the bound looks present while doing nothing. Shrinking the bound to a value
+    the scenario cannot meet is what shows it is enforced.
+    """
+    monkeypatch.setattr("tests.analytics.test_vacuum_fit_cost._CONCURRENT_FIT_TIMEOUT_S", 0.01, raising=False)
+    import tests.analytics.test_vacuum_fit_cost as module
+
+    monkeypatch.setattr(module, "_CONCURRENT_FIT_TIMEOUT_S", 0.01)
+
+    with pytest.raises(AssertionError, match="did not finish in"):
+        module.test_samples_survive_a_writer_running_during_a_fit()
