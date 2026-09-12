@@ -204,7 +204,7 @@ async def test_a_real_answer_does_clear_the_outage(tmp_path: Path) -> None:
     agent._llm_unavailable_announced = True
 
     async def _actually_infers(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="test-model")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="test-model", max_tokens=512)
 
     agent._handle_periodic_report = _actually_infers
 
@@ -277,7 +277,7 @@ async def test_a_generation_timeout_is_not_a_recovery(tmp_path: Path) -> None:
     agent._ollama.generate = AsyncMock(return_value=_timeout_result())
 
     async def _times_out(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="qwen3.8:27b")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="qwen3.8:27b", max_tokens=512)
 
     agent._handle_periodic_report = _times_out
 
@@ -300,7 +300,7 @@ async def test_a_concurrent_handler_cannot_erase_another_s_answer(tmp_path: Path
     b_finished = asyncio.Event()
 
     async def _handler_a(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="a", model="test-model")
+        await agent._generate_tracked(system_prompt="", user_prompt="a", model="test-model", max_tokens=512)
         a_generated.set()
         await b_finished.wait()  # stands in for the audit settlement wait
 
@@ -394,7 +394,7 @@ async def test_a_success_during_delivery_invalidates_the_in_flight_warning(
     agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
 
     async def _fails(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m", max_tokens=512)
 
     await _fail_once_then(agent, OllamaUnavailableError("refused"), _fails)
 
@@ -410,7 +410,7 @@ async def test_a_success_during_delivery_invalidates_the_in_flight_warning(
     agent._ollama.generate = AsyncMock(
         return_value=GenerationResult(text="ответ", tokens_in=5, tokens_out=7, latency_s=1.0, model="m")
     )
-    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m", max_tokens=512)
 
     # 3. the old warning finally lands
     release.set()
@@ -445,7 +445,7 @@ async def test_an_older_success_cannot_clear_a_newer_outage(tmp_path: Path) -> N
     )
 
     async def _succeeds_then_waits(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="a", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="a", model="m", max_tokens=512)
         held.set()
         await proceed.wait()
 
@@ -455,7 +455,7 @@ async def test_an_older_success_cannot_clear_a_newer_outage(tmp_path: Path) -> N
 
     # 2. a later, genuine outage
     async def _fails(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="b", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="b", model="m", max_tokens=512)
 
     await _fail_once_then(agent, OllamaUnavailableError("refused"), _fails)
     await agent._safe_handle(_event())
@@ -501,7 +501,7 @@ async def test_a_stale_in_flight_warning_neither_suppresses_nor_releases_a_newer
     agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
 
     async def _fails(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m", max_tokens=512)
 
     # 1. outage A, transport blocked
     agent._ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("A"))
@@ -517,7 +517,7 @@ async def test_a_stale_in_flight_warning_neither_suppresses_nor_releases_a_newer
     agent._ollama.generate = AsyncMock(
         return_value=GenerationResult(text="ответ", tokens_in=1, tokens_out=1, latency_s=0.1, model="m")
     )
-    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m", max_tokens=512)
 
     # 3. outage B, on a working transport, while A is still blocked
     async def _b_ok(text):
@@ -564,7 +564,7 @@ async def test_a_stale_finally_does_not_release_a_claim_it_no_longer_owns(
     agent = _agent(tmp_path, telegram=tg, max_concurrent=2)
 
     async def _fails(event, **kwargs):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m", max_tokens=512)
 
     agent._handle_periodic_report = _fails
 
@@ -581,7 +581,7 @@ async def test_a_stale_finally_does_not_release_a_claim_it_no_longer_owns(
     agent._ollama.generate = AsyncMock(
         return_value=GenerationResult(text="ответ", tokens_in=1, tokens_out=1, latency_s=0.1, model="m")
     )
-    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m")
+    await agent._generate_tracked(system_prompt="", user_prompt="y", model="m", max_tokens=512)
     generation_b = agent._outage_generation
 
     # B in flight too
@@ -625,7 +625,7 @@ async def test_a_successful_inference_does_not_log_a_shutdown(tmp_path: Path, ca
     )
 
     with caplog.at_level(logging.INFO, logger="cryodaq.agents.assistant.live.agent"):
-        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m")
+        await agent._generate_tracked(system_prompt="", user_prompt="x", model="m", max_tokens=512)
 
     assert not any("остановлен" in r.message for r in caplog.records), (
         "a successful inference logged a shutdown that never happened"

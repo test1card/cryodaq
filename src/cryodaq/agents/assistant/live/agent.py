@@ -79,7 +79,47 @@ class AssistantConfig:
     # protocol.
     llm_api: str = "ollama"
     temperature: float = 0.3
-    max_tokens: int = 2048  # gemma4:e4b is thinking-first; needs 2048+ for thought + response
+    #: Tokens the model may GENERATE for one live-agent answer, thought included.
+    #:
+    #: 2048 was sized for `gemma4:e4b` on Ollama, which is thinking-first and
+    #: needed "2048+ for thought + response" -- the note that stood here. The
+    #: stand moved to vLLM and `qwen38` on 2026-09-11, and the hourly bulletin
+    #: stopped arriving that same day: measured over the audit ledger, every
+    #: report from 11.09 onward reported `tokens.out` of exactly 2048 with an
+    #: EMPTY response, because the whole budget went on reasoning and the answer
+    #: was never written. Sixteen reports on 11.09, thirteen on 12.09, none
+    #: delivered; the operator noticed the silence before the instrument did.
+    #:
+    #: Measured 2026-09-12 on the real prompt taken from the ledger (4,041
+    #: prompt tokens): at 2048 the generation ends `length` with no content; at
+    #: 8192 it ends `stop` after 4,763 tokens in 93 s; at 100,000 it ends `stop`
+    #: after 2,868 tokens in 57 s. A ceiling is not spent when the generation stops
+    #: on its own, and every generation measured AT THE WORKING BUDGETS did -- the
+    #: runs that ended `length` are the ones at 2048, which is the defect. Five
+    #: samples on today's prompts are not a guarantee. What the value buys, stated
+    #: no further than the evidence: additional headroom, chosen by the operator, for
+    #: a generation that terminates on its own. It is not a measured claim about any
+    #: future model.
+    #:
+    #: WHAT IT DOES NOT BUY, because a reviewer measured the bound that actually
+    #: binds: `OllamaClient._get_session` builds its session with no timeout, so
+    #: aiohttp's own `ClientTimeout(total=300)` applies and cuts a never-stopping
+    #: generation near 15,300 tokens -- long before this ceiling, and before
+    #: `ollama.timeout_s`. See the note in config/agent.yaml for the whole chain.
+    max_tokens: int = 8192
+
+    #: The BULLETIN's own allowance, because the one above is shared with alarm
+    #: narration and `_safe_handle` holds one of only two inference slots around
+    #: a whole handler. A reviewer measured the consequence of raising the shared
+    #: value alone: the permit is held around a whole handler, and with
+    #: slices.b_suggestion enabled one alarm summary keeps it through a second
+    #: generation, so a newly fired CRITICAL narration can be made to wait. Of
+    #: the paths sharing that budget the bulletin's own output is the least
+    #: urgent -- a slow one misses its caption and lands in the next report -- so
+    #: it is the one given room. Nothing in the code bounds that wait; three
+    #: review rounds went on my attempts to name a figure for it, each wrong, and
+    #: the mechanism is written into config/agent.yaml instead of a number.
+    periodic_report_max_tokens: int = 8192
     max_concurrent_inferences: int = 2
     max_calls_per_hour: int = 60
     alarm_fired_enabled: bool = True
@@ -161,6 +201,13 @@ class AssistantConfig:
         cfg.timeout_s = float(ollama.get("timeout_s", cfg.timeout_s))
         cfg.llm_api = str(ollama.get("api", cfg.llm_api))
         cfg.temperature = float(ollama.get("temperature", cfg.temperature))
+        # READ FROM THE FILE, which it was not. Every other bound in this section
+        # is configurable and this one was reachable only as a dataclass default,
+        # so `max_tokens:` in agent.yaml was silently ignored -- a fix applied
+        # there alone would have left the bulletin just as empty, and the next
+        # person would have had to find that out the slow way.
+        cfg.max_tokens = int(ollama.get("max_tokens", cfg.max_tokens))
+        cfg.periodic_report_max_tokens = int(ollama.get("periodic_report_max_tokens", cfg.max_tokens))
         _num_ctx = ollama.get("num_ctx")
         cfg.num_ctx = int(_num_ctx) if _num_ctx is not None else None
         rl = d.get("rate_limit", {})
@@ -974,8 +1021,21 @@ class AssistantLiveAgent:
         await self._ollama.close()
         logger.info("AssistantLiveAgent (%s): остановлен", self._config.brand_name)
 
-    async def _generate_tracked(self, *args: Any, **kwargs: Any) -> Any:
+    async def _generate_tracked(self, *args: Any, max_tokens: int, **kwargs: Any) -> Any:
         """Every model call goes through here so recovery has a real signal.
+
+        AND EVERY CALL STATES ITS BUDGET, because omitting it is how the outage of
+        2026-09-11 could come back: `OllamaClient.generate` defaults to 2048, the
+        value that spent itself on reasoning and returned nothing, so a call that
+        simply passes no `max_tokens` is silently back on it. A keyword-only
+        parameter with no default makes that a TypeError at the call site rather
+        than an empty answer three days later.
+
+        A source-shape test was tried for this first and a reviewer defeated it
+        twice -- deleting the keyword, then calling through `getattr` so the AST
+        walk no longer recognised the call. The requirement belongs at the
+        boundary every generation already passes through, not in a test that has
+        to recognise how the boundary was spelled.
 
         Review of 2026-09-05: the outage flag was cleared whenever a handler
         returned normally, and a handler can return without ever reaching the
@@ -984,7 +1044,7 @@ class AssistantLiveAgent:
         strength of zero inference calls. Setting the marker here means the
         claim is made only where the model actually answered.
         """
-        result = await self._ollama.generate(*args, **kwargs)
+        result = await self._ollama.generate(*args, max_tokens=max_tokens, **kwargs)
         if _is_answered_generation(result):
             self._note_model_available()
         return result
@@ -1708,7 +1768,7 @@ class AssistantLiveAgent:
         result = await self._generate_tracked(
             user_prompt,
             system=system_prompt,
-            max_tokens=self._config.max_tokens,
+            max_tokens=self._config.periodic_report_max_tokens,
             temperature=self._config.temperature,
             num_ctx=self._config.num_ctx,
         )
@@ -1773,9 +1833,7 @@ class AssistantLiveAgent:
         # removed from the periodic targets the outcomes mapping is empty, so
         # the gate read as "not failed" and published anyway. The caption is a
         # delivery channel; the persistence-first rule covers it.
-        audit_settled = outcomes_pr.get("audit") != "failed" and not any(
-            error.startswith("audit_") for error in errors
-        )
+        audit_settled = outcomes_pr.get("audit") != "failed" and not any(error.startswith("audit_") for error in errors)
         if summary_is_publishable and audit_settled:
             written_at = time.time()
             await write_summary_async(

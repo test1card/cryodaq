@@ -74,6 +74,124 @@ agent:
     # accepts it and answered in 27.9 s, against 172.2 s at 32768 on a cold
     # load, so the larger window costs nothing here.
     num_ctx: 100000
+    # Tokens ONE live-agent answer may generate, reasoning included. Separate
+    # from num_ctx above, which is the window the prompt is read in.
+    #
+    # The hourly bulletin stopped arriving on 2026-09-11, the day the stand moved to
+    # vLLM and `qwen38`, and nobody was told: report after report spent exactly 2048
+    # tokens -- the whole budget, which was sized for the previous model -- on
+    # reasoning and returned an EMPTY answer. Counted in the audit ledger:
+    # sixteen of sixteen on 11.09, and sixteen of seventeen on 12.09.
+    #
+    # NOT ALL OF THEM, and a reviewer checked the ledger where I had generalised.
+    # One report on 12.09, at 13:55 UTC, did arrive: 3,975 prompt tokens, 1,363 out,
+    # 529 characters in 27.4 s. The failure is not a constant -- it is what happens
+    # whenever the reasoning outruns the budget, which depends on the prompt (the
+    # empty ones carry 3,985-4,446 prompt tokens) and on sampling. Latency on 11.09
+    # ranged 40.6-93.8 s, not the uniform 40-42 s I first wrote; 12.09 was 40.0-41.6.
+    #
+    # Measured 2026-09-12 on the real prompt from the audit ledger, 4,041 prompt
+    # tokens against this server:
+    #
+    #   max_tokens=2048     finish=length, out=2048, NO answer      41.6 s
+    #   max_tokens=8192     finish=stop,   out=4763, 660 chars      93.2 s
+    #   max_tokens=100000   finish=stop,   out=2868, 612 chars      56.9 s
+    #
+    # 100000 by the operator's decision of 2026-09-12: a ceiling is not spent when
+    # the generation stops on its own, which the five samples at 8192 below all did
+    # -- samples on today's prompts, not a guarantee, and admission, scheduling and
+    # server-side queuing are not free either. What it buys is stated exactly and no
+    # further: additional headroom, chosen by the operator, for a generation that
+    # terminates on its own. A reviewer asked for the survivability-of-the-next-model
+    # wording to go, and was right -- no future model has been measured. /v1/models reports
+    # max_model_len=196608 on 2026-09-12, so prompt plus this fits -- note that
+    # ollama_client.py has carried 131072 for this deployment since the switch,
+    # and the two disagree; 196608 is what the server answered today.
+    #
+    # THIS CEILING IS NOT THE BINDING BOUND, and a reviewer corrected the note
+    # that first stood here. Two bounds sit in front of it, and a third thing that
+    # is often mistaken for one; measured 2026-09-12:
+    #
+    #   1. aiohttp's own default. `OllamaClient._get_session` builds
+    #      `ClientSession()` with no timeout, and aiohttp 3.13.5 defaults to
+    #      `ClientTimeout(total=300)` -- verified against the installed package.
+    #      This is the one that binds: at the measured ~51 tok/s it cuts a
+    #      never-stopping generation at roughly 15,300 tokens.
+    #   2. ollama.timeout_s (1400 s above), which therefore never fires first.
+    #   3. _PERIODIC_TICK_LEAD_S in assistant_main.py, 300 s -- NOT a bound, and
+    #      a reviewer corrected that: it only schedules the tick early so the
+    #      note is on disk when the chart renders, and it neither cancels nor
+    #      limits the handler. A slower generation simply misses the CURRENT
+    #      caption and lands in the next report.
+    #
+    # So what this value buys is exact and narrower than "headroom for any
+    # model": a generation that stops on its own is no longer cut at 2048. It
+    # does not make a 100,000-token answer reachable. Making it reachable means
+    # giving the session an explicit timeout first -- which is a change to every
+    # call path in that client, including alarm narration, and is queued
+    # separately rather than smuggled in here.
+    # 8192 for EVERY answer -- alarm narration included, and that is the part
+    # that matters most. Measured 2026-09-12 on the real alarm-summary prompt
+    # (system 641 + user 495 chars, a CRITICAL Т12 overtemperature):
+    #
+    #   max_tokens=2048   finish=length, out=2048, NO answer     40.2 s
+    #   max_tokens=8192   finish=stop,   out=2802, 688 chars     55.0 s
+    #
+    # So the bulletin was not the only thing broken: ALARM NARRATION WAS EXPOSED TO
+    # THE SAME FAILURE, and the reproduced Т12 narration was silent. That is one
+    # prompt reproduced once, not a claim about every alarm -- a reviewer asked for
+    # the narrower wording and was right to. No alarm has fired since 11.09, which
+    # is why the audit ledger cannot say what a real one would have done.
+    #
+    # ALL FIVE paths that share this budget measured at 8192, same day, same
+    # server. FIVE, not four: a reviewer found sensor anomaly missing from the
+    # first list -- its call site shares this budget even though `_should_handle`
+    # currently filters the event, so the code path exists and was measured.
+    #
+    #   alarm summary        out=2802   55.0 s
+    #   diagnostic           out=2223   43.8 s
+    #   experiment finalize  out=1968   39.3 s
+    #   sensor anomaly       out=1133   22.6 s
+    #   shift handover       out=5370  104.9 s   <- thinnest margin, 66% of 8192
+    #
+    # Each of these five ended `stop` -- on its own, inside the budget. That is
+    # five samples on today's prompts and today's model, not a guarantee: the same
+    # prompts at 2048 ended `length` with nothing, which is the whole reason this
+    # value is here.
+    #
+    # Shift handover is the one to watch if this value is ever trimmed. It is NOT
+    # raised to give it more room, because this ceiling is latency a newly fired
+    # CRITICAL narration may wait through: `_safe_handle` holds one of two
+    # inference permits around a whole handler. No figure for that wait is given
+    # here -- an earlier note put it near 160 s from throughput and a reviewer
+    # rightly rejected that: nothing in the code bounds it, and the per-request
+    # ceiling is aiohttp's 300 s rather than any token arithmetic. Handover is not
+    # time-critical; alarm narration is.
+    max_tokens: 8192
+    # And the BULLETIN gets the operator's headroom on its own key, because the
+    # value above is shared with alarm narration and `_safe_handle` holds one of
+    # only two inference permits around a whole handler. Of the paths that share
+    # that budget, the bulletin is the one whose own OUTPUT is least urgent -- a
+    # slow one misses its caption and lands in the next report -- which is why it
+    # is the one given room. That is not the same as harmless; see below.
+    #
+    # WHAT THE SPLIT DOES NOT BUY. Three review rounds went on my successive
+    # attempts to put a NUMBER on this, and all three were wrong, so it is stated
+    # as a mechanism and not as a bound:
+    #
+    #   - the permit is held around the WHOLE handler, not one HTTP call, and the
+    #     handler also assembles context, writes audit and dispatches;
+    #   - slices.b_suggestion is TRUE here, so one successful alarm summary keeps
+    #     its permit through a second, diagnostic generation;
+    #   - there are two permits and the bulletin takes one of them like anything
+    #     else, so a slow bulletin can make a CRITICAL narration wait.
+    #
+    # Nothing in the code bounds that wait, which is why no figure for it belongs
+    # in a comment. What the split DOES buy is narrow and checkable: only the
+    # hourly report is given the large ceiling. Isolating CRITICAL narration needs
+    # priority or reserved capacity, which is a scheduling change with its own
+    # review and is not attempted here.
+    periodic_report_max_tokens: 100000
     # Measured 2026-09-05 against 100.87.73.25:11437, warm unless stated:
     #
     #   qwen3.8:27b   48.0 tok/s generation, 135 tok answer in 2.8 s  <- selected
