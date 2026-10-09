@@ -190,6 +190,15 @@ def _fmt(value: float, decimals: int = 1) -> str:
     return f"{value:.{decimals}f}"
 
 
+def _fmt_wire_number(value: object, decimals: int = 1) -> str:
+    """Format an optional JSON numeric diagnostic without raising."""
+
+    try:
+        return _fmt(float(value), decimals)
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _channel_status_operator_text(status: object) -> str:
     """Return bounded Russian copy without echoing backend enum values."""
     if type(status) is not ChannelStatus:
@@ -513,9 +522,9 @@ class _SensorDiagSection(QFrame):
 
             values: list[tuple[str, bool, bool]] = [
                 (name, False, False),
-                (_fmt(float(data.get("current_T", float("nan")))), True, False),
-                (_fmt(float(data.get("noise_mK", float("nan"))), 0), True, False),
-                (_fmt(float(data.get("drift_mK_per_min", float("nan")))), True, False),
+                (_fmt_wire_number(data.get("current_T")), True, False),
+                (_fmt_wire_number(data.get("noise_mK"), 0), True, False),
+                (_fmt_wire_number(data.get("drift_mK_per_min")), True, False),
                 (str(int(data.get("outlier_count", 0))), True, False),
                 (
                     _fmt(float(data["correlation"]), 2) if data.get("correlation") is not None else "—",

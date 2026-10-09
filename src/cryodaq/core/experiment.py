@@ -2906,7 +2906,11 @@ class ExperimentManager:
             return {}
         try:
             with self._instruments_config.open(encoding="utf-8") as handle:
-                return yaml.safe_load(handle) or {}
+                return _stringify_mapping_keys(yaml.safe_load(handle) or {})
+        except ConfigSnapshotKeyCollisionError:
+            # An unreadable config degrades to "no snapshot"; a config that is
+            # present but unrepresentable must not be recorded as absent.
+            raise
         except Exception as exc:
             logger.error("Failed to read instruments config: %s", exc)
             return {}
@@ -2915,6 +2919,35 @@ class ExperimentManager:
 # ---------------------------------------------------------------------------
 # F27 helpers (module-level)
 # ---------------------------------------------------------------------------
+
+
+class ConfigSnapshotKeyCollisionError(RuntimeError):
+    """Two distinct config keys become one after string coercion."""
+
+
+def _stringify_mapping_keys(node: Any) -> Any:
+    """Coerce mapping keys to str so a config snapshot is a valid JSON object.
+
+    YAML gives ``channels: {1: ...}`` int keys, but the snapshot travels in
+    command replies, whose contract requires exact ``str`` keys, and is
+    persisted through ``json.dumps``, which stringifies keys anyway. Normalize
+    at the read boundary so a freshly created experiment and one reloaded from
+    SQLite carry the same key type.
+    """
+
+    if isinstance(node, dict):
+        coerced: dict[str, Any] = {}
+        for key, value in node.items():
+            text = str(key)
+            if text in coerced:
+                # YAML keeps `1:` and `"1":` apart; str() merges them. Refuse
+                # rather than let one silently overwrite the other.
+                raise ConfigSnapshotKeyCollisionError(f"config snapshot key {text!r} collides after string coercion")
+            coerced[text] = _stringify_mapping_keys(value)
+        return coerced
+    if isinstance(node, list):
+        return [_stringify_mapping_keys(value) for value in node]
+    return node
 
 
 def _validate_photo_dimensions(data: bytes) -> dict[str, int] | None:

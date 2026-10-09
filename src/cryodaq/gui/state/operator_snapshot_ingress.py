@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from cryodaq.operator_snapshot import OperatorSnapshot, SnapshotMode
 _DEFAULT_STALE_AFTER_S = 10.0
 _HEALTH_POLL_INTERVAL_S = 0.5
 _MAX_COUNTER = (1 << 64) - 1
+logger = logging.getLogger(__name__)
 
 
 class OperatorSnapshotIngressOwner(QObject):
@@ -109,6 +111,8 @@ class OperatorSnapshotIngressOwner(QObject):
             self._failure_queued.emit(epoch)
             return
         if snapshots:
+            if self._accepted_count == 0:
+                logger.info("Operator snapshot ingress polled %d snapshot(s)", len(snapshots))
             # A latest-state queue is not an audit log, but every drained
             # element still belongs to one generation-bound batch.  Validate
             # the whole immutable batch before its newest cut may replace the
@@ -163,7 +167,7 @@ class OperatorSnapshotIngressOwner(QObject):
         if not self._active or epoch != self._epoch:
             return
         if type(candidate) is not tuple or not candidate:
-            self._reject_snapshot_batch()
+            self._reject_snapshot_batch("snapshot batch is not a non-empty tuple")
             return
         previous = self._last_accepted_snapshot
         previous_revision = previous.cut.revision if previous is not None else -1
@@ -174,17 +178,17 @@ class OperatorSnapshotIngressOwner(QObject):
                 or item.cut.mode is not self._expected_mode
                 or item.cut.revision < previous_revision
             ):
-                self._reject_snapshot_batch()
+                self._reject_snapshot_batch("snapshot type, mode, or revision is invalid")
                 return
             identity = (item.cut.producer_id, item.cut.experiment_id, item.cut.mode)
             if batch_identity is None:
                 batch_identity = identity
             elif identity != batch_identity:
-                self._reject_snapshot_batch()
+                self._reject_snapshot_batch("snapshot identity changed within batch")
                 return
             if item.cut.revision == previous_revision:
                 if item != previous:
-                    self._reject_snapshot_batch()
+                    self._reject_snapshot_batch("same revision has different snapshot content")
                     return
                 continue
             previous = item
@@ -198,22 +202,23 @@ class OperatorSnapshotIngressOwner(QObject):
         if not self._active or epoch != self._epoch:
             return False
         if type(candidate) is not OperatorSnapshot or candidate.cut.mode is not self._expected_mode:
-            self._reject_snapshot_batch()
+            self._reject_snapshot_batch("snapshot type or mode is invalid")
             return False
         if self._last_accepted_snapshot is not None:
             previous_revision = self._last_accepted_snapshot.cut.revision
             if candidate.cut.revision < previous_revision:
-                self._reject_snapshot_batch()
+                self._reject_snapshot_batch("snapshot revision regressed")
                 return False
             if candidate.cut.revision == previous_revision:
                 if candidate == self._last_accepted_snapshot:
                     return False
-                self._reject_snapshot_batch()
+                self._reject_snapshot_batch("same revision has different snapshot content")
                 return False
         try:
             accepted = self._store.accept_snapshot(candidate)
-        except Exception:
-            self._reject_snapshot_batch()
+        except Exception as exc:
+            logger.error("Operator snapshot store rejected snapshot: %s", exc)
+            self._reject_snapshot_batch("snapshot store rejected snapshot")
             return False
         self._last_accepted_snapshot = candidate
         self._accepted_count = min(_MAX_COUNTER, self._accepted_count + 1)
@@ -240,7 +245,8 @@ class OperatorSnapshotIngressOwner(QObject):
                 transport_age_s=age,
                 stale_after_s=self._stale_after_s,
             )
-        except Exception:
+        except Exception as exc:
+            logger.error("Operator snapshot transport qualification failed: %s", exc)
             self._reject_and_degrade()
             return
         self._last_transport_age = age
@@ -257,9 +263,10 @@ class OperatorSnapshotIngressOwner(QObject):
         self._rejected_count = min(_MAX_COUNTER, self._rejected_count + 1)
         self._degrade_current(connected=False)
 
-    def _reject_snapshot_batch(self) -> None:
+    def _reject_snapshot_batch(self, reason: str) -> None:
         # Invalidate the remainder of this queued batch, including its health
         # event, so rejected input cannot re-freshen the prior cut.
+        logger.error("Rejected operator snapshot batch: %s", reason)
         self._epoch += 1
         self._reject_and_degrade()
 

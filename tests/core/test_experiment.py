@@ -656,3 +656,73 @@ def test_experiment_wal_verification(tmp_path: Path, instruments_yaml: Path, tem
     with patch("sqlite3.connect", side_effect=lambda *a, **kw: _make_fake_conn()):
         with pytest.raises(RuntimeError, match="WAL"):
             em.start_experiment("WALTest", "Op", template_id="custom")
+
+
+def test_config_snapshot_keys_survive_the_command_reply_contract(tmp_path: Path, templates_dir: Path) -> None:
+    """YAML int channel keys must not break experiment_create/status replies.
+
+    ``channels: {1: ...}`` is the shipped instruments.yaml shape. Raw
+    ``yaml.safe_load`` keeps those keys as ``int``, and the reply contract
+    requires exact ``str`` keys, so the snapshot made the engine reject its own
+    replies and the GUI reported "experiment_create failed".
+    """
+    from cryodaq.core.zmq_bridge import encode_command_reply
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text(
+        yaml.dump(
+            {
+                "instruments": [
+                    {
+                        "name": "ls218_1",
+                        "type": "lakeshore_218",
+                        "resource": "GPIB0::12::INSTR",
+                        "channels": {1: {"id": "T11"}, 2: {"id": "T12"}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    em = ExperimentManager(data_dir=tmp_path, instruments_config=cfg, templates_dir=templates_dir)
+    info = em.create_experiment(name="Snapshot", operator="Op", template_id="custom")
+
+    channels = info.config_snapshot["instruments"][0]["channels"]
+    assert sorted(channels) == ["1", "2"]
+
+    encode_command_reply({"ok": True, "experiment": info.to_payload()})
+    encode_command_reply(em.get_status_payload())
+
+    # The persisted form already stringifies keys via json.dumps; a freshly
+    # created experiment must not differ from one rehydrated from metadata.
+    reloaded = em._read_experiment_from_metadata(info.experiment_id)
+    assert reloaded is not None
+    assert reloaded.config_snapshot == info.config_snapshot
+
+
+def test_config_snapshot_refuses_keys_that_collide_when_stringified(tmp_path: Path, templates_dir: Path) -> None:
+    """YAML keeps `1:` and `"1":` apart; coercion must not silently drop one."""
+    from cryodaq.core.experiment import ConfigSnapshotKeyCollisionError, _stringify_mapping_keys
+
+    with pytest.raises(ConfigSnapshotKeyCollisionError, match="collides after string coercion"):
+        _stringify_mapping_keys({"channels": {1: "integer", "1": "text"}})
+
+    cfg = tmp_path / "instruments.yaml"
+    cfg.write_text('instruments:\n  - channels:\n      1: integer\n      "1": text\n', encoding="utf-8")
+    em = ExperimentManager(data_dir=tmp_path, instruments_config=cfg, templates_dir=templates_dir)
+
+    # A present-but-unrepresentable config must not be recorded as an absent
+    # one: creation fails instead of persisting a snapshot with false provenance.
+    with pytest.raises(ConfigSnapshotKeyCollisionError):
+        em.create_experiment(name="Collision", operator="Op", template_id="custom")
+
+
+def test_missing_instruments_config_still_degrades_to_an_empty_snapshot(tmp_path: Path, templates_dir: Path) -> None:
+    """Only collisions are loud; an absent config keeps the existing fallback."""
+    em = ExperimentManager(
+        data_dir=tmp_path,
+        instruments_config=tmp_path / "absent.yaml",
+        templates_dir=templates_dir,
+    )
+    info = em.create_experiment(name="NoConfig", operator="Op", template_id="custom")
+    assert info.config_snapshot == {}

@@ -1,0 +1,177 @@
+name: Release Gate
+
+on:
+  push:
+    tags: ['v*']
+  # A manual run has no event-derived before/base commit, so the operator names the exact
+  # immutable trusted base -- the same input, and the same meaning, as in main.yml.
+  workflow_dispatch:
+    inputs:
+      trusted_base_sha:
+        description: Exact 40-character commit SHA whose registered evidence is trusted
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate_identity:
+    name: Bind the release candidate and its trusted base
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      evidence_sha: ${{ steps.bind.outputs.evidence_sha }}
+      trusted_base_sha: ${{ steps.bind.outputs.trusted_base_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - id: bind
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_CREATED: ${{ github.event.created }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_TRUSTED_BASE_SHA: ${{ inputs.trusted_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
+          readonly event_commit
+          require_commit() {
+            local label="$1" sha="$2"
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$sha" == "0000000000000000000000000000000000000000" ]]; then
+              echo "invalid $label commit SHA" >&2
+              return 1
+            fi
+            if ! git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
+              # A force-pushed predecessor head is GitHub event authority but is
+              # not an ancestor of the new head, so the checkout lacks the
+              # object; fetch that exact commit once, then re-verify.  A SHA
+              # the remote cannot serve still fails closed below.
+              git fetch --no-tags origin "${sha}" >&2 || true
+            fi
+            if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
+              echo "unresolvable $label commit SHA: $sha" >&2
+              return 1
+            fi
+            printf '%s' "$sha"
+          }
+          if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
+            readonly merge_commit="$event_commit"
+            base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
+            readonly base_commit
+            head_commit="$(git rev-parse --verify "${PR_HEAD_SHA:?}^{commit}")"
+            readonly head_commit
+            read -r recorded first_parent second_parent extra \
+              <<<"$(git rev-list --parents -n 1 "$merge_commit")"
+            test "$recorded" = "$merge_commit"
+            test "$first_parent" = "$base_commit"
+            test "$second_parent" = "$head_commit"
+            test -z "${extra:-}"
+            # This conditional waiver trips on tree divergence, not on whether master advanced:
+            # only identical trees prove the PR-head execution covers the synthetic merge tree.
+            merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"
+            readonly merge_tree
+            head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
+            readonly head_tree
+            if [[ "$merge_tree" != "$head_tree" ]]; then
+              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree." \
+                "Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
+              exit 1
+            fi
+            readonly evidence_sha="$head_commit"
+            trusted_base_sha="$(require_commit 'pull request base' "${PR_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          elif [[ "$EVENT_NAME" == "merge_group" ]]; then
+            readonly evidence_sha="$event_commit"
+            trusted_base_sha="$(require_commit 'merge-group base' "${MERGE_GROUP_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "${PUSH_CREATED:-false}" == true ]]; then
+              test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
+              echo "new tag creation has no independently authenticated trusted base; rerun through workflow_dispatch with trusted_base_sha" >&2
+              exit 1
+            else
+              test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
+              trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
+            fi
+            readonly trusted_base_sha
+            readonly evidence_sha="$event_commit"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then
+              echo "workflow_dispatch release evidence must target a v* tag" >&2
+              exit 1
+            fi
+            readonly evidence_sha="$event_commit"
+            trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          else
+            echo "unsupported evidence authority event: $EVENT_NAME" >&2
+            exit 1
+          fi
+          printf 'evidence_sha=%s\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
+          printf 'trusted_base_sha=%s\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"
+
+  whole-tree-artifact-freshness:
+    needs: candidate_identity
+    name: whole-tree artifact freshness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      EVIDENCE_SHA: ${{ needs.candidate_identity.outputs.evidence_sha }}
+      TRUSTED_BASE_SHA: ${{ needs.candidate_identity.outputs.trusted_base_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.candidate_identity.outputs.evidence_sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # The reviewed runtime, not a hand-listed subset. The strict runner imports psutil and
+      # PyYAML, its command tail requires pytest-timeout, and it runs pytest under `-W error`,
+      # where a missing pytest-asyncio turns the project's `asyncio_mode` ini key into a fatal
+      # PytestConfigWarning. A `pip install pytest pyyaml` line would have to be kept in step with
+      # all of that by hand.
+      - name: Install the locked runtime
+        run: python -m pip install -r requirements-lock.txt
+
+      # Registered guards may not become skipped, deselected, or non-default enforcement, so the
+      # release selection runs through the same strict active-guard runner `main.yml` uses for the
+      # `remaining` suite -- NOT plain pytest, which cannot tell a skipped guard from a passing
+      # one.  The release suite registers no guards (the whole-tree guards live in `remaining`),
+      # so the runner feeds the exact-checkout selection files to the strict plugin as required
+      # files, which refuses a skip/xfail/dynamic-skip marker on them. The revision and trusted
+      # base are the ones `candidate_identity` derived from this
+      # event: a tag push IS a push event, and the `bind` step's push branch resolves the trusted
+      # base from `github.event.before`. For a newly CREATED tag it derives nothing and
+      # REFUSES: a fresh tag usually points at the default tip, so a merge base against that
+      # tip would collapse to the tagged candidate itself, and compare_red_reproduction_bindings
+      # would compare a commit with itself -- vacuously green on exactly the check this gate
+      # exists to make independently. A `v*` tag push is therefore a fail-closed tripwire: run
+      # the release through workflow_dispatch on the tag ref with an explicit trusted_base_sha.
+      # A tag FORCE-MOVE still derives a non-vacuous base from the old tag commit. Nothing here
+      # is guessed.
+      - name: Run the release suite through the strict active-guard runner
+        run: |
+          set -euo pipefail
+          python -m tools.ci_active_checkout_runner \
+            --repository "${GITHUB_WORKSPACE:?}" \
+            --revision "${EVIDENCE_SHA:?}" \
+            --trusted-base "${TRUSTED_BASE_SHA:?}" \
+            --suite release \
+            --basetemp "${RUNNER_TEMP:?}/cryodaq-active-release-pytest"

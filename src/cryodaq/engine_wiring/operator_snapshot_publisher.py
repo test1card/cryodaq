@@ -9,6 +9,7 @@ Until then this module is deliberately unwired.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from collections.abc import Callable
@@ -17,6 +18,8 @@ from enum import StrEnum
 from typing import Protocol
 
 from cryodaq.operator_snapshot import OperatorSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class SnapshotComposer(Protocol):
@@ -173,6 +176,7 @@ class OperatorSnapshotPublicationService:
                 except Exception:
                     self._composition_failure_count += 1
                     self._last_error_code = SnapshotPublicationErrorCode.COMPOSITION_FAILED
+                    logger.exception("Operator snapshot composition failed")
                     return False
 
                 try:

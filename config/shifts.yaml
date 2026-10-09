@@ -1,0 +1,12 @@
+# Shift handover configuration
+# Opt-in: shift handover features are disabled if this file is absent or empty.
+
+periodic_interval_hours: 2
+periodic_missed_timeout_minutes: 15
+
+operators:
+  - "Фоменко В.Н."
+
+shift_channels:
+  temperature: "Т2"
+  pressure: "Давление"

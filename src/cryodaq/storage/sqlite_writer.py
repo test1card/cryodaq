@@ -75,6 +75,26 @@ _MAX_COMMIT_REVISION = 2**63 - 1
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
 
+def _sqlite_descriptor_inventory_root() -> Path | None:
+    """Return the platform's open-descriptor inventory, when available."""
+
+    for candidate in (Path("/proc/self/fd"), Path("/dev/fd")):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _sqlite_directory_fd_uri_supported() -> bool:
+    """Return whether SQLite can address a child through a directory fd.
+
+    Linux procfs supports ``/proc/self/fd/<dirfd>/<name>``. macOS exposes
+    ``/dev/fd`` for descriptor inspection, but does not resolve that nested
+    path for SQLite, so it uses the retained-path fallback below.
+    """
+
+    return Path("/proc/self/fd").is_dir()
+
+
 def _operator_log_monotonic() -> float:
     return time.monotonic()
 
@@ -1663,11 +1683,19 @@ class _ControlDatabaseAuthority:
             or set(self._read_only_sidecar_tokens) != set(self._sidecar_handles)
             or self._read_only_mutation_token(self.data_dir, directory=True) != self._read_only_data_dir_token
             or self._read_only_mutation_token(self.db_path, directory=False) != self._read_only_database_token
-            or any(
-                self._read_only_mutation_token(sidecar, directory=False) != token
-                for sidecar, token in self._read_only_sidecar_tokens.items()
-            )
         ):
+            raise RuntimeError("read-only database authority changed during retained scan")
+        for sidecar, token in tuple(self._read_only_sidecar_tokens.items()):
+            observed = self._read_only_mutation_token(sidecar, directory=False)
+            if observed == token:
+                continue
+            # macOS SQLite updates the shared-memory file's ctime while
+            # releasing a read-only connection.  When SQLite cannot use the
+            # Linux directory-fd URI, retain the same-file identity proof and
+            # refresh only that sidecar's post-close mutation token.
+            if not _sqlite_directory_fd_uri_supported() and observed[:4] == token[:4]:
+                self._read_only_sidecar_tokens[sidecar] = observed
+                continue
             raise RuntimeError("read-only database authority changed during retained scan")
 
     def validate_post_native_close(self) -> None:
@@ -1823,8 +1851,13 @@ class _ControlDatabaseAuthority:
                 quoted_path = quote(self.db_path.as_posix(), safe="/:")
                 return f"file:{quoted_path}?mode=ro", True
             return str(self.db_path), False
-        if not self._directory_handles or not Path("/proc/self/fd").is_dir():
+        if not self._directory_handles:
             raise RuntimeError("descriptor-bound SQLite path authority is unavailable")
+        if not _sqlite_directory_fd_uri_supported():
+            if self.read_only:
+                quoted_path = quote(self.db_path.as_posix(), safe="/:")
+                return f"file:{quoted_path}?mode=ro", True
+            return str(self.db_path), False
         directory_handle = self._directory_handles[-1][1]
         quoted_name = quote(self.database_name, safe="")
         mode = "ro" if self.read_only else "rw"
@@ -1836,8 +1869,8 @@ class _ControlDatabaseAuthority:
 
         if os.name == "nt":
             return None
-        descriptor_root = Path("/proc/self/fd")
-        if not descriptor_root.is_dir():
+        descriptor_root = _sqlite_descriptor_inventory_root()
+        if descriptor_root is None:
             raise RuntimeError("SQLite descriptor authority is unavailable")
         observed_numbers: set[int] = set()
         with os.scandir(descriptor_root) as entries:

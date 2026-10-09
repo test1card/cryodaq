@@ -490,11 +490,17 @@ def test_engine_feed_and_command_response() -> None:
     # Simulate command handler response
     diag = engine.get_diagnostics()
     summary = engine.get_summary()
+    channel_payloads = {}
+    for channel, value in diag.items():
+        payload = asdict(value)
+        payload["updated_at"] = value.updated_at.isoformat()
+        channel_payloads[channel] = payload
     response = {
         "ok": True,
-        "channels": {k: asdict(v) for k, v in diag.items()},
+        "channels": channel_payloads,
         "summary": asdict(summary),
     }
+    json.dumps(response, allow_nan=False)
 
     # Verify response structure (what GUI will receive)
     assert response["ok"] is True

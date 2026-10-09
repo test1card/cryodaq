@@ -2263,9 +2263,10 @@ class ZMQCommandServer:
             except Exception as exc:
                 self._record_dispatched_unknown(dispatch_trace)
                 logger.error(
-                    "ZMQ command reply serialization failed: action=%s exception=%s",
+                    "ZMQ command reply serialization failed: action=%s exception=%s detail=%s",
                     _bounded_action_label(raw_action),
                     type(exc).__name__,
+                    str(exc),
                 )
                 try:
                     wire = self._encode_reply(

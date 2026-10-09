@@ -5648,9 +5648,19 @@ async def _handle_gui_command(
 
             diag = sensor_diag.get_diagnostics()
             summary = sensor_diag.get_summary()
+            channel_payloads = {}
+            for channel, value in diag.items():
+                payload = asdict(value)
+                updated_at = payload.get("updated_at")
+                if isinstance(updated_at, datetime):
+                    payload["updated_at"] = updated_at.isoformat()
+                for key, item in tuple(payload.items()):
+                    if isinstance(item, float) and not math.isfinite(item):
+                        payload[key] = None
+                channel_payloads[channel] = payload
             return {
                 "ok": True,
-                "channels": {k: asdict(v) for k, v in diag.items()},
+                "channels": channel_payloads,
                 "summary": asdict(summary),
             }
         if action == "get_vacuum_trend":
@@ -5832,6 +5842,12 @@ class _EngineStartupRollback:
     async def call(self, operation: Callable[[], Any]) -> Any:
         try:
             result = operation()
+            # TaskSupervisor.register/spawn return live task handles.  Those
+            # handles are startup-owned references, not one-shot startup
+            # operations; awaiting one here blocks startup forever on its
+            # long-lived coroutine.
+            if isinstance(result, asyncio.Task):
+                return result
             if inspect.isawaitable(result):
                 return await result
             return result

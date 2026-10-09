@@ -972,6 +972,23 @@ async def test_engine_startup_partial_acquire_rolls_back_every_owner_in_reverse_
         startup.add("late-owner", lambda: None)
 
 
+async def test_engine_startup_call_returns_live_task_handles_without_awaiting_them() -> None:
+    startup = _EngineStartupRollback()
+    release = asyncio.Event()
+
+    async def long_lived_task() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(long_lived_task(), name="startup-live-task")
+    try:
+        returned = await asyncio.wait_for(startup.call(lambda: task), timeout=0.1)
+        assert returned is task
+        assert not task.done()
+    finally:
+        release.set()
+        await task
+
+
 async def test_engine_startup_failure_automatically_retries_retained_cleanup_before_returning() -> None:
     startup = _EngineStartupRollback()
     events: list[str] = []

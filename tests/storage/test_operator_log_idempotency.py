@@ -1022,7 +1022,10 @@ async def test_windows_sqlite_sidecars_block_replacement_until_native_close(tmp_
     await writer.stop()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-bound SQLite authority")
+@pytest.mark.skipif(
+    os.name == "nt" or not Path("/proc/self/fd").is_dir(),
+    reason="POSIX descriptor-bound SQLite authority requires Linux procfs",
+)
 def test_posix_sqlite_target_remains_bound_to_renamed_directory(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     moved_dir = tmp_path / "moved"
