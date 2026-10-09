@@ -1,0 +1,3 @@
+===RUFF===
+All checks passed!
+RUFF_EXIT=0

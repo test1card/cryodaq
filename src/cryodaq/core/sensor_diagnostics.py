@@ -16,12 +16,14 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from cryodaq.channels.descriptors import ChannelCatalog, ChannelQuantity, ChannelRole
 from cryodaq.core.rate_estimator import _ols_slope_per_min
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,9 @@ logger = logging.getLogger(__name__)
 # spent time investigating "broken sensors" that were actually working
 # computed/derived signals with no noise or drift physics.
 #
-# is_physical_sensor() returns True only for channels whose values can use the
-# temperature scorer. A declared descriptor is authoritative; regexes remain
-# only for undeclared legacy/test channels.
+# is_physical_sensor() returns True only for channels whose values come from
+# a real measurement (cryogenic thermometer, vacuum gauge, etc). Health
+# scoring only makes sense for those.
 
 # Patterns for derived / computed / system channels — checked FIRST so they
 # can pre-empt anything that looks like a physical name.
@@ -48,23 +50,24 @@ _DERIVED_CHANNEL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^Keithley.*/(voltage|current|power|resistance)$"),
 )
 
-# Legacy temperature-name patterns. They exist only for channels absent from
-# the catalog, where there is no descriptor with which to validate quantity,
-# unit, or role. Accepts both Cyrillic Т (canonical, runtime convention) and
-# Latin T (used in some test fixtures and legacy configs).
+# Patterns for physical sensors — actual measurements with noise/drift
+# physics. Accepts both Cyrillic Т (canonical, per CLAUDE.md) and Latin T
+# (used in some test fixtures and legacy configs).
 _PHYSICAL_SENSOR_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[ТT]\d+(\b|\s|/|$)"),  # T-prefixed cryo channels
     re.compile(r"/[ТT]\d+(\b|\s|/|$)"),  # …with instrument prefix
+    re.compile(r"/pressure\b"),  # Vacuum gauges
     re.compile(r"/temperature\b"),  # Generic temperature sensors
+    re.compile(r"VSP63D"),  # Thyracont vacuum gauge namespace
 )
 
 
-def is_physical_sensor(channel: str, channel_catalog: ChannelCatalog | None = None) -> bool:
-    """Return True if a channel is eligible for temperature diagnostics.
+def is_physical_sensor(channel: str) -> bool:
+    """Return True if a channel represents a physical sensor measurement.
 
-    For known channels the descriptor is the sole source of classification:
-    only Kelvin temperature measurement roles use this temperature scorer.
-    Unknown legacy/test channels use the restricted name fallback below.
+    Physical sensors have noise floor and drift physics that make health
+    scoring meaningful. Derived / computed / system channels do not and
+    should be excluded from the sensor diagnostics panel's health column.
 
     Phase 2c user report: operators see ~20 red '0' health values for
     analytics/system/derived-Keithley channels and waste time investigating
@@ -72,19 +75,6 @@ def is_physical_sensor(channel: str, channel_catalog: ChannelCatalog | None = No
     """
     if not channel:
         return False
-    if channel_catalog is not None:
-        descriptor = channel_catalog.by_channel_id.get(channel)
-        if descriptor is not None:
-            return (
-                descriptor.quantity is ChannelQuantity.TEMPERATURE
-                and descriptor.unit == "K"
-                and descriptor.role
-                in {
-                    ChannelRole.PRIMARY_MEASUREMENT,
-                    ChannelRole.REFERENCE_MEASUREMENT,
-                    ChannelRole.ENVIRONMENT,
-                }
-            )
     if any(p.search(channel) for p in _DERIVED_CHANNEL_PATTERNS):
         return False
     return any(p.search(channel) for p in _PHYSICAL_SENSOR_PATTERNS)
@@ -207,7 +197,6 @@ class SensorDiagnosticsEngine:
         warning_duration_s: float = 300.0,
         critical_duration_s: float = 900.0,
         cold_start_grace_s: float | None = None,
-        channel_catalog: ChannelCatalog | None = None,
     ) -> None:
         cfg = config or {}
         thresholds = cfg.get("thresholds", {})
@@ -220,7 +209,6 @@ class SensorDiagnosticsEngine:
         self.drift_threshold: float = thresholds.get("drift_K_per_min", 0.1)
         self.corr_min: float = thresholds.get("correlation_min", 0.8)
         self.min_points: int = cfg.get("min_points", 10)
-        self._channel_catalog = channel_catalog
 
         # channel_id → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
@@ -314,7 +302,7 @@ class SensorDiagnosticsEngine:
         don't have noise/drift physics so health scoring is meaningless,
         and including them produces a wall of red zeroes in the panel.
         """
-        if not is_physical_sensor(channel_id, self._channel_catalog):
+        if not is_physical_sensor(channel_id):
             return
         buf = self._buffers.setdefault(channel_id, deque(maxlen=self._maxlen))
         buf.append((timestamp, value))
@@ -361,7 +349,10 @@ class SensorDiagnosticsEngine:
             if status == "ok":
                 if channel_id in self._anomaly_state:
                     state = self._anomaly_state.pop(channel_id)
-                    if state.last_warning_published_ts is not None or state.last_critical_published_ts is not None:
+                    if (
+                        state.last_warning_published_ts is not None
+                        or state.last_critical_published_ts is not None
+                    ):
                         self._alarm_publisher.clear_diagnostic_alarm(channel_id)
             else:
                 if channel_id not in self._anomaly_state:
@@ -375,7 +366,9 @@ class SensorDiagnosticsEngine:
                 elapsed = now_mono - state.first_anomaly_ts
 
                 if elapsed >= self._warning_duration_s and state.last_warning_published_ts is None:
-                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "warning", elapsed)
+                    event = self._alarm_publisher.publish_diagnostic_alarm(
+                        channel_id, "warning", elapsed
+                    )
                     state.last_warning_published_ts = now_mono
                     if event is not None:
                         # F20 cooldown: suppress re-notification if channel was recently notified.
@@ -384,7 +377,8 @@ class SensorDiagnosticsEngine:
                         within_cooldown = (
                             self._escalation_cooldown_s > 0
                             and channel_id in self._channel_last_notified
-                            and now_mono - self._channel_last_notified[channel_id] < self._escalation_cooldown_s
+                            and now_mono - self._channel_last_notified[channel_id]
+                            < self._escalation_cooldown_s
                         )
                         if not within_cooldown:
                             self._channel_last_notified[channel_id] = now_mono
@@ -392,10 +386,11 @@ class SensorDiagnosticsEngine:
 
                 if (
                     elapsed >= self._critical_duration_s
-                    and state.current_status == "critical"
                     and state.last_critical_published_ts is None
                 ):
-                    event = self._alarm_publisher.publish_diagnostic_alarm(channel_id, "critical", elapsed)
+                    event = self._alarm_publisher.publish_diagnostic_alarm(
+                        channel_id, "critical", elapsed
+                    )
                     state.last_critical_published_ts = now_mono
                     if event is not None:
                         # Critical escalation always notifies — cooldown never suppresses
@@ -544,7 +539,9 @@ class SensorDiagnosticsEngine:
         cutoff = latest_ts - window_s
         return np.array([v for t, v in buf if t >= cutoff])
 
-    def _window_points(self, buf: deque[tuple[float, float]], window_s: float) -> list[tuple[float, float]]:
+    def _window_points(
+        self, buf: deque[tuple[float, float]], window_s: float
+    ) -> list[tuple[float, float]]:
         """Extract (ts, value) pairs within the last window_s seconds."""
         if not buf:
             return []
@@ -656,16 +653,6 @@ class SensorDiagnosticsEngine:
         correlation: float | None,
         T_current: float,
     ) -> int:
-        # NaN current reading → cannot be scored healthy (D-C19). NaN-доктрина:
-        # validity is decided at the Reading boundary (engine _sensor_diag_feed
-        # gates on reading.is_usable()). push() here is a status-less float API,
-        # so this stays as fail-closed defense-in-depth for any direct/GUI caller
-        # that bypasses the boundary: a NaN slips through the disconnected(>350)/
-        # shorted(<=0) comparisons (all comparisons with NaN are False) and would
-        # otherwise reach the insufficient-data branch below and return 100.
-        if not math.isfinite(T_current):
-            return 0
-
         # Disconnected / shorted → immediate low score
         if T_current > 350.0 or T_current <= 0.0:
             return 0

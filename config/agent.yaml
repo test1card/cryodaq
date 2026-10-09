@@ -4,7 +4,7 @@ agent:
   brand_emoji: "🤖"
 
   ollama:
-    base_url: http://127.0.0.1:11434
+    base_url: http://localhost:11434
     default_model: gemma4:e4b
     timeout_s: 120  # gemma4:e4b thinking-first; cold-load ~40s, warm ~10s on RTX 5070 Ti 16GB
     temperature: 0.3
@@ -26,10 +26,8 @@ agent:
       enabled: true
     shift_handover_request:
       enabled: true
-    # phase_transition_to_finalize: reserved — AssistantConfig.from_dict
-    # (agents/assistant/live/agent.py) does not read this trigger; kept
-    # commented so it isn't mistaken for a live setting.
-    #   enabled: true
+    phase_transition_to_finalize:
+      enabled: true
     periodic_report:
       enabled: true
       interval_minutes: 60
@@ -64,3 +62,14 @@ agent:
   audit:
     enabled: true
     retention_days: 90
+
+  query:
+    enabled: true
+    intent_model: gemma4:e4b
+    format_model: gemma4:e4b
+    intent_temperature: 0.1
+    format_temperature: 0.3
+    intent_timeout_s: 60.0  # 3× e2b default — absorbs e4b cold-load (~40s) + intent generation
+    format_timeout_s: 90.0  # 2.25× e2b default — absorbs e4b cold-load + Russian format generation
+    rate_limit:
+      max_queries_per_chat_per_hour: 60

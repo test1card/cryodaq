@@ -1,115 +1,148 @@
-"""Behavioral tests for deferred, no-interruption theme selection."""
+"""Behavioral tests for the theme-switch re-exec sequence (IV.1 finding 1).
+
+Theme switching calls ``os.execv`` to replace the launcher process image.
+Before IV.1 the engine + bridge were left to re-parent; the orphaned
+bridge's in-flight REQ was never consumed by the orphaned engine's REP,
+so every subsequent REQ from the re-execed launcher's fresh bridge
+queued behind the stranded reply and timed out with "Resource
+temporarily unavailable" on port 5556.
+
+The fix shuts down the bridge first (so no REQ is mid-flight), then
+terminates the engine, then releases the launcher lock so the new
+launcher can re-acquire it, and finally calls ``os.execv``. These tests
+mock ``os.execv`` and assert the full sequence.
+"""
 
 from __future__ import annotations
 
-from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from cryodaq.launcher import LauncherWindow
 
+def _make_window(lock_fd: int | None = 42, engine_external: bool = False) -> object:
+    """Construct a LauncherWindow-shaped stub without spawning subprocesses.
 
-def _stub() -> SimpleNamespace:
-    active_action = MagicMock(name="active_theme_action")
-    pending_action = MagicMock(name="pending_theme_action")
-    stub = SimpleNamespace(
-        _theme_active_id="warm_stone",
-        _theme_actions={"warm_stone": active_action, "signal": MagicMock()},
-        _theme_pending_action=pending_action,
-        _tray=MagicMock(name="tray"),
-        _stop_assistant=MagicMock(name="stop_assistant"),
-        _stop_engine=MagicMock(name="stop_engine"),
-        _bridge=MagicMock(name="bridge"),
-    )
-    stub._update_theme_pending_indicator = MethodType(
-        LauncherWindow._update_theme_pending_indicator,
-        stub,
-    )
-    stub._defer_theme_selection = MethodType(LauncherWindow._defer_theme_selection, stub)
+    LauncherWindow.__init__ spawns the engine subprocess, acquires file
+    locks, and builds Qt widgets — far too heavy for a unit test. The
+    re-exec sequence only reads ``self._bridge``, ``self._stop_engine``,
+    ``self._lock_fd``, and ``self._engine_external``, so a minimal stub is sufficient.
+    """
+    from cryodaq.launcher import LauncherWindow
+
+    stub = LauncherWindow.__new__(LauncherWindow)
+    stub._bridge = MagicMock(name="bridge")
+    stub._stop_engine = MagicMock(name="stop_engine")
+    stub._lock_fd = lock_fd
+    stub._engine_external = engine_external
     return stub
 
 
-def _packs() -> list[dict[str, str]]:
-    return [
-        {"id": "warm_stone", "name": "Warm Stone", "description": ""},
-        {"id": "signal", "name": "Signal", "description": ""},
-    ]
+def test_theme_switch_shuts_down_bridge_before_execv() -> None:
+    stub = _make_window()
+    from cryodaq.launcher import LauncherWindow
+
+    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
+        LauncherWindow._restart_gui_with_theme_change(stub)
+
+    stub._bridge.shutdown.assert_called_once()
+    mock_execv.assert_called_once()
 
 
-def test_theme_selection_persists_without_stopping_runtime() -> None:
-    stub = _stub()
+def test_theme_switch_stops_engine_before_execv() -> None:
+    stub = _make_window()
+    from cryodaq.launcher import LauncherWindow
 
-    with (
-        patch("cryodaq.gui._theme_loader.available_themes", return_value=_packs()),
-        patch("cryodaq.gui._theme_loader.write_theme_selection") as write_selection,
-    ):
-        LauncherWindow._on_theme_selected(stub, "signal")
+    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
+        LauncherWindow._restart_gui_with_theme_change(stub)
 
-    write_selection.assert_called_once_with("signal")
-    stub._stop_assistant.assert_not_called()
-    stub._stop_engine.assert_not_called()
-    stub._bridge.shutdown.assert_not_called()
-    stub._theme_actions["warm_stone"].setChecked.assert_called_with(True)
-    assert "Signal" in stub._theme_pending_action.setText.call_args.args[0]
-    stub._tray.showMessage.assert_called_once()
+    stub._stop_engine.assert_called_once()
+    mock_execv.assert_called_once()
 
 
-def test_selecting_active_theme_cancels_pending_next_launch() -> None:
-    stub = _stub()
+def test_theme_switch_releases_launcher_lock() -> None:
+    stub = _make_window(lock_fd=7)
+    from cryodaq.launcher import LauncherWindow
 
-    with (
-        patch("cryodaq.gui._theme_loader.available_themes", return_value=_packs()),
-        patch("cryodaq.gui._theme_loader.write_theme_selection") as write_selection,
-    ):
-        LauncherWindow._on_theme_selected(stub, "warm_stone")
+    with patch("cryodaq.launcher.os.execv"), patch("cryodaq.launcher.release_lock") as mock_release:
+        LauncherWindow._restart_gui_with_theme_change(stub)
 
-    write_selection.assert_called_once_with("warm_stone")
-    assert "current" not in stub._theme_pending_action.setText.call_args.args[0].lower()
-    assert (
-        "\u0442\u0435\u043a\u0443\u0449\u0430\u044f \u0442\u0435\u043c\u0430"
-        in stub._theme_pending_action.setText.call_args.args[0]
+    mock_release.assert_called_once_with(7, ".launcher.lock")
+    assert stub._lock_fd is None
+
+
+def test_theme_switch_skips_lock_release_if_no_fd() -> None:
+    stub = _make_window(lock_fd=None)
+    from cryodaq.launcher import LauncherWindow
+
+    with patch("cryodaq.launcher.os.execv"), patch("cryodaq.launcher.release_lock") as mock_release:
+        LauncherWindow._restart_gui_with_theme_change(stub)
+
+    mock_release.assert_not_called()
+
+
+def test_theme_switch_order_bridge_then_engine() -> None:
+    """Bridge shutdown MUST happen BEFORE engine terminate.
+
+    Correctness-critical, not stylistic: if the engine dies first, the
+    bridge's outstanding REQ is left talking to a socket whose process
+    has exited, and ZMQ's connection-reset handling is not guaranteed
+    to drain the reply-pending state cleanly. Shutting the bridge down
+    first guarantees the REQ/REP pair is quiesced before engine teardown.
+    """
+    calls: list[str] = []
+    stub = _make_window()
+    stub._bridge.shutdown = MagicMock(side_effect=lambda: calls.append("bridge"))
+    stub._stop_engine = MagicMock(side_effect=lambda: calls.append("engine"))
+
+    from cryodaq.launcher import LauncherWindow
+
+    with patch("cryodaq.launcher.os.execv"), patch("cryodaq.launcher.release_lock"):
+        LauncherWindow._restart_gui_with_theme_change(stub)
+
+    assert calls == ["bridge", "engine"], (
+        f"expected bridge shutdown before engine stop, got {calls}"
     )
 
 
-def test_persistence_failure_keeps_runtime_and_reports_sanitized_error() -> None:
-    stub = _stub()
+def test_theme_switch_execv_argv_preserved() -> None:
+    stub = _make_window()
+    from cryodaq.launcher import LauncherWindow
 
     with (
-        patch("cryodaq.gui._theme_loader.available_themes", return_value=_packs()),
-        patch("cryodaq.gui._theme_loader._selected_theme_name", return_value="warm_stone"),
-        patch(
-            "cryodaq.gui._theme_loader.write_theme_selection",
-            side_effect=RuntimeError("C:/secret/operator/path"),
-        ),
-        patch("cryodaq.launcher.QMessageBox.critical") as critical,
+        patch("cryodaq.launcher.os.execv") as mock_execv,
+        patch("cryodaq.launcher.release_lock"),
+        patch("cryodaq.launcher.sys") as mock_sys,
     ):
-        LauncherWindow._on_theme_selected(stub, "signal")
+        mock_sys.executable = "/fake/python"
+        mock_sys.argv = ["launcher.py", "--mock"]
+        LauncherWindow._restart_gui_with_theme_change(stub)
 
-    stub._stop_engine.assert_not_called()
-    critical.assert_called_once()
-    operator_text = " ".join(str(arg) for arg in critical.call_args.args)
-    assert "secret" not in operator_text
-    assert "path" not in operator_text
-    stub._tray.showMessage.assert_not_called()
+    mock_execv.assert_called_once_with(
+        "/fake/python",
+        ["/fake/python", "-m", "cryodaq.launcher", "--mock"],
+    )
 
 
-def test_nonmapping_settings_do_not_break_failure_recovery(tmp_path, monkeypatch) -> None:
-    from cryodaq.gui import _theme_loader as loader
+def test_theme_switch_continues_when_bridge_shutdown_raises() -> None:
+    """Exceptions during shutdown must not prevent execv — best-effort."""
+    stub = _make_window()
+    stub._bridge.shutdown = MagicMock(side_effect=RuntimeError("already dead"))
 
-    stub = _stub()
-    settings_file = tmp_path / "settings.local.yaml"
-    settings_file.write_text("- one\n- two\n")
-    monkeypatch.setattr(loader, "SETTINGS_FILE", settings_file)
+    from cryodaq.launcher import LauncherWindow
 
-    with (
-        patch("cryodaq.gui._theme_loader.available_themes", return_value=_packs()),
-        patch(
-            "cryodaq.gui._theme_loader.write_theme_selection",
-            side_effect=RuntimeError("private detail"),
-        ),
-        patch("cryodaq.launcher.QMessageBox.critical") as critical,
-    ):
-        LauncherWindow._on_theme_selected(stub, "signal")
+    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
+        LauncherWindow._restart_gui_with_theme_change(stub)
 
-    critical.assert_called_once()
-    stub._theme_actions["warm_stone"].setChecked.assert_called_with(True)
-    stub._stop_engine.assert_not_called()
+    stub._stop_engine.assert_called_once()
+    mock_execv.assert_called_once()
+
+
+def test_theme_switch_continues_when_engine_stop_raises() -> None:
+    stub = _make_window()
+    stub._stop_engine = MagicMock(side_effect=RuntimeError("engine already dead"))
+
+    from cryodaq.launcher import LauncherWindow
+
+    with patch("cryodaq.launcher.os.execv") as mock_execv, patch("cryodaq.launcher.release_lock"):
+        LauncherWindow._restart_gui_with_theme_change(stub)
+
+    mock_execv.assert_called_once()

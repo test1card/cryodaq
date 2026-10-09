@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread, Timer
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -539,7 +540,14 @@ async def test_filtered_hot_history_spends_deduplicated_deficits_newest_first(
         statements: dict[str, list[str]] = {}
 
         def traced_connect(path: str, *args: object, **kwargs: object):
-            name = Path(path).name
+            # The read paths open encoded read-only URIs
+            # ("file:///...db?mode=ro"), so strip the scheme and query before
+            # naming the database. This test is about WHICH databases are
+            # opened and in what order, not about the connection mode.
+            target = str(path)
+            if target.startswith("file:"):
+                target = unquote(urlparse(target).path)
+            name = Path(target).name
             opened.append(name)
             conn = real_connect(path, *args, **kwargs)
             statements.setdefault(name, [])

@@ -38,11 +38,7 @@ from cryodaq.agents.assistant.query.ru_labels import (
     phase_display_name,
     ru_bool,
 )
-from cryodaq.agents.assistant.query.schemas import (
-    ARCHIVE_DETAIL_INVALID_REQUEST_REASON,
-    QueryAdapters,
-    QueryCategory,
-)
+from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory
 from cryodaq.agents.rag.source_labels import prettify_source_label
 
 if TYPE_CHECKING:
@@ -57,9 +53,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FALLBACK = "Произошла внутренняя ошибка. Попробуй ещё раз или обратись к оператору."
-_RATE_WINDOW_S = 3600.0
-_RATE_BUCKET_SWEEP_INTERVAL_S = 60.0
-_MAX_RATE_BUCKETS = 4096
 
 
 class AssistantQueryAgent:
@@ -99,13 +92,6 @@ class AssistantQueryAgent:
         self._max_per_hour = max_queries_per_chat_per_hour
         self._chart_dispatcher = chart_dispatcher
         self._rate_buckets: dict[int | str, collections.deque[float]] = {}
-        self._next_rate_sweep_at = 0.0
-        self._closed = False
-        self._last_audit_error = False
-
-    @property
-    def last_audit_error(self) -> bool:
-        return self._last_audit_error
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,14 +107,10 @@ class AssistantQueryAgent:
         try:
             return await self._handle_query_inner(query, chat_id=chat_id)
         except Exception:
-            logger.warning("AssistantQueryAgent: unexpected error for %r", query[:80], exc_info=True)
+            logger.warning(
+                "AssistantQueryAgent: unexpected error for %r", query[:80], exc_info=True
+            )
             return _FALLBACK
-
-    async def close(self) -> None:
-        """Drain chart work before the query owner is considered stopped."""
-        self._closed = True
-        if self._chart_dispatcher is not None:
-            await self._chart_dispatcher.close()
 
     async def _handle_query_inner(
         self,
@@ -136,8 +118,6 @@ class AssistantQueryAgent:
         *,
         chat_id: int | str | None = None,
     ) -> str:
-        if self._closed:
-            return _FALLBACK
         if chat_id is not None and not self._check_rate(chat_id):
             logger.info("AssistantQueryAgent: rate-limited chat_id=%s", chat_id)
             return "Слишком много запросов. Подожди немного."
@@ -154,8 +134,12 @@ class AssistantQueryAgent:
         try:
             intent = await self._classifier.classify(query)
             data = await self._router.fetch(intent, query)
-            user_prompt = self._build_format_user_prompt(query, intent.category, data)
-            system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
+            user_prompt = self._build_format_user_prompt(
+                query, intent.category, data
+            )
+            system_prompt = format_with_brand(
+                FORMAT_RESPONSE_SYSTEM, self._config.brand_name
+            )
             # Bound the format LLM call by _format_timeout_s. Without this
             # wrapper a hung Ollama format call (cold model load that never
             # returns, stalled socket) hangs the whole query agent
@@ -177,15 +161,18 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
+                if self._chart_dispatcher is not None and chat_id is not None:
+                    self._chart_dispatcher.dispatch(intent.category, data, chat_id)
         except Exception as exc:
-            logger.warning("AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc)
+            logger.warning(
+                "AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc
+            )
             errors.append(f"unexpected: {exc}")
 
         latency_s = time.monotonic() - t0
         cat_str = intent.category.value if intent is not None else "error"
 
         try:
-            self._last_audit_error = False
             await self._audit.log(
                 audit_id=audit_id,
                 trigger_event={
@@ -196,8 +183,12 @@ class AssistantQueryAgent:
                 },
                 context_assembled=str(data),
                 prompt_template=cat_str,
-                model=result.model if result is not None else (self._format_model or "unknown"),
-                system_prompt=format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name),
+                model=result.model if result is not None else (
+                    self._format_model or "unknown"
+                ),
+                system_prompt=format_with_brand(
+                    FORMAT_RESPONSE_SYSTEM, self._config.brand_name
+                ),
                 user_prompt=user_prompt,
                 response=response,
                 tokens={
@@ -205,17 +196,11 @@ class AssistantQueryAgent:
                     "out": result.tokens_out if result is not None else 0,
                 },
                 latency_s=latency_s,
-                output_intent=["telegram"] if chat_id is not None else [],
-                outputs_dispatched=[],
+                outputs_dispatched=["telegram"] if chat_id is not None else [],
                 errors=errors,
             )
         except Exception:
-            self._last_audit_error = True
             logger.warning("AssistantQueryAgent: audit log failed", exc_info=True)
-            return response
-
-        if self._chart_dispatcher is not None and chat_id is not None:
-            self._chart_dispatcher.dispatch(intent.category if intent is not None else None, data, chat_id)
 
         return response
 
@@ -226,20 +211,8 @@ class AssistantQueryAgent:
     def _check_rate(self, chat_id: int | str) -> bool:
         """Return True if within rate limit; record the request."""
         now = time.monotonic()
-        cutoff = now - _RATE_WINDOW_S
-        if now >= self._next_rate_sweep_at:
-            stale = [key for key, candidate in self._rate_buckets.items() if not candidate or candidate[-1] < cutoff]
-            for key in stale:
-                self._rate_buckets.pop(key, None)
-            self._next_rate_sweep_at = now + _RATE_BUCKET_SWEEP_INTERVAL_S
-
-        bucket = self._rate_buckets.get(chat_id)
-        if bucket is None:
-            if len(self._rate_buckets) >= _MAX_RATE_BUCKETS:
-                logger.warning("AssistantQueryAgent: rate registry capacity reached")
-                return False
-            bucket = collections.deque()
-            self._rate_buckets[chat_id] = bucket
+        bucket = self._rate_buckets.setdefault(chat_id, collections.deque())
+        cutoff = now - 3600.0
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= self._max_per_hour:
@@ -260,7 +233,9 @@ class AssistantQueryAgent:
         try:
             return self._format_dispatch(query, category, data)
         except Exception as exc:
-            logger.warning("_build_format_user_prompt failed for %s: %s", category, exc)
+            logger.warning(
+                "_build_format_user_prompt failed for %s: %s", category, exc
+            )
             return FORMAT_UNKNOWN_USER.format(query=query)
 
     def _format_dispatch(
@@ -292,10 +267,16 @@ class AssistantQueryAgent:
         if category == QueryCategory.KNOWLEDGE_QUERY:
             return self._fmt_knowledge_query(query, data)
         if category == QueryCategory.OUT_OF_SCOPE_HISTORICAL:
-            return FORMAT_OUT_OF_SCOPE_HISTORICAL_USER.format(query=query, brand_name=self._config.brand_name)
+            return FORMAT_OUT_OF_SCOPE_HISTORICAL_USER.format(
+                query=query, brand_name=self._config.brand_name
+            )
         if category == QueryCategory.OUT_OF_SCOPE_GENERAL:
-            return FORMAT_OUT_OF_SCOPE_GENERAL_USER.format(query=query, brand_name=self._config.brand_name)
-        return FORMAT_UNKNOWN_USER.format(query=query, brand_name=self._config.brand_name)
+            return FORMAT_OUT_OF_SCOPE_GENERAL_USER.format(
+                query=query, brand_name=self._config.brand_name
+            )
+        return FORMAT_UNKNOWN_USER.format(
+            query=query, brand_name=self._config.brand_name
+        )
 
     def _fmt_current_value(self, query: str, data: dict[str, Any]) -> str:
         readings = data.get("readings", {})
@@ -311,7 +292,9 @@ class AssistantQueryAgent:
             for ch in channels:
                 r = readings.get(ch)
                 unit = getattr(r, "unit", "") if r is not None else ""
-                val_lines.append(f"  {ch}: {r.value:.4g} {unit}" if r else f"  {ch}: нет данных")
+                val_lines.append(
+                    f"  {ch}: {r.value:.4g} {unit}" if r else f"  {ch}: нет данных"
+                )
                 age = ages.get(ch)
                 if age is None:
                     stale_lines.append(f"  {ch}: нет данных")
@@ -342,11 +325,11 @@ class AssistantQueryAgent:
                 n_references=0,
                 cooldown_active=ru_bool(False),
             )
-        if not eta.available:
-            return f"Запрос: {query}\n\nПрогноз охлаждения недоступен: {eta.reason}. Не утверждай, что прогноза нет."
         h = max(eta.t_remaining_hours, 0.0)
         t_str = f"{int(h)}ч {int((h % 1) * 60)}мин"
-        t_cold = f"{eta.T_cold:.2f}" if eta.T_cold is not None else "нет данных"
+        t_cold = (
+            f"{eta.T_cold:.2f}" if eta.T_cold is not None else "нет данных"
+        )
         return FORMAT_ETA_COOLDOWN_USER.format(
             query=query,
             t_cold=t_cold,
@@ -373,8 +356,6 @@ class AssistantQueryAgent:
                 trend="нет данных",
                 confidence=0.0,
             )
-        if not eta.available:
-            return f"Запрос: {query}\n\nВакуумный прогноз недоступен: {eta.reason}. Не утверждай, что прогноза нет."
 
         cur = eta.current_mbar if eta.current_mbar is not None else current_p
         cur_str = f"{cur:.2e}" if cur is not None else "нет данных"
@@ -408,11 +389,6 @@ class AssistantQueryAgent:
                 std_value=0.0,
                 unit="",
             )
-        unavailable = [stats.reason for stats in stats_dict.values() if not stats.available]
-        if unavailable:
-            return (
-                f"Запрос: {query}\n\nСтатистика диапазона недоступна: {unavailable[0]}. Не подставляй нулевые значения."
-            )
         channel, stats = next(iter(stats_dict.items()))
         return FORMAT_RANGE_STATS_USER.format(
             query=query,
@@ -437,25 +413,21 @@ class AssistantQueryAgent:
                 experiment_age_text="—",
                 target_temp="нет данных",
             )
-        if not status.available:
-            return (
-                f"Запрос: {query}\n\nСтатус эксперимента недоступен: {status.reason}. "
-                "Не утверждай, что активного эксперимента нет."
-            )
         exp_id_text = status.experiment_id
         if status.experiment_started_human:
             exp_id_text += f" (начат {status.experiment_started_human})"
-        if status.experiment_age_s is None:
-            age_text = "нет данных"
-        else:
-            age_h = status.experiment_age_s / 3600
-            age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
+        age_h = status.experiment_age_s / 3600
+        age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
         if status.phase_started_at is not None:
             phase_dt = datetime.fromtimestamp(status.phase_started_at, tz=UTC)
             phase_started = phase_dt.strftime("%H:%M UTC")
         else:
             phase_started = "нет данных"
-        target = f"{status.target_temp} K" if status.target_temp is not None else "нет данных"
+        target = (
+            f"{status.target_temp} K"
+            if status.target_temp is not None
+            else "нет данных"
+        )
         return FORMAT_PHASE_INFO_USER.format(
             query=query,
             experiment_id=exp_id_text,
@@ -467,15 +439,7 @@ class AssistantQueryAgent:
 
     def _fmt_alarm_status(self, query: str, data: dict[str, Any]) -> str:
         result = data.get("alarm_result")
-        if result is None:
-            return FORMAT_ALARM_STATUS_USER.format(
-                query=query,
-                alarm_count="нет данных",
-                alarms_text="нет данных о тревогах",
-            )
-        if not result.available:
-            return f"Запрос: {query}\n\nСостояние тревог недоступно: {result.reason}. Не утверждай, что тревог нет."
-        if result.count == 0:
+        if result is None or result.count == 0:
             return FORMAT_ALARM_STATUS_USER.format(
                 query=query,
                 alarm_count=0,
@@ -504,11 +468,6 @@ class AssistantQueryAgent:
                 vacuum_eta_text="нет данных",
                 alarms_text="нет данных",
             )
-        if not cs.available:
-            return (
-                f"Запрос: {query}\n\nСнимок текущих данных недоступен: {cs.reason}. "
-                "Не утверждай, что поток только запускается."
-            )
 
         if getattr(cs, "snapshot_empty", False):
             return (
@@ -524,17 +483,20 @@ class AssistantQueryAgent:
         phase_text = phase_display_name(exp.phase) if exp else "—"
 
         temps_parts = [
-            f"{ch}: {val:.2f} K" if val is not None else f"{ch}: нет" for ch, val in cs.key_temperatures.items()
+            f"{ch}: {val:.2f} K" if val is not None else f"{ch}: нет"
+            for ch, val in cs.key_temperatures.items()
         ]
         temps_text = ", ".join(temps_parts) if temps_parts else "нет данных"
 
-        pressure_text = f"{cs.current_pressure:.2e} mbar" if cs.current_pressure is not None else "нет данных"
+        pressure_text = (
+            f"{cs.current_pressure:.2e} mbar"
+            if cs.current_pressure is not None
+            else "нет данных"
+        )
 
         cd = cs.cooldown_eta
         if cd is None:
             cd_text = "нет прогноза"
-        elif not cd.available:
-            cd_text = f"недоступен: {cd.reason}"
         else:
             h = max(cd.t_remaining_hours, 0.0)
             cd_text = f"{int(h)}ч {int((h % 1) * 60)}мин"
@@ -542,8 +504,6 @@ class AssistantQueryAgent:
         vac = cs.vacuum_eta
         if vac is None:
             vac_text = "нет прогноза"
-        elif not vac.available:
-            vac_text = f"недоступен: {vac.reason}"
         elif vac.eta_seconds is None:
             vac_text = "не определено"
         else:
@@ -554,8 +514,6 @@ class AssistantQueryAgent:
             ", ".join(a.alarm_id for a in cs.active_alarms)
             if cs.active_alarms
             else "тревог нет"
-            if cs.alarms_available
-            else "нет данных о тревогах"
         )
 
         return FORMAT_COMPOSITE_STATUS_USER.format(
@@ -582,8 +540,6 @@ class AssistantQueryAgent:
                 total_count=0,
                 entries_text="(адаптер архива не сконфигурирован)",
             )
-        if not result.available:
-            return f"Запрос: {query}\n\nАрхив недоступен: {result.reason}. Не утверждай, что записей нет."
         entries = result.entries or []
         if not entries:
             entries_text = "(нет записей за выбранный период)"
@@ -599,7 +555,10 @@ class AssistantQueryAgent:
                 head = f"- {exp_id}"
                 if title:
                     head += f" «{title}»"
-                lines.append(f"{head}: проба {sample}, оператор {operator}, начало {started}, статус {status}")
+                lines.append(
+                    f"{head}: проба {sample}, оператор {operator}, "
+                    f"начало {started}, статус {status}"
+                )
             entries_text = "\n".join(lines)
         return FORMAT_ARCHIVE_LIST_USER.format(
             query=query,
@@ -624,18 +583,6 @@ class AssistantQueryAgent:
                 phases_text="(нет данных)",
                 cooldown_text="(не указано)",
             )
-        if result.reason == ARCHIVE_DETAIL_INVALID_REQUEST_REASON:
-            return (
-                f"Запрос: {query}\n\n"
-                "Не указан идентификатор эксперимента, поэтому архив не запрашивался. "
-                "Уточните идентификатор; не утверждай, что запись не найдена."
-            )
-        if not result.available:
-            return (
-                f"Запрос: {query}\n\n"
-                f"Детали эксперимента {ident} недоступны: {result.reason}.\n"
-                "Не утверждай, что запись не найдена."
-            )
         if result.duration_h is None:
             duration_str = "не зафиксировано"
         else:
@@ -645,7 +592,7 @@ class AssistantQueryAgent:
         if result.phases:
             phase_lines = []
             for p in result.phases:
-                # v0.55.16 (audit SCOPE 3 finding 3.6) — defensive
+                # v0.55.16 (Codex audit SCOPE 3 finding 3.6) — defensive
                 # filter against non-dict phase rows (already filtered
                 # at the loader, but format prompt should not crash if
                 # legacy data slips through) + localise raw English
@@ -663,7 +610,10 @@ class AssistantQueryAgent:
             phases_text = "(нет данных)"
         cooldown = result.cooldown_metrics
         if cooldown:
-            cooldown_text = f"началось {cooldown.get('started_at', '—')}, закончилось {cooldown.get('ended_at', '—')}"
+            cooldown_text = (
+                f"началось {cooldown.get('started_at', '—')}, "
+                f"закончилось {cooldown.get('ended_at', '—')}"
+            )
         else:
             cooldown_text = "(нет фазы захолаживания в архиве этого эксперимента)"
         return FORMAT_ARCHIVE_DETAIL_USER.format(
@@ -689,10 +639,10 @@ class AssistantQueryAgent:
                 cleared_count=0,
                 by_alarm_id_text="(адаптер архива не сконфигурирован)",
             )
-        if not result.available:
-            return f"Запрос: {query}\n\nИстория тревог недоступна: {result.reason}. Не подставляй нулевые счётчики."
         if result.by_alarm_id:
-            top = sorted(result.by_alarm_id.items(), key=lambda kv: kv[1], reverse=True)
+            top = sorted(
+                result.by_alarm_id.items(), key=lambda kv: kv[1], reverse=True
+            )
             lines = [f"- {aid} ×{count}" for aid, count in top]
             by_alarm_id_text = "\n".join(lines)
         else:
@@ -718,12 +668,12 @@ class AssistantQueryAgent:
                 filter_note="",
                 hits_text="(семантический поиск недоступен — RAG-индекс не сконфигурирован)",
             )
-        if not result.available:
-            return (
-                f"Запрос: {query}\n\nСемантический поиск недоступен: {result.reason}. Не утверждай, что совпадений нет."
-            )
         hits = list(result.hits)
-        filter_note = f" (фильтр source_kind={result.source_kind_filter})" if result.source_kind_filter else ""
+        filter_note = (
+            f" (фильтр source_kind={result.source_kind_filter})"
+            if result.source_kind_filter
+            else ""
+        )
         if not hits:
             hits_text = "(совпадений не найдено)"
         else:
@@ -735,10 +685,15 @@ class AssistantQueryAgent:
                 # rather than a chunk-id path. Fall back to source_id
                 # when prettifier is non-specific (would just echo the
                 # kind string).
-                pretty = prettify_source_label(hit.source_kind, getattr(hit, "metadata", None) or {})
+                pretty = prettify_source_label(
+                    hit.source_kind, getattr(hit, "metadata", None) or {}
+                )
                 if pretty == hit.source_kind:
                     pretty = f"{self._kind_label(hit.source_kind)} — {hit.source}"
-                lines.append(f"[Источник {idx}] {pretty} (score={hit.distance:.2f})\n  «{hit.snippet}»")
+                lines.append(
+                    f"[Источник {idx}] {pretty} "
+                    f"(score={hit.distance:.2f})\n  «{hit.snippet}»"
+                )
             hits_text = "\n".join(lines)
         return FORMAT_KNOWLEDGE_QUERY_USER.format(
             query=query,
@@ -751,7 +706,7 @@ class AssistantQueryAgent:
     def _kind_label(kind: str) -> str:
         # Localised labels keep the format prompt's "Источники:" block
         # readable without exposing internal corpus-kind identifiers.
-        # v0.55.14 (audit SCOPE 6 finding 6.4 follow-up) — keys
+        # v0.55.14 (Codex audit SCOPE 6 finding 6.4 follow-up) — keys
         # match the canonical names emitted by document_loader.py
         # (vault_note, not vault); the legacy "vault" alias is kept so
         # an old index does not regress to the raw identifier.

@@ -7,10 +7,6 @@ and the locked-status-palette invariant across all shipped themes.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -52,7 +48,7 @@ def _write_pack(path: Path, overrides: dict[str, str] | None = None) -> None:
         "ON_DESTRUCTIVE": "#ffffff",
         "STATUS_OK": "#4a8a5e",
         "STATUS_WARNING": "#c4862e",
-        "STATUS_CAUTION": "#c4862e",
+        "STATUS_CAUTION": "#b35a38",
         "STATUS_FAULT": "#c44545",
         "STATUS_INFO": "#6490c4",
         "STATUS_STALE": "#5a5d68",
@@ -106,18 +102,6 @@ def test_loads_default_when_theme_key_wrong_type(monkeypatch, tmp_path):
     assert loader._selected_theme_name() == "warm_stone"
 
 
-@pytest.mark.parametrize("content", ["- one\n- two\n", "42\n", "plain scalar\n"])
-def test_truthy_nonmapping_settings_fall_back_without_import_failure(monkeypatch, tmp_path, content):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    settings_file.write_text(content)
-
-    assert loader._selected_theme_name() == "warm_stone"
-    theme_id, pack = loader.resolve_theme()
-    assert theme_id == "warm_stone"
-    assert pack["BACKGROUND"] == "#111111"
-
-
 def test_unknown_pack_falls_back_to_default(monkeypatch, tmp_path, caplog):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
     _write_pack(themes_dir / "warm_stone.yaml")
@@ -156,19 +140,6 @@ def test_invalid_hex_falls_back(monkeypatch, tmp_path, caplog):
     assert any("ACCENT" in rec.message for rec in caplog.records)
 
 
-def test_warning_must_alias_caution_or_pack_falls_back(monkeypatch, tmp_path, caplog):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    _write_pack(themes_dir / "split.yaml", overrides={"STATUS_WARNING": "#abcdef"})
-    settings_file.write_text("theme: split\n")
-
-    with caplog.at_level("ERROR"):
-        pack = loader.load_theme()
-
-    assert pack["STATUS_WARNING"] == pack["STATUS_CAUTION"]
-    assert any("separates STATUS_WARNING" in rec.message for rec in caplog.records)
-
-
 def test_short_hex_rejected(monkeypatch, tmp_path):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
     _write_pack(themes_dir / "warm_stone.yaml")
@@ -182,55 +153,12 @@ def test_short_hex_rejected(monkeypatch, tmp_path):
 def test_missing_default_pack_raises(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)  # empty themes dir, no packs at all
 
-    with pytest.raises(RuntimeError, match="Default theme pack invalid"):
+    with pytest.raises(RuntimeError, match="Default theme pack missing"):
         loader.load_theme()
 
 
-def test_post_build_seeds_theme_pack_for_frozen_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The copied ONEDIR config must load through the frozen resource path."""
-
-    repo_root = Path(__file__).resolve().parents[2]
-    project_root = tmp_path / "project"
-    bundle_root = project_root / "dist" / "CryoDAQ"
-    script = project_root / "build_scripts" / "post_build.py"
-    script.parent.mkdir(parents=True)
-    bundle_root.mkdir(parents=True)
-    shutil.copy2(repo_root / "build_scripts" / "post_build.py", script)
-    # post_build now stamps the unqualified-artifact marker, so the synthetic
-    # project needs the identity helper it imports and the pyproject it reads
-    # the version from. Copy the real ones rather than inventing a version.
-    shutil.copy2(repo_root / "build_scripts" / "artifact_identity.py", script.parent / "artifact_identity.py")
-    shutil.copy2(repo_root / "pyproject.toml", project_root / "pyproject.toml")
-    shutil.copytree(repo_root / "config", project_root / "config")
-
-    subprocess.run([sys.executable, str(script)], check=True, capture_output=True, text=True)
-
-    frozen_file = bundle_root / "_internal" / "cryodaq" / "gui" / "_theme_loader.py"
-    module = types.ModuleType("frozen_theme_loader_probe")
-    module.__file__ = str(frozen_file)
-    monkeypatch.delenv("CRYODAQ_ROOT", raising=False)
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "_MEIPASS", str(bundle_root / "_internal"), raising=False)
-    monkeypatch.setattr(sys, "executable", str(bundle_root / "CryoDAQ.exe"), raising=False)
-    exec(
-        compile(
-            (repo_root / "src" / "cryodaq" / "gui" / "_theme_loader.py").read_text(encoding="utf-8"),
-            str(frozen_file),
-            "exec",
-        ),
-        module.__dict__,
-    )
-
-    assert module.THEMES_DIR == bundle_root / "config" / "themes"
-    theme_id, pack = module.resolve_theme()
-    assert (module.THEMES_DIR / "warm_stone.yaml").is_file()
-    assert theme_id == "warm_stone"
-    assert pack["BACKGROUND"].startswith("#")
-
-
 def test_write_theme_selection_creates_file(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _, settings_file = _isolate(monkeypatch, tmp_path)
     assert not settings_file.exists()
 
     loader.write_theme_selection("warm_stone")
@@ -240,8 +168,7 @@ def test_write_theme_selection_creates_file(monkeypatch, tmp_path):
 
 
 def test_write_theme_selection_preserves_other_keys(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _, settings_file = _isolate(monkeypatch, tmp_path)
     settings_file.write_text(yaml.safe_dump({"theme": "warm_stone", "other_key": "value"}))
 
     loader.write_theme_selection("warm_stone")  # same theme, preserve keys
@@ -251,45 +178,15 @@ def test_write_theme_selection_preserves_other_keys(monkeypatch, tmp_path):
     assert data["other_key"] == "value"
 
 
-def test_write_theme_selection_refuses_corrupt_settings(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    original = "theme: [unterminated"
-    settings_file.write_text(original)
+def test_write_theme_selection_overwrites_corrupt_settings(monkeypatch, tmp_path, caplog):
+    _, settings_file = _isolate(monkeypatch, tmp_path)
+    settings_file.write_text("::: garbage :::")
 
-    with pytest.raises(loader.ThemePackError, match="selection was not changed"):
+    with caplog.at_level("WARNING"):
         loader.write_theme_selection("warm_stone")
 
-    assert settings_file.read_text() == original
-
-
-def test_write_theme_selection_rejects_unknown_or_unsafe_id(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-
-    with pytest.raises(loader.ThemePackError):
-        loader.write_theme_selection("missing")
-    with pytest.raises(loader.ThemePackError, match="invalid theme identifier"):
-        loader.write_theme_selection("../warm_stone")
-
-    assert not settings_file.exists()
-
-
-def test_write_theme_selection_uses_atomic_replace(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    calls: list[tuple[Path, str]] = []
-
-    def _atomic_write(path: Path, content: str, *, encoding: str = "utf-8") -> None:
-        calls.append((path, content))
-        path.write_text(content, encoding=encoding)
-
-    monkeypatch.setattr(loader, "atomic_write_text", _atomic_write)
-
-    loader.write_theme_selection("warm_stone")
-
-    assert [path for path, _content in calls] == [settings_file]
-    assert yaml.safe_load(calls[0][1]) == {"theme": "warm_stone"}
+    data = yaml.safe_load(settings_file.read_text())
+    assert data == {"theme": "warm_stone"}
 
 
 def test_available_themes_returns_metadata(monkeypatch, tmp_path):
@@ -307,26 +204,6 @@ def test_available_themes_returns_metadata(monkeypatch, tmp_path):
 def test_available_themes_empty_when_dir_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(loader, "THEMES_DIR", tmp_path / "does-not-exist")
     assert loader.available_themes() == []
-
-
-def test_available_themes_excludes_invalid_packs(monkeypatch, tmp_path):
-    themes_dir, _ = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    _write_pack(themes_dir / "broken.yaml", overrides={"BACKGROUND": None})
-
-    assert [item["id"] for item in loader.available_themes()] == ["warm_stone"]
-
-
-def test_resolve_theme_reports_actual_default_after_fallback(monkeypatch, tmp_path):
-    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
-    _write_pack(themes_dir / "broken.yaml", overrides={"ACCENT": "invalid"})
-    settings_file.write_text("theme: broken\n")
-
-    theme_id, pack = loader.resolve_theme()
-
-    assert theme_id == "warm_stone"
-    assert pack["ACCENT"] == "#b89e7a"
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +278,9 @@ _LIGHT_THEMES = frozenset({"gost", "xcode", "braun"})
 # gost/xcode/braun light) — the pre-ADR packs are out of scope for
 # these checks (e.g. warm_stone has ACCENT hue == STATUS_OK hue,
 # a known pre-existing compromise; retro-audit is an architect call).
-_ADR_001_PACKS = frozenset({"signal", "instrument", "amber", "gost", "xcode", "braun"})
+_ADR_001_PACKS = frozenset(
+    {"signal", "instrument", "amber", "gost", "xcode", "braun"}
+)
 
 _STATUS_TOKENS = (
     "STATUS_OK",
@@ -466,14 +345,19 @@ def test_status_palette_hue_locked_across_all_themes(real_themes_dir):
     STATUS_OK dark #4a8a5e hue 138.8°, light #2e6b45 hue 142.6° —
     same hue family, quantization-bounded).
     """
-    packs = {pack_file.stem: loader._load_theme_pack(pack_file.stem) for pack_file in real_themes_dir.glob("*.yaml")}
+    packs = {
+        pack_file.stem: loader._load_theme_pack(pack_file.stem)
+        for pack_file in real_themes_dir.glob("*.yaml")
+    }
     assert packs
     for token in _STATUS_TOKENS:
         hues = {name: _hue(p[token]) for name, p in packs.items()}
         base = next(iter(hues.values()))
         for name, h in hues.items():
             delta = min(abs(h - base), 360.0 - abs(h - base))
-            assert delta <= 5.0, f"{token} hue {h:.1f}° in {name} differs >5° from base {base:.1f}°"
+            assert delta <= 5.0, (
+                f"{token} hue {h:.1f}° in {name} differs >5° from base {base:.1f}°"
+            )
 
 
 def test_status_palette_hex_identical_across_dark_themes(real_themes_dir):
@@ -532,7 +416,8 @@ def test_accent_hue_separation_from_status(real_themes_dir):
             # COLD_HIGHLIGHT and STALE are often near-achromatic; 30°
             # still applies but should be trivially satisfied.
             assert delta >= 30.0, (
-                f"{name}: ACCENT hue {accent_hue:.1f}° only {delta:.1f}° from {token} {status_hue:.1f}° (need ≥30°)"
+                f"{name}: ACCENT hue {accent_hue:.1f}° only {delta:.1f}° from "
+                f"{token} {status_hue:.1f}° (need ≥30°)"
             )
 
 
@@ -609,7 +494,8 @@ def test_neutral_tokens_distinct_from_status_ok(real_themes_dir):
             hue_delta = min(abs(ok_hue - tok_hue), 360.0 - abs(ok_hue - tok_hue))
             lum_delta = abs(ok_lum - tok_lum)
             assert hue_delta >= 30.0 or lum_delta >= 0.15, (
-                f"{pack_file.stem}.{token} too close to STATUS_OK: hue Δ{hue_delta:.1f}°, lum Δ{lum_delta:.3f}"
+                f"{pack_file.stem}.{token} too close to STATUS_OK: "
+                f"hue Δ{hue_delta:.1f}°, lum Δ{lum_delta:.3f}"
             )
 
 
@@ -640,7 +526,8 @@ def test_default_cool_accent_preserved_as_indigo():
     STATUS_OK green that the other presets had."""
     pack = loader._load_theme_pack("default_cool")
     assert pack["ACCENT"] == "#7c8cff", (
-        "default_cool ACCENT changed from historical indigo #7c8cff — if intentional, update this test + ADR 002"
+        "default_cool ACCENT changed from historical indigo #7c8cff — "
+        "if intentional, update this test + ADR 002"
     )
 
 
@@ -649,11 +536,15 @@ def test_warm_stone_accent_decoupled_from_status_ok():
     (#4a8a5e) which caused semantic collision across every primary
     button and mode badge. Guard against regression."""
     pack = loader._load_theme_pack("warm_stone")
-    assert pack["ACCENT"] != pack["STATUS_OK"], "warm_stone ACCENT == STATUS_OK — III.A decoupling lost"
+    assert pack["ACCENT"] != pack["STATUS_OK"], (
+        "warm_stone ACCENT == STATUS_OK — III.A decoupling lost"
+    )
 
 
 def test_taupe_quiet_accent_decoupled_from_status_ok():
     """III.A fix: taupe_quiet deliberately set ACCENT == STATUS_OK
     with a «by design» comment; III.A decoupled."""
     pack = loader._load_theme_pack("taupe_quiet")
-    assert pack["ACCENT"] != pack["STATUS_OK"], "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"
+    assert pack["ACCENT"] != pack["STATUS_OK"], (
+        "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"
+    )

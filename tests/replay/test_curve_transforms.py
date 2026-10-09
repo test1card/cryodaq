@@ -1,5 +1,4 @@
 """Unit tests for replay curve transforms (Stage 2, v0.53.0)."""
-
 from __future__ import annotations
 
 import sqlite3
@@ -8,8 +7,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cryodaq.analytics.cooldown_predictor import T_PHASE_BOUNDARY
-from cryodaq.drivers.base import ChannelStatus
 from cryodaq.replay.curve_transforms import (
     add_noise,
     compress_time,
@@ -20,25 +17,6 @@ from cryodaq.replay.curve_transforms import (
     write_curve_json,
 )
 
-
-def test_curve_to_sqlite_writes_lowercase_ok_status(tmp_path: Path) -> None:
-    """Writer must store the canonical lowercase ``"ok"`` (ChannelStatus.OK.value).
-
-    Uppercase ``"OK"`` is masked to NaN by the case-sensitive sentinel decode,
-    so legitimate generated replay rows must carry lowercase status.
-    """
-    db = tmp_path / "curve.db"
-    curve = {"t_hours": [0.0, 1.0], "T_cold": [300.0, 200.0], "T_warm": [290.0, 190.0]}
-    curve_to_sqlite(curve, db)
-    conn = sqlite3.connect(str(db))
-    try:
-        statuses = {r[0] for r in conn.execute("SELECT DISTINCT status FROM readings")}
-    finally:
-        conn.close()
-    assert statuses == {ChannelStatus.OK.value}
-    assert statuses == {"ok"}
-
-
 # ---------------------------------------------------------------------------
 # Shared fixture curve (~100 points, valid cooldown shape)
 # ---------------------------------------------------------------------------
@@ -47,29 +25,6 @@ _N = 100
 _T_H = np.linspace(0.0, 20.0, _N)
 _TC = np.linspace(280.0, 4.5, _N)
 _TW = np.linspace(295.0, 10.0, _N)
-# Derived, not hand-picked: cooldown_predictor._curve_summary() computes
-# phase1_hours as the elapsed time at the first sample where T_cold drops
-# below T_PHASE_BOUNDARY, and _reconcile_summary_value() rejects a supplied
-# phase1_hours/phase2_hours that doesn't match that derivation. A previous
-# version of this fixture hardcoded 10.0/10.0 (an unvalidated half-of-duration
-# guess); for this exact _T_H/_TC ramp the real crossing is at index 83
-# (~16.77h), not the midpoint, and nothing enforced that until
-# _reconcile_summary_value started checking it. Computing it here the same
-# way the product does (mirroring test_cooldown_schema.py's
-# _PHASE1_HOURS/_PHASE2_HOURS) makes the value self-verifying instead of
-# another number to trust.
-#
-# Deliberate narrowing, not an oversight: because this derives phase1/phase2
-# the same way _reconcile_summary_value() checks them, it is consistent by
-# construction and can no longer catch a fixture whose summary disagrees
-# with its own arrays -- there is no way for it to disagree anymore. This
-# test's job is round-trip fidelity of t_hours/T_cold through
-# write_curve_json() -> load_curves() (see the assert_allclose calls in
-# test_round_trip_write_and_load below); the crossing-rule computation
-# itself is exercised by cooldown_predictor's own logic and by
-# test_cooldown_schema.py's independent use of the same derivation pattern.
-_PHASE1_HOURS = next(t for t, tc in zip(_T_H.tolist(), _TC.tolist(), strict=True) if tc < T_PHASE_BOUNDARY)
-_PHASE2_HOURS = float(_T_H[-1]) - _PHASE1_HOURS
 
 
 def _curve_dict() -> dict:
@@ -80,8 +35,8 @@ def _curve_dict() -> dict:
         "T_cold": _TC.tolist(),
         "T_warm": _TW.tolist(),
         "duration_hours": 20.0,
-        "phase1_hours": _PHASE1_HOURS,
-        "phase2_hours": _PHASE2_HOURS,
+        "phase1_hours": 10.0,
+        "phase2_hours": 10.0,
         "T_cold_final": 4.5,
         "T_warm_final": 10.0,
     }

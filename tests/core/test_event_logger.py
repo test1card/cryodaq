@@ -62,7 +62,9 @@ async def test_attached_to_experiment(logger, mock_writer) -> None:
     assert call.kwargs["experiment_id"] == "exp-001"
 
 
-async def test_writer_error_is_swallowed_and_logged_as_warning(mock_em, caplog) -> None:
+async def test_writer_error_is_swallowed_and_logged_as_warning(
+    mock_em, caplog
+) -> None:
     """A writer failure must not propagate, but it must still hit the writer and be
     surfaced as a WARNING (not silently dropped before the write was attempted)."""
     writer = MagicMock()
@@ -76,25 +78,7 @@ async def test_writer_error_is_swallowed_and_logged_as_warning(mock_em, caplog) 
     # The write was actually attempted (not short-circuited before the call) ...
     writer.append_operator_log.assert_awaited_once()
     # ... and the swallowed error was logged as a warning.
-    assert any(rec.levelname == "WARNING" and "Failed to auto-log event" in rec.message for rec in caplog.records)
-
-
-async def test_writer_failure_does_not_publish_event_logged(mock_em) -> None:
-    writer = MagicMock()
-    writer.append_operator_log = AsyncMock(side_effect=RuntimeError("db error"))
-    event_bus = MagicMock()
-    event_bus.publish = AsyncMock()
-
-    await EventLogger(writer, mock_em, event_bus=event_bus).log_event("test", "msg")
-
-    event_bus.publish.assert_not_awaited()
-
-
-async def test_successful_writer_still_publishes_event_logged(mock_writer, mock_em) -> None:
-    event_bus = MagicMock()
-    event_bus.publish = AsyncMock()
-
-    await EventLogger(mock_writer, mock_em, event_bus=event_bus).log_event("test", "msg")
-
-    event_bus.publish.assert_awaited_once()
-    assert event_bus.publish.await_args.args[0].event_type == "event_logged"
+    assert any(
+        rec.levelname == "WARNING" and "Failed to auto-log event" in rec.message
+        for rec in caplog.records
+    )

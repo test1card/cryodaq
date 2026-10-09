@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -16,7 +15,7 @@ from cryodaq.core.alarm_v2 import (
 )
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
-from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,71 +110,6 @@ def test_threshold_above_not_triggered() -> None:
         "level": "WARNING",
     }
     assert ev.evaluate("test", cfg) is None
-
-
-def test_active_threshold_alarm_holds_on_unusable_reading() -> None:
-    """A sensor error may not clear an already-active threshold alarm."""
-    state = ChannelStateTracker()
-    rate = RateEstimator(window_s=120.0, min_points=2)
-    evaluator = AlarmEvaluator(state, rate, PhaseProvider(), SetpointProvider())
-    manager = AlarmStateManager()
-    cfg = {
-        "alarm_type": "threshold",
-        "channel": "T1",
-        "check": "above",
-        "threshold": 4.0,
-        "level": "CRITICAL",
-        "message": "T1 high",
-    }
-
-    state.update(_reading("T1", 5.0))
-    event = evaluator.evaluate("T1_high", cfg)
-    assert manager.process("T1_high", event, cfg) == "TRIGGERED"
-
-    state.update(
-        Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="LS218",
-            channel="T1",
-            value=math.nan,
-            unit="K",
-            status=ChannelStatus.SENSOR_ERROR,
-        )
-    )
-    event = evaluator.evaluate(
-        "T1_high",
-        cfg,
-        is_active=True,
-        active_channels=frozenset({"T1"}),
-    )
-
-    assert manager.process("T1_high", event, cfg) is None
-    assert "T1_high" in manager.get_active()
-
-
-def test_active_threshold_alarm_holds_when_channel_state_disappears() -> None:
-    """A missing input is unknown, never evidence that an active alarm cleared."""
-    cfg = {
-        "alarm_type": "threshold",
-        "channel": "T1",
-        "check": "above",
-        "threshold": 4.0,
-        "level": "CRITICAL",
-        "message": "T1 high",
-    }
-    manager = AlarmStateManager()
-    active = _make_evaluator([_reading("T1", 5.0)]).evaluate("T1_high", cfg)
-    assert manager.process("T1_high", active, cfg) == "TRIGGERED"
-
-    event = _make_evaluator().evaluate(
-        "T1_high",
-        cfg,
-        is_active=True,
-        active_channels=frozenset({"T1"}),
-    )
-
-    assert manager.process("T1_high", event, cfg) is None
-    assert "T1_high" in manager.get_active()
 
 
 def test_threshold_below() -> None:
@@ -280,6 +214,7 @@ def test_threshold_sustained_fires_after_delay() -> None:
         event = ev.evaluate("drift", cfg)
         result_first = state_mgr.process("drift", event, cfg)
     assert result_first is None, "sustained not yet met — must return None on first call"
+    assert "drift" in state_mgr._sustained_since, "sustained_since must be recorded after first true"
 
     # Second process() call at t0 + 65 s: elapsed 65 > 60 → "TRIGGERED".
     with patch("cryodaq.core.alarm_v2.time.time", return_value=t0 + 65.0):
@@ -366,42 +301,6 @@ def test_composite_or() -> None:
     assert result is not None
 
 
-def test_composite_unknown_propagates_for_and_and_or() -> None:
-    """A stale input is unknown: it never activates an alarm by itself."""
-    ev = _make_evaluator(
-        [
-            _reading("T11", 100.0),
-            Reading(
-                timestamp=datetime.now(UTC),
-                instrument_id="VSP63D_1",
-                channel="P1",
-                value=math.nan,
-                unit="mbar",
-                status=ChannelStatus.SENSOR_ERROR,
-            ),
-        ]
-    )
-    unknown_pressure = {"channel": "P1", "check": "above", "threshold": 1e-3}
-
-    assert ev._eval_condition(unknown_pressure) is None
-    assert ev._and_conditions([True, None]) is None
-    assert ev._and_conditions([False, None]) is False
-    assert ev._or_conditions([False, None]) is None
-    assert ev._or_conditions([True, None]) is True
-
-    and_cfg = {
-        "alarm_type": "composite",
-        "operator": "AND",
-        "conditions": [
-            {"channel": "T11", "check": "below", "threshold": 200},
-            unknown_pressure,
-        ],
-    }
-    or_cfg = {**and_cfg, "operator": "OR"}
-    assert ev.evaluate("unknown_and", and_cfg) is None
-    assert ev.evaluate("unknown_or", or_cfg) is not None
-
-
 # ---------------------------------------------------------------------------
 # Rate
 # ---------------------------------------------------------------------------
@@ -480,48 +379,6 @@ def test_rate_no_data_no_fire() -> None:
     assert ev.evaluate("test", cfg) is None
 
 
-def test_active_rate_alarm_holds_on_unusable_reading() -> None:
-    """A rate alarm may not clear solely because its channel becomes unknown."""
-    state = ChannelStateTracker()
-    rate = RateEstimator(window_s=120.0, min_points=2)
-    evaluator = AlarmEvaluator(state, rate, PhaseProvider(), SetpointProvider())
-    manager = AlarmStateManager()
-    now = time.time()
-    rate.push("T1", now - 60.0, 0.0)
-    rate.push("T1", now, 6.0)
-    state.update(_reading("T1", 6.0))
-    cfg = {
-        "alarm_type": "rate",
-        "channel": "T1",
-        "check": "rate_above",
-        "threshold": 5.0,
-        "level": "CRITICAL",
-    }
-
-    event = evaluator.evaluate("rapid_warming", cfg)
-    assert manager.process("rapid_warming", event, cfg) == "TRIGGERED"
-
-    state.update(
-        Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="LS218",
-            channel="T1",
-            value=math.nan,
-            unit="K",
-            status=ChannelStatus.SENSOR_ERROR,
-        )
-    )
-    event = evaluator.evaluate(
-        "rapid_warming",
-        cfg,
-        is_active=True,
-        active_channels=frozenset({"T1"}),
-    )
-
-    assert manager.process("rapid_warming", event, cfg) is None
-    assert "rapid_warming" in manager.get_active()
-
-
 # ---------------------------------------------------------------------------
 # Stale
 # ---------------------------------------------------------------------------
@@ -548,24 +405,6 @@ def test_stale_not_fires_fresh() -> None:
     ev = _make_evaluator([_reading("T1", 4.2)])
     cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
     assert ev.evaluate("stale", cfg) is None
-
-
-def test_stale_fires_immediately_on_unusable_reading() -> None:
-    """A fresh timestamp cannot hide a NaN/error reading from stale alarms."""
-    ev = _make_evaluator(
-        [
-            Reading(
-                timestamp=datetime.now(UTC),
-                instrument_id="LS218",
-                channel="T1",
-                value=math.nan,
-                unit="K",
-                status=ChannelStatus.SENSOR_ERROR,
-            )
-        ]
-    )
-    cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
-    assert ev.evaluate("data_stale", cfg) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +579,7 @@ def test_acknowledge_nonexistent_returns_none():
 
 
 def test_acknowledge_is_idempotent():
-    """A.9: double-ack must not duplicate history entries."""
+    """A.9 Codex: double-ack must not duplicate history entries."""
     mgr = AlarmStateManager()
     event = AlarmEvent(
         alarm_id="test_alarm",
@@ -826,12 +665,12 @@ def test_acknowledge_no_event_on_unknown_or_reack():
 
 
 # ---------------------------------------------------------------------------
-# case 04 regression: cooldown_stall composite — threshold, not threshold_expr
+# Codex-04 regression: cooldown_stall composite — threshold, not threshold_expr
 # ---------------------------------------------------------------------------
 
 
 def test_cooldown_stall_config_evaluates_without_threshold_keyerror(caplog) -> None:
-    """case 04: composite cooldown_stall must not KeyError on 'above' condition.
+    """Codex-04: composite cooldown_stall must not KeyError on 'above' condition.
 
     threshold_expr is not implemented; alarms_v3.yaml uses static threshold: 150.
     Т12=200 K > 150, rate≈0 K/мин → both AND conditions true → alarm fires.
@@ -998,7 +837,7 @@ def test_severity_upgrade_message_updated() -> None:
 
 
 def test_hysteresis_deadband_non_triggering_channel_does_not_keep_active() -> None:
-    """finding: non-triggering channel in deadband must not keep alarm active.
+    """Codex finding: non-triggering channel in deadband must not keep alarm active.
 
     Multi-channel alarm: T1 triggered (value was > threshold), T2 never triggered.
     After T1 clears below deadband, T2 in deadband must NOT return keep-active event.

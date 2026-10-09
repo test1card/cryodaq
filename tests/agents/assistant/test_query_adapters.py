@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +17,6 @@ from cryodaq.agents.assistant.query.adapters.experiment_adapter import Experimen
 from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
 from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
 from cryodaq.agents.assistant.query.schemas import (
-    ActiveAlarmInfo,
     AlarmStatusResult,
     CompositeStatus,
     CooldownETA,
@@ -27,7 +27,6 @@ from cryodaq.agents.assistant.query.schemas import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _make_reading(channel: str, value: float, unit: str = "K") -> MagicMock:
     r = MagicMock()
     r.channel = channel
@@ -37,44 +36,90 @@ def _make_reading(channel: str, value: float, unit: str = "K") -> MagicMock:
     return r
 
 
+def _make_broker(readings: list | None = None) -> MagicMock:
+    broker = MagicMock()
+    queue: asyncio.Queue = asyncio.Queue()
+    broker.subscribe = AsyncMock(return_value=queue)
+    broker.unsubscribe = AsyncMock()
+    broker.publish = AsyncMock()
+    broker._queue = queue
+    if readings:
+        for r in readings:
+            queue.put_nowait(r)
+    return broker
+
+
 # ---------------------------------------------------------------------------
 # BrokerSnapshot
 # ---------------------------------------------------------------------------
 
 
-async def test_broker_snapshot_latest_per_channel() -> None:
-    """After consuming a reading, latest() returns the value.
+async def _poll_until(cond_fn, *, deadline_s: float = 1.0) -> None:
+    """Deterministic wait: poll async cond_fn() until True within deadline_s seconds."""
+    await asyncio.wait_for(_poll_loop(cond_fn), timeout=deadline_s)
 
-    B1: BrokerSnapshot now subscribes over ZMQ (tcp://127.0.0.1:5555)
-    instead of an in-process DataBroker — these tests feed the reading
-    straight into the internal callback instead of going through a fake
-    broker queue + .start()/.stop(), which would require a real socket.
-    """
+
+async def _poll_loop(cond_fn) -> None:
+    while not await cond_fn():  # noqa: ASYNC110
+        await asyncio.sleep(0.005)
+
+
+async def test_broker_snapshot_latest_per_channel() -> None:
+    """After consuming a reading, latest() returns the value."""
     r = _make_reading("T_cold", 12.5)
-    snap = BrokerSnapshot()
-    await snap._on_reading(r)
+    broker = _make_broker(readings=[r])
+    snap = BrokerSnapshot(broker)
+    await snap.start()
+
+    # Wait until the consume loop has processed the reading.
+    async def _has_t_cold() -> bool:
+        return await snap.latest("T_cold") is not None
+
+    await _poll_until(_has_t_cold)
 
     result = await snap.latest("T_cold")
     assert result is not None
     assert result.value == 12.5
 
+    await snap.stop()
+
 
 async def test_broker_snapshot_handles_no_data() -> None:
     """latest() returns None for an unseen channel."""
-    snap = BrokerSnapshot()
+    broker = _make_broker()
+    snap = BrokerSnapshot(broker)
+    await snap.start()
+    # No readings — just yield to let the event loop run the consume task once.
+    await asyncio.sleep(0)
+
     result = await snap.latest("T_unknown")
     assert result is None
+
+    await snap.stop()
 
 
 async def test_broker_snapshot_latest_all_returns_all_channels() -> None:
     """latest_all() returns a dict with all consumed channels."""
-    snap = BrokerSnapshot()
-    await snap._on_reading(_make_reading("T_cold", 10.0))
-    await snap._on_reading(_make_reading("T_warm", 80.0))
+    readings = [
+        _make_reading("T_cold", 10.0),
+        _make_reading("T_warm", 80.0),
+    ]
+    broker = _make_broker(readings=readings)
+    snap = BrokerSnapshot(broker)
+    await snap.start()
+
+    # Wait until both channels appear.
+    async def _both_present() -> bool:
+        ch = await snap.latest_all()
+        return "T_cold" in ch and "T_warm" in ch
+
+    await _poll_until(_both_present)
 
     all_ch = await snap.latest_all()
     assert "T_cold" in all_ch
     assert "T_warm" in all_ch
+
+    await snap.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -82,41 +127,29 @@ async def test_broker_snapshot_latest_all_returns_all_channels() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fake_client(reply: dict) -> MagicMock:
-    """B1: adapters now call the engine's read-only REP commands over ZMQ
-    (via ``EngineQueryClient``) instead of holding a live object reference.
-    This builds a minimal stand-in with a mocked ``.call()``."""
-    client = MagicMock()
-    client.call = AsyncMock(return_value=reply)
-    return client
-
-
 async def test_cooldown_adapter_returns_none_when_inactive() -> None:
-    """Returns None when the engine's cooldown_eta_get reports no prediction."""
-    adapter = CooldownAdapter(_fake_client({"ok": True, "prediction": None}))
+    """Returns None when CooldownService.last_prediction() is None."""
+    service = MagicMock()
+    service.last_prediction.return_value = None
+    adapter = CooldownAdapter(service)
     result = await adapter.eta()
     assert result is None
 
 
 async def test_cooldown_adapter_parses_prediction() -> None:
-    """Correctly wraps a cooldown_eta_get reply into CooldownETA."""
-    adapter = CooldownAdapter(
-        _fake_client(
-            {
-                "ok": True,
-                "prediction": {
-                    "t_remaining_hours": 5.0,
-                    "t_remaining_ci68": (4.0, 6.5),
-                    "progress": 0.65,
-                    "phase": "COOLING",
-                    "n_references": 12,
-                    "cooldown_active": True,
-                    "T_cold": 50.0,
-                    "T_warm": 120.0,
-                },
-            }
-        )
-    )
+    """Correctly wraps a last_prediction dict into CooldownETA."""
+    service = MagicMock()
+    service.last_prediction.return_value = {
+        "t_remaining_hours": 5.0,
+        "t_remaining_ci68": (4.0, 6.5),
+        "progress": 0.65,
+        "phase": "COOLING",
+        "n_references": 12,
+        "cooldown_active": True,
+        "T_cold": 50.0,
+        "T_warm": 120.0,
+    }
+    adapter = CooldownAdapter(service)
     result = await adapter.eta()
     assert isinstance(result, CooldownETA)
     assert result.t_remaining_hours == 5.0
@@ -128,19 +161,9 @@ async def test_cooldown_adapter_parses_prediction() -> None:
     assert result.T_cold == 50.0
 
 
-async def test_cooldown_adapter_returns_none_when_call_fails() -> None:
-    adapter = CooldownAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.eta()
-    assert result is not None
-    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
-
-
-async def test_cooldown_adapter_marks_malformed_prediction_unavailable() -> None:
-    result = await CooldownAdapter(_fake_client({"ok": True, "prediction": "broken"})).eta()
-    assert result is not None
-    assert result.available is False
-    assert result.stale is True
-    assert result.reason
+async def test_cooldown_adapter_returns_none_when_service_is_none() -> None:
+    adapter = CooldownAdapter(None)
+    assert await adapter.eta() is None
 
 
 # ---------------------------------------------------------------------------
@@ -150,16 +173,15 @@ async def test_cooldown_adapter_marks_malformed_prediction_unavailable() -> None
 
 async def test_vacuum_adapter_target_format() -> None:
     """VacuumAdapter matches eta_targets by value proximity."""
-    adapter = VacuumAdapter(
-        _fake_client(
-            {
-                "ok": True,
-                "eta_targets": {"1.00e-06": 3600.0},
-                "trend": "falling",
-                "confidence": 0.92,
-            }
-        )
-    )
+    pred = MagicMock()
+    pred.eta_targets = {"1.00e-06": 3600.0}
+    pred.trend = "falling"
+    pred.confidence = 0.92
+
+    predictor = MagicMock()
+    predictor.get_prediction.return_value = pred
+
+    adapter = VacuumAdapter(predictor)
     result = await adapter.eta_to_target(1e-6)
     assert isinstance(result, VacuumETA)
     assert result.eta_seconds == pytest.approx(3600.0)
@@ -168,15 +190,15 @@ async def test_vacuum_adapter_target_format() -> None:
     assert result.confidence == pytest.approx(0.92)
 
 
-async def test_vacuum_adapter_returns_none_when_call_fails() -> None:
-    adapter = VacuumAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.eta_to_target(1e-6)
-    assert result is not None
-    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
+async def test_vacuum_adapter_returns_none_when_predictor_is_none() -> None:
+    adapter = VacuumAdapter(None)
+    assert await adapter.eta_to_target(1e-6) is None
 
 
 async def test_vacuum_adapter_returns_none_when_no_prediction() -> None:
-    adapter = VacuumAdapter(_fake_client({"ok": True, "status": "no_data"}))
+    predictor = MagicMock()
+    predictor.get_prediction.return_value = None
+    adapter = VacuumAdapter(predictor)
     assert await adapter.eta_to_target(1e-6) is None
 
 
@@ -186,7 +208,7 @@ async def test_vacuum_adapter_returns_none_when_no_prediction() -> None:
 
 
 async def test_sqlite_adapter_range_stats_window() -> None:
-    """Correctly computes min/max/mean/std from readings_history reply."""
+    """Correctly computes min/max/mean/std from read_readings_history."""
     now = datetime.now(UTC).timestamp()
     readings_data = {
         "T_cold": [
@@ -197,7 +219,10 @@ async def test_sqlite_adapter_range_stats_window() -> None:
             (now - 100, 14.0),
         ]
     }
-    adapter = SQLiteAdapter(_fake_client({"ok": True, "data": readings_data}))
+    reader = MagicMock()
+    reader.read_readings_history = AsyncMock(return_value=readings_data)
+
+    adapter = SQLiteAdapter(reader)
     result = await adapter.range_stats("T_cold", window_minutes=60)
 
     assert result is not None
@@ -210,16 +235,11 @@ async def test_sqlite_adapter_range_stats_window() -> None:
 
 
 async def test_sqlite_adapter_returns_none_for_empty_channel() -> None:
-    adapter = SQLiteAdapter(_fake_client({"ok": True, "data": {"T_cold": []}}))
+    reader = MagicMock()
+    reader.read_readings_history = AsyncMock(return_value={"T_cold": []})
+    adapter = SQLiteAdapter(reader)
     result = await adapter.range_stats("T_cold", window_minutes=60)
     assert result is None
-
-
-async def test_sqlite_adapter_returns_none_when_call_fails() -> None:
-    adapter = SQLiteAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.range_stats("T_cold", window_minutes=60)
-    assert result is not None
-    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 # ---------------------------------------------------------------------------
@@ -228,61 +248,36 @@ async def test_sqlite_adapter_returns_none_when_call_fails() -> None:
 
 
 async def test_alarm_adapter_active_alarms() -> None:
-    """Returns AlarmStatusResult with structured info from the engine's
-    alarm_v2_status REP reply."""
-    triggered_at = datetime(2026, 5, 1, 11, 0, 0, tzinfo=UTC).timestamp()
-    adapter = AlarmAdapter(
-        _fake_client(
-            {
-                "ok": True,
-                "active": {
-                    "T1_high": {
-                        "level": "WARNING",
-                        "message": "T_cold above threshold",
-                        "triggered_at": triggered_at,
-                        "channels": ["T_cold"],
-                        "acknowledged": False,
-                        "acknowledged_at": None,
-                        "acknowledged_by": None,
-                    }
-                },
-            }
-        )
-    )
+    """Returns AlarmStatusResult with structured info from engine."""
+    engine = MagicMock()
+    engine.get_active_alarm_details.return_value = [
+        {
+            "alarm_id": "T1_high",
+            "level": "WARNING",
+            "channel_pattern": "T_cold",
+            "triggered_at": datetime(2026, 5, 1, 11, 0, 0, tzinfo=UTC),
+        }
+    ]
+    adapter = AlarmAdapter(engine)
     result = await adapter.active()
     assert isinstance(result, AlarmStatusResult)
     assert result.count == 1
     assert result.active[0].alarm_id == "T1_high"
     assert result.active[0].level == "WARNING"
-    assert result.active[0].channels == ["T_cold"]
 
 
 async def test_alarm_adapter_returns_empty_when_no_alarms() -> None:
-    adapter = AlarmAdapter(_fake_client({"ok": True, "active": {}}))
+    engine = MagicMock()
+    engine.get_active_alarm_details.return_value = []
+    adapter = AlarmAdapter(engine)
     result = await adapter.active()
     assert result.count == 0
 
 
-async def test_alarm_adapter_returns_none_when_success_reply_lacks_active_alarms() -> None:
-    """A malformed successful reply is unavailable, never a known-empty alarm set."""
-    adapter = AlarmAdapter(_fake_client({"ok": True}))
+async def test_alarm_adapter_returns_empty_when_engine_is_none() -> None:
+    adapter = AlarmAdapter(None)
     result = await adapter.active()
-    assert (result.available, result.stale) == (False, True)
-    assert result.reason
-
-
-async def test_alarm_adapter_returns_none_when_call_fails() -> None:
-    adapter = AlarmAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.active()
-    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
-
-
-async def test_alarm_adapter_returns_none_for_malformed_reply() -> None:
-    adapter = AlarmAdapter(_fake_client(None))
-    result = await adapter.active()
-    assert result.available is False
-    assert result.stale is True
-    assert result.reason
+    assert result.count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -290,53 +285,42 @@ async def test_alarm_adapter_returns_none_for_malformed_reply() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_experiment_adapter_active_experiment() -> None:
-    """Returns ExperimentStatus built from the engine's experiment_status reply.
+async def test_experiment_adapter_phase_age() -> None:
+    """Returns ExperimentStatus with non-zero experiment_age_s."""
+    started = time.time() - 3600.0  # 1 hour ago
+    em = MagicMock()
+    em.active_experiment_id = "exp-001"
+    em.get_current_phase.return_value = "COOL"
+    em._get_phase_started_at.return_value = started + 1800  # phase started 30 min ago
+    active = MagicMock()
+    active.experiment_id = "exp-001"
+    active.started_at = started
+    active.target_temp = 4.0
+    active.sample_id = "S-001"
+    em.active_experiment = active
 
-    B1: ``target_temp``/``sample_id``/``experiment_age_s``/
-    ``experiment_started_human`` are documented dead-attribute parity (see
-    experiment_adapter.py module docstring) — always None/0.0 in
-    production before this extraction too.
-    """
-    adapter = ExperimentAdapter(
-        _fake_client(
-            {
-                "ok": True,
-                "current_phase": "COOL",
-                "phase_started_at": time.time() - 1800,
-                "active_experiment": {"experiment_id": "exp-001"},
-            }
-        )
-    )
+    adapter = ExperimentAdapter(em)
     result = await adapter.status()
 
     assert result is not None
     assert result.experiment_id == "exp-001"
     assert result.phase == "COOL"
-    assert result.target_temp is None
-    assert result.sample_id is None
-    assert result.experiment_age_s is None
+    assert result.experiment_age_s > 3500  # ~3600s
+    assert result.target_temp == 4.0
+    assert result.sample_id == "S-001"
 
 
 async def test_experiment_adapter_returns_none_when_no_experiment() -> None:
-    adapter = ExperimentAdapter(_fake_client({"ok": True, "active_experiment": None}))
+    em = MagicMock()
+    em.active_experiment_id = None
+    adapter = ExperimentAdapter(em)
     result = await adapter.status()
     assert result is None
 
 
-async def test_experiment_adapter_returns_none_when_call_fails() -> None:
-    adapter = ExperimentAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.status()
-    assert result is not None
-    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
-
-
-async def test_experiment_adapter_marks_malformed_active_experiment_unavailable() -> None:
-    result = await ExperimentAdapter(_fake_client({"ok": True, "active_experiment": "broken"})).status()
-    assert result is not None
-    assert result.available is False
-    assert result.stale is True
-    assert result.reason
+async def test_experiment_adapter_returns_none_when_manager_is_none() -> None:
+    adapter = ExperimentAdapter(None)
+    assert await adapter.status() is None
 
 
 # ---------------------------------------------------------------------------
@@ -394,50 +378,15 @@ async def _make_composite_adapter(
 async def test_composite_adapter_parallel_fetch() -> None:
     """All adapters are called and results merged into CompositeStatus."""
     snap_data = {"T_cold": _make_reading("T_cold", 15.0)}
-    sentinel_cd = CooldownETA(
-        t_remaining_hours=3.5,
-        t_remaining_low_68=3.0,
-        t_remaining_high_68=4.0,
-        progress=0.45,
-        phase="cooldown",
-        n_references=12,
-        cooldown_active=True,
-        T_cold=42.0,
-    )
-    sentinel_vac = VacuumETA(
-        current_mbar=1e-3,
-        eta_seconds=3600.0,
-        target_mbar=1e-6,
-        trend="falling",
-        confidence=0.8,
-    )
-    sentinel_alarm = AlarmStatusResult(
-        active=[
-            ActiveAlarmInfo(
-                alarm_id="ALM-1",
-                level="WARNING",
-                channels=["T_cold"],
-                triggered_at=None,
-            )
-        ]
-    )
     adapter, snap, cooldown, vacuum, alarms, experiment = await _make_composite_adapter(
-        snapshot_all=snap_data,
-        cd_eta=sentinel_cd,
-        vac_eta=sentinel_vac,
-        alarm_result=sentinel_alarm,
+        snapshot_all=snap_data
     )
     result = await adapter.status()
     assert isinstance(result, CompositeStatus)
-    # Temperature merged from snapshot
     assert result.key_temperatures["T_cold"] == 15.0
-    # Cooldown ETA passed through — a bug dropping it would fail here
-    assert result.cooldown_eta is sentinel_cd
-    # Vacuum ETA passed through — a bug dropping it would fail here
-    assert result.vacuum_eta is sentinel_vac
-    # Alarm merged — a bug dropping alarms would fail here
-    assert len(result.active_alarms) == 1
-    assert result.active_alarms[0].alarm_id == "ALM-1"
+    assert result.active_alarms == []
+    assert result.cooldown_eta is None
+    assert result.vacuum_eta is None
     # All sub-adapters must have been awaited in parallel
     snap.latest_with_labels.assert_awaited_once()
     cooldown.eta.assert_awaited_once()
@@ -456,12 +405,3 @@ async def test_composite_adapter_handles_partial_failure() -> None:
     # Gracefully degraded — snapshot failed, key_temperatures is empty
     assert result.key_temperatures == {}
     assert result.snapshot_empty is True
-
-
-async def test_composite_adapter_marks_alarm_data_unavailable() -> None:
-    adapter, _snap, _cooldown, _vacuum, alarms, _experiment = await _make_composite_adapter()
-    alarms.active = AsyncMock(return_value=None)
-
-    result = await adapter.status()
-
-    assert result.alarms_available is False

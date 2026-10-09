@@ -8,12 +8,8 @@
 
 from __future__ import annotations
 
-import logging
 import math
-import statistics
 from collections import deque
-
-logger = logging.getLogger(__name__)
 
 
 class RateEstimator:
@@ -28,122 +24,23 @@ class RateEstimator:
         Ширина скользящего окна в секундах. По умолчанию 120 с.
     min_points:
         Минимальное число точек для вычисления rate. По умолчанию 60.
-    min_span_s:
-        Минимальный временной охват данных (buf[-1].t − buf[0].t) для
-        вычисления rate. None (по умолчанию) — гейт только по min_points.
-        Задаёт poll-rate-независимый гейт: rate появляется после
-        min_span_s секунд данных независимо от интервала опроса.
     """
 
-    def __init__(
-        self,
-        window_s: float = 120.0,
-        min_points: int = 60,
-        min_span_s: float | None = None,
-        clock_jump_poll_factor: float = 4.0,
-    ) -> None:
+    def __init__(self, window_s: float = 120.0, min_points: int = 60) -> None:
         self._window_s = window_s
         self._min_points = min_points
-        self._min_span_s = min_span_s
-        # C-5 clock guard: forward jump > factor x established poll period
-        # triggers a reset. 4.0 is the ratified doctrine value; exposed as a
-        # calibration knob (real poll cadence jitters) rather than a YAML
-        # config value — it is a fixed safety constant, not deployment data.
-        self._clock_jump_poll_factor = clock_jump_poll_factor
         # Safety cap: 2× window at 10 Hz + 100 margin.
         # Prevents unbounded growth if trim lags; actual usage is window_s × sample_rate.
         self._maxlen: int = max(500, int(window_s * 20) + 100)
-        # R1 drift accumulator: Nth consecutive within-tolerance backward drop
-        # resets instead of dropping forever (see push / _drift_reset_count).
-        self._drift_reset_count = 5
         # channel → deque of (timestamp_s, value)
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
-        # channel → count of consecutive dropped (within-tolerance backward)
-        # samples since the last accepted sample.
-        self._consec_drops: dict[str, int] = {}
-        # F5: last computed rate per channel + a per-channel "serve stale"
-        # marker. A FORWARD-gap reset (a measurement 8-10 s late — just under
-        # the SafetyManager fail-on-silence stale_timeout_s, config/safety.yaml
-        # = 10 s) clears the buffer, so get_rate() would return None for the
-        # whole min_span_s refill window (~30 s). That blind window sits below
-        # the stale guard, letting a real dT/dt transient hide. Invariant: while
-        # refilling after a forward-gap reset, keep serving the last computed
-        # rate (stale-but-usable) so the dT/dt limit stays armed. Backward (NTP)
-        # resets keep their reset-to-None semantics.
-        self._last_rate: dict[str, float] = {}
-        self._serve_stale: dict[str, bool] = {}
         # short prefix → full channel name (e.g. "Т12" → "Т12 Теплообменник 2")
         self._short_to_full: dict[str, str] = {}
 
     def push(self, channel: str, timestamp: float, value: float) -> None:
         """Добавить точку. Автоматически удаляет точки старше окна."""
         buf = self._buffers.setdefault(channel, deque(maxlen=self._maxlen))
-        if buf:
-            decision = self._clock_jump_decision(buf, timestamp)
-            if decision == "drop":
-                # S4: benign sub-tolerance backward gap (per-channel jitter /
-                # sub-second reordering). Resetting on every such gap would
-                # reset-storm the buffer below min_points — rate None = no
-                # protection, silently. Drop just this one out-of-order sample;
-                # the buffer (and forward-sample growth) is preserved.
-                drops = self._consec_drops.get(channel, 0) + 1
-                if drops < self._drift_reset_count:
-                    self._consec_drops[channel] = drops
-                    logger.debug(
-                        "Backward jitter on channel %s: gap %+.3f s within tolerance "
-                        "— dropping single out-of-order sample (buffer %d kept, %d/%d)",
-                        channel,
-                        timestamp - buf[-1][0],
-                        len(buf),
-                        drops,
-                        self._drift_reset_count,
-                    )
-                    return
-                # R1: Nth consecutive within-tolerance backward drop = sustained
-                # backward measurement-time drift, not one-off jitter. Dropping
-                # forever would leave the rate silently stale/None while
-                # SafetyManager skips None. Reset+re-anchor to bound blindness to
-                # the min_span_s refill window (falls through to append below).
-                logger.warning(
-                    "Sustained backward drift on channel %s: %d consecutive "
-                    "within-tolerance backward samples (last gap %+.3f s) — "
-                    "resetting rate buffer (%d samples), re-anchoring; dT/dt "
-                    "protection re-arms after refill",
-                    channel,
-                    drops,
-                    timestamp - buf[-1][0],
-                    len(buf),
-                )
-                buf.clear()
-            elif decision == "reset":
-                # C-5 reset-not-drop: an NTP step (backward beyond tolerance, or
-                # forward > 4x poll) corrupts measurement-time ordering. Dropping
-                # the sample would blind the 5 K/min protection until maxlen
-                # eviction (~forever after a permanent step). Clearing re-anchors
-                # on the current sample, bounding blindness to the min_span_s
-                # refill window.
-                logger.warning(
-                    "Clock jump on channel %s: gap %+.1f s exceeds guard "
-                    "(backward step or > %.0fx poll) — resetting rate buffer "
-                    "(%d samples), re-anchoring; dT/dt protection re-arms after refill",
-                    channel,
-                    timestamp - buf[-1][0],
-                    self._clock_jump_poll_factor,
-                    len(buf),
-                )
-                # F5: a FORWARD-gap reset (gap > 0: silence/late sample or a
-                # forward step) would blind the dT/dt limit for the whole refill
-                # window, below the fail-on-silence stale timeout. Keep serving
-                # the last computed rate until the buffer refills. Backward (NTP)
-                # resets do NOT set this — different failure mode, reset-to-None
-                # semantics preserved.
-                if timestamp - buf[-1][0] > 0.0:
-                    self._serve_stale[channel] = True
-                buf.clear()
         buf.append((timestamp, value))
-        # Any accepted sample (ok / reset re-anchor / drift re-anchor) ends the
-        # consecutive-drop streak.
-        self._consec_drops[channel] = 0
         cutoff = timestamp - self._window_s
         while buf and buf[0][0] < cutoff:
             buf.popleft()
@@ -151,43 +48,6 @@ class RateEstimator:
         short = channel.split(" ", 1)[0] if " " in channel else channel
         if short != channel:
             self._short_to_full[short] = channel
-
-    def _clock_jump_decision(self, buf: deque[tuple[float, float]], timestamp: float) -> str:
-        """Classify `timestamp` against the channel buffer: ok | drop | reset.
-
-        Forward gap is a ``reset`` only if it exceeds ``clock_jump_poll_factor``
-        x the buffer's established poll period (median of recent inter-sample
-        gaps), else ``ok``. The median is used (not config) because
-        RateEstimator has no poll-cadence knowledge and different instruments
-        poll at different rates; it is per-channel, robust to occasional missed
-        polls, and needs no plumbing.
-
-        Backward gap: magnitude ≤ ``max(1.0 s, 0.5 x median poll period)`` →
-        ``drop`` (benign jitter / sub-second reordering — drop the one sample,
-        keep the buffer). Beyond that tolerance → ``reset`` (a real NTP step).
-
-        # ponytail: the tolerance is a fixed heuristic — 1 s floor covers
-        # sub-second reordering, half-a-poll covers ordinary cadence jitter.
-        # A slow monotonic backward *drift* within tolerance would be dropped
-        # sample-by-sample; the R1 drift accumulator in push() bounds that by
-        # resetting after `_drift_reset_count` consecutive drops.
-        """
-        gap = timestamp - buf[-1][0]
-        if len(buf) >= 2:
-            # ponytail: median over the window-bounded buffer (O(n), n <= ~window/poll).
-            gaps = [buf[i + 1][0] - buf[i][0] for i in range(len(buf) - 1)]
-            period = statistics.median(gaps)
-        else:
-            period = 0.0
-        if gap >= 0.0:
-            if period > 0.0 and gap > self._clock_jump_poll_factor * period:
-                return "reset"
-            return "ok"
-        # Backward gap.
-        tolerance = max(1.0, 0.5 * period)
-        if -gap <= tolerance:
-            return "drop"
-        return "reset"
 
     def resolve_channel(self, channel: str) -> str:
         """Resolve short channel ID to full runtime name."""
@@ -199,27 +59,9 @@ class RateEstimator:
         """Вернуть dX/dt в единицах [unit/мин]. None если недостаточно данных."""
         channel = self.resolve_channel(channel)
         buf = self._buffers.get(channel)
-        insufficient = (
-            not buf
-            or len(buf) < self._min_points
-            or (
-                self._min_span_s is not None
-                and buf[-1][0] - buf[0][0] < self._min_span_s
-            )
-        )
-        if insufficient:
-            # F5: during the post-forward-gap refill, serve the last computed
-            # rate (stale-but-usable) so the dT/dt limit stays armed instead of
-            # going blind below the stale-timeout guard. Cleared once fresh data
-            # refills the window (below).
-            if self._serve_stale.get(channel) and channel in self._last_rate:
-                return self._last_rate[channel]
+        if not buf or len(buf) < self._min_points:
             return None
-        rate = _ols_slope_per_min(list(buf))
-        if rate is not None:
-            self._last_rate[channel] = rate
-            self._serve_stale[channel] = False
-        return rate
+        return _ols_slope_per_min(list(buf))
 
     def get_rate_custom_window(self, channel: str, window_s: float) -> float | None:
         """dX/dt с нестандартным окном (например vacuum_loss_early: 60 с).
@@ -235,8 +77,6 @@ class RateEstimator:
         cutoff = latest_ts - window_s
         points = [(t, v) for t, v in buf if t >= cutoff]
         if len(points) < self._min_points:
-            return None
-        if self._min_span_s is not None and points[-1][0] - points[0][0] < self._min_span_s:
             return None
         return _ols_slope_per_min(points)
 
@@ -274,10 +114,6 @@ def _ols_slope_per_min(points: list[tuple[float, float]]) -> float | None:
     num = sum((t - t_mean) * (v - v_mean) for t, v in zip(ts, vs))
     den = sum((t - t_mean) ** 2 for t in ts)
 
-    # DOMAIN guard, not a validity guard: den==0 → all timestamps equal
-    # (undefined slope); isnan(num/den) → numeric propagation. Validity of
-    # readings is decided upstream at the Reading boundary (NaN-доктрина);
-    # this stays as the OLS division-domain floor.
     if den == 0.0 or math.isnan(den) or math.isnan(num):
         return None
 

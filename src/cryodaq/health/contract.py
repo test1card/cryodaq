@@ -2,8 +2,8 @@
 
 This module deliberately has no imports from drivers, the engine, scheduling,
 storage, the GUI, or safety code.  Structural conformance never grants device
-authority: a caller must issue an exact implementation through an explicit
-static allowlist entry, and the returned reader exposes snapshots only.
+authority: only the canonical driver registry may issue a reader accepted by
+the infrastructure authority, and that reader exposes snapshots only.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import FunctionType, MethodType
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 MAX_METRICS_PER_DEVICE: Final = 64
 MAX_ALARMS_PER_DEVICE: Final = 32
@@ -59,8 +59,10 @@ def _bounded_text(value: object, *, field_name: str, maximum: int = MAX_TEXT_BYT
         raise TypeError(f"{field_name} must be a string")
     if unicodedata.normalize("NFC", value) != value:
         raise HealthTelemetryError(f"{field_name} must be NFC-normalized")
-    if any(unicodedata.category(character).startswith("C") for character in value):
-        raise HealthTelemetryError(f"{field_name} contains a Unicode control character")
+    if any(
+        (category := unicodedata.category(character)).startswith("C") or category in {"Zl", "Zp"} for character in value
+    ):
+        raise HealthTelemetryError(f"{field_name} contains a Unicode control or line-separator character")
     try:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -80,7 +82,10 @@ def _identifier(value: object, *, field_name: str) -> str:
 def _finite_nonnegative(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a finite non-negative number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise HealthTelemetryError(f"{field_name} must be a finite non-negative number") from exc
     if not math.isfinite(normalized) or normalized < 0:
         raise HealthTelemetryError(f"{field_name} must be a finite non-negative number")
     return normalized
@@ -89,15 +94,20 @@ def _finite_nonnegative(value: object, *, field_name: str) -> float:
 def _finite_number(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a finite number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise HealthTelemetryError(f"{field_name} must be a finite number") from exc
     if not math.isfinite(normalized):
         raise HealthTelemetryError(f"{field_name} must be a finite number")
     return normalized
 
 
-def _strict_int(value: object, *, field_name: str, minimum: int = 0) -> int:
+def _strict_int(value: object, *, field_name: str, minimum: int = 0, maximum: int = 2**63 - 1) -> int:
     if type(value) is not int or value < minimum:
         raise HealthTelemetryError(f"{field_name} must be an integer >= {minimum}")
+    if value > maximum:
+        raise HealthTelemetryError(f"{field_name} must be an integer <= {maximum}")
     return value
 
 
@@ -288,16 +298,6 @@ class HealthTelemetrySnapshot:
 
 
 @runtime_checkable
-class HealthTelemetryDevice(Protocol):
-    """Narrow passive device shape; conformance alone grants no authority."""
-
-    @property
-    def health_descriptor(self) -> HealthDeviceDescriptor: ...
-
-    def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot: ...
-
-
-@runtime_checkable
 class HealthTelemetryReader(Protocol):
     """Public, type-erased view of an allowlist-issued passive reader."""
 
@@ -354,8 +354,8 @@ def _validate_implementation_type(implementation_type: type[object]) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class StaticHealthTelemetryAllowlistEntry:
-    """One exact, caller-owned issuance entry; no global registry is provided."""
+class _StaticHealthTelemetryAllowlistEntry:
+    """Internal exact-type validation receipt; it conveys no registry authority."""
 
     device_id: str
     implementation_type: type[object]
@@ -389,6 +389,7 @@ class _IssuedHealthTelemetryReader:
     """
 
     __slots__ = (
+        "__weakref__",
         "_counter_values",
         "_descriptor",
         "_entry",
@@ -421,14 +422,14 @@ class _IssuedHealthTelemetryReader:
         cls,
         *,
         issuer_key: object,
-        entry: StaticHealthTelemetryAllowlistEntry,
+        entry: _StaticHealthTelemetryAllowlistEntry,
         entry_token: object,
         read_snapshot: MethodType,
         descriptor: HealthDeviceDescriptor,
     ) -> _IssuedHealthTelemetryReader:
         if issuer_key is not _HEALTH_READER_ISSUER_KEY:
             raise TypeError("health telemetry reader issuer is not authorized")
-        if type(entry) is not StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
+        if type(entry) is not _StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
             raise TypeError("health telemetry allowlist issuance token does not match")
         if type(read_snapshot) is not MethodType:
             raise TypeError("read_snapshot must be an exact bound method")
@@ -454,7 +455,7 @@ class _IssuedHealthTelemetryReader:
             raise TypeError("health telemetry reader was not issued") from exc
         if (
             owner is not _HEALTH_READER_ISSUER_KEY
-            or type(entry) is not StaticHealthTelemetryAllowlistEntry
+            or type(entry) is not _StaticHealthTelemetryAllowlistEntry
             or entry_token is not entry._issuance_token
         ):
             raise TypeError("health telemetry reader was not issued")
@@ -484,8 +485,8 @@ class _IssuedHealthTelemetryReader:
             raise HealthTelemetryError("snapshot metric schema changed after the first successful cut")
         if value.revision <= self._last_revision:
             raise HealthTelemetryError("snapshot revision must increase strictly")
-        if value.observed_time_s < self._last_observed:
-            raise HealthTelemetryError("snapshot observed_time_s regressed")
+        if value.observed_time_s <= self._last_observed:
+            raise HealthTelemetryError("snapshot observed_time_s must increase strictly")
         if value.heartbeat_time_s < self._last_heartbeat:
             raise HealthTelemetryError("snapshot heartbeat_time_s regressed")
         next_counters = dict(self._counter_values)
@@ -506,7 +507,7 @@ class _IssuedHealthTelemetryReader:
     # These annotations document the slots initialized only by the private
     # issuer without making a public constructor available.
     _issuance_owner: object
-    _entry: StaticHealthTelemetryAllowlistEntry
+    _entry: _StaticHealthTelemetryAllowlistEntry
     _entry_token: object
     _read_snapshot: MethodType
     _descriptor: HealthDeviceDescriptor
@@ -517,12 +518,12 @@ class _IssuedHealthTelemetryReader:
     _counter_values: dict[str, int]
 
 
-def issue_health_telemetry_reader(
+def _issue_health_telemetry_reader(
     candidate: object,
     *,
-    entry: StaticHealthTelemetryAllowlistEntry,
+    entry: _StaticHealthTelemetryAllowlistEntry,
 ) -> HealthTelemetryReader:
-    """Issue one snapshot-only reader for an exact static allowlist match."""
+    """Internal wrapper seam; only a registry identity receipt permits polling."""
 
     if type(candidate) is not entry.implementation_type:
         raise HealthTelemetryError("health implementation type is not the exact allowlisted class")
@@ -553,3 +554,13 @@ def issue_health_telemetry_reader(
         read_snapshot=method,
         descriptor=descriptor,
     )
+
+
+def __getattr__(name: str) -> Any:
+    if name == "HealthTelemetryDevice":
+        from cryodaq import health as health_package
+
+        protocol = health_package.HealthTelemetryDevice
+        globals()[name] = protocol
+        return protocol
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

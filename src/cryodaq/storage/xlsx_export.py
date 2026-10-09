@@ -3,33 +3,17 @@
 from __future__ import annotations
 
 import logging
-import math
+import sqlite3
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from cryodaq.paths import get_archive_dir
-from cryodaq.storage.archive_reader import ArchiveReader
-from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
 
 _XLSX_MAX_ROWS = 1_048_576
-
-
-def _ts_sort_key(raw: object) -> float:
-    """Comparable sort key for mixed REAL/legacy-ISO timestamp keys.
-
-    A data dir may mix REAL(float) epoch timestamps and legacy ISO-string
-    timestamps; ``sorted`` on the raw keys raises TypeError. Normalize each
-    to an epoch float first.
-    """
-    try:
-        return _parse_timestamp(raw).timestamp()
-    except (ValueError, TypeError, OSError):
-        return float("inf")
 
 
 class XLSXExporter:
@@ -49,20 +33,15 @@ class XLSXExporter:
         )
     """
 
-    def __init__(self, data_dir: Path, archive_dir: Path | None = None) -> None:
+    def __init__(self, data_dir: Path) -> None:
         """Инициализировать экспортёр.
 
         Параметры
         ----------
         data_dir:
             Директория с daily-файлами SQLite (data_YYYY-MM-DD.db).
-        archive_dir:
-            Директория холодного хранилища (Parquet + index.json). None →
-            ``data_dir / "archive"``. Дни, вытесненные ротацией в Parquet,
-            читаются оттуда, иначе экспорт слепнет на вытесненных днях.
         """
         self._data_dir = data_dir
-        self._archive_dir = archive_dir if archive_dir is not None else get_archive_dir(data_dir)
 
     def export(
         self,
@@ -99,6 +78,11 @@ class XLSXExporter:
             logger.error("openpyxl не установлен: pip install openpyxl")
             return 0
 
+        db_files = self._find_db_files(start, end)
+        if not db_files:
+            logger.warning("Не найдено файлов БД для указанного диапазона")
+            return 0
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb = openpyxl.Workbook()
 
@@ -108,13 +92,10 @@ class XLSXExporter:
         ws_data = wb.active
         ws_data.title = "Данные"
 
-        # Read across hot SQLite + cold Parquet: rotated days live only in the
-        # archive, so a plain SQLite scan would drop them silently.
-        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
-        all_rows: list[dict[str, Any]] = [
-            {"timestamp": raw_ts, "channel": channel, "value": value, "status": status}
-            for raw_ts, _instrument_id, channel, value, _unit, status in rows
-        ]
+        # Собрать все строки, чтобы определить уникальные каналы
+        all_rows: list[dict[str, Any]] = []
+        for db_path in db_files:
+            all_rows.extend(self._query_db(db_path, start, end, channels))
 
         if not all_rows:
             wb.save(str(output_path))
@@ -132,15 +113,12 @@ class XLSXExporter:
             cell.font = bold
 
         # Сводка по времени: ts_str → {channel: value}
-        # NaN-доктрина: decode at the read boundary — a sentinel / error / legacy
-        # ±inf row surfaces as NaN and is left as an empty cell below, never as a
-        # non-physical number in the operator's spreadsheet.
         by_time: dict[str, dict[str, float]] = defaultdict(dict)
         for r in all_rows:
-            by_time[r["timestamp"]][r["channel"]] = decode(r["value"], r["status"])
+            by_time[r["timestamp"]][r["channel"]] = r["value"]
 
         row_num = 2
-        for ts_str in sorted(by_time.keys(), key=_ts_sort_key):
+        for ts_str in sorted(by_time.keys()):
             if row_num >= _XLSX_MAX_ROWS:
                 logger.warning(
                     "XLSX row limit reached (%d). Truncating export — some data omitted.",
@@ -162,14 +140,9 @@ class XLSXExporter:
             channel_values = by_time[ts_str]
             for col, ch in enumerate(unique_channels, 2):
                 v = channel_values.get(ch)
-                if v is not None and math.isfinite(v):
-                    # Write the full float value (no pre-rounding): vacuum
-                    # pressures span 1e-3..1e-9 mbar and were collapsed to 0.000
-                    # by round(v, 3) + "0.000" format. "General" lets Excel pick
-                    # a representation that preserves both small and wide-range
-                    # magnitudes.
-                    cell = ws_data.cell(row=row_num, column=col, value=v)
-                    cell.number_format = "General"
+                if v is not None:
+                    cell = ws_data.cell(row=row_num, column=col, value=round(v, 3))
+                    cell.number_format = "0.000"
 
             row_num += 1
 
@@ -216,3 +189,70 @@ class XLSXExporter:
             len(unique_channels),
         )
         return data_row_count
+
+    # ------------------------------------------------------------------
+    # Внутренние методы
+    # ------------------------------------------------------------------
+
+    def _find_db_files(
+        self,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> list[Path]:
+        """Найти daily-файлы SQLite, покрывающие указанный диапазон."""
+        if not self._data_dir.exists():
+            return []
+
+        all_files = sorted(self._data_dir.glob("data_*.db"))
+        if start is None and end is None:
+            return all_files
+
+        result: list[Path] = []
+        for path in all_files:
+            date_str = path.stem.replace("data_", "")
+            try:
+                file_date = date.fromisoformat(date_str)
+            except ValueError:
+                continue
+            if start is not None and file_date < start.date():
+                continue
+            if end is not None and file_date > end.date():
+                continue
+            result.append(path)
+
+        return result
+
+    def _query_db(
+        self,
+        db_path: Path,
+        start: datetime | None,
+        end: datetime | None,
+        channels: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """Запросить строки readings из одного файла БД."""
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            query = "SELECT timestamp, channel, value FROM readings"
+            conditions: list[str] = []
+            params: list[Any] = []
+
+            if start is not None:
+                conditions.append("timestamp >= ?")
+                params.append(start.timestamp())
+            if end is not None:
+                conditions.append("timestamp < ?")
+                params.append(end.timestamp())
+            if channels:
+                placeholders = ",".join("?" * len(channels))
+                conditions.append(f"channel IN ({placeholders})")
+                params.extend(channels)
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY timestamp;"
+
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()

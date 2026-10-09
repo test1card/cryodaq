@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,27 +35,6 @@ class Reading:
     status: ChannelStatus = ChannelStatus.OK
     raw: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    def is_usable(self) -> bool:
-        """Единственный предикат годности показания (NaN-доктрина).
-
-        Годно ⇔ статус OK-класса И значение конечно. Иначе — NON-FINITE-ERROR
-        (не годно): не конечное значение (NaN/±inf) ИЛИ статус ошибки.
-
-        OK-класс = ровно {OK}. Драйверы всегда сопровождают любой не-OK
-        статус не конечным sentinel-значением (LakeShore OVL → value=inf +
-        OVERRANGE; SENSOR_ERROR / TIMEOUT → NaN), поэтому ограничение годного
-        множества до OK совпадает с прежней float-проверкой, но делает
-        дискриминатором именно статус. Downstream-код не должен различать
-        показания по float-значению — только через этот предикат.
-
-        Не числовое значение (junk из defensive GUI-путей) — не годно (False),
-        а не исключение: годность падает закрыто на safety-пути.
-        """
-        try:
-            return self.status is ChannelStatus.OK and math.isfinite(self.value)
-        except TypeError:
-            return False
 
     @staticmethod
     def now(

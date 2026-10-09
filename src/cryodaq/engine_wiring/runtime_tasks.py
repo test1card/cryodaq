@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections import deque
 from datetime import UTC, datetime
@@ -344,6 +345,7 @@ async def sensor_diag_tick(
     alarm_dispatch_tasks: set[asyncio.Task[Any]],
     event_bus: Any,
     experiment_manager: Any,
+    admission: Any | None = None,
 ) -> None:
     """Periodically recompute sensor diagnostics and dispatch alarm notifications."""
     if sensor_diag is None:
@@ -352,10 +354,31 @@ async def sensor_diag_tick(
     # v0.55.5: default False — sensor-health alarms route to GUI only
     # by policy; the hourly periodic_report carries a digest section.
     _notify_telegram = sd_cfg.get("notify_telegram", False)
+    job = None if admission is None else admission.job("sensor_diagnostics", min_interval_s=0.0)
     while True:
         await asyncio.sleep(interval)
         try:
-            new_events = sensor_diag.update()
+            # Never inline the computation. compute() recomputes per-channel
+            # statistics and a pairwise correlation across every buffered
+            # channel; a 250 ms call here cost acquisition an entire
+            # observation window and delayed safety monitoring and alarm
+            # evaluation with it. Best-effort work does not get to do that.
+            #
+            # Only the ARITHMETIC crosses into the worker. Sending update()
+            # there also carried the alarm publisher with it, so alarm
+            # transitions, anomaly timers and escalation cooldowns were all
+            # mutated off the event loop. compute() is pure and reads one
+            # snapshot; apply() runs here, on the loop, and owns every
+            # mutation.
+            if job is None:
+                computed = await asyncio.to_thread(sensor_diag.compute)
+            else:
+                computed = await job.run(sensor_diag.compute)
+                if computed is None:
+                    # Refused: overloaded, saturated, or still running. The
+                    # previous diagnostics stand and their age is reported.
+                    continue
+            new_events = sensor_diag.apply(computed)
             if _notify_telegram and telegram_bot is not None and new_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
                 # F20 aggregation handled by _format_diag_telegram_messages.
@@ -409,15 +432,39 @@ async def vacuum_trend_feed(vacuum_trend: Any, vt_cfg: dict[str, Any], broker: A
         return
 
 
-async def vacuum_trend_tick(vacuum_trend: Any, vt_cfg: dict[str, Any]) -> None:
+async def vacuum_trend_tick(
+    vacuum_trend: Any,
+    vt_cfg: dict[str, Any],
+    admission: Any | None = None,
+) -> None:
     """Periodically recompute vacuum trend prediction."""
     if vacuum_trend is None:
         return
-    interval = vt_cfg.get("update_interval_s", 30)
+    # Pressure keeps arriving at full rate through vacuum_trend_feed; this is
+    # only how often the curve is refitted. A pump-down is a multi-day process
+    # and its forecast does not improve for being recomputed twice a minute.
+    interval = vt_cfg.get("update_interval_s", 120)
+    job = None if admission is None else admission.job("vacuum_fit", min_interval_s=0.0)
     while True:
         await asyncio.sleep(interval)
         try:
-            vacuum_trend.update()
+            # Never on the event loop. update() runs several scipy curve fits,
+            # and a non-converging one burns its whole evaluation budget:
+            # measured on this stand it blocked the loop for 2.8 s with an hour
+            # of data and 33 s with six hours. While the loop is blocked nothing
+            # is polled, nothing is persisted and no timer fires — a 2026-09-01
+            # 02:39 freeze of ~8 s timed out a bus-scoped instrument read,
+            # quarantined a GPIB session that never recovered, and cost the run
+            # its temperature data for the rest of the night.
+            if job is None:
+                await asyncio.to_thread(vacuum_trend.update)
+                continue
+            # Under load this asks for the cheap fit rather than the exact one,
+            # and is refused outright only when even that cannot be afforded.
+            # A refusal is an ordinary outcome: the previous prediction stands
+            # and its staleness is reported.
+            precision = admission.precision
+            await job.run(functools.partial(vacuum_trend.update, precision=precision))
         except Exception as exc:
             logger.error("VacuumTrendPredictor tick error: %s", exc)
 
@@ -450,7 +497,23 @@ async def leak_rate_feed(
                         f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
                     )
                 except (ValueError, Exception) as exc:  # noqa: BLE001
-                    logger.error("Leak rate auto-finalize failed: %s", exc)
+                    # Abandon the measurement instead of retrying it forever.
+                    #
+                    # finalize() raises its precondition failures BEFORE it
+                    # clears `_active` and drains `_samples`. A precondition
+                    # that cannot be satisfied at runtime -- an unconfigured
+                    # chamber volume, which is this stand's state -- therefore
+                    # left the measurement active with should_finalize() still
+                    # true, so every subsequent pressure reading called
+                    # finalize() again, raised again, and appended another
+                    # sample that nothing would ever drain. One operator button
+                    # press was an unbounded buffer plus an exception every two
+                    # seconds, for the rest of the run.
+                    logger.error("Leak rate auto-finalize failed, measurement cancelled: %s", exc)
+                    try:
+                        leak_rate_estimator.cancel()
+                    except Exception:  # noqa: BLE001 - cleanup must not kill the feed
+                        logger.exception("Leak rate cancel after failed finalize also failed")
     except asyncio.CancelledError:
         return
 

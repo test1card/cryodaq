@@ -14,20 +14,18 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import yaml
-
-from cryodaq.core.atomic_write import atomic_write_text
-from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_THEME = "warm_stone"
 
-_CONFIG_DIR = get_config_dir()
-THEMES_DIR = _CONFIG_DIR / "themes"
-SETTINGS_FILE = _CONFIG_DIR / "settings.local.yaml"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+THEMES_DIR = _REPO_ROOT / "config" / "themes"
+SETTINGS_FILE = _REPO_ROOT / "config" / "settings.local.yaml"
 
 REQUIRED_TOKENS = frozenset(
     {
@@ -69,17 +67,6 @@ REQUIRED_TOKENS = frozenset(
 )
 
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-_THEME_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-
-
-class ThemePackError(ValueError):
-    """A theme identifier or pack failed the local validation contract."""
-
-
-def _validate_theme_id(name: object) -> str:
-    if not isinstance(name, str) or _THEME_ID_RE.fullmatch(name) is None:
-        raise ThemePackError("invalid theme identifier")
-    return name
 
 
 def _selected_theme_name() -> str:
@@ -87,7 +74,7 @@ def _selected_theme_name() -> str:
         return DEFAULT_THEME
     try:
         with SETTINGS_FILE.open(encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
+            data = yaml.safe_load(f) or {}
     except Exception as exc:
         logger.warning(
             "theme: failed to parse %s: %s; using %s",
@@ -96,131 +83,93 @@ def _selected_theme_name() -> str:
             DEFAULT_THEME,
         )
         return DEFAULT_THEME
-    if loaded is None:
-        data: dict[str, Any] = {}
-    elif isinstance(loaded, dict):
-        data = loaded
-    else:
-        logger.warning(
-            "theme: settings in %s must be a mapping; using %s",
-            SETTINGS_FILE,
-            DEFAULT_THEME,
-        )
-        return DEFAULT_THEME
     name = data.get("theme", DEFAULT_THEME)
-    try:
-        return _validate_theme_id(name)
-    except ThemePackError:
+    if not isinstance(name, str) or not name:
         logger.warning(
             "theme: invalid 'theme' value in %s; using %s",
             SETTINGS_FILE,
             DEFAULT_THEME,
         )
         return DEFAULT_THEME
+    return name
 
 
-def validate_theme_pack(name: str) -> dict[str, Any]:
-    """Load one exact pack or raise without silently choosing another pack."""
-
-    name = _validate_theme_id(name)
+def _load_theme_pack(name: str) -> dict[str, Any]:
     pack_file = THEMES_DIR / f"{name}.yaml"
-    if not pack_file.is_file():
-        raise ThemePackError(f"theme pack '{name}' is unavailable")
+    if not pack_file.exists():
+        logger.warning(
+            "theme: pack '%s' not found at %s; falling back to %s",
+            name,
+            pack_file,
+            DEFAULT_THEME,
+        )
+        if name != DEFAULT_THEME:
+            return _load_theme_pack(DEFAULT_THEME)
+        raise RuntimeError(f"Default theme pack missing: {pack_file}")
 
     try:
         with pack_file.open(encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
+            pack = yaml.safe_load(f) or {}
     except Exception as exc:
-        raise ThemePackError(f"theme pack '{name}' could not be parsed") from exc
-    if not isinstance(loaded, dict):
-        raise ThemePackError(f"theme pack '{name}' must be a mapping")
-    pack: dict[str, Any] = loaded
+        logger.error("theme: failed to parse %s: %s", pack_file, exc)
+        if name != DEFAULT_THEME:
+            return _load_theme_pack(DEFAULT_THEME)
+        raise
 
     missing = REQUIRED_TOKENS - set(pack.keys())
     if missing:
-        raise ThemePackError(f"theme pack '{name}' missing tokens: {sorted(missing)}")
-
-    meta_name = pack.get("__meta_name__")
-    meta_description = pack.get("__meta_description__")
-    if not isinstance(meta_name, str) or not meta_name.strip():
-        raise ThemePackError(f"theme pack '{name}' has invalid display metadata")
-    if not isinstance(meta_description, str):
-        raise ThemePackError(f"theme pack '{name}' has invalid description metadata")
+        logger.error(
+            "theme: pack '%s' missing tokens: %s; falling back to %s",
+            name,
+            sorted(missing),
+            DEFAULT_THEME,
+        )
+        if name != DEFAULT_THEME:
+            return _load_theme_pack(DEFAULT_THEME)
+        raise RuntimeError(f"Default theme pack missing tokens: {sorted(missing)}")
 
     for token in REQUIRED_TOKENS:
         val = pack.get(token)
         if not isinstance(val, str) or not _HEX_RE.match(val):
-            raise ThemePackError(f"theme pack '{name}' token {token} is not a #rrggbb hex color")
-
-    if pack["STATUS_WARNING"].lower() != pack["STATUS_CAUTION"].lower():
-        raise ThemePackError(f"theme pack '{name}' separates STATUS_WARNING from STATUS_CAUTION")
+            logger.error(
+                "theme: pack '%s' token %s=%r is not a #rrggbb hex color; falling back to %s",
+                name,
+                token,
+                val,
+                DEFAULT_THEME,
+            )
+            if name != DEFAULT_THEME:
+                return _load_theme_pack(DEFAULT_THEME)
+            raise RuntimeError(f"Default theme pack invalid hex for {token}: {val!r}")
 
     logger.info("theme: loaded pack '%s' (%d tokens)", name, len(pack))
     return pack
 
 
-def resolve_theme() -> tuple[str, dict[str, Any]]:
-    """Return the actual loaded id and pack, falling back only to the default."""
-
-    requested = _selected_theme_name()
-    try:
-        return requested, validate_theme_pack(requested)
-    except ThemePackError as exc:
-        if requested == DEFAULT_THEME:
-            raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
-        logger.error(
-            "theme: rejected pack '%s' (%s); using %s",
-            requested,
-            exc,
-            DEFAULT_THEME,
-        )
-    try:
-        return DEFAULT_THEME, validate_theme_pack(DEFAULT_THEME)
-    except ThemePackError as exc:
-        raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
-
-
-def _load_theme_pack(name: str) -> dict[str, Any]:
-    """Compatibility loader for an explicit id with default fallback."""
-
-    try:
-        return validate_theme_pack(name)
-    except ThemePackError as exc:
-        if name == DEFAULT_THEME:
-            raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
-        logger.error("theme: rejected pack '%s' (%s); using %s", name, exc, DEFAULT_THEME)
-        try:
-            return validate_theme_pack(DEFAULT_THEME)
-        except ThemePackError as default_exc:
-            raise RuntimeError(f"Default theme pack invalid: {default_exc}") from default_exc
-
-
 def load_theme() -> dict[str, Any]:
     """Public entry point; called from theme.py at import time."""
-    return resolve_theme()[1]
+    return _load_theme_pack(_selected_theme_name())
 
 
 def write_theme_selection(name: str) -> None:
-    """Atomically persist a validated selection, preserving other settings."""
-
-    name = _validate_theme_id(name)
-    validate_theme_pack(name)
+    """Persist the selected theme name, preserving other keys in the file."""
     data: dict[str, Any] = {}
     if SETTINGS_FILE.exists():
         try:
             with SETTINGS_FILE.open(encoding="utf-8") as f:
                 loaded = yaml.safe_load(f)
-            if loaded is None:
-                data = {}
-            elif isinstance(loaded, dict):
-                data = dict(loaded)
-            else:
-                raise ThemePackError("theme settings must be a mapping")
+            if isinstance(loaded, dict):
+                data = loaded
         except Exception as exc:
-            raise ThemePackError("theme settings are malformed; selection was not changed") from exc
+            logger.warning(
+                "theme: could not read existing %s (%s); overwriting",
+                SETTINGS_FILE,
+                exc,
+            )
     data["theme"] = name
-    serialized = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    atomic_write_text(SETTINGS_FILE, serialized)
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with SETTINGS_FILE.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
     logger.info("theme: wrote selection '%s' to %s", name, SETTINGS_FILE)
 
 
@@ -231,9 +180,10 @@ def available_themes() -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     for pack_file in sorted(THEMES_DIR.glob("*.yaml")):
         try:
-            pack = validate_theme_pack(pack_file.stem)
-        except ThemePackError as exc:
-            logger.warning("theme: ignoring invalid pack %s: %s", pack_file, exc)
+            with pack_file.open(encoding="utf-8") as f:
+                pack = yaml.safe_load(f) or {}
+        except Exception as exc:
+            logger.warning("theme: failed to read %s: %s", pack_file, exc)
             continue
         results.append(
             {

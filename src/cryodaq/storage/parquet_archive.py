@@ -9,17 +9,11 @@ pyarrow is OPTIONAL — functions degrade gracefully if not installed.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-from cryodaq.paths import get_archive_dir
-from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.archive_reader import ArchiveReader
-from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +27,6 @@ class ParquetExportResult:
     file_size_bytes: int
     duration_s: float
     skipped_days: list[str] = field(default_factory=list)
-    # Days whose rows came from cold Parquet (F17 rotated) instead of a daily
-    # SQLite file. Cold rows carry no experiment_id, so their exported
-    # experiment_id column is null — surfaced here so the caller can say so.
-    archived_days: list[str] = field(default_factory=list)
 
 
 def export_experiment_readings_to_parquet(
@@ -75,59 +65,29 @@ def export_experiment_readings_to_parquet(
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw_temp = tempfile.mkstemp(
-        prefix=f".{output_path.name}.",
-        suffix=".tmp",
-        dir=output_path.parent,
+    writer = pq.ParquetWriter(
+        str(output_path),
+        schema,
+        compression="snappy",
     )
-    os.close(descriptor)
-    temp_path = Path(raw_temp)
-    writer = None
-    published = False
 
     total_rows = 0
     skipped_days: list[str] = []
-    archived_days: list[str] = []
 
     start_epoch = start_time.timestamp()
     end_epoch = end_time.timestamp()
-
-    # A day whose SQLite file was rotated to cold Parquet (F17) has no daily DB;
-    # its data lives only in the archive. Reuse ArchiveReader to read it back so
-    # such days are exported, not silently dropped into skipped_days.
-    reader = ArchiveReader(sqlite_root, get_archive_dir(sqlite_root))
 
     # Iterate daily DB files covering the range
     current_day = start_time.date()
     last_day = end_time.date()
 
     try:
-        writer = pq.ParquetWriter(
-            str(temp_path),
-            schema,
-            compression="snappy",
-        )
         while current_day <= last_day:
             day_str = current_day.isoformat()
             db_path = sqlite_root / f"data_{day_str}.db"
 
             if not db_path.exists():
-                cold_rows = _write_cold_day(
-                    reader,
-                    writer,
-                    schema,
-                    pa,
-                    current_day,
-                    start_time,
-                    end_time,
-                    chunk_size,
-                )
-                if cold_rows:
-                    total_rows += cold_rows
-                    archived_days.append(day_str)
-                else:
-                    # No daily DB and nothing in cold storage → genuinely no data.
-                    skipped_days.append(day_str)
+                skipped_days.append(day_str)
                 current_day += timedelta(days=1)
                 continue
 
@@ -137,7 +97,7 @@ def export_experiment_readings_to_parquet(
                 cursor = conn.execute(
                     "SELECT timestamp, instrument_id, channel, value, unit, status "
                     "FROM readings WHERE timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp, rowid",
+                    "ORDER BY timestamp",
                     (start_epoch, end_epoch),
                 )
 
@@ -159,10 +119,7 @@ def export_experiment_readings_to_parquet(
                         timestamps.append(datetime.fromtimestamp(ts_epoch, tz=UTC))
                         instrument_ids.append(row["instrument_id"])
                         channels.append(row["channel"])
-                        # NaN-доктрина: mask sentinel / error / legacy ±inf to NaN.
-                        # The status column below preserves the discriminator; the
-                        # archived value column never carries a non-physical number.
-                        values.append(decode(float(row["value"]), row["status"]))
+                        values.append(float(row["value"]))
                         units.append(row["unit"])
                         statuses.append(row["status"])
                         exp_ids.append(experiment_id)
@@ -186,25 +143,8 @@ def export_experiment_readings_to_parquet(
                 conn.close()
 
             current_day += timedelta(days=1)
-        writer.close()
-        writer = None
-        metadata = pq.read_metadata(str(temp_path))
-        if metadata.num_rows != total_rows:
-            raise RuntimeError(f"Parquet export row count mismatch: expected {total_rows}, got {metadata.num_rows}")
-        if metadata.schema.to_arrow_schema() != schema:
-            raise RuntimeError("Parquet export schema mismatch after close.")
-        with temp_path.open("r+b") as handle:
-            os.fsync(handle.fileno())
-        os.replace(temp_path, output_path)
-        published = True
     finally:
-        if writer is not None:
-            try:
-                writer.close()
-            except Exception:
-                logger.exception("Failed to close incomplete Parquet export %s", temp_path.name)
-        if not published:
-            temp_path.unlink(missing_ok=True)
+        writer.close()
 
     duration = time.monotonic() - t0
     file_size = output_path.stat().st_size if output_path.exists() else 0
@@ -223,68 +163,12 @@ def export_experiment_readings_to_parquet(
         file_size_bytes=file_size,
         duration_s=duration,
         skipped_days=skipped_days,
-        archived_days=archived_days,
     )
-
-
-def _write_cold_day(
-    reader: ArchiveReader,
-    writer,
-    schema,
-    pa,
-    day,
-    start_time: datetime,
-    end_time: datetime,
-    chunk_size: int,
-) -> int:
-    """Stream a rotated day's cold-Parquet rows into the export writer.
-
-    Returns the number of rows written (0 if the day has no cold data). Cold
-    rows carry no experiment_id, so the exported column is null for them.
-    query_rows is end-EXCLUSIVE and already NaN-decodes values; the window is
-    clamped to this single day so a multi-day range never double-counts. The
-    upper bound is nudged by 1 µs to keep the caller-visible `<= end_time`
-    inclusivity of the hot-path SQL this mirrors.
-    """
-    day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    day_end_exclusive = day_start + timedelta(days=1)
-    win_start = max(start_time, day_start)
-    win_end = min(end_time + timedelta(microseconds=1), day_end_exclusive)
-
-    rows = reader.query_rows(win_start, win_end, None)
-    if not rows:
-        return 0
-
-    written = 0
-    for offset in range(0, len(rows), chunk_size):
-        chunk = rows[offset : offset + chunk_size]
-        batch = pa.table(
-            {
-                "timestamp": pa.array(
-                    [datetime.fromtimestamp(float(r[0]), tz=UTC) for r in chunk],
-                    type=pa.timestamp("us", tz="UTC"),
-                ),
-                "instrument_id": pa.array([r[1] for r in chunk]),
-                "channel": pa.array([r[2] for r in chunk]),
-                # value is already NaN-decoded by query_rows — do not decode again.
-                "value": pa.array([r[3] for r in chunk], type=pa.float64()),
-                "unit": pa.array([r[4] for r in chunk]),
-                "status": pa.array([r[5] for r in chunk]),
-                # Cold rotation stores no experiment context → null column.
-                "experiment_id": pa.array([None] * len(chunk), type=pa.string()),
-            },
-            schema=schema,
-        )
-        writer.write_table(batch)
-        written += len(chunk)
-    return written
 
 
 def read_experiment_parquet(
     parquet_path: Path,
     channels: list[str] | None = None,
-    *,
-    expected_experiment_id: str | None = None,
 ) -> dict[str, list[tuple[float, float]]]:
     """Read experiment data from Parquet. Returns {channel: [(unix_ts, value), ...]}.
 
@@ -307,27 +191,15 @@ def read_experiment_parquet(
         ts_us = ts_col.cast(pa.int64())
         ch_array = table.column("channel").to_pylist()
         val_array = table.column("value").to_pylist()
-        status_array = table.column("status").to_pylist()
-        if expected_experiment_id is not None:
-            experiment_ids = table.column("experiment_id").to_pylist()
-            if any(value != expected_experiment_id for value in experiment_ids):
-                logger.error(
-                    "Rejecting Parquet with mixed or stale experiment identity: %s",
-                    parquet_path,
-                )
-                return {}
 
         channel_set = set(channels) if channels else None
         result: dict[str, list[tuple[float, float]]] = {}
         for i in range(table.num_rows):
             ch = ch_array[i]
-            if not isinstance(ch, str) or not ch:
-                continue
             if channel_set is not None and ch not in channel_set:
                 continue
             epoch = float(ts_us[i].as_py()) / 1_000_000.0
-            # NaN-доктрина: mask legacy raw-inf / sentinel parquet rows on read.
-            result.setdefault(ch, []).append((epoch, decode(float(val_array[i]), status_array[i])))
+            result.setdefault(ch, []).append((epoch, val_array[i]))
 
         return result
 

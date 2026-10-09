@@ -11,6 +11,48 @@ ROOT = Path(__file__).resolve().parents[1]
 PINNED_MINICONDA = "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5"
 
 
+#: The exact patch measured by the supported-platform candidate run. A future
+#: patch requires its own evidence before this value can change.
+APPROVED_PYTHON_PATCH = "3.14.6"
+
+
+def _environment_python_spec() -> str:
+    """Return the `python=...` dependency verbatim from environment.yml.
+
+    Parsed as text rather than with a YAML loader: the guard must fail if the
+    entry is missing entirely, and a loader would just return None for that.
+    """
+    text = (ROOT / "environment.yml").read_text(encoding="utf-8")
+    specs = [
+        line.strip().lstrip("-").strip()
+        for line in text.splitlines()
+        if line.strip().lstrip("-").strip().startswith("python=")
+    ]
+    assert len(specs) == 1, f"environment.yml must pin python exactly once; found {specs}"
+    return specs[0]
+
+
+def test_environment_pins_an_exact_python_patch() -> None:
+    """A floating `python=3.14` would silently reopen resolution to a bad patch.
+
+    `test_supported_test_workflows_use_safe_tracked_runtime` only checks that
+    the workflows REFERENCE environment.yml; it never reads the interpreter
+    entry, so reverting the pin would leave it green. This is the guard that
+    actually binds the patch.
+    """
+    spec = _environment_python_spec()
+    version = spec.split("=", 1)[1]
+
+    assert version.count(".") == 2, (
+        f"environment.yml pins {spec!r}: the Python patch must be exact, not left to the solver. "
+        "A minor-only pin resolves to whatever conda-forge serves on the day the laboratory "
+        "machine is installed."
+    )
+    assert version == APPROVED_PYTHON_PATCH, (
+        f"environment.yml pins {spec!r}; the approved evidence-backed patch is python={APPROVED_PYTHON_PATCH}"
+    )
+
+
 def test_supported_test_workflows_use_safe_tracked_runtime() -> None:
     for relative in (
         ".github/workflows/main.yml",

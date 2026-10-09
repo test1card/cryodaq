@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cryodaq.agents.assistant_main import _handle_assistant_query_command
+from cryodaq.engine import _handle_assistant_query_command
 
 
 def _run(coro):
@@ -62,7 +62,9 @@ def test_returns_error_when_agent_none():
 
 def test_returns_error_on_empty_query():
     agent = AsyncMock()
-    result = _run(_handle_assistant_query_command(agent, {"query": "   ", "chat_id": "gui"}, timeout_s=5.0))
+    result = _run(
+        _handle_assistant_query_command(agent, {"query": "   ", "chat_id": "gui"}, timeout_s=5.0)
+    )
 
     assert result == {"ok": False, "error": "Пустой запрос."}
     agent.handle_query.assert_not_called()
@@ -114,8 +116,8 @@ def test_returns_error_on_handler_exception():
 def test_default_timeout_fires_inside_server_envelope():
     """Default timeout_s must fire BEFORE the server's ``HANDLER_TIMEOUT_SLOW_S``
     envelope so the helper's own Russian error wins over the generic
-    ``handler timeout`` reply from the REP server. Cycle-3 fix for
-    commit 0ab42f2. H7: envelope bumped to 55s, helper to 50s."""
+    ``handler timeout`` reply from the REP server. Cycle-3 fix for Codex
+    finding on commit 0ab42f2. H7: envelope bumped to 55s, helper to 50s."""
     import inspect
 
     from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_SLOW_S
@@ -125,7 +127,8 @@ def test_default_timeout_fires_inside_server_envelope():
     # H7: bumped 25 → 50 to absorb Ollama cold-start (20-40s).
     assert default == 50.0
     assert default < HANDLER_TIMEOUT_SLOW_S, (
-        f"helper timeout {default}s must be < server slow envelope {HANDLER_TIMEOUT_SLOW_S}s"
+        f"helper timeout {default}s must be < server slow envelope "
+        f"{HANDLER_TIMEOUT_SLOW_S}s"
     )
 
 

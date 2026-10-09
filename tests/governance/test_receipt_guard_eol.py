@@ -82,11 +82,30 @@ def test_receipt_bound_guards_are_checked_out_with_lf(tmp_path: Path) -> None:
 
 
 def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path) -> None:
-    """Checkout normalization cannot make a changed guard source pass its receipt."""
+    """Checkout normalization cannot make a changed named guard pass its receipt."""
 
     payload = _copy_receipt_evidence(tmp_path)
     changed_guard = tmp_path / "tests" / "core" / "test_alarm_config_validation.py"
-    changed_guard.write_bytes(changed_guard.read_bytes() + b"\n")
+    source = changed_guard.read_text(encoding="utf-8")
+    named_start = source.index("def test_top_level_channels_and_channel_group_raises")
+    neighbour_start = source.index("def test_top_level_channel_and_channel_group_raises", named_start)
+    named_source = source[named_start:neighbour_start]
+    changed_named_source = named_source.replace("threshold: 4.0", "threshold: 5.0", 1)
+    assert changed_named_source != named_source
+    changed_guard.write_text(
+        source[:named_start] + changed_named_source + source[neighbour_start:],
+        encoding="utf-8",
+        newline="\n",
+    )
 
-    with pytest.raises(GovernanceContractError, match="receipt guard blob does not match registry guard file"):
+    with pytest.raises(
+        GovernanceContractError,
+        match=(
+            # Whole-file receipt binding restored 2026-08-29: the file-level check
+            # fires before the node-level one, so a real source mismatch is refused
+            # earlier.  The node-digest check remains enforced as an additional
+            # constraint and is covered by its own cases.
+            "guard blob does not match registry guard file"
+        ),
+    ):
         validate_registry(payload, root=tmp_path)

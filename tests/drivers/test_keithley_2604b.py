@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -103,15 +101,11 @@ async def test_keithley_read_source_off() -> None:
     """
     import math
 
-    driver = Keithley2604B(
-        "k2604",
-        "USB0::0x05E6::0x2604::04089762::INSTR",
-        mock=False,
-    )
+    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
     # _FakeOutputStateTransport (defined below) returns "0" for source.output
     # and real-ish values for measure.iv() — only the output==0 branch matters.
     driver._transport = _FakeOutputStateTransport("0.000000e+00")
-    await driver.connect()
+    driver._connected = True
 
     # Neither channel is active (source OFF) — exercises the real OFF branch.
     readings = await driver.read_channels()
@@ -127,8 +121,10 @@ async def test_keithley_read_source_off() -> None:
     # V/I/P must be 0.0 when source output is OFF on the real path.
     for reading in readings:
         if reading.channel.endswith(("/voltage", "/current", "/power")):
-            assert reading.value == 0.0, f"{reading.channel} must be 0.0 when source.output=OFF, got {reading.value}"
-    await driver.disconnect()
+            assert reading.value == 0.0, (
+                f"{reading.channel} must be 0.0 when source.output=OFF, "
+                f"got {reading.value}"
+            )
 
 
 class _FakeOutputStateTransport:
@@ -136,22 +132,9 @@ class _FakeOutputStateTransport:
 
     def __init__(self, output: str) -> None:
         self._output = output
-        self._opened = False
-
-    async def open(self, resource: str | None = None) -> None:
-        self._opened = True
-
-    async def close(self) -> None:
-        self._opened = False
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
         c = cmd.lower()
-        if cmd == "*IDN?":
-            return "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
-        if "cryodaq_off_v1" in c:
-            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
-            assert match is not None
-            return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
         if "source.output" in c:
             return self._output
         if "measure.iv()" in c:
@@ -171,17 +154,11 @@ async def test_inactive_channel_output_state_parsed_as_float() -> None:
     the DRIVER branch (keithley_2604b.py:139-158), not Python's float()."""
 
     async def voltages_for(output_state: str) -> list[float]:
-        driver = Keithley2604B(
-            "k",
-            "USB0::0x05E6::0x2604::04089762::INSTR",
-            mock=False,
-        )
+        driver = Keithley2604B("k", "USB0::FAKE", mock=False)
         driver._transport = _FakeOutputStateTransport(output_state)
-        await driver.connect()
+        driver._connected = True  # both channels inactive → driver checks source.output
         readings = await driver.read_channels()
-        voltages = [r.value for r in readings if r.channel.endswith("/voltage")]
-        await driver.disconnect()
-        return voltages
+        return [r.value for r in readings if r.channel.endswith("/voltage")]
 
     on_v = await voltages_for("1.000000e+00")
     assert on_v and any(v == 10.0 for v in on_v), (
@@ -189,4 +166,6 @@ async def test_inactive_channel_output_state_parsed_as_float() -> None:
     )
 
     off_v = await voltages_for("0.000000e+00")
-    assert off_v and all(v == 0.0 for v in off_v), "OFF state must emit zero voltage, not the measured value"
+    assert off_v and all(v == 0.0 for v in off_v), (
+        "OFF state must emit zero voltage, not the measured value"
+    )

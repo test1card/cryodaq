@@ -1,8 +1,6 @@
 """Tests for P0 critical fixes.
 
-P0-01 (AlarmEngine v1 Reading-publish behavior) retired with alarm.py in the
-alarm v1->v2 migration; see tests/core/test_engine_alarm_ring_buffer.py and
-tests/core/test_alarm_v2_integration.py for the v2-equivalent coverage.
+P0-01: AlarmEngine publishes Reading to DataBroker on alarm events
 P0-02: SafetyManager publishes state as Reading to DataBroker
 P0-03: SafetyManager.request_run validates source parameter limits
 P0-04: SafetyManager.emergency_off returns latched flag when FAULT_LATCHED
@@ -15,11 +13,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cryodaq.core.alarm import AlarmCondition, AlarmEngine, AlarmSeverity
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
-from cryodaq.drivers.contracts import SourceOffResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,8 +30,7 @@ pytestmark = pytest.mark.asyncio
 def _mock_keithley():
     k = MagicMock()
     k.connected = True
-    k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    k.emergency_off = AsyncMock()
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -55,6 +52,25 @@ async def _feed_safety(broker: SafetyBroker, channel: str = "Т1 Криоста�
     await asyncio.sleep(0.02)
 
 
+def _alarm_condition(
+    name: str = "test_alarm",
+    channel_pattern: str = "sensor/temp",
+    threshold: float = 100.0,
+    comparison: str = ">",
+    severity: AlarmSeverity = AlarmSeverity.WARNING,
+    hysteresis_k: float = 10.0,
+) -> AlarmCondition:
+    return AlarmCondition(
+        name=name,
+        description=f"Test alarm: {name}",
+        channel_pattern=channel_pattern,
+        threshold=threshold,
+        comparison=comparison,
+        severity=severity,
+        hysteresis_k=hysteresis_k,
+    )
+
+
 async def _drain_queue(queue: asyncio.Queue, *, timeout: float = 0.1) -> list[Reading]:  # noqa: ASYNC109
     """Drain all items from a queue within timeout."""
     items: list[Reading] = []
@@ -69,6 +85,304 @@ async def _drain_queue(queue: asyncio.Queue, *, timeout: float = 0.1) -> list[Re
         except TimeoutError:
             break
     return items
+
+
+# ---------------------------------------------------------------------------
+# P0-01: AlarmEngine publishes Reading on alarm events
+# ---------------------------------------------------------------------------
+
+
+async def test_alarm_publishes_reading_on_activate() -> None:
+    """AlarmEngine publishes a Reading to broker on alarm activation.
+
+    Channel: alarm/{name}, metadata has event_type='activated', severity as string.
+    """
+    broker = DataBroker()
+    test_q = await broker.subscribe(
+        "test_alarm_activate",
+        maxsize=100,
+        filter_fn=lambda r: r.channel.startswith("alarm/"),
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        # Trigger alarm: value=150 > threshold=100
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(test_q, timeout=0.2)
+        assert readings, "Expected at least one Reading published to broker on alarm activation"
+
+        activated = [r for r in readings if r.metadata.get("event_type") == "activated"]
+        assert activated, "No Reading with event_type='activated' found"
+
+        r = activated[0]
+        assert r.channel == "alarm/high_temp"
+        assert r.metadata["event_type"] == "activated"
+        # severity must be a string, NOT an enum
+        assert isinstance(r.metadata["severity"], str)
+        assert r.metadata["severity"] == "warning"
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_publishes_reading_on_clear() -> None:
+    """AlarmEngine publishes a Reading with event_type='cleared' when alarm clears."""
+    broker = DataBroker()
+    test_q = await broker.subscribe(
+        "test_alarm_clear",
+        maxsize=100,
+        filter_fn=lambda r: r.channel.startswith("alarm/"),
+    )
+    engine = AlarmEngine(broker=broker)
+    # hysteresis_k=10: clears when value < 90
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        # Activate
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        # Clear: value=80 < threshold - hysteresis_k = 90
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(test_q, timeout=0.2)
+        cleared = [r for r in readings if r.metadata.get("event_type") == "cleared"]
+        assert cleared, "Expected a Reading with event_type='cleared'"
+        assert cleared[0].channel == "alarm/high_temp"
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_publishes_reading_on_acknowledge() -> None:
+    """AlarmEngine publishes a Reading with event_type='acknowledged' on acknowledge."""
+    broker = DataBroker()
+    test_q = await broker.subscribe(
+        "test_alarm_acknowledge",
+        maxsize=100,
+        filter_fn=lambda r: r.channel.startswith("alarm/"),
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        await engine.acknowledge("high_temp")
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(test_q, timeout=0.2)
+        acknowledged = [r for r in readings if r.metadata.get("event_type") == "acknowledged"]
+        assert acknowledged, "Expected a Reading with event_type='acknowledged'"
+        assert acknowledged[0].channel == "alarm/high_temp"
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_publishes_alarm_count_on_activate() -> None:
+    """AlarmEngine publishes analytics/alarm_count with value=1.0 when alarm activates."""
+    broker = DataBroker()
+    count_q = await broker.subscribe(
+        "test_count_activate",
+        maxsize=100,
+        filter_fn=lambda r: r.channel == "analytics/alarm_count",
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        # Trigger alarm
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(count_q, timeout=0.2)
+        # Find the count reading that shows 1 active alarm
+        count_readings = [r for r in readings if r.value == pytest.approx(1.0)]
+        assert count_readings, (
+            f"Expected analytics/alarm_count Reading with value=1.0, got: "
+            f"{[r.value for r in readings]}"
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_publishes_alarm_count_on_clear() -> None:
+    """AlarmEngine publishes analytics/alarm_count=0.0 as the LAST count after trigger→ack→clear.
+
+    start() emits an initial 0.0; we drain that first so subsequent assertions
+    only see counts produced by the trigger/clear sequence.
+    """
+    broker = DataBroker()
+    count_q = await broker.subscribe(
+        "test_count_clear",
+        maxsize=100,
+        filter_fn=lambda r: r.channel == "analytics/alarm_count",
+    )
+    engine = AlarmEngine(broker=broker)
+    # hysteresis_k=10: clears when value < 90
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        # Drain the initial alarm_count=0.0 published by start() so it doesn't
+        # contaminate the post-clear assertion.
+        await _drain_queue(count_q, timeout=0.1)
+
+        # Activate: count → 1.0
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        # Acknowledge
+        await engine.acknowledge("high_temp")
+        await asyncio.sleep(0.02)
+
+        # Clear: value=80 < threshold - hysteresis_k = 90 → count → 0.0
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=80.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(count_q, timeout=0.2)
+        count_values = [r.value for r in readings]
+        assert count_values, (
+            "Expected analytics/alarm_count readings after trigger→ack→clear sequence"
+        )
+        # The LAST count must be 0.0 (alarm cleared) not merely present somewhere
+        assert count_values[-1] == pytest.approx(0.0), (
+            f"Expected LAST analytics/alarm_count=0.0 after clear, got history: {count_values}"
+        )
+        # Confirm the engine has no active alarms
+        assert engine.get_active_alarms() == [], (
+            f"Expected no active alarms after clear, got: {engine.get_active_alarms()}"
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_count_remains_unresolved_after_acknowledge() -> None:
+    """alarm_count counts ACTIVE + ACKNOWLEDGED alarms until clear."""
+    broker = DataBroker()
+    count_q = await broker.subscribe(
+        "test_count_acknowledge",
+        maxsize=100,
+        filter_fn=lambda r: r.channel == "analytics/alarm_count",
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(
+        _alarm_condition(name="high_temp", threshold=100.0, comparison=">", hysteresis_k=10.0)
+    )
+    await engine.start()
+    try:
+        await broker.publish(
+            Reading.now(channel="sensor/temp", value=150.0, unit="K", instrument_id="test")
+        )
+        await asyncio.sleep(0.05)
+
+        await engine.acknowledge("high_temp")
+        await asyncio.sleep(0.05)
+
+        readings = await _drain_queue(count_q, timeout=0.2)
+        count_values = [r.value for r in readings]
+        assert count_values[-1] == pytest.approx(1.0), (
+            f"Expected unresolved alarm_count to remain 1.0 after acknowledge, got: {count_values}"
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_no_feedback_loop() -> None:
+    """AlarmEngine must not process readings from alarm/ channels (no feedback loop)."""
+    broker = DataBroker()
+    alarm_q = await broker.subscribe(
+        "test_feedback",
+        maxsize=100,
+        filter_fn=lambda r: r.channel.startswith("alarm/"),
+    )
+    engine = AlarmEngine(broker=broker)
+    # Condition matching "alarm/" prefix — this must NOT trigger on alarm/ channels
+    engine.add_condition(
+        AlarmCondition(
+            name="alarm_feedback",
+            description="Feedback test",
+            channel_pattern="alarm/.*",
+            threshold=0.0,
+            comparison=">",
+            severity=AlarmSeverity.WARNING,
+            hysteresis_k=0.0,
+        )
+    )
+    await engine.start()
+    try:
+        # Publish a Reading directly to an alarm/ channel — simulates what engine would publish
+        alarm_reading = Reading.now(
+            channel="alarm/alarm_feedback",
+            value=1.0,
+            unit="",
+            instrument_id="test",
+            metadata={"event_type": "activated", "severity": "warning"},
+        )
+        await broker.publish(alarm_reading)
+        await asyncio.sleep(0.1)
+
+        # Drain — if feedback loop exists, we'd see new alarm readings appear
+        readings = await _drain_queue(alarm_q, timeout=0.15)
+        # The only reading should be the one we published, not new engine-generated ones
+        engine_generated = [
+            r
+            for r in readings
+            if r is not alarm_reading and r.metadata.get("event_type") in ("activated", "cleared")
+        ]
+        assert not engine_generated, (
+            f"Feedback loop detected! Engine generated new alarm readings: {engine_generated}"
+        )
+    finally:
+        await engine.stop()
+
+
+async def test_alarm_initial_count_zero() -> None:
+    """AlarmEngine publishes analytics/alarm_count=0.0 on start (before any alarms)."""
+    broker = DataBroker()
+    count_q = await broker.subscribe(
+        "test_initial_count",
+        maxsize=100,
+        filter_fn=lambda r: r.channel == "analytics/alarm_count",
+    )
+    engine = AlarmEngine(broker=broker)
+    engine.add_condition(_alarm_condition(name="high_temp", threshold=100.0, comparison=">"))
+    await engine.start()
+    try:
+        readings = await _drain_queue(count_q, timeout=0.2)
+        assert readings, "Expected at least one analytics/alarm_count Reading on start"
+        first = readings[0]
+        assert first.value == pytest.approx(0.0), (
+            f"Expected initial alarm count=0.0, got {first.value}"
+        )
+    finally:
+        await engine.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +404,8 @@ async def test_safety_start_publishes_initial_state_safe_off() -> None:
         assert readings, "Expected analytics/safety_state Reading on start"
         safe_off_readings = [r for r in readings if r.metadata.get("state") == "safe_off"]
         assert safe_off_readings, (
-            f"Expected Reading with state='safe_off', got: {[r.metadata.get('state') for r in readings]}"
+            f"Expected Reading with state='safe_off', got: "
+            f"{[r.metadata.get('state') for r in readings]}"
         )
     finally:
         await mgr.stop()
@@ -117,7 +432,9 @@ async def test_safety_publishes_state_on_transition() -> None:
 
         readings = await _drain_queue(state_q, timeout=0.2)
         states = [r.metadata.get("state") for r in readings]
-        assert "running" in states, f"Expected Reading with state='running' after request_run, got states: {states}"
+        assert "running" in states, (
+            f"Expected Reading with state='running' after request_run, got states: {states}"
+        )
     finally:
         await mgr.stop()
 
@@ -125,11 +442,10 @@ async def test_safety_publishes_state_on_transition() -> None:
 async def test_safety_publish_failure_does_not_crash() -> None:
     """SafetyManager must not crash if data_broker.publish raises an exception.
 
-    Verifies three things:
-    1. publish is actually called BEYOND the start() baseline — the transition
-       triggers additional publish calls, not just the initial one.
-    2. The state machine transitions SAFE_OFF → READY despite publish failures.
-    3. No exception propagates out of start() or state transitions.
+    The test verifies three things:
+    1. publish is actually called (not silently skipped) — await_count >= 1
+    2. The state machine still transitions correctly despite publish failures
+    3. No exception propagates out of start() or state transitions
     """
     failing_broker = MagicMock()
     failing_broker.publish = AsyncMock(side_effect=RuntimeError("publish failed"))
@@ -139,33 +455,20 @@ async def test_safety_publish_failure_does_not_crash() -> None:
         # start() should not raise even with a failing broker
         assert mgr.state == SafetyState.SAFE_OFF
 
-        # Capture publish call count AFTER start() — any calls here are from the
-        # initial state publication, not from a transition yet.
-        baseline_count = failing_broker.publish.await_count
-
-        # Feed a healthy reading to trigger SAFE_OFF → READY transition
+        # Transitions should still work
         await _feed_safety(sb)
+        await asyncio.sleep(1.2)
 
-        # Deadline-poll until BOTH the state reaches READY AND the transition's
-        # publish attempt has actually landed (up to 2 s). The state flips to
-        # READY synchronously, but the READY-state publish is an awaited task that
-        # can lag under load — polling on the publish count too (not just the
-        # state) removes the race where await_count is read before that task runs.
-        deadline = asyncio.get_event_loop().time() + 2.0
-        while not (mgr.state == SafetyState.READY and failing_broker.publish.await_count > baseline_count):
-            if asyncio.get_event_loop().time() >= deadline:
-                break
-            await asyncio.sleep(0.05)
+        # The publish was attempted (SafetyManager does not silently skip it)
+        assert failing_broker.publish.await_count >= 1, (
+            f"Expected data_broker.publish to be awaited at least once, "
+            f"got await_count={failing_broker.publish.await_count}"
+        )
 
-        # State machine must reach READY despite failing broker
-        assert mgr.state == SafetyState.READY, f"Expected READY after healthy feed, got {mgr.state}"
-
-        # publish must have been called BEYOND the post-start baseline,
-        # proving the SAFE_OFF → READY transition triggered a publish attempt
-        # (which was swallowed, not crashed).
-        assert failing_broker.publish.await_count > baseline_count, (
-            f"Expected data_broker.publish to be called beyond baseline "
-            f"({baseline_count}), got await_count={failing_broker.publish.await_count}"
+        # State machine must still function despite broker publish failures:
+        # SAFE_OFF → READY is the expected path after a healthy reading
+        assert mgr.state in (SafetyState.SAFE_OFF, SafetyState.READY), (
+            f"Expected SAFE_OFF or READY after feed+sleep, got {mgr.state}"
         )
     finally:
         await mgr.stop()
@@ -176,7 +479,9 @@ async def test_safety_publish_failure_does_not_crash() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _make_safety_ready(*, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0):
+async def _make_safety_ready(
+    *, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0
+):
     """Create a SafetyManager in READY state with source limits configured."""
     mgr, sb = await _make_safety()
     # Configure source limits

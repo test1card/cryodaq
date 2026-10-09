@@ -36,10 +36,29 @@ class ChannelQuantity(StrEnum):
     VOLTAGE = "voltage"
     CURRENT = "current"
     RESISTANCE = "resistance"
+    THERMAL_RESISTANCE = "thermal_resistance"
+    THERMAL_CONDUCTANCE = "thermal_conductance"
     POWER = "power"
     DERIVED = "derived"
     EVENT_STATE = "event_state"
     LEGACY_UNKNOWN = "legacy_unknown"
+
+    @property
+    def display_decimal_places(self) -> int:
+        """Default fixed-point precision for operator-facing readouts."""
+
+        if self in {
+            ChannelQuantity.THERMAL_RESISTANCE,
+            ChannelQuantity.THERMAL_CONDUCTANCE,
+        }:
+            return 4
+        return 2
+
+    @property
+    def display_scientific(self) -> bool:
+        """Whether the default display uses scientific notation."""
+
+        return self is ChannelQuantity.PRESSURE
 
 
 class ChannelRole(StrEnum):
@@ -80,6 +99,8 @@ _UNITS_BY_QUANTITY: Final[Mapping[ChannelQuantity, frozenset[str]]] = MappingPro
         ChannelQuantity.VOLTAGE: frozenset({"V"}),
         ChannelQuantity.CURRENT: frozenset({"A"}),
         ChannelQuantity.RESISTANCE: frozenset({"Ohm"}),
+        ChannelQuantity.THERMAL_RESISTANCE: frozenset({"K/W"}),
+        ChannelQuantity.THERMAL_CONDUCTANCE: frozenset({"W/K"}),
         ChannelQuantity.POWER: frozenset({"W"}),
         ChannelQuantity.DERIVED: frozenset(
             {"K", "°C", "sensor_unit", "mbar", "hPa", "mm", "%", "V", "A", "Ohm", "W", "1"}

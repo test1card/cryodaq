@@ -8,7 +8,6 @@ ExperimentSetpointProvider — читает setpoints из метаданных 
 
 from __future__ import annotations
 
-import logging
 import time
 from datetime import UTC
 from typing import TYPE_CHECKING
@@ -18,8 +17,6 @@ from cryodaq.core.alarm_v2 import PhaseProvider, SetpointProvider
 if TYPE_CHECKING:
     from cryodaq.core.alarm_config import SetpointDef
     from cryodaq.core.experiment import ExperimentManager
-
-logger = logging.getLogger("cryodaq.core.alarm_providers")
 
 
 # ---------------------------------------------------------------------------
@@ -43,8 +40,8 @@ class ExperimentPhaseProvider(PhaseProvider):
         """Текущая фаза активного эксперимента, или None."""
         return self._mgr.get_current_phase()
 
-    def get_phase_elapsed_s(self) -> float | None:
-        """Время с начала текущей фазы, либо None when its start is unknown."""
+    def get_phase_elapsed_s(self) -> float:
+        """Время с начала текущей фазы, в секундах. 0 если нет фазы."""
         active = self._mgr.get_active_experiment()
         if active is None:
             return 0.0
@@ -55,11 +52,7 @@ class ExperimentPhaseProvider(PhaseProvider):
         last = history[-1]
         started_at_raw = last.get("started_at")
         if not started_at_raw:
-            logger.warning(
-                "Фаза без started_at (%r) — phase elapsed is unknown",
-                started_at_raw,
-            )
-            return None
+            return 0.0
         # started_at хранится как ISO string
         from datetime import datetime
 
@@ -70,11 +63,7 @@ class ExperimentPhaseProvider(PhaseProvider):
                     dt = dt.replace(tzinfo=UTC)
                 return time.time() - dt.timestamp()
         except (ValueError, TypeError):
-            logger.warning(
-                "Не удалось распарсить started_at=%r — phase elapsed is unknown",
-                started_at_raw,
-            )
-            return None
+            return 0.0
         return 0.0
 
 
@@ -112,11 +101,12 @@ class ExperimentSetpointProvider(SetpointProvider):
         Порядок:
         1. Если source=="experiment_metadata" → custom_fields активного эксперимента
         2. Иначе — default из SetpointDef
-        3. Если ключ не определён → KeyError
+        3. Если ключ не определён → 0.0
         """
         sp_def = self._defs.get(key)
         if sp_def is None:
-            raise KeyError(key)
+            # Попытка прочитать напрямую из _defaults (базовый класс)
+            return self._defaults.get(key, 0.0)
 
         if sp_def.source == "experiment_metadata":
             active = self._mgr.get_active_experiment()

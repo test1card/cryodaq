@@ -198,17 +198,21 @@ class QueryRouter:
         result = await archive.list_recent(days=days)
         return {"archive_list": result}
 
-    async def _fetch_archive_detail(self, intent: QueryIntent, query: str) -> dict[str, Any]:
+    async def _fetch_archive_detail(
+        self, intent: QueryIntent, query: str
+    ) -> dict[str, Any]:
         archive = self._adapters.archive
         if archive is None:
             return {"archive_detail": None}
         # Heuristic: the IntentClassifier may surface an experiment id via
         # ``quantity`` or as the only entry in ``target_channels`` (the LLM
-        # sometimes treats it as a "channel"). Pass an empty candidate to the
-        # adapter so it returns a typed invalid request, not an absence.
+        # sometimes treats it as a "channel"). Fallback to None — adapter
+        # will return None, format prompt frames it as "детали не найдены".
         candidate = (intent.quantity or "").strip()
         if not candidate and intent.target_channels:
             candidate = intent.target_channels[0].strip()
+        if not candidate:
+            return {"archive_detail": None, "query": query}
         result = await archive.get_detail(candidate)
         return {"archive_detail": result, "experiment_id": candidate}
 
@@ -224,7 +228,9 @@ class QueryRouter:
     # F32 Stage 2 (v0.55.7) — knowledge query
     # ------------------------------------------------------------------
 
-    async def _fetch_knowledge_query(self, intent: QueryIntent, query: str) -> dict[str, Any]:
+    async def _fetch_knowledge_query(
+        self, intent: QueryIntent, query: str
+    ) -> dict[str, Any]:
         """Run semantic search over the RAG corpus.
 
         ``query`` is preferred over ``intent.quantity`` because the original

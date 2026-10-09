@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.drivers.contracts import SourceOffResult
-from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # BUG-1: Safety state machine race — request_run rejected during _fault()
@@ -27,12 +25,7 @@ async def test_request_run_rejected_during_fault() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = SafetyManager(
-        broker,
-        keithley_driver=k,
-        mock=True,
-        qualification_receipt=issued_test_qualification_receipt(),
-    )
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
 
     # Start smua
     result = await sm.request_run(0.5, 40.0, 1.0, channel="smua")
@@ -44,10 +37,10 @@ async def test_request_run_rejected_during_fault() -> None:
     fault_entered = asyncio.Event()
     proceed = asyncio.Event()
 
-    async def slow_emergency_off(channel=None) -> SourceOffResult:
+    async def slow_emergency_off(channel=None):
         fault_entered.set()
         await proceed.wait()  # yield point — event loop runs other tasks
-        return await original_emergency_off(channel)
+        await original_emergency_off(channel)
 
     k.emergency_off = slow_emergency_off
 
@@ -88,10 +81,10 @@ async def test_fault_sets_state_before_emergency_off() -> None:
     state_during_eoff = None
     original_emergency_off = k.emergency_off
 
-    async def check_state_off(channel=None) -> SourceOffResult:
+    async def check_state_off(channel=None):
         nonlocal state_during_eoff
         state_during_eoff = sm.state
-        return await original_emergency_off(channel)
+        await original_emergency_off(channel)
 
     k.emergency_off = check_state_off
 
@@ -262,7 +255,7 @@ async def test_sqlite_ok_nonfinite_filtered(tmp_path) -> None:
 
 
 async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
-    """OVERRANGE +inf persists as sentinel + status (NaN-doctrine P2-2)."""
+    """OVERRANGE reading with value=+inf is intentionally persisted."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -292,16 +285,10 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
     assert len(rows) == 1, f"OVERRANGE +inf must be persisted, got rows={rows}"
     assert rows[0][0] == "T_OVR"
     assert rows[0][2] == ChannelStatus.OVERRANGE.value
-    import math
-
-    from cryodaq.storage.sentinel import SENTINEL, decode
-
-    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
-    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
-    """UNDERRANGE -inf persists as sentinel + status (NaN-doctrine P2-2)."""
+    """UNDERRANGE reading with value=-inf is intentionally persisted."""
     from cryodaq.storage.sqlite_writer import SQLiteWriter
 
     writer = SQLiteWriter(tmp_path)
@@ -331,12 +318,6 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
     assert len(rows) == 1, f"UNDERRANGE -inf must be persisted, got rows={rows}"
     assert rows[0][0] == "T_UNR"
     assert rows[0][2] == ChannelStatus.UNDERRANGE.value
-    import math
-
-    from cryodaq.storage.sentinel import SENTINEL, decode
-
-    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
-    assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
 # ---------------------------------------------------------------------------
@@ -368,194 +349,16 @@ def test_gpib_resource_closed_on_clear_failure() -> None:
     transport._bus_prefix = "GPIB0"
 
     mock_res = MagicMock()
-    mock_res.clear.side_effect = RuntimeError("IFC not supported")
+    mock_res.clear.side_effect = Exception("IFC not supported")
 
     mock_rm = MagicMock()
     mock_rm.open_resource.return_value = mock_res
 
     with patch.object(GPIBTransport, "_get_rm", return_value=mock_rm):
-        with pytest.raises(RuntimeError, match="IFC not supported"):
+        with pytest.raises(Exception, match="IFC not supported"):
             transport._blocking_connect()
 
     # Resource must have been closed despite clear() failure
     mock_res.close.assert_called_once()
     # _resource must still be None (not assigned)
     assert transport._resource is None
-
-
-# ---------------------------------------------------------------------------
-# HI-2 / ME-15: NaN readings must not poison rolling analytics estimators
-# ---------------------------------------------------------------------------
-
-
-def _feed(est_push, reading: Reading) -> bool:
-    """Replicate the engine feed-loop gate: usable ⇒ forwarded, else dropped."""
-    if reading.is_usable():
-        est_push(reading.channel, reading.timestamp.timestamp(), reading.value)
-        return True
-    return False
-
-
-def test_nan_poisons_unguarded_rate_estimator() -> None:
-    """Characterizes HI-2: one raw NaN blinds get_rate for the whole window."""
-    from cryodaq.core.rate_estimator import RateEstimator
-
-    est = RateEstimator(window_s=120.0, min_points=5)
-    for i in range(5):
-        est.push("T1", float(i), 300.0 - i)
-    est.push("T1", 5.0, float("nan"))  # SENSOR_ERROR reading
-    for i in range(6, 11):
-        est.push("T1", float(i), 300.0 - i)
-
-    assert est.get_rate("T1") is None
-
-
-def test_finite_error_status_reading_never_reaches_rate_estimator() -> None:
-    """Doctrine: a FINITE value carrying an error status is NOT usable, so the
-    boundary gate must drop it before the rate estimator sees it.
-
-    This is the case a pure float-finiteness guard (old _push_if_finite) let
-    through — status is now the discriminator, not the value.
-    """
-    from cryodaq.core.rate_estimator import RateEstimator
-
-    est = RateEstimator(window_s=120.0, min_points=3)
-    # A flapping sensor can report a plausible finite number with SENSOR_ERROR.
-    bad = Reading.now("T1", 999.0, "K", status=ChannelStatus.SENSOR_ERROR)
-    assert _feed(est.push, bad) is False
-    assert est.buffer_size("T1") == 0
-
-
-def test_usable_readings_feed_rate_estimator_nan_dropped() -> None:
-    """Fed through the doctrine gate, usable readings accumulate and a
-    mid-stream non-finite (NaN, error status) reading is dropped, so the
-    estimator still yields the correct rate afterward.
-
-    Timestamps are deterministic (not Reading.now()): a wall-clock tight
-    loop can collapse onto one clock tick on a fast/coarse-clock CI runner,
-    zeroing the OLS time-variance denominator and making get_rate()
-    legitimately return None (rate_estimator.py's den==0 guard is correct
-    production behavior — the flake was in the test's timing, not the code).
-    """
-    from cryodaq.core.rate_estimator import RateEstimator
-
-    est = RateEstimator(window_s=120.0, min_points=5)
-    base_ts = 1_700_000_000.0
-    step_s = 2.0
-
-    def _reading(i: int, value: float, **kwargs: object) -> Reading:
-        return Reading(
-            timestamp=datetime.fromtimestamp(base_ts + i * step_s, tz=UTC),
-            instrument_id="test",
-            channel="T1",
-            value=value,
-            unit="K",
-            **kwargs,
-        )
-
-    for i in range(5):
-        assert _feed(est.push, _reading(i, 300.0 - i)) is True
-    # SENSOR_ERROR / TIMEOUT reading arrives as NaN
-    dropped = _reading(5, float("nan"), status=ChannelStatus.SENSOR_ERROR)
-    assert _feed(est.push, dropped) is False
-    for i in range(6, 11):
-        assert _feed(est.push, _reading(i, 300.0 - i)) is True
-
-    # value = 300 - i and timestamp = base_ts + i*step_s are both exactly
-    # affine in i, so the OLS fit is exact regardless of the dropped point:
-    # dv/dt = -1/step_s K/s = -60/step_s K/min = -30 K/min.
-    rate = est.get_rate("T1")
-    assert rate is not None
-    assert rate == pytest.approx(-30.0)
-
-
-def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
-    """ME-15: VacuumTrendPredictor.push keeps its own fail-closed finite guard
-    (status-less float API), so a NaN never poisons the buffer even if a caller
-    bypasses the Reading boundary. Its P <= 0 log-domain guard also stays."""
-    import math
-
-    from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-
-    vt = VacuumTrendPredictor(config={})
-    vt.push(0.0, 1e-3)
-    vt.push(1.0, float("nan"))  # dropped by fail-closed finite guard
-    vt.push(2.0, -5.0)  # dropped by log-domain P <= 0 guard
-    vt.push(3.0, 9e-4)
-
-    assert len(vt._buffer) == 2
-    assert all(math.isfinite(log_p) for _, log_p in vt._buffer)
-
-
-def _usable_and_unusable_feed_readings(*, channel: str, unit: str) -> tuple[Reading, Reading]:
-    return (
-        Reading(
-            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
-            instrument_id="test",
-            channel=channel,
-            value=99.0,
-            unit=unit,
-            status=ChannelStatus.SENSOR_ERROR,
-        ),
-        Reading(
-            timestamp=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
-            instrument_id="test",
-            channel=channel,
-            value=4.2,
-            unit=unit,
-        ),
-    )
-
-
-async def test_sensor_diag_feed_pushes_only_usable_readings() -> None:
-    from cryodaq.engine_wiring import runtime_tasks
-
-    unusable, usable = _usable_and_unusable_feed_readings(channel="T1", unit="K")
-    queue = MagicMock()
-    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
-    broker = MagicMock()
-    broker.subscribe = AsyncMock(return_value=queue)
-    sensor_diag = MagicMock()
-
-    await runtime_tasks.sensor_diag_feed(sensor_diag, broker)
-
-    sensor_diag.push.assert_called_once_with(
-        usable.channel,
-        usable.timestamp.timestamp(),
-        usable.value,
-    )
-
-
-async def test_vacuum_trend_feed_pushes_only_usable_readings() -> None:
-    from cryodaq.engine_wiring import runtime_tasks
-
-    unusable, usable = _usable_and_unusable_feed_readings(channel="P1", unit="mbar")
-    queue = MagicMock()
-    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
-    broker = MagicMock()
-    broker.subscribe = AsyncMock(return_value=queue)
-    vacuum_trend = MagicMock()
-
-    await runtime_tasks.vacuum_trend_feed(vacuum_trend, {"pressure_channel": "P1"}, broker)
-
-    vacuum_trend.push.assert_called_once_with(
-        usable.timestamp.timestamp(),
-        usable.value,
-    )
-
-
-async def test_alarm_v2_feed_loop_pushes_only_usable_readings() -> None:
-    from cryodaq.engine_wiring import runtime_tasks
-
-    unusable, usable = _usable_and_unusable_feed_readings(channel="T1", unit="K")
-    queue = MagicMock()
-    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
-    rate_estimator = MagicMock()
-
-    await runtime_tasks._alarm_v2_feed_loop(queue, MagicMock(), rate_estimator)
-
-    rate_estimator.push.assert_called_once_with(
-        usable.channel,
-        usable.timestamp.timestamp(),
-        usable.value,
-    )

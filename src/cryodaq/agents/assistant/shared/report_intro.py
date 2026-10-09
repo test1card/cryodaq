@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 import urllib.error
 import urllib.request
@@ -21,19 +20,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from cryodaq.agents.assistant.shared.ollama_client import validate_loopback_origin
-
 logger = logging.getLogger(__name__)
 
 _OLLAMA_PATH = "/api/generate"
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Fail closed when a report request receives a redirect response."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        del req, fp, code, msg, headers, newurl
-        return None
 
 
 @dataclass
@@ -41,7 +30,7 @@ class IntroConfig:
     """Configuration for synchronous assistant report intro generation."""
 
     enabled: bool = False  # explicitly opted in via agent.yaml c_campaign_report: true
-    base_url: str = "http://127.0.0.1:11434"
+    base_url: str = "http://localhost:11434"
     model: str = "gemma4:e4b"
     timeout_s: float = 180.0  # campaign report is long — gemma4:e4b needs 60-120s
     max_tokens: int = 2048
@@ -79,7 +68,7 @@ def load_intro_config() -> IntroConfig:
         base_timeout = float(ollama.get("timeout_s", 60.0))
         return IntroConfig(
             enabled=gemma_enabled and slice_enabled,
-            base_url=str(ollama.get("base_url", "http://127.0.0.1:11434")),
+            base_url=str(ollama.get("base_url", "http://localhost:11434")),
             model=str(ollama.get("default_model", "gemma4:e4b")),
             # Campaign reports generate 200-400 words — use at least 180s
             timeout_s=max(base_timeout, 180.0),
@@ -130,7 +119,7 @@ def generate_report_intro(dataset: Any, config: IntroConfig | None = None) -> st
 
 def _call_ollama_sync(prompt: str, system: str, config: IntroConfig) -> str:
     """Blocking HTTP POST to Ollama /api/generate. Raises on error."""
-    url = validate_loopback_origin(config.base_url) + _OLLAMA_PATH
+    url = config.base_url.rstrip("/") + _OLLAMA_PATH
     payload: dict[str, Any] = {
         "model": config.model,
         "prompt": prompt,
@@ -148,19 +137,7 @@ def _call_ollama_sync(prompt: str, system: str, config: IntroConfig) -> str:
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    # Keep the legacy injectable ``urlopen`` seam for callers that replace it
-    # explicitly, while production always uses the no-redirect opener.  The
-    # opener itself remains injectable for redirect-policy tests.
-    urlopen = urllib.request.urlopen
-    build_opener = urllib.request.build_opener
-    if (
-        getattr(build_opener, "__module__", None) == "urllib.request"
-        and getattr(urlopen, "__module__", None) != "urllib.request"
-    ):
-        response = urlopen(req, timeout=config.timeout_s)
-    else:
-        response = build_opener(_NoRedirectHandler()).open(req, timeout=config.timeout_s)
-    with response as resp:
+    with urllib.request.urlopen(req, timeout=config.timeout_s) as resp:
         result: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
     if "error" in result:
         raise RuntimeError(f"Ollama error: {result['error']}")
@@ -248,7 +225,7 @@ def _format_phases(exp: dict[str, Any]) -> str:
         return "нет данных"
     lines: list[str] = []
     for i, p in enumerate(phases):
-        name = p.get("phase") or p.get("name") or f"Фаза {i + 1}"
+        name = p.get("phase") or p.get("name") or f"Фаза {i+1}"
         started = _fmt_dt(p.get("started_at") or p.get("start_time"))
         ended = _fmt_dt(p.get("ended_at") or p.get("end_time"))
         if ended != "—":
@@ -264,22 +241,17 @@ def _format_channel_stats(dataset: Any) -> str:
         return "нет данных"
     by_channel: dict[str, list[float]] = defaultdict(list)
     for r in readings:
-        # Non-finite readings mean "no reading" (NaN-доктрина, reporting/data.py).
-        # Aggregating over them puts "nan" into the prompt, from which Гемма
-        # writes a confident annotation about a value nobody measured.
-        if isinstance(r.value, int | float) and math.isfinite(r.value):
-            by_channel[r.channel].append(r.value)
-        else:
-            by_channel.setdefault(r.channel, [])
+        by_channel[r.channel].append(r.value)
     lines: list[str] = []
     for ch, vals in sorted(by_channel.items()):
-        unit = next((r.unit for r in readings if r.channel == ch), "")
-        unit_str = f" {unit}" if unit else ""
         if not vals:
-            lines.append(f"- {ch}: нет данных")
             continue
         mn, mx, avg = min(vals), max(vals), sum(vals) / len(vals)
-        lines.append(f"- {ch}: мин {mn:.4g}{unit_str} / макс {mx:.4g}{unit_str} / ср {avg:.4g}{unit_str}")
+        unit = next((r.unit for r in readings if r.channel == ch), "")
+        unit_str = f" {unit}" if unit else ""
+        lines.append(
+            f"- {ch}: мин {mn:.4g}{unit_str} / макс {mx:.4g}{unit_str} / ср {avg:.4g}{unit_str}"
+        )
     return "\n".join(lines[:12]) if lines else "нет данных"
 
 
@@ -294,8 +266,7 @@ def _format_alarms(dataset: Any) -> str:
 def _format_operator_notes(dataset: Any) -> str:
     operator_log = getattr(dataset, "operator_log", [])
     gemma_entries = [
-        e
-        for e in operator_log
+        e for e in operator_log
         if "gemma" not in (getattr(e, "tags", None) or ())
         and "ai" not in (getattr(e, "tags", None) or ())
         and e.message.strip()

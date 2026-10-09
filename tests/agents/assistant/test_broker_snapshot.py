@@ -37,10 +37,7 @@ def _reading(channel: str, value: float = 77.0) -> Reading:
 def _snapshot_with_seeded_latest(
     *, latest: dict[str, Reading], channel_manager: MagicMock | None = None
 ) -> BrokerSnapshot:
-    # B1: BrokerSnapshot now subscribes over ZMQ instead of an in-process
-    # DataBroker — these tests never call .start(), so no socket is ever
-    # touched; they only exercise the .latest() lookup-tier logic below.
-    snap = BrokerSnapshot(channel_manager=channel_manager)
+    snap = BrokerSnapshot(broker=MagicMock(), channel_manager=channel_manager)
     snap._latest.update(latest)
     return snap
 

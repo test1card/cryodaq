@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import math
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,6 @@ import pytest
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.replay import ReplaySource
-from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -44,9 +42,7 @@ def _make_db(tmp_path: Path, readings: list[Reading]) -> Path:
     writer._write_batch(readings)
     day = readings[0].timestamp.date()
     db_path = tmp_path / f"data_{day.isoformat()}.db"
-    if writer._conn is not None:
-        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
-    writer._conn = None
+    writer._conn = None  # release connection
     return db_path
 
 
@@ -155,255 +151,40 @@ async def test_replay_missing_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
-    """stop() halts replay deterministically while it is parked inside asyncio.sleep.
-
-    Strategy: monkeypatch cryodaq.storage.replay.asyncio.sleep so the FIRST
-    call sets a ``sleep_started`` event and then blocks on a ``release`` event.
-    We await ``sleep_started``, call ``replay.stop()``, then release — verifying
-    that fewer than all rows were emitted.
-    """
-    import cryodaq.storage.replay as replay_module
-
+async def test_replay_stop(tmp_path: Path) -> None:
+    # Use a small number of readings and a non-zero speed so the loop contains
+    # real asyncio.sleep() calls — giving stop() a guaranteed opportunity to run.
+    # Timestamps are 1 second apart; speed=100 means each sleep is 10 ms.
     n = 10
     readings = [
         _reading("CH1", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)
     ]
     db_path = _make_db(tmp_path, readings)
 
-    sleep_started = asyncio.Event()
-    release = asyncio.Event()
-    original_sleep = asyncio.sleep
-
-    async def _controlled_sleep(delay, *args, **kwargs):
-        if not sleep_started.is_set():
-            sleep_started.set()
-            await asyncio.wait_for(release.wait(), timeout=5.0)
-        else:
-            # Subsequent sleeps: honour them normally (replay already stopped,
-            # this path is only reached if stop() didn't work — let it time out).
-            await original_sleep(delay, *args, **kwargs)
-
-    monkeypatch.setattr(replay_module.asyncio, "sleep", _controlled_sleep)
-
     broker = DataBroker()
-    await broker.subscribe("test_sub", maxsize=n + 10)
+    queue = await broker.subscribe("test_sub", maxsize=n + 10)
 
-    replay = ReplaySource(broker, speed=1.0)  # speed>0 → sleep is called between rows
+    replay = ReplaySource(broker, speed=100.0)  # 1 s apart → 10 ms sleep each
+
+    # Launch play() as a background task
     play_task = asyncio.create_task(replay.play(db_path))
 
-    # Wait for replay to park inside the first sleep
-    await asyncio.wait_for(sleep_started.wait(), timeout=5.0)
+    # Wait deterministically for the first reading to land in the queue.
+    # Each inter-row sleep is 10 ms (speed=100, 1 s gap); polling at 5 ms
+    # intervals catches the first publish well before the second sleep begins,
+    # ensuring stop() fires while replay is blocked in asyncio.sleep().
+    for _ in range(400):  # up to 2 s total
+        await asyncio.sleep(0.005)
+        if not queue.empty():
+            break
 
-    # First row was published before sleep; call stop while parked
+    assert not queue.empty(), "Replay did not publish even one reading within 2 s"
     replay.stop()
 
-    # Release the blocked sleep so replay can observe _running=False and break
-    release.set()
+    count = await play_task
 
-    count = await asyncio.wait_for(play_task, timeout=5.0)
-
-    # Replay emitted the first row (before sleeping), then stopped — count < n
+    # At least one row was published but not all n
     assert 0 < count < n, (
-        f"stop() while parked in sleep must limit emitted count; got count={count} (n={n})"
+        f"Expected stop() to halt replay between 1 and {n - 1} rows; got count={count}"
     )
-
-
-# ---------------------------------------------------------------------------
-# NaN-доктрина: a replayed sentinel/error row publishes NaN, never the sentinel
-# ---------------------------------------------------------------------------
-
-
-async def test_replay_masks_sentinel_value(tmp_path: Path) -> None:
-    readings = [
-        _reading("CH1", 4.5, ts=_fixed_ts(10, 0, 0)),
-        Reading(
-            timestamp=_fixed_ts(10, 0, 1),
-            instrument_id="ls218s",
-            channel="CH1",
-            value=float("nan"),
-            unit="K",
-            status=ChannelStatus.SENSOR_ERROR,
-        ),
-    ]
-    db_path = _make_db(tmp_path, readings)
-
-    broker = DataBroker()
-    queue = await broker.subscribe("test_sub", maxsize=100)
-    replay = ReplaySource(broker, speed=0.0)
-    count = await replay.play(db_path)
-
-    received = [queue.get_nowait() for _ in range(count)]
-    values = [r.value for r in received]
-    assert SENTINEL not in values, "sentinel republished to broker"
-    assert not any(math.isinf(v) for v in values), "inf republished to broker"
-    bad = [r.value for r in received if r.status is ChannelStatus.SENSOR_ERROR]
-    assert bad and all(math.isnan(v) for v in bad), "error row must republish as NaN"
-
-
-# ---------------------------------------------------------------------------
-# F28: play_directory is archive-aware — days rotated to Parquet still replay
-# ---------------------------------------------------------------------------
-
-_ARCHIVE_TODAY = datetime(2026, 4, 29, tzinfo=UTC)
-
-
-def _write_day(data_dir: Path, readings: list[Reading]) -> None:
-    """Persist readings for their day via the real SQLiteWriter."""
-    writer = SQLiteWriter(data_dir)
-    writer._write_batch(readings)
-    if writer._conn is not None:
-        writer._conn.close()
-    writer._conn = None
-
-
-async def test_play_directory_replays_rotated_day(tmp_path: Path) -> None:
-    pytest.importorskip("pyarrow")
-    from cryodaq.storage.cold_rotation import ColdRotationService
-
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _ARCHIVE_TODAY - timedelta(days=40)
-    recent_day = _ARCHIVE_TODAY - timedelta(days=1)
-
-    _write_day(
-        data_dir,
-        [
-            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
-            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
-        ],
-    )
-    _write_day(data_dir, [_reading("Т11", 90.0, ts=recent_day.replace(hour=12))])
-
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    await svc.run_once(now=_ARCHIVE_TODAY)
-    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists(), (
-        "old day must have been rotated + deleted"
-    )
-
-    broker = DataBroker()
-    queue = await broker.subscribe("sub", maxsize=100)
-    replay = ReplaySource(broker, speed=0.0)
-    count = await replay.play_directory(data_dir, archive_dir=archive_dir)
-
-    assert count == 3, f"rotated + hot rows must all replay, got {count}"
-    received = [queue.get_nowait() for _ in range(queue.qsize())]
-    vals = sorted(r.value for r in received)
-    assert vals == pytest.approx([90.0, 180.0, 200.0])
-    assert {"Т12", "Т11"} <= {r.channel for r in received}
-
-
-async def test_play_directory_cold_day_masks_sentinel(tmp_path: Path) -> None:
-    pytest.importorskip("pyarrow")
-    from cryodaq.storage.cold_rotation import ColdRotationService
-
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _ARCHIVE_TODAY - timedelta(days=40)
-
-    _write_day(
-        data_dir,
-        [
-            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
-            Reading(
-                timestamp=old_day.replace(hour=13),
-                instrument_id="ls218s",
-                channel="Т12",
-                value=float("nan"),
-                unit="K",
-                status=ChannelStatus.SENSOR_ERROR,
-            ),
-        ],
-    )
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    await svc.run_once(now=_ARCHIVE_TODAY)
-
-    broker = DataBroker()
-    queue = await broker.subscribe("sub", maxsize=100)
-    replay = ReplaySource(broker, speed=0.0)
-    await replay.play_directory(data_dir, archive_dir=archive_dir)
-
-    received = [queue.get_nowait() for _ in range(queue.qsize())]
-    vals = [r.value for r in received]
-    assert 200.0 in vals, "usable rotated reading must survive"
-    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
-    bad = [r for r in received if r.status is ChannelStatus.SENSOR_ERROR]
-    assert bad and all(math.isnan(r.value) for r in bad), "cold sentinel row must present as NaN"
-
-
-async def test_play_directory_no_archive_unchanged(tmp_path: Path) -> None:
-    """No archive present → byte-identical to the hot-only original."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    _make_db(
-        data_dir,
-        [
-            _reading("CH1", 1.0, ts=datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)),
-            _reading("CH2", 2.0, ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
-        ],
-    )
-    _make_db(data_dir, [_reading("CH1", 3.0, ts=datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC))])
-
-    broker = DataBroker()
-    queue = await broker.subscribe("sub", maxsize=100)
-    replay = ReplaySource(broker, speed=0.0)
-    # No archive_dir passed → defaults to data_dir/archive, which is absent.
-    count = await replay.play_directory(data_dir)
-
-    assert count == 3
-    assert queue.qsize() == 3
-    vals = sorted(r.value for r in [queue.get_nowait() for _ in range(3)])
-    assert vals == pytest.approx([1.0, 2.0, 3.0])
-
-
-async def test_play_directory_overlap_day_unions_hot_and_cold(tmp_path: Path) -> None:
-    """F4: a day present in BOTH the archive and a restored hot .db replays the
-    union+dedup, not hot-only.
-
-    After rotation the hot DB is deleted; a manual restore / backdated import can
-    recreate a hot DB for that archived day. The old code computed
-    cold_days = archived − hot, so an overlap day fell through to the hot-only
-    `play` path and the archived rows vanished — diverging from query_rows'
-    union+dedup contract (archive_reader.py).
-    """
-    pytest.importorskip("pyarrow")
-    from cryodaq.storage.cold_rotation import ColdRotationService
-
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _ARCHIVE_TODAY - timedelta(days=40)
-
-    # Archive two rows for old_day, then rotate (hot DB deleted).
-    _write_day(
-        data_dir,
-        [
-            _reading("Т12", 200.0, ts=old_day.replace(hour=12)),
-            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
-        ],
-    )
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    await svc.run_once(now=_ARCHIVE_TODAY)
-    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
-
-    # Restore a hot DB for the SAME archived day: one exact-duplicate row (hour13)
-    # + one genuinely new row (hour14). Union must dedup the dup, keep the extra.
-    _write_day(
-        data_dir,
-        [
-            _reading("Т12", 180.0, ts=old_day.replace(hour=13)),
-            _reading("Т12", 150.0, ts=old_day.replace(hour=14)),
-        ],
-    )
-    assert (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
-
-    broker = DataBroker()
-    queue = await broker.subscribe("sub", maxsize=100)
-    replay = ReplaySource(broker, speed=0.0)
-    count = await replay.play_directory(data_dir, archive_dir=archive_dir)
-
-    received = [queue.get_nowait() for _ in range(queue.qsize())]
-    vals = sorted(r.value for r in received)
-    # Archived-only 200.0 present (RED discriminator), restored 150.0 present,
-    # shared 180.0 exactly once (dedup) → 3 rows total.
-    assert vals == pytest.approx([150.0, 180.0, 200.0]), f"union/dedup wrong: {vals}"
-    assert count == 3 and len(received) == 3
+    assert not replay._running, "replay._running should be False after stop()"

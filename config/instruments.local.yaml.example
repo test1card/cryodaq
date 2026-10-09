@@ -2,18 +2,7 @@
 # и отредактируйте адреса приборов для вашего стенда.
 #
 # Этот файл НЕ коммитится в git (*.local.yaml в .gitignore).
-#
-# ⚠️  ЗАМЕНА, НЕ СЛИЯНИЕ. Если instruments.local.yaml существует, engine
-#     читает ТОЛЬКО его вместо instruments.yaml целиком (engine.py `_cfg`:
-#     `return local if local.exists() else base`). Блоки НЕ мержатся.
-#     Поэтому каждый top-level блок, который читает engine, должен быть
-#     перенесён сюда, иначе он молча пропадёт:
-#       - instruments        — список приборов (ниже)
-#       - keithley.watchdog  — TSP late-pet check (иначе driver default off)
-#       - chamber            — объём камеры + leak_rate (иначе volume_l пропадёт
-#                              и оценка F13 leak rate отключится)
-#     Значения keithley/chamber ниже — копия base-дефолтов из instruments.yaml;
-#     правьте под стенд (volume_l ОБЯЗАТЕЛЬНО задать для leak rate).
+# Если instruments.local.yaml существует — engine использует его вместо instruments.yaml.
 #
 # Адреса стенда АКЦ ФИАН (март 2026):
 #   LS218_1: GPIB0::12  |  LS218_2: GPIB0::11 (poll 2.0s)
@@ -85,22 +74,3 @@ instruments:
     poll_interval_s: 2.0
     connect_timeout_s: 5.0
     read_timeout_s: 10.0
-
-# ЗАМЕНА-семантика (см. шапку): блоки ниже перенесены из base instruments.yaml —
-# без них engine потеряет watchdog и chamber, т.к. local НЕ мержится с base.
-
-# Keithley 2604B TSP late-pet check под host SafetyManager. V3 неавтономен:
-# best_effort покрывает только stall-then-recover, required fail-closed
-# отказывает при autonomous=0. Полное описание — в base instruments.yaml.
-keithley:
-  watchdog:
-    mode: "off"   # quote: bare off/on — YAML booleans
-    # Finite numeric seconds in [1, 300]; use >= 2 * Keithley poll_interval_s.
-    # os.time() is one-second-granularity and the deadline comparison is `>`.
-    timeout_s: 5.0
-
-chamber:
-  volume_l: 0.0  # ОПЕРАТОР: задать реальный объём камеры в литрах (нужно для F13 leak rate)
-  leak_rate:
-    enabled: true
-    default_sample_window_s: 300.0

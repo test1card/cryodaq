@@ -14,7 +14,6 @@ from cryodaq.agents.assistant.live.prompts import PERIODIC_REPORT_SYSTEM, PERIOD
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
-from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 
 
 async def _wait_until(cond_fn, *, deadline_s: float = 1.0) -> None:
@@ -44,7 +43,7 @@ def _make_config(**overrides) -> AssistantConfig:
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=False,
-        audit_enabled=True,
+        audit_enabled=False,
         periodic_report_enabled=True,
         periodic_report_min_events=1,
         periodic_report_skip_if_idle=True,
@@ -64,21 +63,12 @@ def _make_mock_context(total_event_count: int = 3) -> PeriodicReportContext:
     return ctx
 
 
-def _real_critical_with_warm_reference_summary() -> object:
-    engine = SensorDiagnosticsEngine()
-    engine.set_channel_cold_map({"T1": True, "T16": False})
-    for index in range(20):
-        engine.push("T1", index * 0.5, 380.0)
-        engine.push("T16", index * 0.5, 298.0)
-    engine.update()
-    return engine.get_summary()
-
-
 def _make_agent(
     *,
     config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
+    event_logger=None,
     context: PeriodicReportContext | None = None,
     tmp_path: Path,
 ) -> tuple[AssistantLiveAgent, EventBus]:
@@ -96,13 +86,18 @@ def _make_agent(
     if context is not None:
         ctx_builder.build_periodic_report_context = AsyncMock(return_value=context)
 
-    audit = AuditLogger(tmp_path / "audit", enabled=True)
+    audit = AuditLogger(tmp_path / "audit", enabled=False)
 
     if telegram is None:
         telegram = AsyncMock()
         telegram._send_to_all = AsyncMock()
+    if event_logger is None:
+        event_logger = AsyncMock()
+        event_logger.log_event = AsyncMock()
+
     router = OutputRouter(
         telegram_bot=telegram,
+        event_logger=event_logger,
         event_bus=bus,
     )
 
@@ -203,91 +198,19 @@ async def test_periodic_report_handler_skips_when_idle(tmp_path: Path) -> None:
     await agent.stop()
 
 
-async def test_periodic_report_critical_sensor_health_is_not_idle(tmp_path: Path) -> None:
-    telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock()
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="Проверьте датчик.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
-        )
-    )
-    ollama.close = AsyncMock()
-    ctx = _make_mock_context(total_event_count=0)
-    ctx.sensor_health_summary = _real_critical_with_warm_reference_summary()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
-    await agent.start()
-
-    await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    ollama.generate.assert_awaited_once()
-    await agent.stop()
-
-
-async def test_periodic_report_valid_dict_critical_bypasses_idle_and_dispatches(tmp_path: Path) -> None:
-    """A public wire-format summary follows the same priority path as its producer object."""
-    reader = MagicMock()
-    reader.get_operator_log = AsyncMock(return_value=[])
-    em = MagicMock()
-    em.active_experiment_id = "exp-001"
-    em.get_current_phase = MagicMock(return_value="COOL")
-    em.get_phase_history = MagicMock(return_value=[])
-    context_builder = ContextBuilder(
-        reader,
-        em,
-        sensor_diag_provider=lambda: {
-            "total_channels": 2,
-            "healthy": 0,
-            "warning": 1,
-            "critical": 1,
-            "worst_channel": "T1",
-            "worst_score": 20,
-            "worst_flags": ["out_of_range"],
-        },
-    )
-    telegram = MagicMock()
-    telegram._send_to_all = AsyncMock()
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="Check sensor.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
-        )
-    )
-    ollama.close = AsyncMock()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
-    agent._ctx_builder = context_builder
-    await agent.start()
-
-    await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    ollama.generate.assert_awaited_once()
-    telegram._send_to_all.assert_awaited_once()
-    await agent.stop()
-
-
 async def test_periodic_report_skip_if_idle_false_dispatches_always(tmp_path: Path) -> None:
     """skip_if_idle=False → dispatch even when no events."""
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
     ctx = _make_mock_context(total_event_count=0)
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="Нет событий.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
-        )
-    )
-    ollama.close = AsyncMock()
     cfg = _make_config(periodic_report_skip_if_idle=False)
-    agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
+    agent, bus = _make_agent(config=cfg, telegram=telegram, context=ctx, tmp_path=tmp_path)
     await agent.start()
 
     await bus.publish(_periodic_event())
     await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
 
     telegram._send_to_all.assert_awaited_once()
-    ollama.generate.assert_awaited_once()
     await agent.stop()
 
 
@@ -297,10 +220,14 @@ async def test_periodic_report_handler_handles_empty_response(tmp_path: Path) ->
     ctx = _make_mock_context(total_event_count=2)
     ollama = AsyncMock()
     ollama.generate = AsyncMock(
-        return_value=GenerationResult(text="", tokens_in=10, tokens_out=0, latency_s=1.0, model="gemma4:e2b")
+        return_value=GenerationResult(
+            text="", tokens_in=10, tokens_out=0, latency_s=1.0, model="gemma4:e2b"
+        )
     )
     ollama.close = AsyncMock()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path
+    )
     await agent.start()
 
     await bus.publish(_periodic_event())
@@ -336,6 +263,7 @@ async def test_periodic_report_disabled_does_not_handle(tmp_path: Path) -> None:
 def test_periodic_report_prefix_includes_suffix() -> None:
     router = OutputRouter(
         telegram_bot=None,
+        event_logger=MagicMock(),
         event_bus=MagicMock(),
         brand_name="Гемма",
         brand_emoji="🤖",
@@ -360,78 +288,17 @@ def test_periodic_report_prompt_prohibits_latex() -> None:
     assert "\r" not in PERIODIC_REPORT_SYSTEM
 
 
-async def test_periodic_report_context_read_failure_dispatches_only_deterministic_unavailable(
+async def test_periodic_report_context_read_failure_bypasses_idle_skip(
     tmp_path: Path,
 ) -> None:
-    """A failed read is visible but never becomes a normal empty report."""
+    """context_read_failed=True must bypass skip_if_idle so the fault is visible."""
     telegram = MagicMock()
     telegram._send_to_all = AsyncMock()
     ctx = _make_mock_context(total_event_count=0)
     ctx.context_read_failed = True
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="Нет событий.", tokens_in=10, tokens_out=2, latency_s=1.0, model="gemma4:e2b"
-        )
-    )
-    ollama.close = AsyncMock()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
+    agent, bus = _make_agent(telegram=telegram, context=ctx, tmp_path=tmp_path)
     await agent.start()
     await bus.publish(_periodic_event())
     await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
     telegram._send_to_all.assert_awaited_once()
-    ollama.generate.assert_not_awaited()
-    assert "не сформирован" in telegram._send_to_all.call_args.args[0]
-    await agent.stop()
-
-
-async def test_periodic_report_missing_log_capability_uses_deterministic_unavailable_fallback(
-    tmp_path: Path,
-) -> None:
-    """Missing log capability preserves no-Ollama and audit-backed fallback behavior."""
-    telegram = MagicMock()
-    telegram._send_to_all = AsyncMock()
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock()
-    ollama.close = AsyncMock()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
-    em = MagicMock()
-    em.active_experiment_id = None
-    agent._ctx_builder = ContextBuilder(object(), em)
-    await agent.start()
-
-    await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    ollama.generate.assert_not_awaited()
-    audit_files = list((tmp_path / "audit").rglob("*.json"))
-    assert len(audit_files) == 1
-    assert "не сформирован" in telegram._send_to_all.call_args.args[0]
-    await agent.stop()
-
-
-async def test_periodic_report_missing_diagnostics_provider_uses_deterministic_unavailable_fallback(
-    tmp_path: Path,
-) -> None:
-    """Missing diagnostics is unavailable evidence, never an idle empty window."""
-    telegram = MagicMock()
-    telegram._send_to_all = AsyncMock()
-    ollama = AsyncMock()
-    ollama.generate = AsyncMock()
-    ollama.close = AsyncMock()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
-    reader = MagicMock()
-    reader.get_operator_log = AsyncMock(return_value=[])
-    em = MagicMock()
-    em.active_experiment_id = None
-    agent._ctx_builder = ContextBuilder(reader, em)
-    await agent.start()
-
-    await bus.publish(_periodic_event())
-    await _wait_until(lambda: telegram._send_to_all.await_count >= 1)
-
-    ollama.generate.assert_not_awaited()
-    audit_files = list((tmp_path / "audit").rglob("*.json"))
-    assert len(audit_files) == 1
-    assert "не сформирован" in telegram._send_to_all.call_args.args[0]
     await agent.stop()

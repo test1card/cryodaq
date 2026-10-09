@@ -1,26 +1,14 @@
-"""Tests for HDF5Exporter — archive-aware (hot SQLite + cold Parquet) → HDF5 export.
-
-The exporter is per-day and archive-aware: readings flow through
-``ArchiveReader.query_rows`` so a day rotated to Parquet cold storage still
-exports (the hot ``data_*.db`` is gone once rotated). ``source_data`` and the
-``experiments`` metadata come from the hot daily DB when it is still present
-(rotation only ever fires on days that carry no ``source_data``).
-"""
+"""Tests for HDF5Exporter — SQLite → HDF5 export."""
 
 from __future__ import annotations
 
-import asyncio
-import json
-import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import h5py
-import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.storage.hdf5_export import HDF5Exporter, hdf5_export_days
-from cryodaq.storage.sentinel import SENTINEL
+from cryodaq.storage.hdf5_export import HDF5Exporter
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -48,18 +36,12 @@ def _reading(
     )
 
 
-def _write_day(data_dir: Path, readings: list[Reading]) -> date:
-    """Persist readings to their daily SQLite file; return the (UTC) day.
-
-    The connection is closed so a subsequent ArchiveReader read (or a cold
-    rotation) sees a released file.
-    """
-    writer = SQLiteWriter(data_dir)
+def _populate_db(tmp_path: Path, readings: list[Reading]) -> Path:
+    """Write readings to a SQLite DB and return its path."""
+    writer = SQLiteWriter(tmp_path)
     writer._write_batch(readings)
-    if writer._conn is not None:
-        writer._conn.close()
-    writer._conn = None
-    return readings[0].timestamp.date()
+    day = readings[0].timestamp.date()
+    return tmp_path / f"data_{day.isoformat()}.db"
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +50,11 @@ def _write_day(data_dir: Path, readings: list[Reading]) -> date:
 
 
 async def test_export_creates_file(tmp_path: Path) -> None:
-    day = _write_day(tmp_path, [_reading()])
+    db_path = _populate_db(tmp_path, [_reading()])
     output_path = tmp_path / "export" / "test.h5"
 
-    count = HDF5Exporter(tmp_path).export(day, output_path)
+    exporter = HDF5Exporter()
+    count = exporter.export(db_path, output_path)
 
     assert output_path.exists(), "HDF5 output file was not created"
     assert count > 0, "Expected non-zero exported row count"
@@ -84,16 +67,14 @@ async def test_export_creates_file(tmp_path: Path) -> None:
 
 async def test_readings_in_hdf5(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
-    day = _write_day(
-        tmp_path,
-        [
-            _reading("T_STAGE", 4.235, "K", ts=ts),
-            _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
-        ],
-    )
+    readings = [
+        _reading("T_STAGE", 4.235, "K", ts=ts),
+        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
+    ]
+    db_path = _populate_db(tmp_path, readings)
     output_path = tmp_path / "out.h5"
 
-    HDF5Exporter(tmp_path).export(day, output_path)
+    HDF5Exporter().export(db_path, output_path)
 
     with h5py.File(str(output_path), "r") as hf:
         ch_group = hf["ls218s"]["T_STAGE"]
@@ -113,17 +94,15 @@ async def test_readings_in_hdf5(tmp_path: Path) -> None:
 
 async def test_instrument_groups(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    day = _write_day(
-        tmp_path,
-        [
-            _reading("CH1", 4.5, "K", ts=ts, instrument_id="ls218s_a"),
-            _reading("CH1", 77.0, "K", ts=ts, instrument_id="ls218s_b"),
-            _reading("CH2", 4.6, "K", ts=ts, instrument_id="ls218s_a"),
-        ],
-    )
+    readings = [
+        _reading("CH1", 4.5, "K", ts=ts, instrument_id="ls218s_a"),
+        _reading("CH1", 77.0, "K", ts=ts, instrument_id="ls218s_b"),
+        _reading("CH2", 4.6, "K", ts=ts, instrument_id="ls218s_a"),
+    ]
+    db_path = _populate_db(tmp_path, readings)
     output_path = tmp_path / "out.h5"
 
-    HDF5Exporter(tmp_path).export(day, output_path)
+    HDF5Exporter().export(db_path, output_path)
 
     with h5py.File(str(output_path), "r") as hf:
         assert "ls218s_a" in hf, "Group for ls218s_a not found"
@@ -141,7 +120,7 @@ async def test_instrument_groups(tmp_path: Path) -> None:
 
 
 async def test_experiment_metadata_as_attrs(tmp_path: Path) -> None:
-    day = _write_day(tmp_path, [_reading()])
+    db_path = _populate_db(tmp_path, [_reading()])
     output_path = tmp_path / "out.h5"
 
     metadata = {
@@ -152,7 +131,7 @@ async def test_experiment_metadata_as_attrs(tmp_path: Path) -> None:
         "temperature_K": 4.2,
     }
 
-    HDF5Exporter(tmp_path).export(day, output_path, experiment_metadata=metadata)
+    HDF5Exporter().export(db_path, output_path, experiment_metadata=metadata)
 
     with h5py.File(str(output_path), "r") as hf:
         assert hf.attrs["experiment_id"] == "exp_001"
@@ -160,36 +139,39 @@ async def test_experiment_metadata_as_attrs(tmp_path: Path) -> None:
         assert hf.attrs["sample"] == "Si_wafer"
         assert hf.attrs["run_number"] == 42
         assert abs(hf.attrs["temperature_K"] - 4.2) < 1e-9
-        # Built-in provenance attrs are also present. Per-day export has no single
-        # source DB path (a rotated day has no DB at all), so provenance is the
-        # exported day + the export timestamp.
-        assert "source_day" in hf.attrs
+        # Built-in attrs are also present
+        assert "source_db" in hf.attrs
         assert "export_time" in hf.attrs
 
 
 # ---------------------------------------------------------------------------
-# 5. Day with no readings → returns 0
+# 5. DB with no readings → returns 0
 # ---------------------------------------------------------------------------
 
 
 async def test_empty_db_returns_zero(tmp_path: Path) -> None:
-    # Create a valid-schema but empty daily DB, then export that day.
+    # Create an empty DB by writing an empty batch (no-op) — but that doesn't
+    # create the file. Instead write one reading to trigger DB creation, then
+    # delete the data from the table.
     import sqlite3
 
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    day = _write_day(tmp_path, [_reading(ts=ts)])
-    db_path = tmp_path / f"data_{day.isoformat()}.db"
+    writer = SQLiteWriter(tmp_path)
+    writer._write_batch([_reading(ts=ts)])
+    db_path = tmp_path / f"data_{ts.date().isoformat()}.db"
+    writer._conn = None  # release connection
 
+    # Wipe the rows so we have a valid-schema but empty DB
     conn = sqlite3.connect(str(db_path))
     conn.execute("DELETE FROM readings;")
     conn.commit()
     conn.close()
 
     output_path = tmp_path / "out.h5"
-    count = HDF5Exporter(tmp_path).export(day, output_path)
+    count = HDF5Exporter().export(db_path, output_path)
 
-    assert count == 0, f"Expected 0 for empty day, got {count}"
-    assert output_path.exists(), "HDF5 file should still be created even for an empty day"
+    assert count == 0, f"Expected 0 for empty DB, got {count}"
+    assert output_path.exists(), "HDF5 file should still be created even for empty DB"
 
 
 # ---------------------------------------------------------------------------
@@ -199,299 +181,21 @@ async def test_empty_db_returns_zero(tmp_path: Path) -> None:
 
 async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
-    day = _write_day(
-        tmp_path,
-        [
-            _reading("T_STAGE", 4.235, "K", ts=ts),
-            _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
-        ],
-    )
+    readings = [
+        _reading("T_STAGE", 4.235, "K", ts=ts),
+        _reading("T_STAGE", 4.240, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
+    ]
+    db_path = _populate_db(tmp_path, readings)
     output_path = tmp_path / "compressed.h5"
 
-    HDF5Exporter(tmp_path).export(day, output_path)
+    HDF5Exporter().export(db_path, output_path)
 
     with h5py.File(str(output_path), "r") as hf:
 
         def _check_compression(name: str, obj: h5py.Dataset | h5py.Group) -> None:
             if isinstance(obj, h5py.Dataset):
-                assert obj.compression == "gzip", f"Dataset '{name}' missing gzip compression: {obj.compression}"
+                assert obj.compression == "gzip", (
+                    f"Dataset '{name}' missing gzip compression: {obj.compression}"
+                )
 
         hf.visititems(_check_compression)
-
-
-# ---------------------------------------------------------------------------
-# 7. D-C15 — status column must be preserved (not dropped)
-# ---------------------------------------------------------------------------
-
-
-async def test_hdf5_preserves_status(tmp_path: Path) -> None:
-    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
-    day = _write_day(
-        tmp_path,
-        [
-            _reading("T_STAGE", 4.2, "K", ts=ts, status=ChannelStatus.OK),
-            _reading(
-                "T_STAGE",
-                4.3,
-                "K",
-                ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC),
-                status=ChannelStatus.SENSOR_ERROR,
-            ),
-        ],
-    )
-    output_path = tmp_path / "status.h5"
-
-    HDF5Exporter(tmp_path).export(day, output_path)
-
-    with h5py.File(str(output_path), "r") as hf:
-        grp = hf["ls218s"]["T_STAGE"]
-        assert "status" in grp, f"status dataset dropped: {list(grp.keys())}"
-        statuses = [s.decode() if isinstance(s, bytes) else s for s in grp["status"]]
-        assert len(statuses) == 2, f"expected 2 statuses, got {statuses}"
-        assert statuses[0] == ChannelStatus.OK.value
-        assert statuses[1] == ChannelStatus.SENSOR_ERROR.value
-
-
-# ---------------------------------------------------------------------------
-# 8. D-C16 — instrument/channel names that sanitize alike retain exact identity
-# ---------------------------------------------------------------------------
-
-
-async def test_hdf5_sanitize_name_collision(tmp_path: Path) -> None:
-    """Sanitized/colliding group names must retain exact source identities.
-
-    Instrument IDs 'rack/ls218s' and 'rack ls218s' both sanitize to
-    'rack_ls218s'.  The shipped channel ID 'Keithley_1/smua/voltage' and the
-    distinct 'Keithley_1 smua/voltage' likewise collide after sanitization.
-    Opaque suffixes alone cannot recover either exact identity.
-    """
-    ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
-    expected = [
-        ("rack/ls218s", "Keithley_1/smua/voltage", 1.0),
-        ("rack/ls218s", "Keithley_1 smua/voltage", 2.0),
-        ("rack ls218s", "Keithley_1/smua/voltage", 3.0),
-        ("rack ls218s", "Keithley_1 smua/voltage", 4.0),
-    ]
-    day = _write_day(
-        tmp_path,
-        [
-            _reading(
-                channel_id,
-                value,
-                "K",
-                ts=ts + timedelta(seconds=index),
-                instrument_id=instrument_id,
-            )
-            for index, (instrument_id, channel_id, value) in enumerate(expected)
-        ],
-    )
-    output_path = tmp_path / "collide.h5"
-
-    count = HDF5Exporter(tmp_path).export(day, output_path)  # must not raise
-    assert count == len(expected), f"expected {len(expected)} exported readings, got {count}"
-
-    with h5py.File(str(output_path), "r") as hf:
-        recovered = {
-            (
-                inst_group.attrs["instrument_id"],
-                channel_group.attrs["channel_id"],
-                float(channel_group["value"][0]),
-            )
-            for inst_group in hf.values()
-            if isinstance(inst_group, h5py.Group)
-            for channel_group in inst_group.values()
-            if isinstance(channel_group, h5py.Group)
-        }
-        assert recovered == set(expected)
-
-
-# ---------------------------------------------------------------------------
-# NaN-доктрина: sentinel/error values are masked in the value dataset
-# ---------------------------------------------------------------------------
-
-
-async def test_hdf5_masks_sentinel_value(tmp_path: Path) -> None:
-    day = _write_day(
-        tmp_path,
-        [
-            _reading("CH1", 4.5, ts=datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)),
-            _reading(
-                "CH1",
-                float("nan"),
-                ts=datetime(2026, 3, 14, 12, 0, 30, tzinfo=UTC),
-                status=ChannelStatus.SENSOR_ERROR,
-            ),
-        ],
-    )
-    output_path = tmp_path / "masked.h5"
-    HDF5Exporter(tmp_path).export(day, output_path)
-
-    with h5py.File(str(output_path), "r") as hf:
-        ch = hf["ls218s"]["CH1"]
-        values = list(ch["value"][:])
-        statuses = [s.decode() if isinstance(s, bytes) else s for s in ch["status"][:]]
-    assert SENTINEL not in values, "sentinel leaked into HDF5 value dataset"
-    assert not any(math.isinf(v) for v in values), "inf leaked into HDF5"
-    assert 4.5 in values, "usable reading must survive"
-    assert any(math.isnan(v) for v in values), "non-usable reading must be masked to NaN"
-    assert "sensor_error" in statuses, "status column must be preserved for forensics"
-
-
-# ---------------------------------------------------------------------------
-# Cold rotation: a day rotated to Parquet must still export (the last blind reader)
-# ---------------------------------------------------------------------------
-
-pytest.importorskip("pyarrow")
-
-from cryodaq.storage.cold_rotation import ColdRotationService  # noqa: E402
-
-_TODAY = datetime(2026, 4, 29, tzinfo=UTC)
-
-
-def test_hdf5_export_reads_rotated_day(tmp_path: Path) -> None:
-    """Rotated-day readings live only in Parquet — export must find them there."""
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _TODAY - timedelta(days=40)
-    _write_day(data_dir, [_reading("T1", 70.0, ts=old_day.replace(hour=12))])
-
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    asyncio.run(svc.run_once(now=_TODAY))
-    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists(), (
-        "precondition: old day must be rotated (SQLite deleted)"
-    )
-
-    out = tmp_path / "rotated.h5"
-    count = HDF5Exporter(data_dir, archive_dir).export(old_day.date(), out)
-
-    assert count == 1, "rotated-day reading must export from Parquet"
-    with h5py.File(str(out), "r") as hf:
-        values = list(hf["ls218s"]["T1"]["value"])
-    assert values == [pytest.approx(70.0)], "rotated value missing from HDF5"
-
-
-def test_hdf5_export_rejects_receipted_wrong_day_before_writing(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    artifact_day = _TODAY - timedelta(days=40)
-    declared_day = artifact_day + timedelta(days=1)
-    _write_day(data_dir, [_reading("T1", 70.0, ts=artifact_day.replace(hour=12))])
-    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    assert asyncio.run(service.run_once(now=_TODAY))
-
-    index_path = archive_dir / "index.json"
-    document = json.loads(index_path.read_text(encoding="utf-8"))
-    document["files"][0]["original_name"] = f"data_{declared_day.date().isoformat()}.db"
-    index_path.write_text(json.dumps(document), encoding="utf-8")
-    output_path = tmp_path / "must-not-exist-wrong-day.h5"
-
-    with pytest.raises(RuntimeError) as caught:
-        HDF5Exporter(data_dir, archive_dir).export(declared_day.date(), output_path)
-
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-    assert not output_path.exists()
-
-
-def test_hdf5_rotated_day_masks_sentinel(tmp_path: Path) -> None:
-    """A sentinel row rotated to Parquet must surface as NaN with status intact."""
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _TODAY - timedelta(days=40)
-    _write_day(
-        data_dir,
-        [
-            _reading("T1", 70.0, ts=old_day.replace(hour=12)),
-            _reading(
-                "T1",
-                float("nan"),
-                ts=old_day.replace(hour=13),
-                status=ChannelStatus.SENSOR_ERROR,
-            ),
-        ],
-    )
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    asyncio.run(svc.run_once(now=_TODAY))
-
-    out = tmp_path / "rotated_masked.h5"
-    HDF5Exporter(data_dir, archive_dir).export(old_day.date(), out)
-
-    with h5py.File(str(out), "r") as hf:
-        ch = hf["ls218s"]["T1"]
-        values = list(ch["value"][:])
-        statuses = [s.decode() if isinstance(s, bytes) else s for s in ch["status"][:]]
-    assert SENTINEL not in values, "sentinel leaked out of cold Parquet into HDF5"
-    assert 70.0 in values, "usable reading must survive"
-    assert any(math.isnan(v) for v in values), "sentinel row must mask to NaN"
-    assert "sensor_error" in statuses, "status must be preserved from cold storage"
-
-
-def test_hdf5_export_days_unions_hot_and_cold(tmp_path: Path) -> None:
-    """The GUI enumeration helper lists both rotated (cold) and live (hot) days."""
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    old_day = _TODAY - timedelta(days=40)
-    recent_day = _TODAY - timedelta(days=1)
-    _write_day(data_dir, [_reading("T1", 70.0, ts=old_day.replace(hour=12))])
-    _write_day(data_dir, [_reading("T2", 85.0, ts=recent_day.replace(hour=12))])
-
-    svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
-    asyncio.run(svc.run_once(now=_TODAY))
-    # old day rotated (no hot DB), recent day still hot
-    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
-
-    days = hdf5_export_days(data_dir, archive_dir)
-    assert old_day.date().isoformat() in days, "rotated day missing from enumeration"
-    assert recent_day.date().isoformat() in days, "hot day missing from enumeration"
-
-
-def test_hdf5_export_rejects_missing_indexed_source_before_writing(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
-    (archive_dir / "index.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "original_name": "data_2026-03-14.db",
-                        "archive_path": "year=2026/month=03/data_2026-03-14.db.parquet",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    output_path = tmp_path / "must-not-exist.h5"
-
-    with pytest.raises(RuntimeError) as caught:
-        HDF5Exporter(data_dir, archive_dir).export(date(2026, 3, 14), output_path)
-
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-    assert not output_path.exists()
-
-
-def test_hdf5_export_days_rejects_malformed_index(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    archive_dir.mkdir()
-    (archive_dir / "index.json").write_text('{"files": "not-a-list"}', encoding="utf-8")
-
-    with pytest.raises(RuntimeError) as caught:
-        hdf5_export_days(tmp_path / "data", archive_dir)
-
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-
-
-def test_hdf5_export_days_rejects_missing_index_with_cold_artifact(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    artifact = archive_dir / "year=2026" / "month=03" / "data_2026-03-14.db.parquet"
-    artifact.parent.mkdir(parents=True)
-    artifact.write_bytes(b"retained cold artifact")
-
-    with pytest.raises(RuntimeError) as caught:
-        hdf5_export_days(tmp_path / "data", archive_dir)
-
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-
-
-def test_hdf5_export_days_allows_absent_empty_archive(tmp_path: Path) -> None:
-    assert hdf5_export_days(tmp_path / "data", tmp_path / "archive") == []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,8 @@ from tools.ci_candidate_runner import (
     _validate_strict_guard_receipt,
 )
 from tools.ci_guard_execution import active_guard_specs, checkout_execution_selection, current_guard_platform
+from tools.governance_contract import _RED_REPRODUCTION_PROVENANCE
+from tools.test_node_source import TestNodeSourceError, test_node_sha256
 
 # The sealed candidate disables autoload; this checkout runner must not reuse its explicit plugin list.
 _PYTEST = (sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider")
@@ -549,6 +552,186 @@ def _canonical_reproduction_path(locator: str) -> PurePosixPath:
     return path
 
 
+def _receipt_guard_blobs(root: Path, commit: str, path: PurePosixPath) -> dict[str, str]:
+    """Return the guard-file blobs a committed red-reproduction receipt records.
+
+    This reads only the Git blob, never the working tree, matching the
+    comparison's "no working-tree filter is authority" rule.  A malformed
+    receipt fails closed here: the move it is meant to justify is refused.
+    """
+
+    try:
+        raw = _git_bytes(root, "show", f"{commit}:{path}")
+    except RedReproductionComparisonError:
+        raise RedReproductionComparisonError(
+            f"trusted-base red-reproduction receipt is not readable at {commit}: {path}"
+        )
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(
+            f"trusted-base red-reproduction receipt is not valid JSON: {path}"
+        ) from exc
+    guard_blobs = receipt.get("guard_blobs") if isinstance(receipt, dict) else None
+    if not isinstance(guard_blobs, dict) or not guard_blobs:
+        raise RedReproductionComparisonError(f"trusted-base red-reproduction receipt records no guard blobs: {path}")
+    validated: dict[str, str] = {}
+    for guard_path, guard_blob in guard_blobs.items():
+        if not isinstance(guard_path, str) or not isinstance(guard_blob, str) or _SHA.fullmatch(guard_blob) is None:
+            raise RedReproductionComparisonError(f"trusted-base red-reproduction receipt guard blob is invalid: {path}")
+        candidate = PurePosixPath(guard_path)
+        if (
+            candidate.is_absolute()
+            or str(candidate) != guard_path
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            raise RedReproductionComparisonError(
+                f"trusted-base red-reproduction receipt guard blob path is unsafe: {path}"
+            )
+        validated[guard_path] = guard_blob
+    return validated
+
+
+def _receipt_payload(root: Path, commit: str, path: PurePosixPath) -> dict[str, Any]:
+    try:
+        raw = _git_bytes(root, "show", f"{commit}:{path}")
+    except RedReproductionComparisonError:
+        raise RedReproductionComparisonError(f"red-reproduction receipt is not readable at {commit}: {path}")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(f"red-reproduction receipt is not valid JSON: {path}") from exc
+    if not isinstance(receipt, dict):
+        raise RedReproductionComparisonError(f"red-reproduction receipt has no mapping root: {path}")
+    return receipt
+
+
+def _receipt_node_digests(root: Path, commit: str, path: PurePosixPath) -> dict[str, str] | None:
+    receipt = _receipt_payload(root, commit, path)
+    if receipt.get("schema_version") == 1:
+        return None
+    nodes = receipt.get("guard_nodes")
+    digests = receipt.get("guard_node_sha256")
+    if (
+        receipt.get("schema_version") != 2
+        or not isinstance(nodes, list)
+        or nodes != sorted(set(nodes))
+        or not nodes
+        or not isinstance(digests, dict)
+        or set(digests) != set(nodes)
+        or any(not isinstance(node, str) or not isinstance(digest, str) for node, digest in digests.items())
+    ):
+        raise RedReproductionComparisonError(f"red-reproduction receipt node bindings are invalid: {path}")
+    return dict(sorted(digests.items()))
+
+
+def _derived_node_digests_from_recorded_blobs(root: Path, commit: str, path: PurePosixPath) -> dict[str, str]:
+    receipt = _receipt_payload(root, commit, path)
+    nodes = receipt.get("guard_nodes")
+    blobs = _receipt_guard_blobs(root, commit, path)
+    if not isinstance(nodes, list) or nodes != sorted(set(nodes)) or not nodes:
+        raise RedReproductionComparisonError(f"red-reproduction receipt guard nodes are invalid: {path}")
+    derived: dict[str, str] = {}
+    for node in nodes:
+        if not isinstance(node, str):
+            raise RedReproductionComparisonError(f"red-reproduction receipt guard node is invalid: {path}")
+        guard_path = node.split("::", 1)[0]
+        blob = blobs.get(guard_path)
+        if blob is None:
+            raise RedReproductionComparisonError(f"red-reproduction receipt guard node has no file blob: {node}")
+        try:
+            derived[node] = test_node_sha256(_git_bytes(root, "cat-file", "blob", blob), node)
+        except TestNodeSourceError as exc:
+            raise RedReproductionComparisonError(
+                f"red-reproduction receipt guard node cannot be structurally derived: {node}"
+            ) from exc
+    return dict(sorted(derived.items()))
+
+
+def _honest_candidate_receipt(root: Path, commit: str, path: PurePosixPath, digest: str) -> None:
+    """Require the candidate receipt to be an honest red receipt bound to the candidate.
+
+    This is deliberately the SAME validation the registry contract applies to a
+    receipt, executed from Git objects alone: the digest must match the receipt
+    bytes, the provenance and schema must be the exact local-executed form, the
+    exit code must be a real failure, and every guard blob the receipt records
+    must equal the guard file as it is committed at the candidate.  A receipt
+    whose guard blobs do not match the candidate's committed guard files is a
+    re-point, not a re-run, and is refused here even when the guard blobs moved.
+    """
+
+    try:
+        raw = _git_bytes(root, "show", f"{commit}:{path}")
+    except RedReproductionComparisonError:
+        raise RedReproductionComparisonError(f"candidate red-reproduction receipt is not readable at {commit}: {path}")
+    if f"sha256:{hashlib.sha256(raw).hexdigest()}" != digest:
+        raise RedReproductionComparisonError(
+            f"candidate red-reproduction receipt digest does not match its bytes: {path}"
+        )
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(f"candidate red-reproduction receipt is not valid JSON: {path}") from exc
+    if not isinstance(receipt, dict) or receipt.get("schema_version") not in {1, 2}:
+        raise RedReproductionComparisonError(f"candidate red-reproduction receipt schema is not exact: {path}")
+    if receipt.get("provenance") != _RED_REPRODUCTION_PROVENANCE:
+        raise RedReproductionComparisonError(
+            f"candidate red-reproduction receipt provenance is not the local-executed form: {path}"
+        )
+    if not isinstance(receipt.get("exit_code"), int) or receipt["exit_code"] == 0:
+        raise RedReproductionComparisonError(
+            f"candidate red-reproduction receipt exit code does not record a failure: {path}"
+        )
+    guard_blobs = _receipt_guard_blobs(root, commit, path)
+
+    # WHOLE-FILE BINDING APPLIES TO BOTH SCHEMAS.  Owner decision, 2026-08-29:
+    # "Go back to the old safe way".  Measured that day, 11 of 13 receipt-bound
+    # guards depend on a module-level helper, class or fixture OUTSIDE the hashed
+    # function range, so a function-only digest lets a weakened shared helper keep
+    # its receipt.  Whole-file hashing gives false INVALIDATION (noisy, safe);
+    # function-only hashing gives false RETENTION (quiet, unsafe).  Before a
+    # week-long run the quiet failure is the one that matters.
+    #
+    # The node digests below are NOT removed.  They remain enforced as an
+    # ADDITIONAL constraint, so a schema-2 receipt must match the whole guard file
+    # AND the named node - strictly stronger than either scheme alone.
+    for guard_path, recorded_blob in guard_blobs.items():
+        recorded_path = PurePosixPath(guard_path)
+        try:
+            _mode, _kind, committed_blob = _tree_entry(root, commit, recorded_path)
+        except RedReproductionComparisonError as exc:
+            raise RedReproductionComparisonError(
+                f"candidate red-reproduction receipt names an absent guard file: {guard_path}"
+            ) from exc
+        if committed_blob != recorded_blob:
+            raise RedReproductionComparisonError(
+                f"candidate red-reproduction receipt guard blob does not match its committed guard file: {guard_path}"
+            )
+
+    if receipt["schema_version"] != 1:
+        node_digests = _receipt_node_digests(root, commit, path)
+        assert node_digests is not None
+        for node, recorded_digest in node_digests.items():
+            guard_path = PurePosixPath(node.split("::", 1)[0])
+            try:
+                reproduced_source = _git_bytes(root, "cat-file", "blob", guard_blobs[str(guard_path)])
+                reproduced_digest = test_node_sha256(reproduced_source, node)
+                source = _git_bytes(root, "show", f"{commit}:{guard_path}")
+                actual_digest = test_node_sha256(source, node)
+            except (KeyError, RedReproductionComparisonError, TestNodeSourceError) as exc:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt names an absent or invalid guard node: {node}"
+                ) from exc
+            if reproduced_digest != recorded_digest:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt node digest does not match its recorded guard blob: {node}"
+                )
+            if actual_digest != recorded_digest:
+                raise RedReproductionComparisonError(
+                    f"candidate red-reproduction receipt node digest does not match its committed guard node: {node}"
+                )
+
+
 def _tree_entry(root: Path, revision: str, path: PurePosixPath) -> tuple[str, str, str]:
     """Return the exact committed mode, object kind, and object ID for one literal path."""
 
@@ -582,10 +765,6 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
         candidate_binding = current.get(identity)
         if candidate_binding is None:
             raise RedReproductionComparisonError(f"candidate deleted trusted-base prevention binding: {identity}")
-        if candidate_binding != binding:
-            raise RedReproductionComparisonError(
-                f"candidate modified trusted-base locator or digest binding: {identity}"
-            )
         path = _canonical_reproduction_path(binding[0])
         try:
             base_entry = _tree_entry(root, base_commit, path)
@@ -594,8 +773,89 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
             raise RedReproductionComparisonError(
                 f"candidate deleted or renamed trusted-base red-reproduction evidence: {path}"
             ) from exc
-        if base_entry[2] != candidate_entry[2]:
+        if candidate_binding[0] != binding[0]:
+            # Re-pointing the binding at a different receipt file is never a
+            # re-run; a re-run rewrites the same receipt in place.
+            raise RedReproductionComparisonError(
+                f"candidate modified trusted-base locator or digest binding: {identity}"
+            )
+        binding_unchanged = candidate_binding == binding
+        bytes_unchanged = base_entry[2] == candidate_entry[2]
+        if binding_unchanged and bytes_unchanged:
+            pass
+        elif bytes_unchanged:
+            # The registry digest moved without the receipt bytes moving: the
+            # digest can no longer match its own receipt. Not a re-run.
+            raise RedReproductionComparisonError(
+                f"candidate modified trusted-base locator or digest binding: {identity}"
+            )
+        elif binding_unchanged:
+            # The receipt bytes moved while the registry digest did not: the
+            # digest no longer matches the receipt it names. Not a re-run.
             raise RedReproductionComparisonError(f"candidate changed trusted-base red-reproduction bytes: {path}")
+        else:
+            # Both the receipt bytes AND the registry digest moved. That is the
+            # shape of the re-run Rule A forces -- legitimate ONLY when the
+            # guard files the receipt names also moved AND the candidate receipt
+            # is itself an honest red receipt. A receipt whose guard blobs still
+            # match the trusted base is a re-point while everything it describes
+            # stands still, and stays refused.
+            try:
+                base_nodes = _receipt_node_digests(root, base_commit, path)
+                candidate_nodes = _receipt_node_digests(root, candidate_commit, path)
+            except RedReproductionComparisonError:
+                raise RedReproductionComparisonError(
+                    f"candidate modified trusted-base locator or digest binding: {identity}"
+                )
+            if candidate_nodes is None:
+                if base_nodes is not None:
+                    raise RedReproductionComparisonError(
+                        f"candidate downgraded trusted-base red-reproduction node bindings: {identity}"
+                    )
+                base_guard_blobs = _receipt_guard_blobs(root, base_commit, path)
+                candidate_guard_blobs = _receipt_guard_blobs(root, candidate_commit, path)
+                if base_guard_blobs == candidate_guard_blobs:
+                    raise RedReproductionComparisonError(
+                        "candidate modified trusted-base red-reproduction binding while its guard files "
+                        f"are unchanged: {identity}"
+                    )
+            elif base_nodes is None:
+                # The trusted base predates node binding. Two different things
+                # can bring us here, and they are told apart the same way the
+                # branch above tells them apart -- by whether the guard blobs
+                # the receipt RECORDS have moved.
+                base_guard_blobs = _receipt_guard_blobs(root, base_commit, path)
+                candidate_guard_blobs = _receipt_guard_blobs(root, candidate_commit, path)
+                if base_guard_blobs == candidate_guard_blobs:
+                    # A pure migration. Everything the receipt describes stands
+                    # still, so the ONLY legitimate change is adding node digests
+                    # derived from the blobs it already recorded.
+                    base_receipt = _receipt_payload(root, base_commit, path)
+                    migrated_receipt = _receipt_payload(root, candidate_commit, path)
+                    migrated_receipt.pop("guard_node_sha256", None)
+                    migrated_receipt["schema_version"] = 1
+                    if migrated_receipt != base_receipt:
+                        raise RedReproductionComparisonError(
+                            f"candidate changed receipt claims while migrating node bindings: {identity}"
+                        )
+                    if candidate_nodes != _derived_node_digests_from_recorded_blobs(root, base_commit, path):
+                        raise RedReproductionComparisonError(
+                            f"candidate node-binding migration was not derived from recorded guard blobs: {identity}"
+                        )
+                # else: the recorded guard blobs moved, so this is the re-run
+                # Rule A forces, arriving at the same time as node binding.
+                # tools/red_reproduction.py REFUSES to stamp a digest for a node
+                # whose source moved -- it demands exactly this re-run -- so
+                # forbidding it here would make any change to a receipt-bound
+                # guard test unmergeable. _honest_candidate_receipt below is
+                # what proves the new receipt is a real red rather than a
+                # convenient one.
+            elif base_nodes == candidate_nodes:
+                raise RedReproductionComparisonError(
+                    "candidate modified trusted-base red-reproduction binding while its guard nodes "
+                    f"are unchanged: {identity}"
+                )
+            _honest_candidate_receipt(root, candidate_commit, path, candidate_binding[1])
         if base_entry[:2] != candidate_entry[:2]:
             raise RedReproductionComparisonError(
                 f"candidate changed trusted-base red-reproduction mode or type: {path}"
@@ -654,6 +914,12 @@ def run_suite(
         require_git_resolution=protected_producer_root is not None,
     )
     guard_nodes = tuple(spec.node for spec in guard_specs)
+    # The release suite deliberately registers no guards (the whole-tree guards live
+    # in `remaining`), so its exact-checkout selection must itself be executed
+    # strictly: feed the selection files to the strict command as required files so
+    # a skip/xfail/dynamic-skip marker cannot pass unseen.  Other suites keep their
+    # registry-bound strict pass unchanged.
+    required_files = files if (not guard_nodes and suite == "release") else ()
     basetemp.mkdir(parents=True, exist_ok=True)
     environment = _checkout_environment(root)
 
@@ -663,6 +929,7 @@ def run_suite(
         basetemp=basetemp,
         execution_root="git-index",
         pytest_command=_PYTEST,
+        required_files=required_files,
     )
     if protected_producer_root is not None:
         if strict is not None:
@@ -688,12 +955,15 @@ def run_suite(
         _validate_strict_guard_receipt(
             completed.stdout + completed.stderr,
             suite=suite,
-            expected=guard_nodes,
-            expected_platforms={spec.node: spec.platform for spec in guard_specs},
+            expected=(*guard_nodes, *required_files),
+            expected_platforms={
+                **{spec.node: spec.platform for spec in guard_specs},
+                **{path: None for path in required_files},
+            },
             platform=platform,
         )
 
-    ordinary = (*files, *selected_nodes)
+    ordinary = tuple(path for path in (*files, *selected_nodes) if path not in required_files)
     if ordinary:
         command = _PYTEST + ("--basetemp", str(basetemp / "ordinary"), *ordinary)
         command += tuple(argument for node in guard_nodes for argument in ("--deselect", node)) + _TAIL
@@ -716,15 +986,31 @@ def run_suite(
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The runner's own argument contract, exposed so callers can be CHECKED against it.
+
+    Module level rather than buried in `main`: a recipe that emits an invocation of
+    this runner - `tools/gate_commands.py` does - can only be verified against the
+    real contract if the real contract is reachable without running the suite.  A
+    substring check over the emitted text cannot tell a complete invocation from one
+    that argparse would reject.
+    """
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--suite", choices=("remaining",), required=True)
+    # OB-006 added `release`, the tag-triggered suite. Both names are exact-checkout partitions
+    # declared in tools/ci_execution_roots.py; a suite absent from that registry selects nothing
+    # and would exit 0 without executing a guard, so this list must never widen past it.
+    parser.add_argument("--suite", choices=("release", "remaining"), required=True)
     parser.add_argument("--basetemp", type=Path, required=True)
     parser.add_argument("--trusted-base", required=True)
     parser.add_argument("--protected-producer-root", type=Path)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return run_suite(
         args.suite,
         root=args.repository,

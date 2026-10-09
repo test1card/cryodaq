@@ -23,27 +23,26 @@ cd cryodaq
 
 ## 3. Установка пакета
 
-Поддерживаемая установка Windows/Linux начинается с tracked Conda environment:
+С IV.4 F1 `pyarrow` входит в базовые зависимости, extra `[archive]`
+сохранён как no-op alias для обратной совместимости со старыми
+install-строками:
 
-```bash
-conda env create --file environment.yml
-conda activate cryodaq
-pip install -r requirements-lock.txt
-pip install -e . --no-deps --no-build-isolation
-pip check
+```powershell
+pip install -e ".[dev,web]"
 ```
 
-`environment.yml` фиксирует безопасную версию SQLite, с которой связан Python.
-`requirements-lock.txt` фиксирует версии Python-пакетов для поддерживаемого
-набора build backend + base + dev + web. Это version-pinned inputs, но не побитовый artifact
-lock: файл не содержит hashes, а Conda environment не фиксирует Python patch,
-build strings и все transitive Conda artifacts.
+Минимальная runtime-установка без dev/web extras:
 
-`pyarrow` входит в базовые зависимости; extra `[archive]` сохранён как no-op
-alias. `pysqlite3-binary` не устанавливается: опубликованные wheel-версии не
-достигают исправленной SQLite-границы. Голый `pip install -e ".[dev,web]"`
-допустим только как developer convenience внутри независимо проверенного
-безопасного Python/SQLite environment и не является lab deployment path.
+```powershell
+pip install -e .                     # Parquet поддержка в базе
+pip install -e ".[dev,web,archive]"  # старая строка — по-прежнему работает
+```
+
+Если нужен только web dashboard, используйте:
+
+```powershell
+pip install -e ".[web]"
+```
 
 Эта установка подтягивает и GUI dependencies, включая:
 
@@ -53,15 +52,7 @@ alias. `pysqlite3-binary` не устанавливается: опублико�
 - `openpyxl`
 - `scipy`
 
-Именно Conda + lock + `--no-deps` path считается поддерживаемым для локального
-тестирования и развёртывания. Запуск `pytest` из произвольной распакованной
-копии без установки проекта не считается гарантированным сценарием.
-
-Windows helper `install.bat` предполагает уже активированный безопасный runtime,
-устанавливает version-pinned Python dependencies из `requirements-lock.txt`,
-выполняет `python -m pip install -e . --no-deps --no-build-isolation` и
-`python -m pip check`, затем вызывает
-`create_shortcut.py` для ярлыка на рабочем столе.
+Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
 
 ### Bootstrap predictor model
 
@@ -89,40 +80,23 @@ cp cooldown_v5/predictor_model.json data/cooldown_model/
 ```powershell
 Copy-Item config\instruments.local.yaml.example config\instruments.local.yaml
 Copy-Item config\notifications.local.yaml.example config\notifications.local.yaml
-Copy-Item config\web.local.yaml.example config\web.local.yaml
-Copy-Item config\channel_descriptors.local.yaml.example config\channel_descriptors.local.yaml
 ```
 
 Проверьте и заполните:
 
 - `config/instruments.local.yaml`
 - `config/notifications.local.yaml`
-- `config/web.local.yaml` — нужен только для write-действий web dashboard;
-  сгенерируйте случайный `web.api_token`
-- `config/channel_descriptors.local.yaml` — обязательная complete
-  machine-specific descriptor authority, когда выбран
-  `instruments.local.yaml`; не используйте её как частичный override
 
 Также в репозитории уже используются:
 
-- `config/alarms_v3.yaml`
+- `config/alarms.yaml`
 - `config/interlocks.yaml`
 - `config/housekeeping.yaml`
-- `config/safety.yaml`
 - `config/experiment_templates/*.yaml`
-
-Перед реальным запуском сверьте physical roster с descriptor manifest. Каждый
-`(instrument_id, emitted_channel)` обязан ровно один раз связываться со
-стабильным `channel_id`; лишний, отсутствующий, malformed или неоднозначный
-binding завершает startup fail-closed. Descriptor задаёт идентичность для
-persistence/replay/report/GUI, но сам по себе не выдаёт capability и тем более
-source authority. Selection парный: local instruments требуют local
-descriptors; base instruments используют base descriptors, даже если local
-descriptor-файл существует.
 
 ## 5. Что настроить в instruments.local.yaml
 
-Актуальный стек:
+Актуальный стек первой RC-версии:
 
 - три `LakeShore 218S`
 - `Keithley 2604B`
@@ -134,9 +108,6 @@ descriptor-файл существует.
 - допустимы разные shapes channel config, но конфигурация должна оставаться валидным YAML
 - Keithley runtime использует dual-channel model (`smua`, `smub`)
 - Любые старые инструкции про отключение или скрытие `smub` считать устаревшими
-- TSP watchdog выбирается в `keithley.watchdog.mode`: `"off"`,
-  `"best_effort"` или `"required"`; значение должно быть строкой, потому что
-  bare `off/on` в YAML превращаются в boolean
 
 ## 6. Запуск
 
@@ -153,15 +124,6 @@ cryodaq-gui
 cryodaq
 ```
 
-Скрипты из корня репозитория запускают тот же launcher:
-
-```text
-.\start.bat       # Windows
-./start.sh        # Linux / macOS
-.\start_mock.bat  # Windows mock mode, CRYODAQ_MOCK=1
-./start_mock.sh   # Linux / macOS mock mode, CRYODAQ_MOCK=1
-```
-
 Mock mode:
 
 ```powershell
@@ -171,64 +133,8 @@ cryodaq-engine --mock
 Optional web dashboard:
 
 ```powershell
-uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080
+uvicorn cryodaq.web.server:app --host 0.0.0.0 --port 8080
 ```
-
-GET-эндпоинты web dashboard остаются read-only и работают по loopback-модели
-доверия — биндите только `127.0.0.1`. Публичный доступ возможен только через
-reverse proxy с авторизацией или SSH-туннель.
-
-Write-действия web dashboard ограничены двумя REST routes:
-`POST /api/v1/log` и `POST /api/v1/alarms/{id}/ack`. Они требуют
-`Authorization: Bearer <token>`; токен читается из gitignored
-`config/web.local.yaml` (`web.api_token`). Пока токен не задан, write routes
-отвечают 403. Неверный или отсутствующий bearer-токен даёт 401.
-
-Для `POST /api/v1/log` клиент передаёт текст, необязательные теги и, если
-запись относится к эксперименту, его точный `experiment_id`. Устаревший ID
-отклоняется авторитетным engine. Без `experiment_id` запись помечается
-`experiment_unbound=true` и не привязывается неявно к эксперименту, который
-оказался текущим в момент доставки. Клиент передаёт `Idempotency-Key` из ровно
-32 строчных шестнадцатеричных символов, владеет им и повторно использует тот же
-ключ при retry. Web-процесс копирует заголовок в `request_id`; клиент не
-передаёт `request_id` в JSON. Web-процесс назначает author/source; клиент не
-может подменить эти системные поля. Проверка bearer-токена выполняется до
-обработки тела запроса.
-
-Семантика settlement для `POST /api/v1/log` нормативно задана в
-[protocol.md](protocol.md#post-apiv1log-settlement-and-retry): HTTP 409 —
-доказанный non-commit (следуйте `retry_safe`), 502 — неизвестный исход без
-слепого retry/нового ключа, 503 — commit с pending publication. Во всех этих
-случаях сохраняйте исходный caller-owned `Idempotency-Key`.
-
-Публичные live-reading ответы используют строгий JSON: `NaN` и обе
-бесконечности передаются как `null`, при этом identity и status измерения не
-исчезают. Клиент должен показывать такое значение как недоступное/устаревшее,
-а не считать `null` нулём или нормальным измерением.
-
-Клиенты квитирования тревог должны использовать точную идентичность
-срабатывания. Сначала прочитайте `GET /api/v1/alarms`: ответ содержит
-`engine_instance_id`, `snapshot_revision` и `activation_id` внутри каждой
-записи `active`; `acknowledged_by` остаётся отредактированным. Затем передайте
-идентичность именно этой строки, не подставляя более свежие значения:
-
-```http
-POST /api/v1/alarms/T1_high/ack
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{"engine_instance_id":"<from GET>","activation_id":"<from active.T1_high>","reason":"observed"}
-```
-
-Поля `engine_instance_id` и `activation_id` обязательны; `reason` опционален и
-ограничен 256 символами. Это breaking migration для прежних REST-клиентов,
-посылавших пустое тело или только имя тревоги. Нельзя сохранять идентичность
-между перезапусками движка или повторными срабатываниями: задержанный/старый
-ACK отказывается fail-closed и клиент должен заново показать оператору
-актуальный GET-снимок. Квитирование меняет только ответственность за внимание
-и звуковую индикацию. Оно не очищает hazard, не запускает safety recovery и не
-выдаёт управляющую команду; строка тревоги остаётся видимой до авторитетного
-сброса условия.
 
 Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
 (или полного dev/test install path `.[dev,web]`).
@@ -237,31 +143,26 @@ ACK отказывается fail-closed и клиент должен занов
 
 Проверьте минимум следующее:
 
-- ToolRail slot `Дашборд` получает свежие данные
-- ToolRail slot `Источник мощности` открывается и показывает каналы A/B
-- ToolRail slot `Тревоги` не содержит unexpected active alarms
-- ToolRail slot `Служебный лог` может загрузить записи
-- ToolRail: `Ещё` → `Архив` открывается без ошибок
-- ToolRail: `Ещё` → `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
-- ToolRail slot `База знаний` открывается; при пустом индексе показывает управляемое empty/error state
-- tray icon, если системный трей доступен, показывает красный fault/active
-  alarm либо жёлтый disconnect/unknown/malformed state с отдельной формой и
-  русской подсказкой; alarm count в launcher пока не авторитетен, поэтому
-  зелёный намеренно недостижим. Всегда сверять dashboard + alarms: даже после
-  закрытия wiring зелёный coarse state не доказывает safe/ready/recording
+- `Обзор` получает свежие данные
+- вкладка `Источник мощности` открывается и показывает каналы A/B
+- вкладка `Алармы` не содержит unexpected active alarms
+- вкладка `Служебный лог` может загрузить записи
+- вкладка `Архив` открывается без ошибок
+- вкладка `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
+- tray icon, если системный трей доступен, не показывает healthy без backend truth
 
-Текущая GUI-компоновка — MainWindowV2 shell, не вкладки:
+Текущая GUI-компоновка содержит 10 вкладок:
 
-- TopWatchBar
-- ToolRail
-- OverlayContainer с дашбордом и полноэкранными surfaces
-- BottomStatusBar
-
-Порядок основных ToolRail slots: `Дашборд`, `Новый эксперимент`,
-`Эксперимент`, `Источник мощности`, `Аналитика`, `Теплопроводность`,
-`MultiLine`, `Тревоги`, `Служебный лог`, `База знаний`, `Приборы`.
-Меню `Ещё`: `Архив`, `Калибровка`, `Настройки`, `Открыть Web-панель`,
-`Перезапустить Engine`.
+- `Обзор`
+- `Эксперимент`
+- `Источник мощности`
+- `Аналитика`
+- `Теплопроводность` (включает автоизмерение)
+- `Алармы`
+- `Служебный лог`
+- `Архив`
+- `Калибровка`
+- `Приборы`
 
 ## 8. Данные и артефакты
 
@@ -274,24 +175,15 @@ ACK отказывается fail-closed и клиент должен занов
 Основные runtime-файлы:
 
 - daily SQLite databases: `data/data_YYYY-MM-DD.db`
-- cold archive: `data/archive/` (zstd Parquet + `index.json`)
 - experiment artifacts: `data/experiments/<experiment_id>/`
 - calibration sessions: `data/calibration/sessions/<session_id>/`
 - calibration curves: `data/calibration/curves/<sensor_id>/<curve_id>/`
 
 Housekeeping:
 
-- while `cold_rotation.enabled: true`, daily DB lifecycle belongs to cold
-  rotation: old `data/data_YYYY-MM-DD.db` files move to zstd Parquet under
-  `data/archive`
-- retention compresses only when cold rotation is off; legacy `.db.gz` files
-  are ingested by rotation before deletion
+- compresses only unlinked old daily DBs
 - does not delete experiment-linked DBs
 - does not delete experiment artifact folders
-
-Read paths are hot ∪ cold: GUI history, archive views, CSV/XLSX/HDF5 export,
-reports, operator log and replay continue to see days already rotated out of
-hot SQLite.
 
 ## 9. Отчёты и архив
 
@@ -313,11 +205,12 @@ hot SQLite.
 
 Генерация PDF не является обязательным критерием развёртывания.
 
-## 10. Известные caveat'ы
+## 10. Известные caveat'ы RC
 
 - Runtime apply калибровки доступен через global on/off и per-channel policy; отсутствие curve, assignment или сбой вычисления нужно трактовать как консервативный fallback к `KRDG` с явным логированием.
 - Поведение на живом LakeShore требует отдельной lab verification и не считается автоматически подтверждённым одним только unit/mock coverage.
 - PDF-артефакт остаётся best-effort и зависит от внешнего `LibreOffice` / `soffice`.
+- На новых версиях Python сохраняются `WindowsSelectorEventLoopPolicy` deprecation warnings.
 
 ## 11. Smoke-test commands
 
@@ -330,9 +223,7 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория в поддерживаемом `cryodaq`
-environment, установленном по разделу 3. GUI tests требуют `PySide6` и
-`pyqtgraph`; web dependencies уже входят в tracked lock.
+Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"` (или старая строка `.[dev,web,archive]` — работает так же, extra-alias без эффекта). GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
 
@@ -340,59 +231,34 @@ environment, установленном по разделу 3. GUI tests тре�
 
 CryoDAQ uses SQLite WAL mode with multiple concurrent connections (writer +
 history readers + reporting + web dashboard). Due to a WAL-reset race
-condition documented at https://www.sqlite.org/wal.html, the runtime must use
-a safe SQLite implementation.
+condition documented at https://www.sqlite.org/wal.html, production
+deployments **must** run SQLite >= 3.51.3.
 
-### Windows and Linux
+### Ubuntu 22.04
 
-Create the supported runtime from the tracked environment before installing
-CryoDAQ. It pins the Python-linked SQLite library to a known-safe version on both
-laboratory platforms:
+Ubuntu 22.04 ships `libsqlite3-0 3.37.2`, which is inside the affected range.
+Options, in order of preference:
 
-```bash
-conda env create --file environment.yml
-conda activate cryodaq
-pip install -r requirements-lock.txt
-pip install -e . --no-deps --no-build-isolation
-```
+1. **Recommended.** Build SQLite from source under `/opt/sqlite-3.51.3/` and
+   preload it: `LD_PRELOAD=/opt/sqlite-3.51.3/lib/libsqlite3.so cryodaq`.
+2. Bundle a custom `libsqlite3` in the PyInstaller frozen build (see
+   `build_scripts/cryodaq.spec`).
+3. (Fallback) Set `CRYODAQ_SQLITE_SYNC=FULL` to reduce the race window at the
+   cost of write throughput.
 
-`cryodaq.storage._sqlite` selects the implementation once at import time:
+The engine emits a WARNING on startup if it detects an affected version.
 
-- safe stdlib SQLite → use stdlib
-- unsafe stdlib SQLite + independently installed safe `pysqlite3` → use it
-- both unsafe/absent → `SQLiteWriter` hard-fails at startup unless the operator
-  explicitly sets `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
+### Ubuntu 24.04 / Windows 11
 
-Do not mix direct `import sqlite3` connections with CryoDAQ storage code on the
-same DB. All runtime readers/writers must go through `cryodaq.storage._sqlite`.
-`CRYODAQ_SQLITE_SYNC=FULL` remains an emergency throughput tradeoff, not the
-normal deployment path.
+SQLite >= 3.51.3 is available natively. No action required.
 
-### macOS — dev-only, not a lab runtime target
+## Reproducible builds via lockfile
 
-CryoDAQ's supported lab platforms are Windows 10/11 and Linux (see Section 1).
-macOS is dev-only: the engine never runs near real hardware on Darwin, so it is
-deliberately absent from both the deployment requirements and the CI matrix
-(`ubuntu-latest` + `windows-latest` only — no `macos-latest` leg).
-
-No fallback package is installed by default. On macOS the stdlib SQLite is used
-as-is and must still pass the same startup gate; macOS remains a development
-sandbox rather than a supported lab runtime.
-
-## Version-pinned dependency inputs
-
-CryoDAQ pins resolved Python package versions in `requirements-lock.txt`,
-generated via `pip-compile --all-build-deps` from `pyproject.toml`. Production
-bundle builds install from this file and then install CryoDAQ with `--no-deps
---no-build-isolation`, avoiding a second unconstrained runtime or build-backend
-resolution. The Python-linked SQLite version is pinned by
-`environment.yml`.
-
-These files define the supported version-pinned inputs; they do not claim a
-bit-for-bit reproducible environment. The pip lock has no artifact hashes and
-the Conda file intentionally leaves Python patch/build and transitive artifacts
-to the solver. CI plus `pip check` verifies the resolved environment actually
-satisfies the project before tests or packaging.
+CryoDAQ pins all runtime dependencies in `requirements-lock.txt`, generated
+via `pip-compile` from `pyproject.toml`. Production bundle builds install
+from this lockfile so two operators building on different days get the
+exact same transitive dependencies — important for safety-critical lab
+deployments where a silent transitive bump can change behaviour.
 
 ### Regenerating the lockfile
 
@@ -400,21 +266,7 @@ After changing `pyproject.toml` dependencies:
 
 ```bash
 pip install pip-tools
-pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.windows.txt pyproject.toml
-pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.linux.txt pyproject.toml
-pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.macos.txt pyproject.toml
-```
-
-Run the candidate command on its named operating system. Reconcile the three
-candidate files into the tracked `requirements-lock.txt`: keep one reviewed
-version per package and preserve the canonical PEP 508 platform markers for
-Windows, Linux, and macOS. Never replace the tracked lock with raw output from
-one host, because that can silently remove dependencies needed by another
-supported platform. Then verify the reconciled lock:
-
-```bash
-pytest -q tests/test_ci_safe_sqlite_contract.py tests/test_lock_drift.py
-python scripts/check_lock_drift.py
+pip-compile --extra=dev --extra=web --output-file=requirements-lock.txt pyproject.toml
 git add requirements-lock.txt
 git commit -m "deps: update lockfile"
 ```
@@ -425,10 +277,7 @@ The build scripts (`build.sh` / `build.bat`) install from
 ## Frozen-app build (PyInstaller)
 
 ```bash
-conda activate cryodaq
-pip install -r requirements-lock.txt
-pip install -e . --no-deps --no-build-isolation
-pip check
+pip install -e ".[dev,web]"   # ensures pyinstaller is installed
 ./build_scripts/build.sh       # Linux / macOS
 build_scripts\build.bat        # Windows
 ```

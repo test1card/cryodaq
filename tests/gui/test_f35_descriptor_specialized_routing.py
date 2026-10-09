@@ -159,6 +159,7 @@ def test_passive_power_named_like_smu_never_routes_to_source_panel() -> None:
 
     shell._keithley_panel.on_reading.assert_not_called()
     shell._conductivity_panel.on_reading.assert_not_called()
+    shell._conductivity_panel.on_descriptor_reading.assert_not_called()
     assert shell._analytics_keithley_snapshot == {}
 
 
@@ -184,7 +185,8 @@ def test_quantity_and_display_group_select_temperature_raw_and_multiline_sinks()
     length = _reading("MultiLine_1/length_ch1", "mm", instrument_id="MultiLine_1")
     shell = _shell()
 
-    _route(shell, temperature, _descriptor(temperature, quantity=ChannelQuantity.TEMPERATURE))
+    temperature_descriptor = _descriptor(temperature, quantity=ChannelQuantity.TEMPERATURE)
+    _route(shell, temperature, temperature_descriptor)
     _route(shell, raw, _descriptor(raw, quantity=ChannelQuantity.RAW_SENSOR))
     length_descriptor = _descriptor(
         length,
@@ -196,7 +198,7 @@ def test_quantity_and_display_group_select_temperature_raw_and_multiline_sinks()
     )
     _route(shell, length, length_descriptor)
 
-    shell._conductivity_panel.on_reading.assert_called_once_with(temperature)
+    shell._conductivity_panel.on_descriptor_reading.assert_called_once_with(temperature, temperature_descriptor)
     shell._analytics_view.set_temperature_readings.assert_called_once_with({temperature.channel: temperature})
     shell._calibration_panel.on_reading.assert_called_once_with(raw)
     shell._multiline_panel.on_descriptor_reading.assert_called_once_with(length, length_descriptor)

@@ -48,7 +48,11 @@ def _driver(*, simulated: bool) -> MagicMock:
         selected.v_comp = v_comp
         selected.i_comp = i_comp
 
+    async def update_source_target(channel: str, p_target: float) -> None:
+        driver._channels[channel].p_target = p_target
+
     driver.start_source = AsyncMock(side_effect=start_source)
+    driver.update_source_target = AsyncMock(side_effect=update_source_target)
     return driver
 
 

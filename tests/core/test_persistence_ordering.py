@@ -10,7 +10,7 @@ These tests verify:
   - write_immediate() tolerates slow writes (no premature timeout)
   - old queue-based start() API still works
   - start_immediate() creates the data directory on demand
-  - Scheduler without a writer fails closed before either broker
+  - Scheduler with sqlite_writer=None still publishes (backward compat)
 """
 
 from __future__ import annotations
@@ -95,7 +95,9 @@ async def test_write_immediate_persists_before_return(tmp_path: Path, monkeypatc
     # No sleep — if write_immediate truly awaits the commit, rows exist NOW.
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), f"DB file not created: {db_path}"
-    assert _count_rows(db_path) == 5, f"Expected 5 rows immediately after write_immediate, found {_count_rows(db_path)}"
+    assert _count_rows(db_path) == 5, (
+        f"Expected 5 rows immediately after write_immediate, found {_count_rows(db_path)}"
+    )
 
     await writer.stop()
 
@@ -126,7 +128,9 @@ async def test_write_immediate_failure_does_not_publish(tmp_path: Path, monkeypa
         await sched.stop()
 
     # The subscriber queue must be empty: no unpersisted data may be published.
-    assert test_queue.empty(), f"Expected empty queue after write failure, but got {test_queue.qsize()} items"
+    assert test_queue.empty(), (
+        f"Expected empty queue after write failure, but got {test_queue.qsize()} items"
+    )
 
     await writer.stop()
 
@@ -164,10 +168,10 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path, monkeypatch) 
 
     original_write_immediate = writer.write_immediate
 
-    async def gated_write_immediate(batch: list) -> bool:
-        write_started.set()  # signal: write has been entered
-        await write_gate.wait()  # block until test releases
-        return await original_write_immediate(batch)
+    async def gated_write_immediate(batch: list) -> None:
+        write_started.set()           # signal: write has been entered
+        await write_gate.wait()       # block until test releases
+        await original_write_immediate(batch)
 
     writer.write_immediate = gated_write_immediate  # type: ignore[method-assign]
 
@@ -238,7 +242,9 @@ async def test_write_immediate_timeout_handling(tmp_path: Path, monkeypatch) -> 
 
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), "DB file must exist after slow write_immediate"
-    assert _count_rows(db_path) == 10, f"Expected 10 rows after slow write, found {_count_rows(db_path)}"
+    assert _count_rows(db_path) == 10, (
+        f"Expected 10 rows after slow write, found {_count_rows(db_path)}"
+    )
 
     await writer.stop()
 
@@ -267,7 +273,9 @@ async def test_backward_compat_queue_mode(tmp_path: Path, monkeypatch) -> None:
 
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), "DB file must be created by queue-mode writer"
-    assert _count_rows(db_path) == 3, f"Expected 3 rows after queue flush, found {_count_rows(db_path)}"
+    assert _count_rows(db_path) == 3, (
+        f"Expected 3 rows after queue flush, found {_count_rows(db_path)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,77 +292,34 @@ async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> 
     writer = SQLiteWriter(non_existent)
     await writer.start_immediate()
 
-    assert non_existent.exists(), f"start_immediate() must create data_dir, but {non_existent} was not created"
+    assert non_existent.exists(), (
+        f"start_immediate() must create data_dir, but {non_existent} was not created"
+    )
     assert writer._running is True, "start_immediate() must set _running = True"
 
     await writer.stop()
 
 
 # ---------------------------------------------------------------------------
-# 7. Scheduler persistence failures fail closed
+# 7. Scheduler with sqlite_writer=None still publishes (backward compat)
 # ---------------------------------------------------------------------------
 
 
-async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monkeypatch) -> None:
-    """F1 (Phase A gate, CRITICAL): a locked/busy write that write_immediate
-    swallows (no re-raise, per A6) must still suppress publication to BOTH
-    brokers — the scheduler's only prior guard was ``is_disk_full``, which a
-    locked-DB failure never sets. R1 (Phase A recheck): the drop is signalled
-    via write_immediate()'s per-call return value, not shared writer state.
-    """
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    from cryodaq.core.safety_broker import SafetyBroker
-
-    broker = DataBroker()
-    test_queue = await broker.subscribe("test_consumer", maxsize=100)
-    safety_broker = SafetyBroker()
-    safety_queue = safety_broker.subscribe("test_safety_consumer", maxsize=100)
-
-    writer = SQLiteWriter(tmp_path)
-    await writer.start_immediate()
-
-    driver = MockDriver()
-    sched = Scheduler(broker, sqlite_writer=writer, safety_broker=safety_broker)
-    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
-
-    def fake_write_batch(batch: list) -> bool:
-        # Mirrors _write_day_batch's locked-DB swallow: no raise, but the
-        # batch was never durably persisted — reported via the return value
-        # (R1, Phase A recheck), not shared writer state.
-        return False
-
-    with patch.object(writer, "_write_batch", side_effect=fake_write_batch):
-        await sched.start()
-        await asyncio.sleep(0.3)
-        await sched.stop()
-
-    assert test_queue.empty(), (
-        "Locked-DB swallow marked the batch dropped, but a reading still "
-        "reached the DataBroker subscriber — persistence-first violated (F1)"
-    )
-    assert safety_queue.empty(), (
-        "Locked-DB swallow marked the batch dropped, but a reading still "
-        "reached the SafetyBroker subscriber — persistence-first violated (F1)"
-    )
-
-    await writer.stop()
-
-
-async def test_scheduler_without_writer_fails_closed() -> None:
-    """The default scheduler path must not bypass persistence."""
-    from cryodaq.core.safety_broker import SafetyBroker
-
+async def test_scheduler_without_writer_still_publishes(tmp_path: Path) -> None:
+    """Scheduler(sqlite_writer=None) must behave exactly like the old Scheduler."""
     broker = DataBroker()
     test_queue = await broker.subscribe("no_writer_consumer", maxsize=100)
-    safety_broker = SafetyBroker()
-    safety_queue = safety_broker.subscribe("no_writer_safety_consumer", maxsize=100)
 
     driver = MockDriver()
-    sched = Scheduler(broker, safety_broker=safety_broker)
-    sched.add(InstrumentConfig(driver=driver))
-    state = sched._instruments[driver.name]
+    # Explicit sqlite_writer=None — should be identical to the old two-arg Scheduler.
+    sched = Scheduler(broker, sqlite_writer=None)
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
 
-    await sched._process_readings(state, await driver.read_channels())
+    await sched.start()
+    try:
+        reading = await asyncio.wait_for(test_queue.get(), timeout=2.0)
+    finally:
+        await sched.stop()
 
-    assert test_queue.empty(), "A reading bypassed persistence and reached DataBroker"
-    assert safety_queue.empty(), "A reading bypassed persistence and reached SafetyBroker"
+    assert reading.channel == "CH1"
+    assert abs(reading.value - 4.2) < 1e-9, f"Unexpected reading value: {reading.value}"

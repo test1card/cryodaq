@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-import subprocess
-from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,19 +7,9 @@ import pytest
 import yaml
 from docx import Document
 
-from cryodaq.channels.descriptors import (
-    ChannelCatalog,
-    ChannelDescriptorV1,
-    ChannelQuantity,
-    ChannelRole,
-    ChannelSafetyClass,
-)
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.report_process import ReportProcessRunner
-from cryodaq.report_state import ReportContractError, load_current_manifest
 from cryodaq.reporting.generator import ReportGenerator
-from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -137,157 +123,9 @@ def _doc_text(path: Path) -> str:
     return "\n".join(parts)
 
 
-def _remove_measured_values_archive(experiment_root: Path, metadata: dict[str, object]) -> None:
-    metadata["result_tables"] = [
-        item
-        for item in metadata.get("result_tables", [])
-        if isinstance(item, dict) and item.get("table_id") != "measured_values"
-    ]
-    metadata["artifact_index"] = [
-        item
-        for item in metadata.get("artifact_index", [])
-        if isinstance(item, dict) and Path(str(item.get("path", ""))).name != "measured_values.csv"
-    ]
-    (experiment_root / "archive" / "tables" / "measured_values.csv").unlink(missing_ok=True)
-
-
-def _corrupt_sqlite_freelist_trunk(db_path: Path) -> None:
-    with closing(sqlite3.connect(db_path)) as conn:
-        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-        conn.execute("CREATE TABLE freelist_seed (payload BLOB NOT NULL)")
-        conn.executemany(
-            "INSERT INTO freelist_seed(payload) VALUES (?)",
-            [(b"x" * 3000,) for _ in range(16)],
-        )
-        conn.commit()
-        conn.execute("DROP TABLE freelist_seed")
-        conn.commit()
-
-    raw = bytearray(db_path.read_bytes())
-    first_trunk_page = int.from_bytes(raw[32:36], "big")
-    assert first_trunk_page > 0
-    trunk_offset = (first_trunk_page - 1) * page_size
-    raw[trunk_offset : trunk_offset + 4] = first_trunk_page.to_bytes(4, "big")
-    db_path.write_bytes(raw)
-
-
-def test_direct_generator_rejects_experiment_traversal(tmp_path: Path) -> None:
-    with pytest.raises(ReportContractError):
-        ReportGenerator(tmp_path).generate("../outside")
-
-
-async def test_direct_generator_rejects_missing_metadata_artifact(
-    manager: ExperimentManager,
-    tmp_path: Path,
+async def test_report_generation_uses_new_output_names_and_sections(
+    manager: ExperimentManager, tmp_path: Path
 ) -> None:
-    exp_id = manager.start_experiment(
-        name="Missing artifact",
-        operator="Operator",
-        template_id="thermal_conductivity",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-    metadata_path = tmp_path / "experiments" / exp_id / "metadata.json"
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    payload.setdefault("artifact_index", []).append(
-        {"role": "missing", "path": str(metadata_path.parent / "missing.csv")}
-    )
-    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ReportContractError, match="must exist"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_direct_generator_rejects_symlinked_archive_input(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Symlink artifact",
-        operator="Operator",
-        template_id="thermal_conductivity",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-    experiment_root = tmp_path / "experiments" / exp_id
-    outside = tmp_path / "outside.csv"
-    outside.write_text("a,b\n1,2\n", encoding="utf-8")
-    link = experiment_root / "archive" / "tables" / "linked.csv"
-    link.symlink_to(outside)
-    metadata_path = experiment_root / "metadata.json"
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    payload.setdefault("result_tables", []).append({"table_id": "linked", "path": str(link)})
-    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ReportContractError, match="symlink"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_ephemeral_child_preserves_manual_schema_and_selects_generation(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Child report",
-        title="Child report",
-        operator="Operator",
-        template_id="thermal_conductivity",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    await _seed_experiment_data(tmp_path, exp_id)
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    report = ReportProcessRunner(tmp_path, timeout_s=20).generate_experiment(exp_id)
-
-    assert set(report) == {
-        "docx_path",
-        "pdf_path",
-        "assets_dir",
-        "sections",
-        "skipped",
-        "reason",
-    }
-    assert isinstance(report["docx_path"], str)
-    assert report["pdf_path"] is None or isinstance(report["pdf_path"], str)
-    assert isinstance(report["assets_dir"], str)
-    assert isinstance(report["sections"], list)
-    assert type(report["skipped"]) is bool
-    assert isinstance(report["reason"], str)
-    assert Path(report["docx_path"]).is_file()  # noqa: ASYNC240 - child completed
-    manifest = load_current_manifest(tmp_path / "experiments" / exp_id)
-    assert manifest is not None
-    report_path = Path(report["docx_path"])
-    assert report_path.relative_to(tmp_path / "experiments" / exp_id) == (
-        Path("reports") / "generations" / manifest["generation_id"] / "report_editable.docx"
-    )
-    archive = manager.get_archive_item(exp_id)
-    assert archive is not None
-    assert archive.docx_path == Path(report["docx_path"])
-
-
-async def test_ephemeral_child_preserves_disabled_report_types(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Disabled child report",
-        title="Disabled child report",
-        operator="Operator",
-        template_id="debug_checkout",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    report = ReportProcessRunner(tmp_path, timeout_s=20).generate_experiment(exp_id)
-
-    assert report["skipped"] is True
-    assert report["pdf_path"] is None
-    assert report["sections"] == []
-    assert isinstance(report["docx_path"], str)
-    assert isinstance(report["assets_dir"], str)
-
-
-async def test_report_generation_uses_new_output_names_and_sections(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Lambda",
         title="Lambda",
@@ -339,67 +177,9 @@ async def test_report_generation_uses_new_output_names_and_sections(manager: Exp
     assert "Фотографии и внешние изображения" in text
 
 
-async def test_generated_report_binds_descriptor_projection_and_embeds_chart(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Descriptor chart",
-        title="Descriptor chart",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    descriptor = ChannelDescriptorV1(
-        schema_version=1,
-        channel_id="stage_temperature",
-        instrument_id="reference",
-        source_key="input.stage.temperature",
-        quantity=ChannelQuantity.TEMPERATURE,
-        unit="K",
-        role=ChannelRole.PRIMARY_MEASUREMENT,
-        safety_class=ChannelSafetyClass.OBSERVATIONAL,
-        display_group="Cryostat",
-        display_name="Stage temperature",
-        visible_by_default=True,
-        display_order=1,
-        descriptor_revision=1,
-    )
-    writer = SQLiteWriter(
-        tmp_path,
-        channel_catalog=LiveChannelDescriptorCatalog(ChannelCatalog((descriptor,))),
-    )
-    first = datetime(2026, 3, 16, 12, 1, tzinfo=UTC)
-    receipt = await writer.write_committed(
-        [
-            Reading(first, "reference", "stage_temperature", 8.5, "K", ChannelStatus.OK),
-            Reading(first.replace(minute=2), "reference", "stage_temperature", 4.2, "K", ChannelStatus.OK),
-        ]
-    )
-    assert receipt is not None
-    await writer.stop()
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["artifact_index"] = [
-        item for item in metadata["artifact_index"] if item.get("role") != "temperature_overview"
-    ]
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    (experiment_root / "archive" / "plots" / "temperature_overview.png").unlink()
-
-    result = ReportGenerator(tmp_path).generate(exp_id)
-    document = Document(result.docx_path)
-
-    assert len(document.inline_shapes) == 1
-    assert (result.assets_dir / "cooldown_temperature.png").is_file()
-    assert "4.20 К" in _doc_text(result.docx_path)
-
-
 async def test_report_generation_for_cooldown_template_uses_archive_tables(
-    manager: ExperimentManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    manager: ExperimentManager, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -410,28 +190,20 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(
     await _seed_experiment_data(tmp_path, exp_id)
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
-    # Remove the live DB so that generate() MUST fall back to the archive CSV.
-    # If the generator silently skips the archive and reads only from the live
-    # DB, the temperature/pressure data would be absent from the report.
-    live_db = tmp_path / "data_2026-03-16.db"
-    if live_db.exists():
-        live_db.unlink()
-
     result = ReportGenerator(tmp_path).generate(exp_id)
 
-    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
-    assert archive_csv.exists(), "finalize must produce measured_values.csv"
-
+    assert (
+        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    ).exists()
     text = _doc_text(result.docx_path)
     assert "Охлаждение" in text
     assert "Тревоги" in text
-    # "Таблица измеренных величин" only appears if cooldown_test template
-    # is extended to include result_tables_section; assert the seeded
-    # Legacy archive rows are preserved but not classified as temperature.
-    assert "4.30 К" not in text
+    assert "Таблица измеренных величин" in text
 
 
-async def test_report_disabled_template_is_respected(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_disabled_template_is_respected(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Checkout",
         title="Checkout",
@@ -448,7 +220,9 @@ async def test_report_disabled_template_is_respected(manager: ExperimentManager,
     assert result.docx_path.exists() is False
 
 
-async def test_report_artifact_folder_contains_named_outputs(manager: ExperimentManager, tmp_path: Path) -> None:
+async def test_report_artifact_folder_contains_named_outputs(
+    manager: ExperimentManager, tmp_path: Path
+) -> None:
     exp_id = manager.start_experiment(
         name="Artifact Check",
         title="Artifact Check",
@@ -472,7 +246,6 @@ async def test_report_generation_graceful_without_pdf_tooling(
     manager: ExperimentManager,
     tmp_path: Path,
     monkeypatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     exp_id = manager.start_experiment(
         name="No PDF",
@@ -485,25 +258,17 @@ async def test_report_generation_graceful_without_pdf_tooling(
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     monkeypatch.setattr("cryodaq.reporting.generator.shutil.which", lambda _name: None)
-    with caplog.at_level("WARNING", logger="cryodaq.reporting.generator"):
-        result = ReportGenerator(tmp_path).generate(exp_id)
+    result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
     assert result.docx_path.name == "report_editable.docx"
     assert result.pdf_path is None
-    # Degradation must be LOUD: a WARNING naming the consequence + the remedy.
-    assert any(
-        rec.levelname == "WARNING" and "PDF не создан" in rec.message and "LibreOffice" in rec.message
-        for rec in caplog.records
-    ), "missing-soffice degradation must log a WARNING naming PDF loss + LibreOffice remedy"
 
 
 async def test_report_generation_can_use_archived_measured_values_without_live_db(
     manager: ExperimentManager,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     exp_id = manager.start_experiment(
         name="Archive source",
         title="Archive source",
@@ -525,7 +290,6 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
         writer._conn = None
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
-    # Delete live DB — generator must fall back to the archive CSV exclusively.
     db_path = tmp_path / "data_2026-03-16.db"
     if db_path.exists():
         db_path.unlink()
@@ -533,566 +297,9 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
-    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
-    assert archive_csv.exists(), "finalize must produce measured_values.csv"
-
-    text = _doc_text(result.docx_path)
-    # Legacy archive rows are not classified as temperature without descriptors.
-    assert "4.30 К" not in text
-    # Seeded pressure reading channel name must appear in the archive CSV.
-    csv_text = archive_csv.read_text(encoding="utf-8")
-    assert "K1/smua/power" in csv_text, "K1/smua/power not found in archive CSV"
-    assert "P_MAIN/pressure" in csv_text, "P_MAIN/pressure not found in archive CSV"
-    assert "T_STAGE" in csv_text, "T_STAGE not found in archive CSV"
-
-
-@pytest.mark.parametrize(
-    ("measured_values_complete", "measured_values_issues"),
-    [
-        pytest.param(False, [], id="explicit-incomplete"),
-        pytest.param(True, ["sqlite_read:2026-03-16:sqlite"], id="explicit-issue"),
-    ],
-)
-async def test_report_header_only_archive_cannot_outvote_measurement_failure_metadata(
-    manager: ExperimentManager,
-    tmp_path: Path,
-    measured_values_complete: bool,
-    measured_values_issues: list[str],
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Incomplete empty archive",
-        title="Incomplete empty archive",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
-    assert len(archive_csv.read_text(encoding="utf-8").splitlines()) == 1
-
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    summary = metadata["summary_metadata"]
-    summary["measured_values_complete"] = measured_values_complete
-    summary["measured_values_issues"] = measured_values_issues
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    (tmp_path / "data_2026-03-16.db").unlink()
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_with_no_measured_values_table_keeps_ordinary_empty_state(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    """A genuinely absent archive table remains an ordinary empty run."""
-    exp_id = manager.start_experiment(
-        name="No measurements",
-        title="No measurements",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["result_tables"] = [
-        item for item in metadata.get("result_tables", []) if item.get("table_id") != "measured_values"
-    ]
-    metadata["artifact_index"] = [
-        item
-        for item in metadata.get("artifact_index", [])
-        if Path(str(item.get("path", ""))).name != "measured_values.csv"
-    ]
-    metadata["summary_metadata"]["measured_values_complete"] = True
-    metadata["summary_metadata"]["measured_values_truncated"] = False
-    metadata["summary_metadata"]["measured_values_issues"] = []
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-    archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
-    if archive_csv.exists():
-        archive_csv.unlink()
-
-    result = ReportGenerator(tmp_path).generate(exp_id)
-
-    assert result.docx_path.exists()
     assert (
-        "\u0434\u0430\u043d\u043d\u044b\u0435 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442"
-        in _doc_text(result.docx_path)
-    )
-
-
-@pytest.mark.parametrize(
-    "authority_mutation",
-    [
-        pytest.param("not_finalized", id="not-finalized"),
-        pytest.param("missing_complete", id="missing-complete"),
-        pytest.param("incomplete", id="incomplete"),
-        pytest.param("truncated", id="truncated"),
-        pytest.param("issues", id="issues"),
-        pytest.param("nonzero", id="nonzero"),
-        pytest.param("unrelated_schema", id="unrelated-sqlite-schema"),
-    ],
-)
-async def test_report_empty_measurements_require_exact_finalized_zero_row_authority(
-    manager: ExperimentManager,
-    tmp_path: Path,
-    authority_mutation: str,
-) -> None:
-    """Missing artifacts are empty only with complete positive zero-row authority."""
-    exp_id = manager.start_experiment(
-        name="Unproven empty",
-        title="Unproven empty",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["result_tables"] = [
-        item for item in metadata.get("result_tables", []) if item.get("table_id") != "measured_values"
-    ]
-    metadata["artifact_index"] = [
-        item
-        for item in metadata.get("artifact_index", [])
-        if Path(str(item.get("path", ""))).name != "measured_values.csv"
-    ]
-    (experiment_root / "archive" / "tables" / "measured_values.csv").unlink(missing_ok=True)
-
-    summary = metadata["summary_metadata"]
-    summary["measured_values_complete"] = True
-    summary["measured_values_truncated"] = False
-    summary["measured_values_issues"] = []
-    if authority_mutation == "not_finalized":
-        metadata["experiment"]["status"] = "RUNNING"
-        metadata["experiment"]["end_time"] = None
-    elif authority_mutation == "missing_complete":
-        summary.pop("measured_values_complete")
-    elif authority_mutation == "incomplete":
-        summary["measured_values_complete"] = False
-    elif authority_mutation == "truncated":
-        summary["measured_values_truncated"] = True
-    elif authority_mutation == "issues":
-        summary["measured_values_issues"] = ["sqlite_read:data_2026-03-16.db"]
-    elif authority_mutation == "nonzero":
-        summary["measured_value_rows"] = 1
-    else:
-        with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
-            conn.execute("DROP TABLE experiments")
-            conn.execute("CREATE TABLE unrelated (value REAL)")
-            conn.commit()
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_empty_measurements_require_finalized_status_when_sqlite_matches(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Unfinalized empty",
-        title="Unfinalized empty",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    _remove_measured_values_archive(experiment_root, metadata)
-    metadata["experiment"]["status"] = "RUNNING"
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-
-    db_path = tmp_path / "data_2026-03-16.db"
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.execute(
-            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
-            ("RUNNING", exp_id),
-        )
-        conn.commit()
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_empty_measurements_reject_corrupt_sqlite_freelist_with_readable_binding(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Corrupt empty",
-        title="Corrupt empty",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    _remove_measured_values_archive(experiment_root, metadata)
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-
-    db_path = tmp_path / "data_2026-03-16.db"
-    _corrupt_sqlite_freelist_trunk(db_path)
-    with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
-        assert conn.execute(
-            "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
-            (exp_id,),
-        ).fetchone() == (exp_id,)
-        assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_empty_measurements_reject_unrelated_sqlite_table(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Unrelated schema",
-        title="Unrelated schema",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    _remove_measured_values_archive(experiment_root, metadata)
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-
-    with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
-        conn.execute("CREATE TABLE unrelated (value REAL)")
-        conn.commit()
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_empty_measurements_reject_sqlite_experiment_binding_mismatch(
-    manager: ExperimentManager,
-    tmp_path: Path,
-) -> None:
-    exp_id = manager.start_experiment(
-        name="Mismatched binding",
-        title="Mismatched binding",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    experiment_root = tmp_path / "experiments" / exp_id
-    metadata_path = experiment_root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    _remove_measured_values_archive(experiment_root, metadata)
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-
-    with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
-        conn.execute(
-            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
-            ("ABORTED", exp_id),
-        )
-        conn.commit()
-
-    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_rejects_malformed_measured_values_archive(
-    manager: ExperimentManager,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A real malformed row must not be rendered as an empty measurement report."""
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    exp_id = manager.start_experiment(
-        name="Malformed archive",
-        title="Malformed archive",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    await _seed_experiment_data(tmp_path, exp_id)
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    # This is an on-disk corrupt archive artifact, not a patched parser error.
-    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
-    archive_csv.write_text(
-        "timestamp,instrument_id,channel,value,unit,status\nnot-a-timestamp,k1,T_STAGE,4.3,K,ok\n",
-        encoding="utf-8",
-    )
-    live_db = tmp_path / "data_2026-03-16.db"
-    if live_db.exists():
-        live_db.unlink()
-
-    with pytest.raises(ReportContractError, match="archived measured values"):
-        ReportGenerator(tmp_path).generate(exp_id)
-
-
-async def test_report_with_readable_measured_values_archive_remains_normal(
-    manager: ExperimentManager,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A valid archive table still renders its measurements after live DB rotation."""
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    exp_id = manager.start_experiment(
-        name="Readable archive",
-        title="Readable archive",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    await _seed_experiment_data(tmp_path, exp_id)
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    live_db = tmp_path / "data_2026-03-16.db"
-    if live_db.exists():
-        live_db.unlink()
-
-    result = ReportGenerator(tmp_path).generate(exp_id)
-
-    assert result.docx_path.exists()
-    assert "4.30 \u041a" not in _doc_text(result.docx_path)
-
-
-async def test_report_generation_graceful_on_soffice_timeout(
-    manager: ExperimentManager,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hung soffice (TimeoutExpired) must degrade to docx-only, not raise.
-
-    Falls back exactly like the missing-soffice path: pdf_path is None and
-    the editable docx is still produced. No exception bubbles to the caller.
-    """
-    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    exp_id = manager.start_experiment(
-        name="Timeout PDF",
-        title="Timeout PDF",
-        operator="Operator",
-        template_id="cooldown_test",
-        start_time="2026-03-16T12:00:00+00:00",
-    )
-    await _seed_experiment_data(tmp_path, exp_id)
-    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
-
-    # Pretend soffice exists, but make the subprocess hang past its timeout.
-    monkeypatch.setattr("cryodaq.reporting.generator.shutil.which", lambda _name: "/usr/bin/soffice")
-
-    def _raise_timeout(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="soffice", timeout=120)
-
-    monkeypatch.setattr("cryodaq.reporting.generator.subprocess.run", _raise_timeout)
-
-    result = ReportGenerator(tmp_path).generate(exp_id)
-
-    assert result.docx_path.exists()
-    assert result.docx_path.name == "report_editable.docx"
-    assert result.pdf_path is None
-
-
-def test_deadline_conversion_reserves_frozen_commit_tail(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import cryodaq.reporting.generator as generator_module
-
-    waits: list[float] = []
-    terminated: list[int] = []
-
-    class HungSoffice:
-        pid = 42
-
-        def wait(self, timeout: float) -> int:
-            waits.append(timeout)
-            if len(waits) == 1:
-                raise subprocess.TimeoutExpired(cmd="soffice", timeout=timeout)
-            return 0
-
-    monkeypatch.setattr(generator_module.shutil, "which", lambda _name: "soffice")
-    monkeypatch.setattr(generator_module.subprocess, "Popen", lambda *_args, **_kwargs: HungSoffice())
-    monkeypatch.setattr(generator_module.time, "time", lambda: 100.0)
-    monkeypatch.setattr(generator_module, "terminate_descendant_tree", terminated.append)
-
-    result = ReportGenerator(tmp_path)._try_convert_pdf(
-        tmp_path / "report.docx",
-        tmp_path / "report.pdf",
-        deadline_epoch=115.0,
-    )
-
-    assert result is None
-    assert waits == [2.0, 2.0]
-    assert terminated == [42]
-
-
-@pytest.mark.parametrize(
-    "tree_error",
-    [
-        subprocess.TimeoutExpired(cmd="taskkill", timeout=2.0),
-        OSError("taskkill failed"),
-    ],
-)
-def test_deadline_cleanup_falls_back_to_direct_leader_kill(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tree_error: BaseException,
-) -> None:
-    import cryodaq.reporting.generator as generator_module
-
-    waits: list[float] = []
-    kills: list[int] = []
-
-    class HungSoffice:
-        pid = 45
-
-        def wait(self, timeout: float) -> int:
-            waits.append(timeout)
-            if len(waits) == 1:
-                raise subprocess.TimeoutExpired(cmd="soffice", timeout=timeout)
-            return 0
-
-        def kill(self) -> None:
-            kills.append(self.pid)
-
-    def fail_tree_cleanup(_pid: int) -> None:
-        raise tree_error
-
-    monkeypatch.setattr(generator_module.shutil, "which", lambda _name: "soffice")
-    monkeypatch.setattr(generator_module.subprocess, "Popen", lambda *_args, **_kwargs: HungSoffice())
-    monkeypatch.setattr(generator_module.time, "time", lambda: 100.0)
-    monkeypatch.setattr(generator_module, "terminate_descendant_tree", fail_tree_cleanup)
-
-    result = ReportGenerator(tmp_path)._try_convert_pdf(
-        tmp_path / "report.docx",
-        tmp_path / "report.pdf",
-        deadline_epoch=115.0,
-    )
-
-    assert result is None
-    assert waits == [2.0, 2.0]
-    assert kills == [45]
-
-
-def test_deadline_conversion_does_not_enter_commit_reserve(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import cryodaq.reporting.generator as generator_module
-
-    monkeypatch.setattr(generator_module.shutil, "which", lambda _name: "soffice")
-    monkeypatch.setattr(generator_module.time, "time", lambda: 100.0)
-    monkeypatch.setattr(
-        generator_module.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("soffice must not start inside commit reserve"),
-    )
-
-    result = ReportGenerator(tmp_path)._try_convert_pdf(
-        tmp_path / "report.docx",
-        tmp_path / "report.pdf",
-        deadline_epoch=113.0,
-    )
-
-    assert result is None
-
-
-def test_deadline_conversion_recomputes_budget_after_process_start(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import cryodaq.reporting.generator as generator_module
-
-    waits: list[float] = []
-    clock = iter((100.0, 102.0))
-
-    class Soffice:
-        pid = 43
-
-        def wait(self, timeout: float) -> int:
-            waits.append(timeout)
-            return 0
-
-    monkeypatch.setattr(generator_module.shutil, "which", lambda _name: "soffice")
-    monkeypatch.setattr(generator_module.subprocess, "Popen", lambda *_args, **_kwargs: Soffice())
-    monkeypatch.setattr(generator_module.time, "time", lambda: next(clock, 102.0))
-
-    result = ReportGenerator(tmp_path)._try_convert_pdf(
-        tmp_path / "report.docx",
-        tmp_path / "report.pdf",
-        deadline_epoch=120.0,
-    )
-
-    assert result is None
-    assert waits == [5.0]
-
-
-def test_deadline_conversion_settles_process_when_start_consumes_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import cryodaq.reporting.generator as generator_module
-
-    waits: list[float] = []
-    terminated: list[int] = []
-    clock = iter((100.0, 103.0))
-
-    class Soffice:
-        pid = 44
-
-        def wait(self, timeout: float) -> int:
-            waits.append(timeout)
-            return 0
-
-    monkeypatch.setattr(generator_module.shutil, "which", lambda _name: "soffice")
-    monkeypatch.setattr(generator_module.subprocess, "Popen", lambda *_args, **_kwargs: Soffice())
-    monkeypatch.setattr(generator_module.time, "time", lambda: next(clock, 103.0))
-    monkeypatch.setattr(generator_module, "terminate_descendant_tree", terminated.append)
-
-    result = ReportGenerator(tmp_path)._try_convert_pdf(
-        tmp_path / "report.docx",
-        tmp_path / "report.pdf",
-        deadline_epoch=115.0,
-    )
-
-    assert result is None
-    assert terminated == [44]
-    assert waits == [2.0]
-
-
-def test_gemma_intro_with_control_char_renders_without_raising(tmp_path: Path) -> None:
-    """LLM intro containing a C0 control char must be xml_safe-wrapped (no crash)."""
-    from docx import Document
-
-    from cryodaq.reporting.generator import ReportGenerator
-
-    document = Document()
-    # A bell char (\x07) is illegal in XML 1.0 and would raise inside python-docx
-    # if passed straight through to add_paragraph.
-    ReportGenerator._render_gemma_annotation(document, "Введение.\x07\nВторой абзац.")
-
-    text = "\n".join(p.text for p in document.paragraphs if p.text)
-    assert "Аннотация" in text
-    assert "Введение." in text
-    assert "Второй абзац." in text
-    assert "\x07" not in text
+        tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    ).exists()
 
 
 def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:

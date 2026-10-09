@@ -44,6 +44,8 @@ _SLOT_KEYS = {
 _RENDER_KEYS = {
     "display_time",
     "include_channels",
+    "channel_labels",
+    "focus_cold",
     "max_points_per_channel",
     "max_total_points",
     "max_input_bytes",
@@ -53,6 +55,13 @@ _RENDER_KEYS = {
     "bad_points",
     "source_errors",
 }
+# Presentational fields a producer may omit. This is a cross-process file
+# contract: a producer that predates a field, or a file already queued on disk
+# when the code updated, must still render rather than fail the whole report.
+# Absent always means "the behaviour that existed before the field".
+_RENDER_OPTIONAL_KEYS = {"channel_labels", "focus_cold"}
+_RENDER_REQUIRED_KEYS = _RENDER_KEYS - _RENDER_OPTIONAL_KEYS
+
 _READING_KEYS = {"ts", "iid", "ch", "v", "u", "st"}
 _ALARM_KEYS = {"id", "level", "channels", "triggered_at", "acknowledged"}
 _RESULT_KEYS = {
@@ -88,6 +97,10 @@ class PeriodicSlotSnapshot:
 class PeriodicRenderSnapshot:
     display_time: str
     include_channels: tuple[str, ...] | None
+    # Presentation only: canonical channel -> operator-facing name, supplied
+    # by the producer so the renderer stays deterministic (it draws exactly
+    # what its input file says and never consults live operator config).
+    channel_labels: tuple[tuple[str, str], ...]
     max_points_per_channel: int
     max_total_points: int
     max_input_bytes: int
@@ -96,6 +109,11 @@ class PeriodicRenderSnapshot:
     dropped_points: int
     bad_points: int
     source_errors: tuple[str, ...]
+    # Presentation only: scale the temperature axis to the coldest cluster of
+    # channels instead of to all of them, so sensors that have come down stay
+    # readable when others sit near room temperature. Default False keeps the
+    # full-scale view.
+    focus_cold: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,7 +355,15 @@ def _validate_slot(value: object) -> PeriodicSlotSnapshot:
 
 
 def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnapshot:
-    if not isinstance(value, dict) or set(value) != _RENDER_KEYS:
+    # channel_labels is OPTIONAL and purely presentational. This is a
+    # cross-process file contract: a producer that predates the field, or a
+    # file already queued on disk when the code updated, must still render
+    # rather than fail the whole report. Absent means "no operator names",
+    # which is exactly the previous behaviour.
+    if not isinstance(value, dict):
+        raise PeriodicInputError("periodic render options have an invalid schema")
+    present = set(value)
+    if not _RENDER_REQUIRED_KEYS <= present or not present <= _RENDER_KEYS:
         raise PeriodicInputError("periodic render options have an invalid schema")
     display = _text(value["display_time"], minimum=16, maximum=16, field="display_time")
     try:
@@ -352,6 +378,20 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
         maximum_bytes=256,
         field="include_channels",
     )
+    raw_labels = value.get("channel_labels", [])
+    if not isinstance(raw_labels, list) or len(raw_labels) > 64:
+        raise PeriodicInputError("channel_labels has an invalid count")
+    labels: list[tuple[str, str]] = []
+    seen_labels: set[str] = set()
+    for entry in raw_labels:
+        if not isinstance(entry, list) or len(entry) != 2:
+            raise PeriodicInputError("channel_labels entry has an invalid shape")
+        label_channel = _text(entry[0], minimum=1, maximum=256, field="channel_labels")
+        label_text = _text(entry[1], minimum=1, maximum=256, field="channel_labels")
+        if label_channel in seen_labels:
+            raise PeriodicInputError("channel_labels contains a duplicate channel")
+        seen_labels.add(label_channel)
+        labels.append((label_channel, label_text))
     per_channel = _integer(value["max_points_per_channel"], minimum=2, maximum=100_000, field="max_points_per_channel")
     total = _integer(value["max_total_points"], minimum=2, maximum=500_000, field="max_total_points")
     if total < per_channel:
@@ -373,9 +413,11 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
         if item in errors:
             raise PeriodicInputError("source_errors contains duplicate evidence")
         errors.append(item)
+    focus_cold = _boolean(value.get("focus_cold", False), "focus_cold")
     return PeriodicRenderSnapshot(
         display,
         channels,
+        tuple(labels),
         per_channel,
         total,
         declared,
@@ -384,6 +426,7 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
         dropped,
         bad,
         tuple(errors),
+        focus_cold,
     )
 
 

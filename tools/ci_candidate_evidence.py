@@ -100,6 +100,7 @@ _PROTECTED_PRODUCER_FILES = (
     "tools/ci_guard_execution.py",
     "tools/ci_required_workflow_context.py",
     "tools/governance_contract.py",
+    "tools/test_node_source.py",
 )
 
 

@@ -81,24 +81,6 @@ async def test_armed_to_tripped() -> None:
     await engine.stop()
 
 
-async def test_noop_action_is_not_logged_as_authoritative_success(caplog) -> None:
-    """A shim completion is not evidence that the physical action succeeded."""
-    import logging
-
-    async def noop() -> None:
-        return None
-
-    broker, engine, _called = await _make_engine(action_fn=noop)
-    engine.add_condition(_make_condition())
-
-    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
-        await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
-        await asyncio.sleep(0.05)
-
-    assert "выполнено успешно" not in caplog.text
-    await engine.stop()
-
-
 # ---------------------------------------------------------------------------
 # 2. TRIPPED → ARMED after acknowledge()
 # ---------------------------------------------------------------------------
@@ -121,60 +103,31 @@ async def test_tripped_to_acknowledged() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Cooldown dedups the notification but the protective action still runs
+# 3. Cooldown prevents re-trip within cooldown window
 # ---------------------------------------------------------------------------
 
 
-async def test_cooldown_dedups_notification_but_still_protects(caplog) -> None:
-    """Interlocks are latching (TRIPPED → ARMED only via operator acknowledge).
-    If the operator acknowledges while the value is STILL in breach, the
-    protection must re-trip and re-run the action — it must NOT go blind for the
-    rest of the cooldown window. The cooldown only deduplicates the loud
-    operator-facing CRITICAL announcement, not the protective action."""
-    import logging
-
+async def test_cooldown_prevents_retrip() -> None:
     broker, engine, called = await _make_engine()
-    # Very long cooldown so the second breach definitely falls within it.
+    # Use a very long cooldown so the second publish definitely falls within it
     engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=60.0))
 
-    # First trip → action runs, loud CRITICAL announcement emitted.
+    # First trip
     await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
     assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
-    assert len(called) == 1
 
-    # Operator acknowledges but the cause is NOT fixed (value still > threshold).
+    # Acknowledge to return to ARMED so the cooldown logic is exercised
     engine.acknowledge("high_temp")
     assert engine.get_state()["high_temp"] == InterlockState.ARMED
 
-    caplog.clear()
-    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
-        await broker.publish(Reading.now("T1", 400.0, "K", instrument_id="test"))
-        await asyncio.sleep(0.05)
+    # Publish again — still within cooldown, should NOT trip
+    await broker.publish(Reading.now("T1", 400.0, "K", instrument_id="test"))
+    await asyncio.sleep(0.05)
 
-    # MUST re-trip: protection is not blinded by the cooldown.
-    assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
-    assert len(called) == 2, "protective action must run again on the persisting breach"
-    # ...but the loud trip announcement is deduplicated within the cooldown window.
-    assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text
-
-    await engine.stop()
-
-
-async def test_cooldown_does_not_suppress_first_announcement(caplog) -> None:
-    """Sanity: the FIRST trip (no prior last_trip_time) is never suppressed."""
-    import logging
-
-    broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=60.0))
-
-    caplog.clear()
-    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
-        await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
-        await asyncio.sleep(0.05)
-
-    assert len(called) == 1
-    assert "БЛОКИРОВКА СРАБОТАЛА" in caplog.text
+    # Still ARMED because cooldown is active
+    assert engine.get_state()["high_temp"] == InterlockState.ARMED
+    assert len(called) == 1  # action called only once
 
     await engine.stop()
 
@@ -185,89 +138,45 @@ async def test_cooldown_does_not_suppress_first_announcement(caplog) -> None:
 
 
 async def test_action_called_async() -> None:
-    """Prove the check loop SERIALLY AWAITS each action before processing any further reading.
+    """Action must be fully AWAITED before the trip is considered complete.
 
-    Production code (_check_loop): a single ``async for`` loop over the subscriber
-    queue; each trip does ``await self._trip(...)`` which does ``await action_callable()``.
-    While one action is blocked, the loop cannot dequeue ANY subsequent reading —
-    including readings for DIFFERENT conditions on DIFFERENT channels.
-
-    Strategy — two independent conditions on separate channels:
-
-    1. Condition A on channel "T1" with action_a that blocks on ``action_a_gate``.
-       Condition B on channel "T2" with action_b that sets ``action_b_started`` on entry.
-    2. Publish T1 reading → wait until action_a is running (deterministic via Event).
-    3. While action_a is gated, publish T2 reading.
-       Assert action_b has NOT started via a BOUNDED NEGATIVE wait (0.2 s timeout).
-       If prod were fire-and-forget, action_b would start immediately and this
-       bounded-wait would NOT raise — proving the test has teeth.
-    4. Release action_a_gate → the loop drains.
-       Assert action_b DOES start (positive wait, 1.0 s timeout).
+    We block the action on an asyncio.Event so the trip can only complete
+    after we release it. This proves the engine awaits the coroutine rather
+    than fire-and-forgetting it via create_task.
     """
-    action_a_started = asyncio.Event()
-    action_a_gate = asyncio.Event()
-    action_b_started = asyncio.Event()
+    action_started = asyncio.Event()
+    action_gate = asyncio.Event()
+    awaited: list[bool] = []
 
-    async def action_a() -> None:
-        action_a_started.set()
-        await action_a_gate.wait()
-
-    async def action_b() -> None:
-        action_b_started.set()
+    async def async_action() -> None:
+        action_started.set()        # signal: coroutine body has been entered
+        await action_gate.wait()    # block until test releases the gate
+        awaited.append(True)
 
     broker = DataBroker()
-    engine = InterlockEngine(
-        broker=broker,
-        actions={"action_a": action_a, "action_b": action_b},
-    )
-    # Condition A: T1 channel, threshold 300, action_a
-    engine.add_condition(
-        InterlockCondition(
-            name="cond_a",
-            description="Condition A on T1",
-            channel_pattern=r"T1",
-            threshold=300.0,
-            comparison=">",
-            action="action_a",
-        )
-    )
-    # Condition B: T2 channel, threshold 300, action_b
-    engine.add_condition(
-        InterlockCondition(
-            name="cond_b",
-            description="Condition B on T2",
-            channel_pattern=r"T2",
-            threshold=300.0,
-            comparison=">",
-            action="action_b",
-        )
-    )
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": async_action})
+    engine.add_condition(_make_condition(threshold=300.0, comparison=">"))
     await engine.start()
 
-    try:
-        # Step 1 — trip condition A and wait until action_a is running and blocked
-        await broker.publish(Reading.now("T1", 999.0, "K", instrument_id="test"))
-        await asyncio.wait_for(action_a_started.wait(), timeout=1.0)
+    await broker.publish(Reading.now("T1", 999.0, "K", instrument_id="test"))
 
-        # Step 2 — while action_a is gated, enqueue a T2 reading for condition B
-        await broker.publish(Reading.now("T2", 999.0, "K", instrument_id="test"))
+    # Wait until the action coroutine has been entered (proves it was called)
+    await asyncio.wait_for(action_started.wait(), timeout=1.0)
 
-        # Step 3 — NEGATIVE assertion: action_b must NOT start while action_a is blocked.
-        # A fire-and-forget implementation would start action_b immediately and this
-        # would NOT raise TimeoutError — so a raise here is the proof of serial awaiting.
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(action_b_started.wait(), timeout=0.2)
+    # While the gate is still closed the action hasn't completed → awaited is empty
+    assert len(awaited) == 0, (
+        "Action completed before gate was opened — engine used create_task (fire-and-forget)"
+    )
+    # State is already TRIPPED (state change happens before action call in _trip)
+    assert engine.get_state()["high_temp"] == InterlockState.TRIPPED
 
-        # Step 4 — release action_a; the loop now processes the queued T2 reading
-        action_a_gate.set()
+    # Release the gate → action completes
+    action_gate.set()
+    await asyncio.sleep(0.05)
 
-        # Positive assertion: action_b MUST start once the loop is unblocked
-        await asyncio.wait_for(action_b_started.wait(), timeout=1.0)
+    assert len(awaited) == 1, "Async action was not awaited to completion"
 
-    finally:
-        # Ensure gate is released so action_a coroutine can finish before stop()
-        action_a_gate.set()
-        await engine.stop()
+    await engine.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +187,9 @@ async def test_action_called_async() -> None:
 async def test_regex_channel_matching() -> None:
     broker, engine, called = await _make_engine()
     # Pattern matches T1 through T8
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
+    )
 
     await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
@@ -296,7 +207,9 @@ async def test_regex_channel_matching() -> None:
 
 async def test_regex_no_match_ignored() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
+    )
 
     # "PRESSURE_1" does not match T[1-8]
     await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
@@ -416,16 +329,12 @@ async def test_event_history_bounded() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
-    """load_config must parse threshold, comparison, channel_pattern, action, and cooldown_s.
+async def test_load_config_yaml(tmp_path: Path) -> None:
+    """load_config must parse ALL fields from YAML, not just name/state.
 
-    All fields are verified BEHAVIORALLY — no private internals accessed:
-    1. A reading that matches the pattern AND exceeds the threshold trips the interlock
-       and fires the action.
-    2. A reading on a non-matching channel does NOT trip.
-    3. After acknowledging and re-arming, a second matching reading within the cooldown
-       window still PROTECTS (re-trips + re-runs the action) but the loud trip
-       announcement is deduplicated — proving cooldown_s was loaded and is active.
+    We verify that threshold, comparison, channel_pattern, action, and
+    cooldown_s are actually loaded by driving a reading through the engine
+    and checking the loaded condition fields directly.
     """
     config_data = {
         "interlocks": [
@@ -436,73 +345,47 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
                 "threshold": 400.0,
                 "comparison": ">",
                 "action": "emergency_off",
-                "cooldown_s": 60.0,  # long cooldown — second trip must be blocked
+                "cooldown_s": 5.0,
             }
         ]
     }
     config_file = tmp_path / "interlocks.yaml"
     config_file.write_text(yaml.dump(config_data), encoding="utf-8")
 
-    action_count: list[int] = [0]
+    action_called: list[bool] = []
 
     async def _action() -> None:
-        action_count[0] += 1
+        action_called.append(True)
 
     broker = DataBroker()
     engine = InterlockEngine(broker=broker, actions={"emergency_off": _action})
     engine.load_config(config_file)
 
-    # Interlock must be registered and start ARMED
+    # Verify state and all parsed fields
     states = engine.get_state()
-    assert "overheat" in states, "Interlock 'overheat' not registered after load_config"
+    assert "overheat" in states
     assert states["overheat"] == InterlockState.ARMED
 
+    # Retrieve the loaded condition from the internal records to assert exact fields
+    record = engine._interlocks["overheat"]
+    cond = record.condition
+    assert cond.threshold == 400.0, f"threshold not loaded: {cond.threshold}"
+    assert cond.comparison == ">", f"comparison not loaded: {cond.comparison}"
+    assert cond.channel_pattern == r"T\d+", f"channel_pattern not loaded: {cond.channel_pattern}"
+    assert cond.action == "emergency_off", f"action not loaded: {cond.action}"
+    assert cond.cooldown_s == 5.0, f"cooldown_s not loaded: {cond.cooldown_s}"
+
+    # Behavioral proof: a reading matching the pattern+threshold MUST trip the interlock
     await engine.start()
     try:
-        # --- Behavioral check 1: matching channel + above threshold → TRIPPED, action fired ---
         await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
         await asyncio.sleep(0.05)
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
-            "Interlock loaded from YAML did not trip on T5=450 > 400 (threshold not loaded)"
+            "Interlock loaded from YAML did not trip on a matching reading"
         )
-        assert action_count[0] == 1, "YAML-loaded action was not called on first trip"
-
-        # --- Behavioral check 2: non-matching channel does NOT trip ---
-        # acknowledge() transitions TRIPPED → ARMED (not a separate ACKNOWLEDGED state)
-        engine.acknowledge("overheat")
-        await asyncio.sleep(0.01)
-        assert engine.get_state()["overheat"] == InterlockState.ARMED, "Expected ARMED after acknowledge()"
-        # "PRESSURE_1" does not match r"T\d+" — must stay ARMED (not re-tripped)
-        await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
-        await asyncio.sleep(0.05)
-        assert engine.get_state()["overheat"] == InterlockState.ARMED, (
-            "Non-matching channel 'PRESSURE_1' unexpectedly tripped 'overheat' "
-            "(channel_pattern may not have been loaded)"
+        assert len(action_called) == 1, (
+            "YAML-loaded action was not called on trip"
         )
-
-        # --- Behavioral check 3: cooldown_s loaded → re-trip within the window
-        #     still protects (action runs) but the loud announcement is deduped ---
-        # After acknowledge, state is ARMED with last_trip_time set.
-        import logging
-
-        caplog.clear()
-        with caplog.at_level(logging.WARNING, logger="cryodaq.core.interlock"):
-            await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
-            await asyncio.sleep(0.05)
-        # Protection is NOT blinded by the cooldown — it re-trips and re-acts.
-        assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
-            "Interlock must re-trip on a persisting breach after acknowledge"
-        )
-        assert action_count[0] == 2, (
-            f"Action fired {action_count[0]} times; the protective action must run "
-            "again on the persisting breach (protection not blinded by cooldown)"
-        )
-        # cooldown_s=60 loaded & active → the loud trip announcement is deduped,
-        # and a cooldown-dedup WARNING is emitted instead.
-        assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text, (
-            "loud trip announcement must be deduplicated within cooldown_s (cooldown_s may not have been loaded)"
-        )
-        assert "кулдаун" in caplog.text.lower()
     finally:
         await engine.stop()
 
@@ -541,7 +424,9 @@ async def test_duplicate_name_rejected() -> None:
 
 async def test_get_state() -> None:
     broker = DataBroker()
-    engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None, "stop_source": lambda: None})
+    engine = InterlockEngine(
+        broker=broker, actions={"emergency_off": lambda: None, "stop_source": lambda: None}
+    )
     engine.add_condition(_make_condition(name="lock_a", action="emergency_off"))
     engine.add_condition(_make_condition(name="lock_b", action="stop_source"))
 

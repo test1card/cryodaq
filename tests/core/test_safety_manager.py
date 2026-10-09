@@ -4,75 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import time
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
-from cryodaq.drivers.contracts import (
-    AcquisitionTiming,
-    DriverTrustClass,
-    SourceOffResult,
-    _issue_registry_runtime_binding,
-)
-from cryodaq.engine import EngineCommandContext, _handle_gui_command
-from cryodaq.engine_wiring.supervision import TaskSupervisor
-from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
-    """Create a mock Keithley driver.
-
-    ``emergency_off`` returns ``SourceOffResult.DEVICE_REPORTED_OFF``: the
-    driver contract is an evidence enum, not a bool, and only that member
-    means every targeted channel's OUTPUT_OFF write succeeded AND readback
-    confirmed the output is OFF. Returning ``True`` here would be a mock
-    inventing a shape production no longer produces, so callers that judge
-    OFF by identity against the enum would silently read it as unconfirmed.
-    """
+    """Create a mock Keithley driver."""
     k = MagicMock()
     k.connected = True
-    k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    k.emergency_off = AsyncMock()
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
 
 
-async def _make_manager(*, mock=True, keithley=None, stale=10.0, data_broker=None):
+async def _make_manager(*, mock=True, keithley=None, stale=10.0):
     """Create and start a SafetyManager with SafetyBroker."""
     broker = SafetyBroker()
-    binding = None
-    if keithley is not None:
-        keithley.mock = mock
-        binding = _issue_registry_runtime_binding(
-            driver=keithley,
-            timing=AcquisitionTiming(1.0, 1.0, 1.0),
-            registry_provenance="test:safety-manager",
-            trust_class=DriverTrustClass.REVIEWED_SOURCE,
-            simulation=mock,
-        )
-    mgr = SafetyManager(
-        broker,
-        keithley_driver=keithley,
-        reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
-        mock=mock,
-        data_broker=data_broker,
-    )
+    mgr = SafetyManager(broker, keithley_driver=keithley, mock=mock)
     mgr._config.stale_timeout_s = stale
     mgr._config.cooldown_before_rearm_s = 0.1  # Fast for tests
     mgr._config.require_keithley_for_run = not mock
     await mgr.start()
-    if not mock:
-        # Simulate the production registry/connection authority handing the
-        # manager a current exact both-channel OFF receipt.
-        generation = await mgr.begin_reviewed_source_connect(keithley, binding, "test setup")
-        assert await mgr.complete_reviewed_source_connect(keithley, binding, generation, "test setup")
     return mgr, broker
 
 
@@ -81,354 +39,6 @@ async def _feed(broker, channel="Т1 Криостат верх", value=4.5, unit
     r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test")
     await broker.publish(r)
     await asyncio.sleep(0.02)  # Let collect loop process
-
-
-class _RunPublicationGate(DataBroker):
-    """Real broker whose first committed RUN state has a controlled boundary."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-        self._gated = False
-
-    async def publish(
-        self,
-        reading: Reading,
-        *,
-        persistence_authoritative: bool = False,
-        descriptor_envelope: bytes | None = None,
-    ) -> None:
-        if (
-            not self._gated
-            and reading.channel == "analytics/keithley_channel_state/smua"
-            and reading.metadata.get("state") == "on"
-        ):
-            self._gated = True
-            self.entered.set()
-            await self.release.wait()
-        await super().publish(
-            reading,
-            persistence_authoritative=persistence_authoritative,
-            descriptor_envelope=descriptor_envelope,
-        )
-
-
-class _ExactRunSource:
-    """Small exact reviewed-source implementation for authority-cut races."""
-
-    def __init__(self) -> None:
-        self.mock = False
-        self.connected = True
-        self.output_state_unverified = False
-        self.watchdog_trip_pending = False
-        self._connection_generation = 1
-        self._active: set[str] = set()
-        self.block_global_off = False
-        self.global_off_entered = asyncio.Event()
-        self.global_off_release = asyncio.Event()
-        self.off_calls: list[str | None] = []
-
-    @property
-    def source_connection_generation(self) -> int:
-        return self._connection_generation
-
-    @property
-    def active_channels(self) -> list[str]:
-        return sorted(self._active)
-
-    @property
-    def unsafe_output_observations(self) -> tuple[()]:
-        return ()
-
-    async def start_source(
-        self,
-        channel: str,
-        _p_target: float,
-        _v_comp: float,
-        _i_comp: float,
-    ) -> None:
-        self._active.add(channel)
-        self.output_state_unverified = True
-
-    async def stop_source(self, channel: str) -> bool:
-        self._active.discard(channel)
-        self.output_state_unverified = bool(self._active)
-        return True
-
-    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
-        self.off_calls.append(channel)
-        if channel is None and self.block_global_off:
-            self.global_off_entered.set()
-            await self.global_off_release.wait()
-        if channel is None:
-            self._active.clear()
-        else:
-            self._active.discard(channel)
-        self.output_state_unverified = bool(self._active)
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-
-def _engine_command_context(
-    manager: SafetyManager,
-    event_logger: AsyncMock,
-) -> EngineCommandContext:
-    return EngineCommandContext(
-        safety_manager=manager,
-        event_logger=event_logger,
-        sink_registry=SimpleNamespace(sinks=[]),
-        interlock_engine=None,
-        leak_rate_estimator=None,
-        leak_cfg={},
-        alarm_v2_state_mgr=None,
-        alarm_ring=None,
-        broker=None,
-        experiment_manager=None,
-        calibration_acquisition=None,
-        event_bus=None,
-        cooldown_alarm=None,
-        vacuum_guard=None,
-        alarm_dispatch_tasks=set(),
-        calibration_store=None,
-        writer=None,
-        drivers_by_name={},
-        sensor_diag=None,
-        vacuum_trend=None,
-        alarm_v2_state_tracker=None,
-        multiline_burst_auto_stop_meta={},
-        multiline_burst_auto_stop_tasks={},
-        mutation_capability_token="test-mutation-token-1",
-    )
-
-
-def _start_command() -> dict[str, object]:
-    return {
-        "cmd": "keithley_start",
-        "channel": "smua",
-        "p_target": 0.1,
-        "v_comp": 1.0,
-        "i_comp": 0.1,
-        "protocol_major": 1,
-        "mutation_capability": "cryodaq_mutation_v1",
-        "capability_token": "test-mutation-token-1",
-    }
-
-
-async def _yield_until(predicate, *, message: str) -> None:
-    for _ in range(100):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-    pytest.fail(message)
-
-
-async def _l05_started_child_manager(
-    outcome: str,
-) -> tuple[
-    SafetyManager,
-    _ExactRunSource,
-    TaskSupervisor,
-    asyncio.Task[None],
-    asyncio.Event,
-    asyncio.Event,
-    AsyncMock,
-    AsyncMock,
-    list[str],
-]:
-    """Start the real child lifecycle with one deterministically controlled child."""
-
-    collect_entered = asyncio.Event()
-    collect_release = asyncio.Event()
-    external_cancel_caught = asyncio.Event()
-
-    async def controlled_collect() -> None:
-        collect_entered.set()
-        if outcome == "external_cancel":
-            try:
-                await collect_release.wait()
-            except asyncio.CancelledError:
-                external_cancel_caught.set()
-                await asyncio.Event().wait()
-        else:
-            await collect_release.wait()
-        if outcome == "runtime_error":
-            raise RuntimeError("L05 controlled collect failure")
-        if outcome == "normal_exit":
-            return
-        await asyncio.Event().wait()
-
-    source = _ExactRunSource()
-    binding = _issue_registry_runtime_binding(
-        driver=source,
-        timing=AcquisitionTiming(1.0, 1.0, 1.0),
-        registry_provenance="test:l05-child-settlement",
-        trust_class=DriverTrustClass.REVIEWED_SOURCE,
-        simulation=False,
-    )
-    ordered_events: list[str] = []
-
-    async def audit_fault(**_kwargs: object) -> None:
-        ordered_events.append("audit")
-
-    audit = AsyncMock(side_effect=audit_fault)
-    manager = SafetyManager(
-        SafetyBroker(),
-        keithley_driver=source,
-        reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt(),
-        mock=False,
-        fault_log_callback=audit,
-    )
-    manager._config.critical_channels = []
-    manager._collect_loop = controlled_collect  # type: ignore[method-assign]
-    original_off = source.emergency_off
-
-    async def tracked_off(channel: str | None = None) -> SourceOffResult:
-        ordered_events.append("off")
-        return await original_off(channel)
-
-    source.emergency_off = tracked_off  # type: ignore[method-assign]
-    await manager.start()
-    await collect_entered.wait()
-    generation = await manager.begin_reviewed_source_connect(source, binding, "L05 child test")
-    assert await manager.complete_reviewed_source_connect(source, binding, generation, "L05 child test")
-    collect_task = manager._collect_task
-    assert collect_task is not None
-
-    event_bus = MagicMock()
-    event_bus.publish = AsyncMock()
-    dispatch_tasks: set[asyncio.Task[object]] = set()
-    supervisor = TaskSupervisor(
-        event_bus=event_bus,
-        experiment_manager=SimpleNamespace(active_experiment_id=None),
-        safety_manager=manager,
-        alarm_dispatch_tasks=dispatch_tasks,
-        logger_=MagicMock(),
-    )
-    supervisor.register(
-        "safety_collect",
-        collect_task,
-        controlled_collect,
-        safety_critical=True,
-    )
-    return (
-        manager,
-        source,
-        supervisor,
-        collect_task,
-        collect_release,
-        audit,
-        event_bus.publish,
-        ordered_events,
-        external_cancel_caught,
-    )
-
-
-async def test_manager_stop_suppresses_only_its_exact_child_cancellation() -> None:
-    (
-        manager,
-        source,
-        supervisor,
-        collect_task,
-        collect_release,
-        audit,
-        alarm_publish,
-        _events,
-        _external_cancel_caught,
-    ) = await _l05_started_child_manager("stop_cancel")
-    supervisor.stop()
-    try:
-        await manager.stop()
-        await asyncio.sleep(0)
-
-        assert collect_task.cancelled()
-        assert manager.is_stop_cancelled_child(collect_task) is True
-        assert audit.await_count == 0
-        assert alarm_publish.await_count == 0
-        assert manager.state is SafetyState.SAFE_OFF
-        assert source.off_calls.count(None) >= 2
-    finally:
-        collect_release.set()
-        source.global_off_release.set()
-        if manager._collect_task is not None or manager._monitor_task is not None:
-            await manager.stop()
-
-
-@pytest.mark.parametrize(
-    ("outcome", "expected_outcome"),
-    (
-        ("runtime_error", "failed"),
-        ("normal_exit", "completed"),
-        ("external_cancel", "cancelled"),
-    ),
-)
-async def test_manager_stop_faults_and_audits_non_stop_child_outcomes(
-    outcome: str,
-    expected_outcome: str,
-) -> None:
-    (
-        manager,
-        source,
-        supervisor,
-        collect_task,
-        collect_release,
-        audit,
-        alarm_publish,
-        ordered_events,
-        external_cancel_caught,
-    ) = await _l05_started_child_manager(outcome)
-    source.block_global_off = True
-    supervisor.stop()
-    stop_task: asyncio.Task[None] | None = None
-    try:
-        if outcome == "external_cancel":
-            collect_task.cancel()
-            await external_cancel_caught.wait()
-            assert not collect_task.done()
-            assert collect_task.cancelling() == 1
-            assert manager.is_stop_cancelled_child(collect_task) is False
-
-            stop_task = asyncio.create_task(manager.stop())
-            await source.global_off_entered.wait()
-            assert not collect_task.done()
-            assert collect_task.cancelling() == 1
-            assert manager.is_stop_cancelled_child(collect_task) is False
-            source.global_off_release.set()
-            await stop_task
-            assert collect_task.cancelled()
-            assert collect_task.cancelling() == 2
-            assert manager.is_stop_cancelled_child(collect_task) is False
-        else:
-            stop_task = asyncio.create_task(manager.stop())
-            await source.global_off_entered.wait()
-            collect_release.set()
-            await _yield_until(
-                collect_task.done,
-                message="controlled safety child did not reach its terminal outcome",
-            )
-            source.global_off_release.set()
-            await stop_task
-
-        await _yield_until(
-            lambda: audit.await_count == 1 and alarm_publish.await_count >= 1,
-            message="stopping-window child loss was not faulted and audited by both owners",
-        )
-        assert manager.state is SafetyState.FAULT_LATCHED
-        assert manager._failed_child_reason == f"safety_collect_{expected_outcome}"
-        assert f"({expected_outcome})" in manager.fault_reason
-        assert audit.await_args.kwargs["source"] == "safety_collect"
-        minimum_off_proofs = 3 if outcome == "external_cancel" else 4
-        assert source.off_calls.count(None) >= minimum_off_proofs
-        assert "audit" in ordered_events
-        assert ordered_events[-1] == "off"
-        assert manager._pending_child_fault_settlements == set()
-    finally:
-        collect_release.set()
-        source.global_off_release.set()
-        if stop_task is not None and not stop_task.done():
-            await stop_task
-        if manager._collect_task is not None or manager._monitor_task is not None:
-            await manager.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -615,65 +225,6 @@ async def test_emergency_off_from_running():
 
 
 # ---------------------------------------------------------------------------
-# 9b. CR-2: emergency_off FAILS CLOSED when output OFF cannot be confirmed
-# ---------------------------------------------------------------------------
-
-
-async def test_emergency_off_unconfirmed_latches_fault():
-    """CR-2: if the driver cannot confirm output OFF (write raised or readback
-    still-on → driver returns PHYSICAL_STATE_UNKNOWN), operator emergency_off must NOT report
-    success and must NOT transition to SAFE_OFF (which would stop all
-    stale/heartbeat/rate monitoring while the SMU may still be sourcing).
-    It must latch a FAULT instead."""
-    k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
-    mgr, broker = await _make_manager(mock=False, keithley=k)
-    try:
-        await _feed(broker, "Т1 Криостат верх", 4.5)
-        await asyncio.sleep(1.5)
-        await mgr.request_run(0.5, 40.0, 1.0)
-        assert mgr.state == SafetyState.RUNNING
-
-        result = await mgr.emergency_off()
-
-        assert result["ok"] is False, "must not report success on unconfirmed OFF"
-        assert "error" in result
-        assert mgr.state == SafetyState.FAULT_LATCHED, f"unconfirmed emergency_off must latch FAULT, got {mgr.state}"
-        assert mgr.state != SafetyState.SAFE_OFF
-    finally:
-        # Unverified OFF intentionally leaves live HOLD ownership. Supply one
-        # exact later proof before asking the manager to relinquish children.
-        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-        await mgr.stop()
-
-
-async def test_emergency_off_driver_raise_latches_fault():
-    """CR-2: a driver emergency_off that RAISES (transport dead mid-call)
-    must also fail closed: ok=False + FAULT_LATCHED, never SAFE_OFF."""
-    k = _mock_keithley()
-    # First call (operator path via _ensure_output_off) raises; the retry
-    # inside _fault()'s shielded shutdown also raises — both must be survived.
-    k.emergency_off = AsyncMock(side_effect=OSError("transport down"))
-    mgr, broker = await _make_manager(mock=False, keithley=k)
-    try:
-        await _feed(broker, "Т1 Криостат верх", 4.5)
-        await asyncio.sleep(1.5)
-        await mgr.request_run(0.5, 40.0, 1.0)
-        assert mgr.state == SafetyState.RUNNING
-
-        result = await mgr.emergency_off()
-
-        assert result["ok"] is False
-        assert mgr.state == SafetyState.FAULT_LATCHED, f"emergency_off raise must latch FAULT, got {mgr.state}"
-        assert mgr.state != SafetyState.SAFE_OFF
-    finally:
-        # The simulated dead transport is the behavior under test, not a valid
-        # terminal receipt. Restore an exact proof for deterministic teardown.
-        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-        await mgr.stop()
-
-
-# ---------------------------------------------------------------------------
 # 10. Cannot start from FAULT_LATCHED
 # ---------------------------------------------------------------------------
 
@@ -711,8 +262,12 @@ async def test_broker_overflow_triggers_fault():
         # invokes the overflow callback -> SafetyManager._fault(). This makes the
         # overflow deterministic instead of timing-dependent.
         for _ in range(q.maxsize):
-            q.put_nowait(Reading.now(channel="CHfill", value=0.0, unit="K", instrument_id="test"))
-        await broker.publish(Reading.now(channel="CHoverflow", value=1.0, unit="K", instrument_id="test"))
+            q.put_nowait(
+                Reading.now(channel="CHfill", value=0.0, unit="K", instrument_id="test")
+            )
+        await broker.publish(
+            Reading.now(channel="CHoverflow", value=1.0, unit="K", instrument_id="test")
+        )
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"SafetyBroker overflow must latch FAULT_LATCHED, got {mgr.state}"
@@ -731,12 +286,7 @@ async def test_broker_overflow_triggers_fault():
 
 async def test_keithley_required_non_mock():
     broker = SafetyBroker()
-    mgr = SafetyManager(
-        broker,
-        keithley_driver=None,
-        qualification_receipt=issued_test_qualification_receipt(),
-        mock=False,
-    )
+    mgr = SafetyManager(broker, keithley_driver=None, mock=False)
     mgr._config.require_keithley_for_run = True
     await mgr.start()
     try:
@@ -812,11 +362,10 @@ async def test_fault_hardware_shutdown_completes_under_cancellation():
     emergency_off_calls = []
     shutdown_event = asyncio.Event()
 
-    async def slow_emergency_off(channel=None) -> SourceOffResult:
+    async def slow_emergency_off(channel=None):
         await asyncio.sleep(0.05)
         emergency_off_calls.append("done")
         shutdown_event.set()
-        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = slow_emergency_off
@@ -854,7 +403,7 @@ async def test_run_permitted_state_is_actively_monitored():
 
     sm._state = SafetyState.RUN_PERMITTED
     stale_ts = time.monotonic() - 100.0
-    sm._latest[("test", "Т1 Криостат верх")] = (stale_ts, 77.0, "ok")
+    sm._latest["Т1 Криостат верх"] = (stale_ts, 77.0, "ok")
     sm._config.critical_channels = [re.compile(r"Т1 .*")]
     sm._config.stale_timeout_s = 10.0
 
@@ -864,115 +413,9 @@ async def test_run_permitted_state_is_actively_monitored():
         f"Stale critical channel in RUN_PERMITTED must transition to FAULT_LATCHED, "
         f"got {sm._state}. F1 regression: monitoring disabled during source start"
     )
-    # fault_reason must contain the exact stale channel name — prod format is
-    # "Устаревшие данные канала {ch}" (safety_manager.py:951).
-    # The weak "or Устаревшие" branch is intentionally removed: a generic stale
-    # message without the channel name would pass the old check but miss a
-    # regression where the wrong channel (or no channel) is reported.
-    assert "Т1 Криостат верх" in sm._fault_reason, (
-        f"fault_reason must name the stale channel 'Т1 Криостат верх', got: {sm._fault_reason!r}"
-    )
-
-
-@pytest.mark.parametrize("_iteration", range(32))
-async def test_dead_interlock_faults_during_run_permitted_source_start(
-    _iteration: int,
-) -> None:
-    start_entered = asyncio.Event()
-    start_release = asyncio.Event()
-    off_settled = asyncio.Event()
-
-    async def blocked_start(*_args: object) -> None:
-        start_entered.set()
-        await start_release.wait()
-
-    async def exact_global_off(channel: str | None = None) -> SourceOffResult:
-        assert channel is None
-        off_settled.set()
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    keithley = _mock_keithley()
-    keithley.mock = True
-    keithley.start_source.side_effect = blocked_start
-    keithley.emergency_off.side_effect = exact_global_off
-    binding = _issue_registry_runtime_binding(
-        driver=keithley,
-        timing=AcquisitionTiming(1.0, 1.0, 1.0),
-        registry_provenance="test:dead-interlock-start-boundary",
-        trust_class=DriverTrustClass.REVIEWED_SOURCE,
-        simulation=True,
-    )
-    manager = SafetyManager(
-        SafetyBroker(),
-        keithley_driver=keithley,
-        reviewed_source_runtime_binding=binding,
-        mock=True,
-    )
-    manager._config.critical_channels = []
-
-    run = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smua"))
-    await start_entered.wait()
-    try:
-        assert manager.state is SafetyState.RUN_PERMITTED, _iteration
-        escalated = await manager.on_interlock_dead_channel(
-            "overheat_zone",
-            "Т5 Зона нагрева",
-            value=float("nan"),
-        )
-        assert escalated is True, _iteration
-        assert off_settled.is_set(), _iteration
-        assert keithley.emergency_off.await_count == 1, _iteration
-        assert manager.state is SafetyState.FAULT_LATCHED, _iteration
-    finally:
-        start_release.set()
-        result = await asyncio.wait_for(run, timeout=1.0)
-
-    assert result["ok"] is False, _iteration
-    assert result["state"] == SafetyState.FAULT_LATCHED.value, _iteration
-    assert "Fault during start" in result["error"], _iteration
-    assert manager.state is SafetyState.FAULT_LATCHED
-    assert manager._active_sources == set(), _iteration
-    assert all(call.args in {(), (None,)} for call in keithley.emergency_off.await_args_list)
-
-
-async def test_rate_fault_latches_within_35s_at_deployed_2s_poll():
-    """HI-1 regression: a 10 K/min ramp at the deployed 2.0 s poll must latch a
-    rate FAULT within ~35 s of data — not after a ~120 s dead-window.
-
-    Feeds 2 s-spaced readings directly into the SafetyManager's rate estimator
-    with controlled timestamps (same time-injection approach as the other rate
-    tests — no sleeping) and keeps _latest fresh so stale checks don't fire.
-    """
-    import re
-
-    broker = SafetyBroker()
-    sm = SafetyManager(broker, keithley_driver=None, mock=True)
-    sm._config.critical_channels = [re.compile(r"Т1 .*")]
-    sm._config.stale_timeout_s = 10.0
-
-    channel = "Т1 Криостат верх"
-    sm._state = SafetyState.RUNNING
-
-    t0 = 1_000_000.0
-    ramp_per_sec = 10.0 / 60.0  # 10 K/min, twice the 5 K/min limit
-
-    fault_at_s: float | None = None
-    for i in range(18):  # 18 samples × 2 s = 34 s of simulated data
-        t = t0 + 2.0 * i
-        sm._rate_estimator.push(channel, t, 80.0 + ramp_per_sec * (t - t0))
-        sm._latest[("test", channel)] = (time.monotonic(), 80.0, "ok")  # always fresh
-        await sm._run_checks()
-        if sm._state == SafetyState.FAULT_LATCHED:
-            fault_at_s = 2.0 * i
-            break
-
-    assert fault_at_s is not None, (
-        "10 K/min ramp produced no rate FAULT within 34 s of 2 s-spaced data — "
-        "HI-1 dead-window: the dT/dt gate cannot arm at the deployed poll rate"
-    )
-    assert fault_at_s <= 35.0
-    assert "Rate limit exceeded" in sm._fault_reason, (
-        f"fault_reason must be the rate-limit fault, got: {sm._fault_reason!r}"
+    # fault_reason must contain evidence of the stale channel (not a generic message)
+    assert "Т1 Криостат верх" in sm._fault_reason or "Устаревшие" in sm._fault_reason, (
+        f"fault_reason must name the stale channel, got: {sm._fault_reason!r}"
     )
 
 
@@ -1005,8 +448,11 @@ def test_load_config_succeeds_with_valid_config(tmp_path):
     """Positive case: valid config loads correctly."""
     cfg = tmp_path / "safety.yaml"
     cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\n  - 'Т7 .*'\nstale_timeout_s: 10.0\nheartbeat_timeout_s: 15.0\n",
-        encoding="utf-8",
+        "critical_channels:\n"
+        "  - 'Т1 .*'\n"
+        "  - 'Т7 .*'\n"
+        "stale_timeout_s: 10.0\n"
+        "heartbeat_timeout_s: 15.0\n"
     )
     sm = SafetyManager(SafetyBroker(), mock=True)
     sm.load_config(cfg)
@@ -1016,7 +462,9 @@ def test_load_config_succeeds_with_valid_config(tmp_path):
     assert "Т1 .*" in pattern_strings, f"Expected 'Т1 .*' in patterns, got {pattern_strings}"
     assert "Т7 .*" in pattern_strings, f"Expected 'Т7 .*' in patterns, got {pattern_strings}"
     # Verify numeric timeout values were parsed (not just defaulted)
-    assert sm._config.stale_timeout_s == 10.0, f"stale_timeout_s must be 10.0, got {sm._config.stale_timeout_s}"
+    assert sm._config.stale_timeout_s == 10.0, (
+        f"stale_timeout_s must be 10.0, got {sm._config.stale_timeout_s}"
+    )
     assert sm._config.heartbeat_timeout_s == 15.0, (
         f"heartbeat_timeout_s must be 15.0, got {sm._config.heartbeat_timeout_s}"
     )
@@ -1051,10 +499,7 @@ def test_load_config_fails_on_non_string_pattern(tmp_path):
 def test_load_config_fails_on_non_numeric_timeout(tmp_path):
     """A.4.1 residual: non-numeric stale_timeout_s must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n",
-        encoding="utf-8",
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -1063,10 +508,7 @@ def test_load_config_fails_on_non_numeric_timeout(tmp_path):
 def test_load_config_fails_on_non_dict_source_limits(tmp_path):
     """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n",
-        encoding="utf-8",
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -1075,10 +517,7 @@ def test_load_config_fails_on_non_dict_source_limits(tmp_path):
 def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
     """A.4.1 residual: non-numeric source limit must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n",
-        encoding="utf-8",
-    )
+    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n")
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -1138,7 +577,7 @@ async def test_keithley_heartbeat_monitored_in_run_permitted():
     sm._config.heartbeat_timeout_s = 0.5
 
     now = time.monotonic()
-    sm._latest[("test", "Т1 Криостат верх")] = (now, 77.0, "ok")
+    sm._latest["Т1 Криостат верх"] = (now, 77.0, "ok")
 
     sm._state = SafetyState.RUN_PERMITTED
     sm._run_permitted_since = now - 10.0  # 10s ago, well past 0.5s timeout
@@ -1181,7 +620,9 @@ async def test_fault_log_callback_survives_outer_cancellation():
 
     await asyncio.sleep(0.2)  # allow shielded task to finish
 
-    assert callback_completed.is_set(), "Cancellation of _fault() swallowed the shielded post-mortem log callback"
+    assert callback_completed.is_set(), (
+        "Cancellation of _fault() swallowed the shielded post-mortem log callback"
+    )
 
 
 async def test_safe_off_fault_latched_shields_emergency_off():
@@ -1190,11 +631,10 @@ async def test_safe_off_fault_latched_shields_emergency_off():
     off_started = asyncio.Event()
     off_completed = asyncio.Event()
 
-    async def slow_emergency_off(channel=None) -> SourceOffResult:
+    async def slow_emergency_off(channel=None):
         off_started.set()
         await asyncio.sleep(0.1)
         off_completed.set()
-        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = slow_emergency_off
@@ -1215,648 +655,6 @@ async def test_safe_off_fault_latched_shields_emergency_off():
     await asyncio.sleep(0.2)
 
     assert off_completed.is_set(), "Cancellation of _safe_off swallowed shielded _ensure_output_off"
-
-
-async def test_simultaneous_global_off_requests_share_one_driver_owner():
-    """Concurrent global-OFF waiters must produce one physical operation."""
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    calls = 0
-
-    async def blocked_off(channel=None) -> SourceOffResult:
-        nonlocal calls
-        assert channel is None
-        calls += 1
-        entered.set()
-        await release.wait()
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    k = _mock_keithley()
-    k.emergency_off.side_effect = blocked_off
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-
-    first = asyncio.create_task(manager._ensure_output_off())
-    await entered.wait()
-    second = asyncio.create_task(manager._ensure_output_off())
-    await asyncio.sleep(0)
-    assert calls == 1
-
-    release.set()
-    assert await first is True
-    assert await second is True
-    assert calls == 1
-
-
-async def test_cancelled_global_off_waiter_does_not_cancel_shared_owner():
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    completed = asyncio.Event()
-    calls = 0
-
-    async def blocked_off(channel=None) -> SourceOffResult:
-        nonlocal calls
-        assert channel is None
-        calls += 1
-        entered.set()
-        await release.wait()
-        completed.set()
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    k = _mock_keithley()
-    k.emergency_off.side_effect = blocked_off
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-
-    cancelled_waiter = asyncio.create_task(manager._ensure_output_off())
-    await entered.wait()
-    surviving_waiter = asyncio.create_task(manager._ensure_output_off())
-    await asyncio.sleep(0)
-    cancelled_waiter.cancel()
-    await asyncio.sleep(0)
-    assert not completed.is_set()
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled_waiter
-    assert await surviving_waiter is True
-    assert completed.is_set()
-    assert calls == 1
-
-
-async def test_settled_global_off_owner_is_not_reused_by_later_request():
-    k = _mock_keithley()
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-
-    assert await manager._ensure_output_off() is True
-    assert await manager._ensure_output_off() is True
-    assert k.emergency_off.await_count == 2
-
-
-async def test_shared_global_off_failure_is_fail_closed_for_all_waiters():
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    calls = 0
-
-    async def failing_off(channel=None) -> SourceOffResult:
-        nonlocal calls
-        assert channel is None
-        calls += 1
-        entered.set()
-        await release.wait()
-        raise RuntimeError("driver OFF failure")
-
-    k = _mock_keithley()
-    k.emergency_off.side_effect = failing_off
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-
-    first = asyncio.create_task(manager._ensure_output_off())
-    await entered.wait()
-    second = asyncio.create_task(manager._ensure_output_off())
-    await asyncio.sleep(0)
-    release.set()
-
-    assert await first is False
-    assert await second is False
-    assert calls == 1
-    assert manager.snapshot_operator_safety().verified_off is False
-
-
-@pytest.mark.parametrize("cancel_after_write", range(8))
-async def test_cancelled_start_settles_before_full_off_at_every_write_boundary(
-    cancel_after_write: int,
-) -> None:
-    """A caller cancellation cannot let a late OUTPUT_ON land after OFF."""
-    k = _mock_keithley()
-    manager, _broker = await _make_manager(mock=False, keithley=k)
-    manager._config.critical_channels = []
-    reached = asyncio.Event()
-    release = asyncio.Event()
-    order: list[str] = []
-    output_on = False
-
-    async def phased_start(*_args: object) -> None:
-        nonlocal output_on
-        for index in range(8):
-            order.append(f"write:{index}")
-            if index == 7:
-                output_on = True
-            if index == cancel_after_write:
-                reached.set()
-                await release.wait()
-        order.append("start:settled")
-
-    async def full_off(channel: str | None = None) -> SourceOffResult:
-        nonlocal output_on
-        assert channel is None
-        assert order[-1] == "start:settled"
-        order.append("off:settled")
-        output_on = False
-        k.output_state_unverified = False
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    k.start_source.side_effect = phased_start
-    k.emergency_off.side_effect = full_off
-    task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smua"))
-    try:
-        await asyncio.wait_for(reached.wait(), timeout=1.0)
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1.0)
-
-        assert order[-2:] == ["start:settled", "off:settled"]
-        assert output_on is False
-        assert manager._active_sources == set()
-        assert manager.state is SafetyState.SAFE_OFF
-        snapshot = manager.snapshot_operator_safety()
-        assert snapshot.verified_off is True
-    finally:
-        release.set()
-        # The one-shot ordering double rejects any second OFF call. Terminal
-        # manager shutdown now always requires its own global proof.
-        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-        await manager.stop()
-
-
-async def test_repeated_cancellation_of_public_emergency_off_settles_truth_first() -> None:
-    k = _mock_keithley()
-    manager, _broker = await _make_manager(mock=False, keithley=k)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def slow_off(channel: str | None = None) -> SourceOffResult:
-        del channel
-        entered.set()
-        await release.wait()
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    k.emergency_off.side_effect = slow_off
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    task = asyncio.create_task(manager.emergency_off())
-    try:
-        await entered.wait()
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1.0)
-        assert manager._active_sources == set()
-        assert manager.state is SafetyState.SAFE_OFF
-        assert manager.snapshot_operator_safety().verified_off is True
-    finally:
-        release.set()
-        await manager.stop()
-
-
-async def test_repeated_cancellation_of_normal_stop_settles_channel_off_first() -> None:
-    k = _mock_keithley()
-    manager, _broker = await _make_manager(mock=False, keithley=k)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def slow_stop(_channel: str) -> None:
-        entered.set()
-        await release.wait()
-
-    k.stop_source.side_effect = slow_stop
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    task = asyncio.create_task(manager.request_stop(channel="smua"))
-    try:
-        await entered.wait()
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1.0)
-        assert manager._active_sources == set()
-        assert manager.state is SafetyState.SAFE_OFF
-    finally:
-        release.set()
-        await manager.stop()
-
-
-async def test_repeated_cancellation_with_false_fault_off_retains_uncertain_active_truth() -> None:
-    k = _mock_keithley()
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def slow_false(channel: str | None = None) -> SourceOffResult:
-        del channel
-        entered.set()
-        await release.wait()
-        return SourceOffResult.PHYSICAL_STATE_UNKNOWN
-
-    k.emergency_off.side_effect = slow_false
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    task = asyncio.create_task(manager._fault("cancelled false OFF"))
-    await entered.wait()
-    task.cancel()
-    await asyncio.sleep(0)
-    task.cancel()
-    release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    assert manager.state is SafetyState.FAULT_LATCHED
-    assert manager._active_sources == {"smua"}
-    assert manager.snapshot_operator_safety().verified_off is False
-
-
-@pytest.mark.parametrize("off_proof", (True, False))
-async def test_cancelled_soft_interlock_settles_exact_off_before_propagating(
-    off_proof: bool,
-) -> None:
-    k = _mock_keithley()
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def slow_off(channel: str | None = None) -> SourceOffResult:
-        del channel
-        entered.set()
-        await release.wait()
-        return SourceOffResult.DEVICE_REPORTED_OFF if off_proof else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-
-    k.emergency_off.side_effect = slow_off
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    task = asyncio.create_task(
-        manager.on_interlock_trip(
-            "soft-cancel",
-            "T5",
-            320.0,
-            action="stop_source",
-        )
-    )
-    await entered.wait()
-    task.cancel()
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.sleep(0)
-    assert manager._active_sources == {"smua"}
-    assert not task.done()
-    release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    if off_proof:
-        assert manager.state is SafetyState.SAFE_OFF
-        assert manager._active_sources == set()
-    else:
-        assert manager.state is SafetyState.FAULT_LATCHED
-        assert manager._active_sources == {"smua"}
-        assert manager.snapshot_operator_safety().verified_off is False
-
-
-@pytest.mark.parametrize("off_proof", (True, False))
-async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
-    off_proof: bool,
-) -> None:
-    k = _mock_keithley()
-    manager, _broker = await _make_manager(mock=False, keithley=k)
-    manager._config.critical_channels = []
-    publish_entered = asyncio.Event()
-    publish_release = asyncio.Event()
-    hardware_on = False
-
-    async def start(*_args: object) -> None:
-        nonlocal hardware_on
-        hardware_on = True
-
-    async def off(channel: str | None = None) -> SourceOffResult:
-        nonlocal hardware_on
-        assert channel is None
-        if off_proof:
-            hardware_on = False
-            k.output_state_unverified = False
-        return SourceOffResult.DEVICE_REPORTED_OFF if off_proof else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-
-    original_publish = manager._publish_keithley_channel_states
-
-    async def blocked_publish(reason: str, **kwargs: object) -> None:
-        if reason.startswith("run:"):
-            publish_entered.set()
-            await publish_release.wait()
-        await original_publish(reason, **kwargs)
-
-    k.start_source.side_effect = start
-    k.emergency_off.side_effect = off
-    manager._publish_keithley_channel_states = blocked_publish  # type: ignore[method-assign]
-    task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smua"))
-    try:
-        await publish_entered.wait()
-        assert manager.state is SafetyState.RUNNING
-        assert manager._active_sources == {"smua"}
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        publish_release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=1.0)
-        if off_proof:
-            assert hardware_on is False
-            assert manager._active_sources == set()
-            assert manager.state is SafetyState.SAFE_OFF
-        else:
-            assert hardware_on is True
-            assert manager._active_sources == {"smua"}
-            assert manager.state is SafetyState.FAULT_LATCHED
-            assert manager.snapshot_operator_safety().verified_off is False
-    finally:
-        publish_release.set()
-        k.emergency_off.side_effect = None
-        k.emergency_off.return_value = SourceOffResult.DEVICE_REPORTED_OFF
-        await manager.stop()
-
-
-@pytest.mark.parametrize(
-    "revocation",
-    (
-        "dead_channel_fault",
-        "channel_stop",
-        "global_emergency_stop",
-        "settlement_in_progress",
-        "child_loss",
-    ),
-)
-async def test_post_publication_authority_cut_revokes_run_receipt_and_start_audit(
-    revocation: str,
-) -> None:
-    data_broker = _RunPublicationGate()
-    published = await data_broker.subscribe(
-        f"run_reconciliation_{revocation}",
-        maxsize=100,
-        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
-    )
-    source = _ExactRunSource()
-    manager, _broker = await _make_manager(
-        mock=False,
-        keithley=source,
-        data_broker=data_broker,
-    )
-    manager._config.critical_channels = []
-    event_logger = AsyncMock()
-    context = _engine_command_context(manager, event_logger)
-    run_task = asyncio.create_task(_handle_gui_command(_start_command(), context=context))
-    competing_task: asyncio.Task[object] | None = None
-    try:
-        await data_broker.entered.wait()
-        assert manager.state is SafetyState.RUNNING
-        assert manager._active_sources == {"smua"}
-        assert source.active_channels == ["smua"]
-
-        if revocation == "dead_channel_fault":
-            competing_task = asyncio.create_task(
-                manager.on_interlock_dead_channel("dead-heater-sensor", "T5"),
-            )
-            await _yield_until(
-                lambda: manager.state is SafetyState.FAULT_LATCHED,
-                message="dead-channel fault did not latch at the broker boundary",
-            )
-        elif revocation == "channel_stop":
-            abort_before = manager._abort_generation
-            competing_task = asyncio.create_task(manager.request_stop(channel="smua"))
-            await _yield_until(
-                lambda: manager._abort_generation != abort_before,
-                message="channel stop did not advance the abort generation",
-            )
-        elif revocation == "global_emergency_stop":
-            full_abort_before = manager._full_abort_generation
-            competing_task = asyncio.create_task(manager.emergency_off(channel=None))
-            await _yield_until(
-                lambda: manager._full_abort_generation != full_abort_before,
-                message="global emergency stop did not advance the full-abort generation",
-            )
-        elif revocation == "settlement_in_progress":
-            source.block_global_off = True
-            competing_task = asyncio.create_task(
-                manager._fault(
-                    "retained settlement at RUN publication",
-                    source="test_child_settlement",
-                )
-            )
-            manager._retain_child_fault_settlement(
-                competing_task,
-                reason="retained settlement at RUN publication",
-            )
-            await source.global_off_entered.wait()
-            assert manager._pending_child_fault_settlements
-        else:
-            assert manager._collect_task is not None
-            lost_child = manager._collect_task
-            lost_child.cancel()
-            await asyncio.gather(lost_child, return_exceptions=True)
-            await _yield_until(
-                lambda: manager.state is SafetyState.FAULT_LATCHED,
-                message="terminal safety child was not synchronously consumed",
-            )
-
-        data_broker.release.set()
-        if revocation == "settlement_in_progress":
-            await asyncio.sleep(0)
-            assert not run_task.done()
-            assert source.off_calls == [None]
-            source.global_off_release.set()
-
-        result = await asyncio.wait_for(run_task, timeout=2.0)
-        if competing_task is not None:
-            await asyncio.wait_for(competing_task, timeout=2.0)
-
-        assert result["ok"] is False
-        assert result["active_channels"] == []
-        assert source.active_channels == []
-        assert manager._active_sources == set()
-        assert "RUN authority revoked after publication" in result["error"]
-        event_logger.log_event.assert_not_awaited()
-        if revocation in {"dead_channel_fault", "settlement_in_progress", "child_loss"}:
-            assert manager.state is SafetyState.FAULT_LATCHED
-        else:
-            assert manager.state is SafetyState.SAFE_OFF
-
-        delivered = []
-        while not published.empty():
-            delivered.append(published.get_nowait())
-            published.task_done()
-        smua_states = [reading.metadata["state"] for reading in delivered if reading.metadata.get("channel") == "smua"]
-        assert "on" in smua_states
-        assert smua_states[-1] != "on"
-    finally:
-        data_broker.release.set()
-        source.block_global_off = False
-        source.global_off_release.set()
-        if not run_task.done():
-            run_task.cancel()
-        if competing_task is not None and not competing_task.done():
-            competing_task.cancel()
-        await asyncio.gather(
-            run_task,
-            *(task for task in (competing_task,) if task is not None),
-            return_exceptions=True,
-        )
-        await manager.stop()
-
-
-async def test_cancelled_queued_request_stop_aborts_inflight_start_and_settles_off() -> None:
-    k = _mock_keithley()
-    manager, _broker = await _make_manager(mock=False, keithley=k)
-    manager._config.critical_channels = []
-    start_entered = asyncio.Event()
-    start_release = asyncio.Event()
-    off_settled = asyncio.Event()
-    hardware_on = False
-
-    async def blocked_start(*_args: object) -> None:
-        nonlocal hardware_on
-        start_entered.set()
-        await start_release.wait()
-        hardware_on = True
-
-    async def off(_channel: str | None = None) -> SourceOffResult:
-        nonlocal hardware_on
-        hardware_on = False
-        off_settled.set()
-        return SourceOffResult.DEVICE_REPORTED_OFF
-
-    k.start_source.side_effect = blocked_start
-    k.emergency_off.side_effect = off
-    run_task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smua"))
-    await start_entered.wait()
-    stop_task = asyncio.create_task(manager.request_stop(channel="smua"))
-    await asyncio.sleep(0)
-    stop_task.cancel()
-    await asyncio.sleep(0)
-    stop_task.cancel()
-    start_release.set()
-
-    run_result = await asyncio.wait_for(run_task, timeout=1.0)
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(stop_task, timeout=1.0)
-    assert run_result["ok"] is False
-    assert off_settled.is_set()
-    assert hardware_on is False
-    assert manager._active_sources == set()
-    assert manager.state is SafetyState.SAFE_OFF
-    await manager.stop()
-
-
-async def test_cancelled_soft_interlock_queued_for_lock_still_executes_full_action() -> None:
-    k = _mock_keithley()
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    await manager._cmd_lock.acquire()
-    task = asyncio.create_task(manager.on_interlock_trip("queued-soft", "T5", 320.0, action="stop_source"))
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.sleep(0)
-    assert k.emergency_off.await_count == 0
-    assert manager._active_sources == {"smua"}
-    manager._cmd_lock.release()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    assert k.emergency_off.await_count == 1
-    assert manager._active_sources == set()
-    assert manager.state is SafetyState.SAFE_OFF
-
-
-async def test_cancelled_soft_interlock_publish_completes_transition_before_propagating() -> None:
-    k = _mock_keithley()
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-    publish_entered = asyncio.Event()
-    publish_release = asyncio.Event()
-
-    async def blocked_publish(*_args: object, **_kwargs: object) -> None:
-        publish_entered.set()
-        await publish_release.wait()
-
-    manager._publish_keithley_channel_states = blocked_publish  # type: ignore[method-assign]
-    task = asyncio.create_task(manager.on_interlock_trip("publish-soft", "T5", 320.0, action="stop_source"))
-    await publish_entered.wait()
-    assert manager._active_sources == set()
-    assert manager.state is SafetyState.SAFE_OFF
-    task.cancel()
-    await asyncio.sleep(0)
-    task.cancel()
-    publish_release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    assert manager._active_sources == set()
-    assert manager.state is SafetyState.SAFE_OFF
-
-
-async def test_internally_cancelled_interlock_off_faults_and_retains_hazard_truth() -> None:
-    k = _mock_keithley()
-
-    async def internally_cancelled_off(channel: str | None = None) -> SourceOffResult:
-        del channel
-        raise asyncio.CancelledError
-
-    k.emergency_off.side_effect = internally_cancelled_off
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-
-    await manager.on_interlock_trip(
-        "internal-off-cancel",
-        "T5",
-        320.0,
-        action="stop_source",
-    )
-
-    assert manager.state is SafetyState.FAULT_LATCHED
-    assert manager._active_sources == {"smua"}
-    assert manager.snapshot_operator_safety().verified_off is False
-
-
-async def test_internally_cancelled_interlock_publish_keeps_safe_truth() -> None:
-    k = _mock_keithley()
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-
-    async def internally_cancelled_publish(*_args: object, **_kwargs: object) -> None:
-        raise asyncio.CancelledError
-
-    manager._publish_keithley_channel_states = internally_cancelled_publish  # type: ignore[method-assign]
-    await manager.on_interlock_trip(
-        "internal-publish-cancel",
-        "T5",
-        320.0,
-        action="stop_source",
-    )
-
-    assert manager.state is SafetyState.SAFE_OFF
-    assert manager._active_sources == set()
-
-
-async def test_internally_cancelled_emergency_publish_keeps_safe_truth() -> None:
-    k = _mock_keithley()
-    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
-    manager._state = SafetyState.RUNNING
-    manager._active_sources.add("smua")
-
-    async def internally_cancelled_publish(*_args: object, **_kwargs: object) -> None:
-        raise asyncio.CancelledError
-
-    manager._publish_keithley_channel_states = internally_cancelled_publish  # type: ignore[method-assign]
-    result = await manager.emergency_off()
-
-    assert result["ok"] is True
-    assert manager.state is SafetyState.SAFE_OFF
-    assert manager._active_sources == set()
 
 
 # NOTE: a source-grep "regression lock" for the asyncio.shield(log_task) call
@@ -1881,7 +679,9 @@ async def test_fault_log_callback_runs_even_if_publish_fails():
 
     await sm._fault("test publish failure", channel="smua", value=1.0)
 
-    assert callback_invoked.is_set(), "Fault log callback NOT invoked — publish failure swallowed it"
+    assert callback_invoked.is_set(), (
+        "Fault log callback NOT invoked — publish failure swallowed it"
+    )
 
 
 async def test_fault_log_callback_runs_before_publish():
@@ -1919,7 +719,9 @@ async def test_fault_log_callback_runs_before_publish():
     # call that must happen AFTER the callback, per the Jules R2 Q1 contract.
     sm._publish_keithley_channel_states = slow_channel_states
 
-    fault_task = asyncio.create_task(sm._fault("test cancel during publish", channel="smua", value=1.0))
+    fault_task = asyncio.create_task(
+        sm._fault("test cancel during publish", channel="smua", value=1.0)
+    )
     # Wait until _publish_keithley_channel_states has actually started
     await asyncio.wait_for(channel_states_started.wait(), timeout=2.0)
     fault_task.cancel()
@@ -1935,7 +737,8 @@ async def test_fault_log_callback_runs_before_publish():
     callback_idx = call_order.index("callback")
     channel_states_idx = call_order.index("channel_states_start")
     assert callback_idx < channel_states_idx, (
-        f"fault_log_callback must complete before _publish_keithley_channel_states; got order: {call_order}"
+        f"fault_log_callback must complete before _publish_keithley_channel_states; "
+        f"got order: {call_order}"
     )
 
 

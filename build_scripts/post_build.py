@@ -4,19 +4,11 @@ Run after ``pyinstaller build_scripts/cryodaq.spec``. Seeds the dist tree
 with the contents that ``paths.py`` expects to find next to the exe under
 ``sys.executable.parent``.
 """
-
 from __future__ import annotations
 
-import json
 import shutil
 import sys
-import tomllib
 from pathlib import Path
-
-try:
-    from .artifact_identity import UNQUALIFIED_LABEL, checkpoint_version
-except ImportError:
-    from artifact_identity import UNQUALIFIED_LABEL, checkpoint_version
 
 
 def main() -> None:
@@ -27,47 +19,31 @@ def main() -> None:
         print(f"ERROR: {dist_dir} not found. Run pyinstaller first.", file=sys.stderr)
         sys.exit(1)
 
-    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
-    artifact_version = checkpoint_version(project["project"]["version"])
-    marker = {
-        "label": UNQUALIFIED_LABEL,
-        "schema_version": 1,
-        "status": "unqualified",
-        "version": artifact_version,
-    }
-    (dist_dir / "ARTIFACT_STATUS.json").write_text(
-        json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
     # --- config/ next to exe (NOT inside _internal/) ---
     config_dst = dist_dir / "config"
     config_dst.mkdir(exist_ok=True)
     config_src = project_root / "config"
     copied = 0
-    for yaml_file in config_src.rglob("*.yaml"):
+    for yaml_file in config_src.glob("*.yaml"):
         if ".local." in yaml_file.name:
             continue  # skip machine-specific files
-        destination = config_dst / yaml_file.relative_to(config_src)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(yaml_file, destination)
+        shutil.copy2(yaml_file, config_dst / yaml_file.name)
         copied += 1
-    for example in config_src.rglob("*.local.yaml.example"):
-        destination = config_dst / example.relative_to(config_src)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(example, destination)
-
-    themes_src = config_src / "themes"
-    themes_copied = 0
-    if themes_src.exists():
-        themes_dst = config_dst / "themes"
-        shutil.copytree(themes_src, themes_dst, dirs_exist_ok=True)
-        themes_copied = sum(1 for path in themes_dst.glob("*.yaml") if path.is_file())
+    for example in config_src.glob("*.local.yaml.example"):
+        shutil.copy2(example, config_dst / example.name)
 
     # LICENSE next to exe (Phase 2c O.1)
     license_src = project_root / "LICENSE"
     if license_src.exists():
         shutil.copy2(license_src, dist_dir / "LICENSE")
+
+    # Experiment templates subdirectory
+    templates_src = config_src / "experiment_templates"
+    if templates_src.exists():
+        templates_dst = config_dst / "experiment_templates"
+        templates_dst.mkdir(exist_ok=True)
+        for tpl in templates_src.glob("*.yaml"):
+            shutil.copy2(tpl, templates_dst / tpl.name)
 
     # --- runtime directories ---
     (dist_dir / "data").mkdir(exist_ok=True)
@@ -105,9 +81,7 @@ def main() -> None:
 
     print("Post-build complete:")
     print(f"  {copied} configs copied to {config_dst}")
-    print(f"  {themes_copied} theme packs copied to {config_dst / 'themes'}")
     print("  data/, logs/, plugins/ created")
-    print(f"  {UNQUALIFIED_LABEL}: {artifact_version}")
     print("  README_OPERATOR.txt written")
 
 

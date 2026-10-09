@@ -24,7 +24,7 @@ from cryodaq.core.alarm_ack_codec import (
     validate_alarm_ack_wire_result,
     validate_safety_audio_ack_wire_result,
 )
-from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, gui_worker_poll_in_flight
 
 _MAX_ACTIVATIONS = 64
 _MAX_TEXT = 128
@@ -190,7 +190,7 @@ class AnnunciationController(QObject):
         if self._closing:
             return
         self._expire_status_if_needed()
-        if self._status_worker is not None and not self._status_worker.isFinished():
+        if gui_worker_poll_in_flight(self._status_worker):
             return
         factory = self._worker_factory
         if factory is None:
@@ -256,7 +256,7 @@ class AnnunciationController(QObject):
             or _bounded_text(activation_id) is None
             or _bounded_text(normalized_operator) is None
             or _bounded_text(normalized_reason) is None
-            or (self._ack_worker is not None and not self._ack_worker.isFinished())
+            or gui_worker_poll_in_flight(self._ack_worker)
         ):
             return False
         retained_command = self._pending_alarm_ack_commands.get(activation_id)

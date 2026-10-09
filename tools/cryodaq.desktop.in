@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CryoDAQ
+Name[ru]=CryoDAQ
+Comment=Cryogenic data acquisition — engine and operator window
+Comment[ru]=Криогенная система сбора данных — движок и окно оператора
+Exec=@REPO@/tools/cryodaq-desktop-launch.sh
+Icon=cryodaq
+Terminal=false
+Categories=Science;Engineering;
+StartupNotify=true
+X-GNOME-SingleWindow=true

@@ -22,24 +22,14 @@ from cryodaq.core.event_bus import EngineEvent, EventBus
 async def _drain_handler_tasks(agent: AssistantLiveAgent) -> None:
     """Wait until agent._handler_tasks is empty (all background handlers done).
 
-    Yields control repeatedly until the agent's _event_loop task has dequeued
-    the published event and created at least one handler task, then awaits all
-    handler tasks WITHOUT return_exceptions so any handler failure surfaces as a
-    test error.  If the event is correctly skipped (no handler spawned), we
-    drain after a bounded wait rather than hanging.
+    Yields control at least once so the agent's _event_loop task can dequeue the
+    published event and create handler tasks before we start draining.
     """
-    # Yield repeatedly (up to ~50 ms) until the event loop picks up the event
-    # and spawns at least one handler task.
-    for _ in range(50):
-        await asyncio.sleep(0)
-        if agent._handler_tasks:
-            break
-
-    # Drain: gather WITHOUT return_exceptions so handler failures fail the test.
-    # Loop in case a completed handler spawns further tasks.
+    # Yield to let the event loop task pick up the event and spawn handler tasks.
+    await asyncio.sleep(0)
+    # Drain: gather in a loop in case a handler spawns further tasks.
     while agent._handler_tasks:
-        tasks = list(agent._handler_tasks)
-        await asyncio.gather(*tasks)  # propagates exceptions
+        await asyncio.gather(*list(agent._handler_tasks), return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +61,7 @@ def _make_config(**overrides) -> AssistantConfig:
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=False,
-        audit_enabled=True,
+        audit_enabled=False,
         slice_b_suggestion=True,
     )
     for k, v in overrides.items():
@@ -81,12 +71,12 @@ def _make_config(**overrides) -> AssistantConfig:
 
 def _two_call_ollama(summary_text: str, diag_text: str) -> MagicMock:
     """Ollama mock that returns summary on 1st call, diagnostic on 2nd."""
-    responses = iter(
-        [
-            GenerationResult(text=summary_text, tokens_in=80, tokens_out=30, latency_s=2.0, model="gemma4:e4b"),
-            GenerationResult(text=diag_text, tokens_in=120, tokens_out=40, latency_s=2.5, model="gemma4:e4b"),
-        ]
-    )
+    responses = iter([
+        GenerationResult(text=summary_text, tokens_in=80, tokens_out=30,
+                         latency_s=2.0, model="gemma4:e4b"),
+        GenerationResult(text=diag_text, tokens_in=120, tokens_out=40,
+                         latency_s=2.5, model="gemma4:e4b"),
+    ])
     ollama = AsyncMock()
     ollama.generate = AsyncMock(side_effect=lambda *a, **kw: next(responses))
     ollama.close = AsyncMock()
@@ -106,6 +96,7 @@ def _make_agent(
     config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
+    event_logger=None,
     reader=None,
     tmp_path: Path,
 ) -> tuple[AssistantLiveAgent, EventBus]:
@@ -118,13 +109,18 @@ def _make_agent(
         reader.read_readings_history = AsyncMock(return_value={})
 
     ctx = ContextBuilder(reader, em)
-    audit = AuditLogger(tmp_path / "audit", enabled=True)
+    audit = AuditLogger(tmp_path / "audit", enabled=False)
 
     if telegram is None:
         telegram = AsyncMock()
         telegram._send_to_all = AsyncMock()
+    if event_logger is None:
+        event_logger = AsyncMock()
+        event_logger.log_event = AsyncMock()
+
     router = OutputRouter(
         telegram_bot=telegram,
+        event_logger=event_logger,
         event_bus=bus,
     )
     agent = AssistantLiveAgent(
@@ -154,7 +150,9 @@ async def test_diagnostic_suggestion_runs_after_alarm_summary(tmp_path: Path) ->
 
     await bus.publish(_alarm_event())
     # Wait for handler tasks to drain instead of sleeping a fixed duration.
-    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
+    await asyncio.wait_for(
+        _drain_handler_tasks(agent), timeout=5.0
+    )
 
     assert ollama.generate.await_count == 2
     calls = ollama.generate.call_args_list

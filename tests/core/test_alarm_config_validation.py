@@ -1791,6 +1791,9 @@ def test_shipped_configs_still_load(tmp_path: Path) -> None:
     config/physical_alarms.yaml defines no alarms at all."""
     repo_root = Path(__file__).resolve().parents[2]
     _, alarms = load_alarm_config(repo_root / "config" / "alarms_v3.yaml")
-    assert len(alarms) == 16
+    # 15 since 2026-08-31: vacuum_stall was disabled on the owner's ruling —
+    # a pump-down reaching its plateau is normal behaviour, and its
+    # P > 1e-5 mbar condition held the alarm active for most of every run.
+    assert len(alarms) == 15
     _, physical = load_alarm_config(repo_root / "config" / "physical_alarms.yaml")
     assert len(physical) == 0

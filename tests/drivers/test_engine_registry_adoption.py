@@ -42,8 +42,10 @@ def test_main_labels_registry_subclasses_and_exits_as_config_error(
         shutdown_capability: str,
         engine_ready_nonce: str,
         engine_ready_channel_fd: int | None,
+        mock_instrument_client: object | None = None,
     ) -> None:
         assert mock is True
+        assert mock_instrument_client is None
         assert engine_instance_id == "a" * 32
         assert shutdown_capability == "b" * 64
         assert engine_ready_nonce == "c" * 64
@@ -213,6 +215,50 @@ def test_all_entries_validate_before_any_factory_runs(
     assert calls == []
 
 
+def test_health_node_under_instruments_is_rejected_before_any_factory_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "instruments": [
+                {
+                    "type": "deterministic_health_node",
+                    "name": "compressor.primary",
+                    "component_type": "compressor",
+                }
+            ]
+        },
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(engine_module, "construct_driver", lambda *args: calls.append(args))
+
+    with pytest.raises(DriverRegistryError, match=r"instruments\[0\].*not an instrument driver"):
+        _load_drivers(path, mock=True, data_dir=tmp_path)
+
+    assert calls == []
+
+
+def test_health_nodes_root_is_visibly_rejected_until_production_wiring_exists(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "instruments": [],
+            "health_nodes": [
+                {
+                    "type": "deterministic_health_node",
+                    "name": "compressor.primary",
+                    "component_type": "compressor",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(DriverRegistryError, match="health_nodes.*not supported by the production engine"):
+        _load_drivers(path, mock=True, data_dir=tmp_path)
+
+
 def test_multiple_reviewed_sources_fail_before_any_factory_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,8 +416,10 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
         mock: bool,
         calibration_store: CalibrationStore | None = None,
         data_dir: Path | None = None,
+        mock_instrument_client: object | None = None,
     ) -> DriverLoadResult:
         observed["config_path"] = config_path
+        observed["mock_instrument_client"] = mock_instrument_client
         observed["mock"] = mock
         observed["calibration_store"] = calibration_store
         observed["data_dir"] = data_dir
@@ -402,11 +450,13 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
     monkeypatch.setattr(engine_module, "_load_drivers", _fake_load_drivers)
     monkeypatch.setattr(engine_module, "SafetyManager", _RecordingSafetyManager)
 
+    external_client = object()
     with pytest.raises(_StopAfterSafetyBinding):
-        await _run_engine(mock=True)
+        await _run_engine(mock=True, mock_instrument_client=external_client)
 
     assert observed["config_path"] == config_dir / "instruments.yaml"
     assert observed["mock"] is True
     assert isinstance(observed["calibration_store"], CalibrationStore)
     assert observed["data_dir"] is data_dir
+    assert observed["mock_instrument_client"] is external_client
     assert observed["source"] is observed["expected_source"]

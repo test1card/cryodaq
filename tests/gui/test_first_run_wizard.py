@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLabel, QLineEdi
 
 from cryodaq import engine
 from cryodaq.drivers.registry import (
-    BUILTIN_DRIVER_SPECS,
+    INSTRUMENT_DRIVER_SPECS,
     ConfigField,
     DriverRegistryError,
     UnknownDriverTypeError,
@@ -28,6 +28,7 @@ from cryodaq.drivers.registry import (
 from cryodaq.gui import first_run_config as cfg
 from cryodaq.gui import theme
 from cryodaq.gui.first_run_wizard import (
+    _DRIVER_TITLES,
     FirstRunWizard,
     _bounded_compound_value,
     _field_label,
@@ -245,7 +246,7 @@ def test_reviewed_source_rejects_control_field_even_when_default_is_false(tmp_pa
     )
 
     with (
-        patch("cryodaq.gui.first_run_wizard.get_driver_spec", return_value=unsafe_schema),
+        patch("cryodaq.gui.first_run_wizard.get_instrument_driver_spec", return_value=unsafe_schema),
         pytest.raises(DriverRegistryError, match="управляющие параметры.*output_enabled"),
     ):
         _InstrumentsPage(tmp_path)
@@ -282,7 +283,7 @@ def test_secret_registry_field_is_not_rendered_without_owner_contract(tmp_path: 
         },
     )
 
-    with patch("cryodaq.gui.first_run_wizard.get_driver_spec", return_value=secret_schema):
+    with patch("cryodaq.gui.first_run_wizard.get_instrument_driver_spec", return_value=secret_schema):
         page = _InstrumentsPage(tmp_path)
 
     assert "api_token" not in page._field_widgets["LS"]
@@ -306,7 +307,7 @@ def test_preserved_secret_registry_field_is_rejected_before_non_secret_copy(tmp_
         },
     )
 
-    with patch("cryodaq.gui.first_run_wizard.get_driver_spec", return_value=secret_schema):
+    with patch("cryodaq.gui.first_run_wizard.get_instrument_driver_spec", return_value=secret_schema):
         with pytest.raises(DriverRegistryError, match="api_token"):
             _InstrumentsPage(tmp_path)
 
@@ -372,7 +373,8 @@ def test_registry_fields_follow_input_accessibility_and_focus_contract(tmp_path:
 def test_registry_inventory_has_reviewed_russian_labels_and_progressive_card_hierarchy(tmp_path: Path) -> None:
     _app()
     _write_valid_config(tmp_path)
-    for spec in BUILTIN_DRIVER_SPECS.values():
+    assert set(_DRIVER_TITLES) == set(INSTRUMENT_DRIVER_SPECS)
+    for spec in INSTRUMENT_DRIVER_SPECS.values():
         for key, field in spec.config_fields.items():
             if field.setup_visible and not field.secret:
                 assert _field_label(key)
@@ -382,6 +384,21 @@ def test_registry_inventory_has_reviewed_russian_labels_and_progressive_card_hie
     assert "ПРИБОР И ПОДКЛЮЧЕНИЕ" in visible
     assert "Термометр Lake Shore 218S" in visible
     assert "Тип драйвера:" in visible
+
+
+def test_health_telemetry_type_is_rejected_from_instrument_setup(tmp_path: Path) -> None:
+    _app()
+    _write_valid_config(tmp_path)
+    (tmp_path / "instruments.yaml").write_text(
+        "instruments:\n"
+        "  - type: deterministic_health_node\n"
+        "    name: compressor.primary\n"
+        "    component_type: compressor\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UnknownDriverTypeError, match="not an instrument driver"):
+        _InstrumentsPage(tmp_path)
 
 
 def test_forced_wizard_seeds_existing_local_and_preserves_valid_unedited_fields(tmp_path: Path) -> None:

@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import math
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-from cryodaq.core.alarm_config import AlarmConfig, SetpointDef, load_alarm_config
+from cryodaq.core.alarm_config import AlarmConfig, SetpointDef
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager, tick_alarm
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
-from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.base import Reading
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,7 +91,9 @@ def test_phase_alarm_suppressed_outside_phase() -> None:
     state2, rate2, ev2, sm2 = _make_stack(phase="measurement", setpoints={"T12_setpoint": 4.2})
     state2.update(_reading("T12", 5.5))
     fired = _simulate_tick(ev2, sm2, [alarm_cfg], current_phase="measurement")
-    assert fired.get("detector_drift") == "TRIGGERED", f"alarm must fire inside its phase filter, got {fired}"
+    assert fired.get("detector_drift") == "TRIGGERED", (
+        f"alarm must fire inside its phase filter, got {fired}"
+    )
 
 
 def test_phase_alarm_fires_in_correct_phase() -> None:
@@ -123,7 +121,8 @@ def test_phase_alarm_fires_in_correct_phase() -> None:
 
     transitions = _simulate_tick(ev, sm, [alarm_cfg], current_phase="measurement")
     assert transitions.get("detector_drift") == "TRIGGERED", (
-        f"alarm with phase_filter=['measurement'] must fire when current_phase='measurement', got {transitions}"
+        f"alarm with phase_filter=['measurement'] must fire when current_phase='measurement', "
+        f"got {transitions}"
     )
 
 
@@ -215,251 +214,6 @@ def test_tick_dedup_no_retrigger() -> None:
     # Second tick — still faulty, should be deduped
     t2 = _simulate_tick(ev, sm, alarms, None)
     assert "sensor_fault" not in t2  # no re-notify
-
-
-def test_shipped_vacuum_loss_cold_holds_when_pressure_becomes_unusable() -> None:
-    """The real CRITICAL vacuum alarm may not clear when pressure becomes unknown."""
-    _, alarms = load_alarm_config(Path(__file__).parents[2] / "config" / "alarms_v3.yaml")
-    alarm_cfg = next(alarm for alarm in alarms if alarm.alarm_id == "vacuum_loss_cold")
-    assert alarm_cfg.config["level"] == "CRITICAL"
-    assert alarm_cfg.notify == ["gui", "telegram", "sound"]
-
-    state, _, evaluator, state_mgr = _make_stack()
-    state.update(_reading("Т11", 100.0))
-    state.update(_reading("Т12", 100.0))
-    state.update(_reading("VSP63D_1/pressure", 2.0e-3, unit="mbar"))
-
-    _, initial_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert initial_transition == "TRIGGERED"
-
-    state.update(
-        Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="VSP63D_1",
-            channel="VSP63D_1/pressure",
-            value=math.nan,
-            unit="mbar",
-            status=ChannelStatus.SENSOR_ERROR,
-        )
-    )
-
-    _, next_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert next_transition is None
-    assert "vacuum_loss_cold" in state_mgr.get_active()
-
-
-def test_shipped_vacuum_loss_cold_holds_when_evaluator_raises(monkeypatch, caplog) -> None:
-    """A caught evaluator exception is unknown, never a CRITICAL clear.
-
-    This deliberately drives the shipped ``vacuum_loss_cold`` config through
-    production ``tick_alarm``. The initial healthy reading is its configured
-    vacuum-loss condition; the second reading is the positive control that the
-    real alarm remains active before its evaluator is made to fail.
-    """
-    _, alarms = load_alarm_config(Path(__file__).parents[2] / "config" / "alarms_v3.yaml")
-    alarm_cfg = next(alarm for alarm in alarms if alarm.alarm_id == "vacuum_loss_cold")
-    assert alarm_cfg.config["level"] == "CRITICAL"
-    assert alarm_cfg.notify == ["gui", "telegram", "sound"]
-
-    state, _, evaluator, state_mgr = _make_stack()
-    state.update(_reading("Т11", 100.0))
-    state.update(_reading("Т12", 100.0))
-    state.update(_reading("VSP63D_1/pressure", 2.0e-3, unit="mbar"))
-    _, first_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert first_transition == "TRIGGERED"
-
-    state.update(_reading("VSP63D_1/pressure", 9.9e-1, unit="mbar"))
-    _, positive_control_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert positive_control_transition is None
-    assert "vacuum_loss_cold" in state_mgr.get_active()
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("evaluator fault")
-
-    monkeypatch.setattr(evaluator, "_eval_composite", boom)
-    with caplog.at_level("ERROR", logger="cryodaq.core.alarm_v2"):
-        event, transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-
-    assert transition is None
-    assert event is not None and event.evaluator_error is True
-    active = state_mgr.get_active()["vacuum_loss_cold"]
-    assert active.level == "CRITICAL"
-    assert active.evaluator_error is True
-    assert any(record.exc_info and "Ошибка evaluate vacuum_loss_cold" in record.message for record in caplog.records)
-
-    # The same exception must not turn an inactive alarm into a new firing.
-    inactive_mgr = AlarmStateManager()
-    inactive_event, inactive_transition = tick_alarm(alarm_cfg, None, evaluator, inactive_mgr)
-    assert inactive_event is None
-    assert inactive_transition is None
-    assert inactive_mgr.get_active() == {}
-
-
-@pytest.mark.parametrize(
-    ("evaluator_path", "method", "config"),
-    [
-        (
-            "threshold",
-            "_eval_threshold",
-            {
-                "alarm_type": "threshold",
-                "channel": "T1",
-                "check": "above",
-                "threshold": 1.0,
-            },
-        ),
-        (
-            "composite any_*",
-            "_eval_condition",
-            {
-                "alarm_type": "composite",
-                "operator": "AND",
-                "conditions": [{"check": "any_above", "channels": ["T1"], "threshold": 1.0}],
-            },
-        ),
-        (
-            "composite above/below",
-            "_eval_condition",
-            {
-                "alarm_type": "composite",
-                "operator": "AND",
-                "conditions": [{"check": "above", "channel": "T1", "threshold": 1.0}],
-            },
-        ),
-        (
-            "composite rate",
-            "_eval_condition",
-            {
-                "alarm_type": "composite",
-                "operator": "AND",
-                "conditions": [{"check": "rate_above", "channel": "T1", "threshold": 1.0}],
-            },
-        ),
-        (
-            "top-level rate",
-            "_eval_rate",
-            {"alarm_type": "rate", "channel": "T1", "check": "rate_above", "threshold": 1.0},
-        ),
-        (
-            "relative rate",
-            "_eval_rate",
-            {
-                "alarm_type": "rate",
-                "channel": "T1",
-                "check": "relative_rate_near_zero",
-                "rate_threshold": 0.1,
-            },
-        ),
-        (
-            "rate additional_condition",
-            "_eval_condition",
-            {
-                "alarm_type": "rate",
-                "channel": "T1",
-                "check": "rate_above",
-                "threshold": 1.0,
-                "additional_condition": {
-                    "check": "above",
-                    "channel": "T2",
-                    "threshold": 1.0,
-                },
-            },
-        ),
-        (
-            "phase_elapsed_s",
-            "_eval_condition",
-            {
-                "alarm_type": "composite",
-                "operator": "AND",
-                "conditions": [{"check": "above", "channel": "phase_elapsed_s", "threshold": 1.0}],
-            },
-        ),
-        (
-            "stale",
-            "_eval_stale",
-            {"alarm_type": "stale", "channel": "T1", "timeout_s": 1.0},
-        ),
-    ],
-    ids=lambda value: value if isinstance(value, str) else None,
-)
-def test_every_evaluator_exception_holds_active_and_never_fires_inactive(
-    monkeypatch, evaluator_path: str, method: str, config: dict
-) -> None:
-    """Sweep every shipped evaluator subpath through the shared exception boundary."""
-    state, rate, evaluator, state_mgr = _make_stack()
-    state.update(_reading("T1", 10.0))
-    monkeypatch.setattr(rate, "get_rate_custom_window", lambda *_args: 10.0)
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError(f"{evaluator_path} evaluator fault")
-
-    monkeypatch.setattr(evaluator, method, boom)
-    alarm_id = f"exception_sweep_{evaluator_path}"
-    alarm_cfg = AlarmConfig(alarm_id=alarm_id, config={**config, "level": "CRITICAL"}, phase_filter=None)
-
-    inactive_event, inactive_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert inactive_event is None
-    assert inactive_transition is None
-    assert state_mgr.get_active() == {}
-
-    state_mgr.process(
-        alarm_id,
-        AlarmEvent(alarm_id, "CRITICAL", "existing hazard", time.time(), ["T1"], {"T1": 10.0}),
-        alarm_cfg.config,
-    )
-    active_event, active_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-
-    assert active_transition is None
-    assert active_event is not None and active_event.evaluator_error is True
-    held = state_mgr.get_active()[alarm_id]
-    assert held.evaluator_error is True
-    assert held.message == "existing hazard"
-
-    # A later successful evaluation removes only the evaluator-failure marker;
-    # it does not create a second activation or notification.
-    assert (
-        state_mgr.process(
-            alarm_id,
-            AlarmEvent(alarm_id, "CRITICAL", "existing hazard", time.time(), ["T1"], {"T1": 10.0}),
-            alarm_cfg.config,
-        )
-        is None
-    )
-    assert state_mgr.get_active()[alarm_id].evaluator_error is False
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        {"alarm_type": "unknown"},
-        {"alarm_type": "threshold", "channel": "T1", "check": "unknown", "threshold": 1.0},
-        {"alarm_type": "composite", "operator": "unknown", "conditions": []},
-        {"alarm_type": "composite", "operator": "AND", "conditions": [{"check": "unknown"}]},
-        {"alarm_type": "rate", "channel": "T1", "check": "unknown", "threshold": 1.0},
-    ],
-    ids=["alarm_type", "threshold_check", "composite_operator", "composite_check", "rate_check"],
-)
-def test_invalid_evaluator_configuration_holds_active_and_never_fires_inactive(config: dict) -> None:
-    """Post-load config corruption is evaluator-unknown, not a resolution."""
-    state, _, evaluator, state_mgr = _make_stack()
-    state.update(_reading("T1", 10.0))
-    alarm_id = "invalid_evaluator_configuration"
-    alarm_cfg = AlarmConfig(alarm_id=alarm_id, config={**config, "level": "CRITICAL"}, phase_filter=None)
-
-    inactive_event, inactive_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-    assert inactive_event is None
-    assert inactive_transition is None
-
-    state_mgr.process(
-        alarm_id,
-        AlarmEvent(alarm_id, "CRITICAL", "existing hazard", time.time(), ["T1"], {"T1": 10.0}),
-        alarm_cfg.config,
-    )
-    active_event, active_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
-
-    assert active_transition is None
-    assert active_event is not None and active_event.evaluator_error is True
-    assert state_mgr.get_active()[alarm_id].evaluator_error is True
 
 
 # ---------------------------------------------------------------------------

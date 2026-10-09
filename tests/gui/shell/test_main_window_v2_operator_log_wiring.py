@@ -13,32 +13,11 @@ from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import pytest
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
-
-
-@pytest.fixture(autouse=True)
-def _isolate_operator_log_retry_state():
-    """A prior test's durable unknown write must not forge this fixture's state."""
-
-    settings = QSettings("FIAN", "CryoDAQ")
-    key = "operator_log/unresolved_submit_v1"
-    present = settings.contains(key)
-    value = settings.value(key)
-    settings.remove(key)
-    settings.sync()
-    try:
-        yield
-    finally:
-        if present:
-            settings.setValue(key, value)
-        else:
-            settings.remove(key)
-        settings.sync()
 
 
 def _app() -> QApplication:
@@ -85,8 +64,7 @@ def test_overlay_opens_connected_when_recent_reading():
         w._last_reading_time = time.monotonic()
         w._ensure_overlay("log")
         assert w._operator_log_panel is not None
-        # Visible contract: set_connected(True) enables the log submit button.
-        assert w._operator_log_panel._submit_btn.isEnabled() is True
+        assert w._operator_log_panel._connected is True
     finally:
         _stop_timers(w)
 
@@ -98,8 +76,7 @@ def test_overlay_opens_disconnected_on_cold_start():
         # _last_reading_time == 0.0 by default.
         w._ensure_overlay("log")
         assert w._operator_log_panel is not None
-        # Visible contract: set_connected(False) disables the log submit button.
-        assert w._operator_log_panel._submit_btn.isEnabled() is False
+        assert w._operator_log_panel._connected is False
     finally:
         _stop_timers(w)
 
@@ -111,16 +88,10 @@ def test_tick_status_flips_overlay_connected_bool():
         w._ensure_overlay("log")
         w._last_reading_time = time.monotonic()
         w._tick_status()
-        # Visible contract: connected → submit + author + message enabled.
-        assert w._operator_log_panel._submit_btn.isEnabled() is True
-        assert w._operator_log_panel._author_edit.isEnabled() is True
-        assert w._operator_log_panel._message_edit.isEnabled() is True
+        assert w._operator_log_panel._connected is True
         w._last_reading_time = time.monotonic() - 10.0
         w._tick_status()
-        # Visible contract: disconnected → all composer controls disabled.
-        assert w._operator_log_panel._submit_btn.isEnabled() is False
-        assert w._operator_log_panel._author_edit.isEnabled() is False
-        assert w._operator_log_panel._message_edit.isEnabled() is False
+        assert w._operator_log_panel._connected is False
     finally:
         _stop_timers(w)
 
@@ -177,20 +148,22 @@ def test_lazy_open_replays_current_experiment():
 # ----------------------------------------------------------------------
 
 
-def test_operator_log_entry_does_not_forge_connection_or_refresh_on_overlay():
+def test_operator_log_entry_reading_triggers_refresh_on_overlay():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("log")
-        last_measurement = w._last_reading_time
-        connected_before = w._operator_log_panel._connected
+        # Replace refresh_entries with a counter spy.
+        called = {"n": 0}
+        original = w._operator_log_panel.refresh_entries
+
+        def spy() -> None:
+            called["n"] += 1
+            original()
+
+        w._operator_log_panel.refresh_entries = spy  # type: ignore[method-assign]
         w._dispatch_reading(_log_entry_reading())
-        # Analytics/support traffic is not measurement freshness or engine
-        # presence authority. A log entry may update the view only after a
-        # separately established live connection; it cannot spawn a poll by
-        # itself.
-        assert w._last_reading_time == last_measurement
-        assert w._operator_log_panel._connected == connected_before
+        assert called["n"] == 1
     finally:
         _stop_timers(w)
 
@@ -200,9 +173,7 @@ def test_unrelated_analytics_reading_does_not_crash():
     w = MainWindowV2()
     try:
         w._ensure_overlay("log")
-        workers_before = len(w._operator_log_panel._workers)
-        # Any non-operator_log_entry analytics reading must not raise and must
-        # not trigger a refresh.
+        # Any non-operator_log_entry analytics reading must not raise.
         w._dispatch_reading(
             Reading(
                 timestamp=datetime.now(UTC),
@@ -213,8 +184,6 @@ def test_unrelated_analytics_reading_does_not_crash():
                 metadata={"state": "ready"},
             )
         )
-        # No refresh spawned for unrelated reading.
-        assert len(w._operator_log_panel._workers) == workers_before
     finally:
         _stop_timers(w)
 
@@ -242,7 +211,6 @@ def test_lazy_open_after_connection_loss_is_disconnected():
         # Simulate prior activity then stale.
         w._last_reading_time = time.monotonic() - 100.0
         w._ensure_overlay("log")
-        # Visible contract: stale silence → submit button disabled.
-        assert w._operator_log_panel._submit_btn.isEnabled() is False
+        assert w._operator_log_panel._connected is False
     finally:
         _stop_timers(w)

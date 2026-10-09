@@ -762,17 +762,6 @@ _REGISTRY_ROWS = (
         "archive retention policy accepts channel regexes instead of descriptor selectors",
     ),
     (
-        "C2-028",
-        _Challenge(
-            "src/cryodaq/core/interlock.py",
-            "InterlockCondition.matches_channel",
-            "regular expression match() over identity",
-            "412dc0c2c14cee74dc26",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "interlock configuration lacks verified descriptor selector",
-    ),
-    (
         "C2-029",
         _Challenge(
             "src/cryodaq/core/rate_estimator.py",
@@ -1520,17 +1509,8 @@ _REGISTRY_ROWS = (
         "OPEN-ROUTING-DEBT",
         "periodic report grouping inferred from channel spelling",
     ),
-    (
-        "C2-105",
-        _Challenge(
-            "src/cryodaq/notifications/telegram_commands.py",
-            "TelegramCommandBot._cmd_temps",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "operator notification routing infers semantics from identity spelling",
-    ),
+    # C2-105 RETIRED: TelegramCommandBot._cmd_temps now selects the declared
+    # descriptor quantity, so a channel rename cannot change its physical role.
     (
         "C2-106",
         _Challenge(

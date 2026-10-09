@@ -506,7 +506,12 @@ def test_real_launcher_shutdown_settles_every_owner_before_releasing_lock(
         host._close_engine_stderr_stream = MethodType(LauncherWindow._close_engine_stderr_stream, host)
 
         assert try_acquire_lock(lock_name, lock_dir=tmp_path) is None
-        assert LauncherWindow._do_shutdown(host) is True
+        settled = LauncherWindow._do_shutdown(host)
+        settlement_deadline = time.monotonic() + 3.0
+        while not settled and time.monotonic() < settlement_deadline:
+            time.sleep(0.01)
+            settled = LauncherWindow._do_shutdown(host)
+        assert settled is True
 
         assert assistant.poll() is not None
         assert engine.poll() is not None
@@ -551,13 +556,11 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
     -- then it is force-reaped exactly once, with the unsettled incarnation
     latched before that reaping ever touches the process.
 
-    ``_stop_engine`` no longer waits out the whole budget in one
-    ``process.wait(timeout=60)`` call (that would freeze the Qt main thread
-    same as the old synchronous ZMQ round-trip); it polls in <=1s slices
-    against a wall-clock deadline tracked across repeated calls. A real
-    caller re-enters via the shutdown-retry timer; this test fast-forwards
-    a fake ``time.monotonic`` across those re-entries instead of sleeping
-    for 60 real seconds.
+    ``_stop_engine`` no longer waits for process exit on the Qt main thread.
+    It polls without blocking against a wall-clock deadline tracked across
+    repeated calls. A real caller re-enters via the shutdown-retry timer;
+    this test fast-forwards a fake ``time.monotonic`` across those re-entries
+    instead of sleeping for 60 real seconds.
     """
 
     class TimedOutProcess:
@@ -637,7 +640,7 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
     with pytest.raises(RuntimeError, match="not yet exited"):
         LauncherWindow._stop_engine(host)
 
-    assert process.wait_timeouts == [1.0]
+    assert process.wait_timeouts == []
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
     assert host._engine_proc is process
@@ -660,7 +663,7 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
         assert process.kill_calls == 0
         assert host._engine_proc is process
 
-    assert process.wait_timeouts == [1.0, 1.0, 1.0, 1.0]
+    assert process.wait_timeouts == []
 
     # Spy on terminate() to prove the unsettled incarnation is latched
     # BEFORE any reaping touches the process -- the production comment
@@ -682,7 +685,7 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
         LauncherWindow._stop_engine(host)
 
     assert latched_before_reap == [("a" * 32, None)]
-    assert process.wait_timeouts == [1.0, 1.0, 1.0, 1.0, 5.0, 5.0]
+    assert process.wait_timeouts == [5.0, 5.0]
     assert process.terminate_calls == 1
     assert process.kill_calls == 1
     assert host._engine_proc is None

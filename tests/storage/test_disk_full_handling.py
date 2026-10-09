@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -75,7 +74,10 @@ async def test_persistence_failure_callback_invoked(tmp_path):
     try:
         await asyncio.wait_for(callback_invoked.wait(), timeout=2.0)
     except TimeoutError:
-        pytest.fail(f"persistence_failure_callback was not invoked within 2s. is_disk_full={writer.is_disk_full}")
+        pytest.fail(
+            "persistence_failure_callback was not invoked within 2s. "
+            f"is_disk_full={writer.is_disk_full}"
+        )
 
     assert any("disk full" in r.lower() for r in received_reasons), (
         f"callback received unexpected reasons: {received_reasons}"
@@ -113,7 +115,7 @@ async def test_safety_manager_on_persistence_failure_latches_fault():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    keithley.emergency_off = AsyncMock()
 
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     await mgr.start()
@@ -131,7 +133,7 @@ async def test_disk_monitor_does_NOT_auto_clear_flag(tmp_path, caplog):
     """DiskMonitor logs recovery but does NOT clear the writer flag.
 
     Operator must acknowledge_fault to actually resume polling — this
-    prevents auto-recovery on disk-space flapping (Phase 2a P1-1).
+    prevents auto-recovery on disk-space flapping (Codex Phase 2a P1-1).
     """
     from cryodaq.core.broker import DataBroker
     from cryodaq.core.disk_monitor import DiskMonitor
@@ -152,7 +154,7 @@ async def test_disk_monitor_does_NOT_auto_clear_flag(tmp_path, caplog):
 
     # Flag MUST still be set — auto-clear is forbidden.
     assert writer.is_disk_full is True, (
-        "DiskMonitor must NOT auto-clear the disk_full flag (P1-1). "
+        "DiskMonitor must NOT auto-clear the disk_full flag (Codex P1-1). "
         "Recovery requires explicit operator acknowledge_fault."
     )
     # Recovery WAS logged for the operator.
@@ -169,7 +171,7 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    keithley.emergency_off = AsyncMock()
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     mgr._config.cooldown_before_rearm_s = 0.0  # no cooldown for the test
     mgr._config.require_reason = False
@@ -189,7 +191,9 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 
         result = await mgr.acknowledge_fault("ack")
         assert result.get("ok"), f"acknowledge_fault failed: {result}"
-        assert cleared["called"] is True, "acknowledge_fault must invoke the persistence_failure_clear callback"
+        assert cleared["called"] is True, (
+            "acknowledge_fault must invoke the persistence_failure_clear callback"
+        )
     finally:
         await mgr.stop()
 
@@ -198,7 +202,7 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 async def test_disk_full_classifier_rejects_unrelated_disk_messages(tmp_path):
     """The phrase-based classifier must NOT match SQLITE_CORRUPT / SQLITE_IOERR.
 
-    Phase 2a P1-2: matching individual keywords like 'disk' would
+    Codex Phase 2a P1-2: matching individual keywords like 'disk' would
     false-positive on 'database disk image is malformed' (corrupt) or
     'disk I/O error' (transient I/O), which are NOT disk-full.
     """
@@ -230,7 +234,9 @@ async def test_disk_full_classifier_accepts_real_messages(tmp_path):
         writer = SQLiteWriter(tmp_path)
         poisoned = _poisoned_conn(sqlite3.OperationalError(msg))
         writer._write_day_batch(poisoned, [_reading()])
-        assert writer.is_disk_full is True, f"Real disk-full message {msg!r} was not classified as disk-full"
+        assert writer.is_disk_full is True, (
+            f"Real disk-full message {msg!r} was not classified as disk-full"
+        )
 
 
 @pytest.mark.asyncio
@@ -240,7 +246,7 @@ async def test_persistence_failure_callback_from_executor_thread(tmp_path):
     The previous test exercised callback scheduling from the event-loop
     thread. In production _write_day_batch runs in the SQLiteWriter executor.
     This test runs the same path via run_in_executor to cover the actual
-    cross-thread codepath (Phase 2a P2).
+    cross-thread codepath (Codex Phase 2a P2).
     """
     writer = SQLiteWriter(tmp_path)
     writer.set_event_loop(asyncio.get_running_loop())

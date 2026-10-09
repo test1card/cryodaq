@@ -3,7 +3,7 @@ title: Настройка приборов
 audience: lab tech, operator on duty
 scope: физическое подключение + конфигурация приборов CryoDAQ
 status: canonical
-last_updated: 2026-07-08
+last_updated: 2026-04-17
 companion: docs/deployment.md, docs/safety-operator.md, config/instruments.yaml
 ---
 
@@ -12,7 +12,7 @@ companion: docs/deployment.md, docs/safety-operator.md, config/instruments.yaml
 Этот документ — для лаборанта, который разворачивает CryoDAQ на новом
 стенде или меняет железо на работающем. В основном это редактирование
 `config/instruments.yaml` и проверка связи через mock / live mode. Код
-`src/cryodaq/drivers/` трогать не надо.
+drivers/ трогать не надо.
 
 Схема стека с точки зрения оператора:
 
@@ -29,7 +29,7 @@ companion: docs/deployment.md, docs/safety-operator.md, config/instruments.yaml
               SQLite → DataBroker → GUI / алармы
 ```
 
-## Пять поддерживаемых приборов
+## Три поддерживаемых прибора
 
 Текущая конфигурация — в `config/instruments.yaml`. Если нужны
 машинно-зависимые параметры (COM-порт, GPIB-адрес не совпадает с
@@ -85,7 +85,7 @@ for res in rm.list_resources():
 
 **Интерфейс:** USB-TMC. Двухканальный source-measure unit — оба канала
 `smua` и `smub` активны одновременно (инвариант уровня кодовой базы;
-см. `docs/architecture.md`).
+см. `CLAUDE.md` / design-system).
 
 **Адрес на шаблоне:**
 
@@ -119,70 +119,9 @@ print('Found:', dev.serial_number if dev else None)
 в коде появилось `:SOUR:VOLT` или подобное, это баг.
 
 **Host-side P=const режим:** текущая реализация держит `P = const`
-программным циклом на хосте.
-
-**TSP late-pet watchdog:** программная TSP-проверка дедлайна
-под host SafetyManager, выбирается оператором через
-`config/instruments.yaml` → `keithley.watchdog.mode`:
-
-| mode | поведение на connect | покрытие |
-|------|----------------------|----------|
-| `off` (дефолт драйвера) | TSP-скрипт не загружается; host SafetyManager — единственный авторитет; байт-идентичный поток команд | только host |
-| `best_effort` | активировать на connect; CRITICAL сообщает, что автономной защиты нет | late-pet stall-recovery + latch + reconcile |
-| `required` | требует `cryodaq_wdog_autonomous == 1`; v3 сообщает 0, поэтому `connect()` бросает → прибор недоступен → SAFE_OFF | зарезервирован для доказанной автономной реализации |
-
-Легаси-алиас: `enabled: true` → `best_effort`, `enabled: false` → `off`
-(при наличии обоих ключей выигрывает `mode`).
-
-Иерархия покрытия (честно):
-- `off` — защита только на хосте.
-- `best_effort` (текущий механизм) — проверка
-  **stall-recovery** (запоздавший pet убивает выходы + защёлкивает
-  trip для reconcile). Полную смерть хоста этот механизм **не**
-  покрывает: `cryodaq_wdog_run()` только взводит и возвращается (не
-  крутит цикл — иначе занял бы single-threaded FIFO), а дедлайн
-  проверяется внутри `cryodaq_wdog_pet()` на каждом polling-тике.
-- `required` не принимает активный late-pet checker за автономную защиту:
-  он читает отдельный bit и fail-closed отказывает с v3.
-- Предыдущий вариант автономного таймера был не «непроверенным», а
-  документированно некорректным: использовал отсутствующий атрибут timer,
-  нулевой stimulus и неподходящий `SOURCE_IDLE` в source action. Он удалён.
-- Полный host-death остаётся без автономного TSP-покрытия. Force-OFF при
-  следующем connect — восстановление, а не защита во время смерти хоста.
-  Предпочтительный финальный элемент — независимый защёлкивающийся cutout/
-  interlock с анализом общих отказов. Внутренний SMU-прототип допустим только
-  как гипотеза по документированному API и требует стендового доказательства.
-  Output-enable/digital-I/O facility 2604B по reference manual не подходит для
-  safety circuits и не должна управлять safety interlock; нужен отдельный
-  application-appropriate safety circuit.
-
-`SOURCE_IDLE` возвращает источник к idle level и не равен открытию реле/OFF.
-Ни внутренний status bit, ни `source.output` не являются независимым
-доказательством отсутствия энергии на клеммах.
-
-Лимит 5 W — host-only target cap и исчезает вместе с хостом. Приборные
-`limitv=40 V` и `limiti=1 A` ограничивают рабочую точку применимым envelope
-нагрузки и прибора, но не гарантируют ≤5 W и не ограничивают накопленную
-энергию при длительной подаче после смерти хоста.
-
-`watchdog.timeout_s` принимает только конечное число от 1 до 300 секунд
-(boolean, строка, NaN/Inf и значения вне диапазона валят загрузку конфига).
-TSP `os.time()` имеет секундную гранулярность; сравнение строгое `elapsed >
-timeout`, поэтому равенство дедлайну ещё не trip. Практический timeout должен
-быть не меньше `2 * poll_interval_s`; меньший безопасно отклоняется не всегда,
-но даёт явный warning о возможном ложном late-pet trip.
-
-Version/active/tripped/autonomous readback принимают только конечные точные
-protocol-значения (version 3; flags 0/1). До upload только буквальный TSP
-`nil` означает свежий прибор; malformed/NaN/Inf/out-of-domain сохраняют
-неизвестную latch-улику и запрещают upload. Найденный latch также не стирается
-на connect: RUN блокируется сразу, SafetyManager латчит FAULT, а operator fault
-ack после повторного verified both-output OFF явно потребляет latch и
-реактивирует late-pet check. Если прибор power-cycle вернул `nil`, сохранённый
-host pending-bit разрешает тот же audited ack/re-upload path. В `required`
-текущий v3 реактивировать нельзя: выбрать `best_effort` и явно переподключить
-прибор. `off` допустим только как осознанное отключение всего TSP-path после
-фиксации evidence, а не как способ «успешно» consume latch.
+программным циклом на хосте. Плановый Phase 3 — TSP-watchdog
+(`tsp/p_const.lua` — black-box, пока **не подгружается**); требует
+hardware verification.
 
 **Disconnect требует emergency_off first** — автоматизировано в
 engine, но при ручном вытаскивании USB-кабеля лучше сначала
@@ -212,19 +151,6 @@ ls -l /dev/ttyUSB* /dev/ttyS*
 прибора с несовместимой распайкой), и что на приборе не включена
 модема-эмуляция.
 
-### Etalon MultiLine (интерферометрическая метрология длины)
-
-**Интерфейс:** TCP/IP (Ethernet). Адрес хоста и порт — в
-`config/instruments.yaml` (секция прибора MultiLine); машинно-зависимые
-значения удобно держать в `instruments.local.yaml`.
-
-Абсолютная интерферометрическая метрология длины (несколько каналов).
-Драйвер `src/cryodaq/drivers/instruments/etalon_multiline.py`. Режимы: **averaged**
-(усреднённые отсчёты) и **continuous**; поддерживается burst-захват
-вибрации с записью в Parquet. Операторский workflow (в т.ч. «Захват
-вибрации») — в overlay «MultiLine»; подробности в
-`docs/operator_manual.md`.
-
 ## Как добавить / заменить прибор
 
 1. Отредактировать `config/instruments.yaml` (или создать
@@ -243,15 +169,9 @@ ls -l /dev/ttyUSB* /dev/ttyS*
    ```
 3. Перезапустить engine. Новый прибор виден в панели «Приборы»
    (`Ctrl+D`) — должна появиться строка со статусом / heartbeat.
-4. Добавить каждую пару `(instrument_id, emitted_channel)` в обязательный
-   descriptor manifest: `config/channel_descriptors.local.yaml`, если выбран
-   `instruments.local.yaml`, иначе `config/channel_descriptors.yaml`.
-   Локальный manifest полностью заменяет base и обязателен вместе с локальным
-   списком приборов; каждый emitted channel без binding отклоняется до
-   persistence/publication (`src/cryodaq/engine.py:2247-2256`,
-   `src/cryodaq/storage/channel_descriptors.py:827-837`).
-   `config/channels.yaml` задаёт только отображение и группировку, не
-   идентичность канала.
+4. Новые каналы нужно ещё добавить в `config/channels.yaml`
+   (для отображения и группировки); иначе они будут собраны и
+   записаны в SQLite, но не показаны на дашборде.
 
 ## Mock mode для разработки
 
@@ -292,9 +212,8 @@ cryodaq-engine --mock
   или `KRDG? 1..8` — парсер драйвера заточен под строку-с-запятыми от
   `KRDG?`.
 - **Keithley: `connect()` форсит OUTPUT OFF** на обоих каналах
-  перед assume-control и readback-verify. Если OFF не удалось
-  подтвердить, драйвер выставляет `output_state_unverified`, а
-  SafetyManager fail-closed блокирует RUN до успешного emergency-off.
+  перед assume-control (best-effort; если force-off fails, логируется
+  CRITICAL, но продолжаем — crash-recovery guard).
 - **Thyracont VSP63D vs VSM77DL** — старые версии документации
   упоминают VSM77DL; код поддерживает оба (драйвер автодетектирует
   протокол). Имя в YAML пишем по фактической модели на стенде.
@@ -307,21 +226,17 @@ cryodaq-engine --mock
 1. Написать драйвер, наследующийся от
    `src/cryodaq/drivers/base.InstrumentDriver`. Реализовать
    `read_channels() -> list[Reading]`, `connect()`, `disconnect()`.
-2. Зарегистрировать тип в allowlisted registry
-   `src/cryodaq/drivers/registry.py`: engine вызывает
-   `validate_instrument_entries()` и `construct_driver()`, а не собственную
-   фабрику (`src/cryodaq/engine.py:2082-2127`).
+2. Зарегистрировать тип в `src/cryodaq/engine.py` фабрикой.
 3. Добавить пример записи в `config/instruments.yaml` с комментарием
    «# type: <ваш_type>».
 4. Написать unit-тест в `tests/drivers/`.
 
 Этот флоу выходит за рамки «настройки прибора» — это уже dev-задача.
-См. `docs/architecture.md` (раздел «Subsystem map», строка Drivers) для
-карты драйверных модулей.
+См. `CLAUDE.md ### Драйверы` для module-index.
 
 ## См. также
 
-- `docs/architecture.md` — архитектурный контекст приборного стека и ключевые
+- `CLAUDE.md` — архитектурный контекст приборного стека и ключевые
   правила (persistence-first, TSP-not-SCPI, dual-channel Keithley).
 - `docs/safety-operator.md` — что делать при `fault_latched` из-за
   потери связи с прибором.

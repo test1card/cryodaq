@@ -12,7 +12,7 @@ import io
 import sys
 from pathlib import Path
 
-from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA
+from cryodaq.drivers.capability_metadata import INSTRUMENT_DRIVER_METADATA
 
 from .loader import load_lab_profile
 from .schema import LabProfileError
@@ -74,7 +74,7 @@ def _validate(argv: list[str] | None) -> int:
     print(f"lab_id: {profile.lab_id}")
     print(f"display_name: {profile.display_name}")
     for instrument in profile.instruments:
-        spec = BUILTIN_DRIVER_METADATA[instrument.type_name]
+        spec = INSTRUMENT_DRIVER_METADATA[instrument.type_name]
         derived = ", ".join(sorted(capability.value for capability in spec.capabilities))
         print(
             f"instrument {instrument.name}: type={instrument.type_name} "

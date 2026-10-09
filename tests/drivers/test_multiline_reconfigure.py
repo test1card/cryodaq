@@ -76,9 +76,13 @@ def test_reconfigure_replaces_channel_set_atomically() -> None:
 def test_reconfigure_refreshes_mock_nominals() -> None:
     driver = _driver()
     _run(driver.reconfigure_channels([7, 14]))
-    # Exact mapping — detects both stale keys (e.g. original ch1) and wrong values.
-    # Formula: 1000 + ch * 50 → ch7=1350.0, ch14=1700.0.
-    assert driver._mock_nominal_lengths_mm == {7: 1350.0, 14: 1700.0}
+    # Nominals match the standard formula 1000 + ch * 50 for each channel
+    assert 7 in driver._mock_nominal_lengths_mm
+    assert 14 in driver._mock_nominal_lengths_mm
+    assert 1 not in driver._mock_nominal_lengths_mm
+    # Verify exact formula values — not just key presence.
+    assert driver._mock_nominal_lengths_mm[7] == pytest.approx(1350.0)   # 1000 + 7*50
+    assert driver._mock_nominal_lengths_mm[14] == pytest.approx(1700.0)  # 1000 + 14*50
 
 
 def test_reconfigure_takes_effect_next_poll_in_averaged_mode() -> None:
@@ -89,7 +93,11 @@ def test_reconfigure_takes_effect_next_poll_in_averaged_mode() -> None:
     assert driver._channel_numbers == [5, 6, 7]
     # Mock readings reflect the new set
     readings = driver._mock_readings()
-    length_channels = sorted(int(r.channel.split("_ch")[-1]) for r in readings if "/length_ch" in r.channel)
+    length_channels = sorted(
+        int(r.channel.split("_ch")[-1])
+        for r in readings
+        if "/length_ch" in r.channel
+    )
     assert length_channels == [5, 6, 7]
 
 
@@ -205,21 +213,7 @@ def test_set_channels_command_returns_unknown_driver_error() -> None:
         )
     )
     assert out["ok"] is False
-    # 2026-07-25: production deliberately stopped echoing the raw operator-
-    # supplied `name` back into the error text (was: f"MultiLine driver
-    # '{name}' not found") and added a stable machine-readable error_code
-    # alongside it (engine.py:1111-1117), matching the same pattern used
-    # throughout the zmq_client.py transport rewrite. Assert on the stable
-    # code, not the human-readable substring that broke this test.
-    # NOTE: the human-readable text is still English, not Russian, despite
-    # reaching the operator verbatim via QMessageBox.warning() in
-    # multiline_panel.py:886-891 -- a real, pre-existing Russian-operator-
-    # wording gap that predates this campaign (the original base string was
-    # also English). Flagging, not fixing, here: reworked strings landed
-    # in this task's scope, but "should this be Russian" is a separate,
-    # substantive product-text decision outside a test-repair.
-    assert out["error_code"] == "multiline_driver_unavailable"
-    assert "unavailable" in out["error"]
+    assert "not found" in out["error"]
 
 
 def test_set_channels_command_default_name_when_one_driver(tmp_path: Path) -> None:
@@ -254,7 +248,9 @@ def test_set_channels_command_persists_to_local_yaml(tmp_path: Path) -> None:
     matched = [
         e
         for e in instruments
-        if isinstance(e, dict) and e.get("type") == "etalon_multiline" and e.get("name") == "MultiLine_test"
+        if isinstance(e, dict)
+        and e.get("type") == "etalon_multiline"
+        and e.get("name") == "MultiLine_test"
     ]
     assert len(matched) == 1
     assert matched[0]["channels"] == [3, 7, 11]
@@ -313,7 +309,10 @@ def test_persist_appends_stub_when_no_existing_match(tmp_path: Path) -> None:
         channels=[5, 10],
     )
     raw = yaml.safe_load((tmp_path / "instruments.local.yaml").read_text(encoding="utf-8"))
-    matched = [e for e in raw["instruments"] if isinstance(e, dict) and e.get("name") == "MultiLine_42"]
+    matched = [
+        e for e in raw["instruments"]
+        if isinstance(e, dict) and e.get("name") == "MultiLine_42"
+    ]
     assert len(matched) == 1
     assert matched[0]["channels"] == [5, 10]
 
@@ -337,13 +336,16 @@ def test_persist_overwrites_existing_local_entry(tmp_path: Path) -> None:
         channels=[5, 6, 7],
     )
     raw = yaml.safe_load(local.read_text(encoding="utf-8"))
-    matched = [e for e in raw["instruments"] if isinstance(e, dict) and e.get("name") == "MultiLine_1"]
+    matched = [
+        e for e in raw["instruments"]
+        if isinstance(e, dict) and e.get("name") == "MultiLine_1"
+    ]
     assert len(matched) == 1
     assert matched[0]["channels"] == [5, 6, 7]
 
 
 def test_persist_carries_top_level_chamber_from_base_to_local(tmp_path: Path) -> None:
-    """audit cycle 2 amend — engine reads instruments.local.yaml
+    """Codex audit cycle 2 amend — engine reads instruments.local.yaml
     wholesale (top-level keys are NOT inherited from base). The persist
     helper must therefore copy ``chamber`` (and any other top-level
     keys) from base into local; otherwise a MultiLine channel-set
@@ -416,7 +418,7 @@ def test_persist_local_top_level_overrides_base(tmp_path: Path) -> None:
 
 
 def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Path) -> None:
-    """audit cycle 1 amend — if instruments.local.yaml exists but
+    """Codex audit cycle 1 amend — if instruments.local.yaml exists but
     only contains a Lakeshore entry (e.g. operator edited via
     connection_settings), persisting a MultiLine change must merge the
     base etalon_multiline entry's full config (host/port/mode) rather
@@ -459,7 +461,11 @@ def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Pat
     )
 
     raw = yaml.safe_load(local.read_text(encoding="utf-8"))
-    instruments = {(e["type"], e["name"]): e for e in raw["instruments"] if isinstance(e, dict)}
+    instruments = {
+        (e["type"], e["name"]): e
+        for e in raw["instruments"]
+        if isinstance(e, dict)
+    }
     # Lakeshore local override preserved
     assert instruments[("lakeshore_218s", "LS_1")]["channels"] == [1, 2, 3]
     # MultiLine entry is the BASE merged in, not a minimal stub —
@@ -472,7 +478,7 @@ def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Pat
 
 
 def test_reconfigure_continuous_refuses_spawn_on_listener_cancel_timeout() -> None:
-    """audit cycle 1 amend — if the old listener doesn't cancel
+    """Codex audit cycle 1 amend — if the old listener doesn't cancel
     within the 2s grace window, the driver must NOT spawn a new
     listener (would race the still-unwinding old task for the read
     stream)."""

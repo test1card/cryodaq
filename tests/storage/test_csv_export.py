@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import csv
-import json
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.csv_export import CSVExporter
-from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -44,9 +40,7 @@ def _populate_db(data_dir: Path, readings: list[Reading]) -> None:
     """Write readings into the data_dir using SQLiteWriter."""
     writer = SQLiteWriter(data_dir)
     writer._write_batch(readings)
-    if writer._conn is not None:
-        writer._conn.close()  # close, don't just drop the ref — Windows locks open DB files
-    writer._conn = None
+    writer._conn = None  # release without closing (tests don't need graceful teardown)
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
@@ -170,86 +164,3 @@ async def test_empty_result(tmp_path: Path) -> None:
     header, rows = _read_csv(output_path)
     assert header == _EXPECTED_HEADER, "Header row missing or wrong in empty export"
     assert len(rows) == 0, "Expected no data rows in empty export"
-
-
-# ---------------------------------------------------------------------------
-# 6. D-C9 / ME-10 — early local-hours range must select correct UTC day file
-# ---------------------------------------------------------------------------
-
-
-async def test_csv_selects_utc_day_for_early_local_hours(tmp_path: Path) -> None:
-    """A range whose local start is 00:00 MSK must still select the UTC day file.
-
-    Regression: _find_db_files compared UTC-named files against caller-tz
-    start.date()/end.date(), dropping early-hours rows.
-    """
-    data_dir = tmp_path / "data"
-    ts = datetime(2026, 3, 13, 22, 30, 0, tzinfo=UTC)  # lives in data_2026-03-13.db
-    _populate_db(data_dir, [_reading("CH1", 1.0, "K", ts=ts)])
-
-    msk = timezone(timedelta(hours=3))
-    start = datetime(2026, 3, 14, 0, 0, 0, tzinfo=msk)  # 2026-03-13 21:00 UTC
-    end = datetime(2026, 3, 14, 6, 0, 0, tzinfo=msk)  # 2026-03-14 03:00 UTC
-
-    output_path = tmp_path / "early.csv"
-    count = CSVExporter(data_dir).export(output_path, start=start, end=end)
-
-    _, rows = _read_csv(output_path)
-    assert count == 1, f"early-hours UTC day file dropped: got {count}"
-    assert len(rows) == 1
-    assert rows[0]["channel"] == "CH1"
-
-
-# ---------------------------------------------------------------------------
-# NaN-доктрина: sentinel/error rows carry status but never a real value
-# ---------------------------------------------------------------------------
-
-
-def test_csv_masks_sentinel_value(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    ts_good = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    ts_bad = datetime(2026, 3, 14, 12, 0, 30, tzinfo=UTC)
-    _populate_db(
-        data_dir,
-        [
-            _reading("CH1", 4.5, ts=ts_good, status=ChannelStatus.OK),
-            _reading("CH1", float("nan"), ts=ts_bad, status=ChannelStatus.SENSOR_ERROR),
-        ],
-    )
-
-    output_path = tmp_path / "masked.csv"
-    CSVExporter(data_dir).export(output_path)
-
-    _, rows = _read_csv(output_path)
-    by_status = {r["status"]: r for r in rows}
-    bad = by_status["sensor_error"]
-    assert str(SENTINEL) not in bad["value"], "sentinel leaked into CSV value"
-    assert bad["value"].strip().lower() not in {"inf", "-inf", "nan"}
-    assert bad["value"] == "", "non-usable value must be blank, status preserved"
-    assert by_status["ok"]["value"] not in ("", None)
-
-
-def test_csv_export_rejects_missing_indexed_source_before_writing(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = data_dir / "archive"
-    archive_dir.mkdir(parents=True)
-    (archive_dir / "index.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "original_name": "data_2026-03-14.db",
-                        "archive_path": "year=2026/month=03/data_2026-03-14.db.parquet",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    output_path = tmp_path / "must-not-exist.csv"
-
-    with pytest.raises(RuntimeError) as caught:
-        CSVExporter(data_dir).export(output_path)
-
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-    assert not output_path.exists()

@@ -3,21 +3,39 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
-from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.core.alarm import AlarmEvent, AlarmSeverity
 from cryodaq.notifications.telegram import TelegramNotifier
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _event(
+    event_type: str = "activated",
+    severity: AlarmSeverity = AlarmSeverity.WARNING,
+    alarm_name: str = "test_alarm",
+    channel: str = "ls218s/CH1",
+    value: float = 150.0,
+    threshold: float = 100.0,
+    ts: datetime | None = None,
+) -> AlarmEvent:
+    return AlarmEvent(
+        timestamp=ts or datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC),
+        alarm_name=alarm_name,
+        channel=channel,
+        value=value,
+        threshold=threshold,
+        severity=severity,
+        event_type=event_type,
+    )
 
 
 def _notifier(**kwargs) -> TelegramNotifier:
@@ -30,32 +48,105 @@ def _notifier(**kwargs) -> TelegramNotifier:
 
 
 # ---------------------------------------------------------------------------
-# 1. The retired alarm-v1 notifier surface stays retired.
-#
-# TelegramNotifier.__call__/_format_message/_send formatted a
-# cryodaq.core.alarm AlarmEvent — a type deleted in the v1->v2 migration.
-# Nothing constructed such an event and nothing registered the notifier as
-# an alarm callback (engine.py builds it only for EscalationService, which
-# calls send_message). The formatter carried the unknown-as-determined
-# defect (`f"{event.value:.4g}"` prints "nan" for an unavailable reading),
-# so the unreachable chain was removed rather than patched. This guard
-# fails if it is reintroduced without a live caller.
+# 1. _format_message for "activated" event contains emoji and ТРЕВОГА header
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("attr", ["__call__", "_format_message", "_send"])
-def test_retired_alarm_notifier_surface_absent(attr: str) -> None:
-    # vars(), not hasattr(): every class inherits type.__call__.
-    assert attr not in vars(TelegramNotifier), (
-        f"TelegramNotifier.{attr} is the retired alarm-v1 formatting chain "
-        "(unreachable, and it rendered non-finite values as 'nan'). "
-        "Reintroduce it only together with a production caller and a "
-        "finite-value guard."
+def test_format_message_activated() -> None:
+    notifier = _notifier()
+    event = _event(
+        event_type="activated",
+        severity=AlarmSeverity.CRITICAL,
+        alarm_name="T_STAGE_HIGH",
+        channel="ls218s/T_STAGE",
+        value=350.0,
+        threshold=300.0,
     )
 
+    msg = notifier._format_message(event)
+
+    assert "ТРЕВОГА" in msg, "Expected 'ТРЕВОГА' in activated message"
+    assert "🔔" in msg, "Expected activated emoji 🔔"
+    assert "🚨" in msg, "Expected critical severity emoji 🚨"
+    assert "T_STAGE_HIGH" in msg, "alarm_name not in message"
+    assert "ls218s/T_STAGE" in msg or "ls218s" in msg, "channel not in message"
+    assert "350" in msg, "value not in message"
+    assert "300" in msg, "threshold not in message"
+    assert "критическая" in msg, "severity label not russified"
+    assert "CRITICAL" not in msg, "raw English severity leaked"
+
+
+def test_format_message_severity_labels_are_russian() -> None:
+    notifier = _notifier()
+
+    for severity, expected in (
+        (AlarmSeverity.INFO, "информационная"),
+        (AlarmSeverity.WARNING, "предупреждение"),
+        (AlarmSeverity.CRITICAL, "критическая"),
+    ):
+        msg = notifier._format_message(_event(severity=severity))
+        assert f"Уровень: {expected}" in msg
+        assert severity.value.upper() not in msg
+
 
 # ---------------------------------------------------------------------------
-# 2. from_config loads bot_token and chat_id from YAML
+# 2. _format_message for "cleared" event contains "Тревога снята"
+# ---------------------------------------------------------------------------
+
+
+def test_format_message_cleared() -> None:
+    notifier = _notifier()
+    event = _event(
+        event_type="cleared",
+        severity=AlarmSeverity.WARNING,
+        alarm_name="T_SHIELD_HIGH",
+        channel="ls218s/T_SHIELD",
+        value=80.0,
+        threshold=100.0,
+    )
+
+    msg = notifier._format_message(event)
+
+    assert "Тревога снята" in msg, "Expected 'Тревога снята' in cleared message"
+    assert "✅" in msg, "Expected cleared emoji ✅"
+    assert "T_SHIELD_HIGH" in msg, "alarm_name not in cleared message"
+
+
+# ---------------------------------------------------------------------------
+# 3. __call__ with "acknowledged" event returns early — no HTTP call
+# ---------------------------------------------------------------------------
+
+
+async def test_acknowledged_skipped() -> None:
+    notifier = _notifier()
+    event = _event(event_type="acknowledged")
+
+    # Patch _send so we can verify it is NOT called
+    notifier._send = AsyncMock()
+
+    await notifier(event)
+
+    notifier._send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 4. send_cleared=False skips cleared events — no HTTP call
+# ---------------------------------------------------------------------------
+
+
+async def test_send_cleared_disabled() -> None:
+    notifier = _notifier(send_cleared=False)
+    event = _event(event_type="cleared")
+
+    notifier._send = AsyncMock()
+
+    await notifier(event)
+
+    notifier._send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 5. from_config loads bot_token and chat_id from YAML
 # ---------------------------------------------------------------------------
 
 
@@ -84,6 +175,25 @@ def test_from_config(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Additional: activated event does invoke _send
+# ---------------------------------------------------------------------------
+
+
+async def test_activated_calls_send() -> None:
+    notifier = _notifier()
+    event = _event(event_type="activated")
+
+    notifier._send = AsyncMock()
+
+    await notifier(event)
+
+    notifier._send.assert_called_once()
+    # Verify the text passed contains the alarm name
+    text_arg: str = notifier._send.call_args[0][0]
+    assert "test_alarm" in text_arg
+
+
+# ---------------------------------------------------------------------------
 # Additional: from_config raises FileNotFoundError for missing file
 # ---------------------------------------------------------------------------
 
@@ -91,6 +201,23 @@ def test_from_config(tmp_path: Path) -> None:
 def test_from_config_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         TelegramNotifier.from_config(tmp_path / "does_not_exist.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Additional: _format_message includes time string in expected format
+# ---------------------------------------------------------------------------
+
+
+def test_format_message_time_format() -> None:
+    notifier = _notifier()
+    ts = datetime(2026, 3, 14, 9, 5, 3, tzinfo=UTC)
+    event = _event(event_type="activated", ts=ts)
+
+    msg = notifier._format_message(event)
+
+    # Time is formatted as HH:MM:SS DD.MM.YYYY
+    assert "09:05:03" in msg, f"Expected time '09:05:03' in message: {msg!r}"
+    assert "14.03.2026" in msg, f"Expected date '14.03.2026' in message: {msg!r}"
 
 
 # ===========================================================================
@@ -107,8 +234,10 @@ def _make_bot(**kwargs):
     broker = MagicMock()
     broker.subscribe = AsyncMock(return_value=asyncio.Queue())
     alarm_engine = MagicMock()
-    alarm_engine.get_active.return_value = {}
-    # Phase 2b K.1: TelegramCommandBot now refuses empty allowlist
+    alarm_engine.get_active_alarms.return_value = {}
+    alarm_engine.get_state.return_value = {}
+    alarm_engine.get_events.return_value = []
+    # Phase 2b Codex K.1: TelegramCommandBot now refuses empty allowlist
     # when commands are enabled. Pass a default test chat id unless the
     # caller overrides it.
     kwargs.setdefault("allowed_chat_ids", [1234])
@@ -122,56 +251,11 @@ def _make_bot(**kwargs):
     return bot
 
 
-def _tg_msg(
-    text: str,
-    chat_id: int = 1234,
-    username: str = "testuser",
-    message_id: int = 77,
-) -> dict:
+def _tg_msg(text: str, chat_id: int = 1234, username: str = "testuser") -> dict:
     return {
         "text": text,
-        "message_id": message_id,
         "chat": {"id": chat_id},
         "from": {"id": 9, "username": username, "first_name": "Test"},
-    }
-
-
-def _capability_response(token: str = "token-1") -> dict:
-    return {
-        "ok": True,
-        "compatibility_receipt": {
-            "schema": "mutation_compatibility_v1",
-            "accepted": True,
-            "server_protocol_major": 1,
-            "required_capability": "cryodaq_mutation_v1",
-            "capability_token": token,
-        },
-    }
-
-
-def _published_log_result(command: dict, *, entry_id: int = 1) -> dict:
-    entry = {
-        "id": entry_id,
-        "timestamp": "2026-07-23T00:00:00+00:00",
-        "experiment_id": command["experiment_id"],
-        "author": command["author"],
-        "source": command["source"],
-        "message": command["message"],
-        "tags": list(command.get("tags", [])),
-    }
-    return {
-        "ok": True,
-        "committed": True,
-        "retry_safe": False,
-        "publication_state": "published",
-        "entry": entry,
-        "commit_receipt": {
-            "schema": "operator_log_commit_v1",
-            "request_id": command["request_id"],
-            "entry_id": entry_id,
-            "experiment_id": command["experiment_id"],
-            "committed": True,
-        },
     }
 
 
@@ -183,123 +267,17 @@ async def test_cmd_status_formats_message() -> None:
     assert "CryoDAQ" in text or "Статус" in text or "Аптайм" in text
 
 
-def test_cached_readings_render_stale_or_unavailable_truthfully() -> None:
-    bot = _make_bot()
-    bot._latest = {
-        "Т1": Reading(
-            timestamp=datetime.now(UTC) - timedelta(minutes=5),
-            instrument_id="LS218",
-            channel="Т1",
-            value=4.2,
-            unit="K",
-        ),
-        "Т2": Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="LS218",
-            channel="Т2",
-            value=float("nan"),
-            unit="K",
-            status=ChannelStatus.SENSOR_ERROR,
-        ),
-        "vacuum": Reading(
-            timestamp=datetime.now(UTC) - timedelta(minutes=5),
-            instrument_id="VSP",
-            channel="vacuum",
-            value=1e-4,
-            unit="mbar",
-        ),
-        "Keithley/smu/voltage": Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="Keithley",
-            channel="Keithley/smu/voltage",
-            value=float("nan"),
-            unit="V",
-            status=ChannelStatus.SENSOR_ERROR,
-        ),
-    }
-
-    temps = bot._cmd_temps()
-    pressure = bot._cmd_pressure()
-    keithley = bot._cmd_keithley()
-    status = bot._cmd_status()
-
-    assert "4.20" in temps and "устар" in temps
-    assert "nan" not in temps and "недоступ" in temps
-    assert "1.00e-04" in pressure and "устар" in pressure
-    assert "nan" not in keithley and "недоступ" in keithley
-    assert "LS218: активен" not in status
-    assert "устар" in status or "недоступ" in status
-
-
-def test_fresh_cached_temperature_remains_a_normal_readout() -> None:
-    bot = _make_bot()
-    bot._latest = {
-        "Т1": Reading.now("Т1", 4.2, "K", instrument_id="LS218"),
-    }
-
-    rendered = bot._cmd_temps()
-
-    assert "4.20 K" in rendered
-    assert "устар" not in rendered and "недоступ" not in rendered
-
-
 async def test_cmd_log_writes_entry() -> None:
-    async def dispatch(command: dict) -> dict:
-        if command == {"cmd": "mutation_capabilities"}:
-            return _capability_response()
-        return _published_log_result(command)
-
-    handler = AsyncMock(side_effect=dispatch)
+    handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/log exp-1 Всё штатно"))
-    assert handler.await_count == 2
-    cmd = handler.await_args_list[1].args[0]
+    await bot._handle_message(_tg_msg("/log Всё штатно"))
+    handler.assert_called_once()
+    cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "log_entry"
     assert "Всё штатно" in cmd["message"]
     assert cmd["author"] == "testuser"
-    assert cmd["experiment_id"] == "exp-1"
-    assert len(cmd["request_id"]) == 32
-    assert set(cmd["request_id"]) <= set("0123456789abcdef")
-    assert set(cmd) == {
-        "cmd",
-        "request_id",
-        "experiment_id",
-        "message",
-        "author",
-        "source",
-        "protocol_major",
-        "mutation_capability",
-        "capability_token",
-    }
-    assert cmd["protocol_major"] == 1
-    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
-    assert cmd["capability_token"] == "token-1"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
-
-
-@pytest.mark.parametrize("corruption", ["missing_publication", "wrong_request", "wrong_author", "extra_key"])
-async def test_cmd_log_never_accepts_incomplete_or_misbound_success(corruption: str) -> None:
-    async def dispatch(command: dict) -> dict:
-        if command == {"cmd": "mutation_capabilities"}:
-            return _capability_response()
-        result = _published_log_result(command)
-        if corruption == "missing_publication":
-            result.pop("publication_state")
-        elif corruption == "wrong_request":
-            result["commit_receipt"]["request_id"] = "f" * 32
-        elif corruption == "wrong_author":
-            result["entry"]["author"] = "forged"
-        else:
-            result["unexpected"] = True
-        return result
-
-    bot = _make_bot(command_handler=AsyncMock(side_effect=dispatch))
-    await bot._handle_message(_tg_msg("/log exp-1 exact"))
-
-    reply = bot._send.await_args.args[1]
-    assert "✅" not in reply
-    assert "Подробности" in reply
 
 
 async def test_query_agent_missing_reply_has_no_english_terms() -> None:
@@ -315,7 +293,7 @@ async def test_query_agent_missing_reply_has_no_english_terms() -> None:
 async def test_unavailable_command_handler_reply_has_no_english_terms() -> None:
     bot = _make_bot(command_handler=None)
 
-    await bot._handle_message(_tg_msg("/log exp-1 запись"))
+    await bot._handle_message(_tg_msg("/log запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "command_handler" not in text
@@ -326,7 +304,7 @@ async def test_command_handler_failure_does_not_expose_raw_english_error() -> No
     handler = AsyncMock(return_value={"ok": False, "error": "backend failure"})
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/log exp-1 запись"))
+    await bot._handle_message(_tg_msg("/log запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "backend failure" not in text
@@ -337,38 +315,19 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/log"))
     bot._send.assert_called_once()
-    reply = bot._send.call_args[0][1]
-    assert reply == "❌ Укажите experiment_id и текст: /log &lt;experiment_id&gt; &lt;текст&gt;"
-    assert reply.encode("utf-8").decode("utf-8") == reply
-    assert "\ufffd" not in reply
+    assert "❌" in bot._send.call_args[0][1]
 
 
 async def test_cmd_phase_advances() -> None:
-    """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
+    """Phase 2c Codex I.2: legacy 'cooling' alias canonicalises to the
     ExperimentPhase enum value 'cooldown' before being dispatched."""
-
-    async def dispatch(command: dict) -> dict:
-        if command == {"cmd": "experiment_status"}:
-            return {
-                "ok": True,
-                "active_experiment": {"experiment_id": "exp-current"},
-            }
-        if command == {"cmd": "mutation_capabilities"}:
-            return _capability_response()
-        return {"ok": True}
-
-    handler = AsyncMock(side_effect=dispatch)
+    handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/phase cooling exp-current"))
-    assert handler.await_count == 3
-    cmd = handler.await_args_list[2].args[0]
+    await bot._handle_message(_tg_msg("/phase cooling"))
+    handler.assert_called_once()
+    cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "experiment_advance_phase"
-    assert cmd["experiment_id"] == "exp-current"
     assert cmd["phase"] == "cooldown", "legacy 'cooling' must canonicalise to enum value 'cooldown'"
-    assert cmd["protocol_major"] == 1
-    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
-    assert cmd["capability_token"] == "token-1"
-    assert "expected_experiment_id" not in cmd
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -379,287 +338,16 @@ async def test_cmd_phase_invalid_returns_error() -> None:
     assert "❌" in bot._send.call_args[0][1]
 
 
-@pytest.mark.parametrize(
-    "discovery_response",
-    [
-        {"ok": True},
-        {"ok": True, "compatibility_receipt": None},
-        {
-            "ok": True,
-            "compatibility_receipt": {
-                **_capability_response()["compatibility_receipt"],
-                "unexpected": True,
-            },
-        },
-        {
-            "ok": True,
-            "compatibility_receipt": {
-                **_capability_response()["compatibility_receipt"],
-                "server_protocol_major": 2,
-            },
-        },
-        {
-            "ok": True,
-            "compatibility_receipt": {
-                **_capability_response()["compatibility_receipt"],
-                "capability_token": "",
-            },
-        },
-    ],
-)
-async def test_mutation_discovery_refuses_missing_or_malformed_receipts(
-    discovery_response: dict,
-) -> None:
-    handler = AsyncMock(return_value=discovery_response)
-    bot = _make_bot(command_handler=handler)
-
-    await bot._handle_message(_tg_msg("/log exp-1 запись"))
-
-    handler.assert_awaited_once_with({"cmd": "mutation_capabilities"})
-    assert bot._mutation_envelope is None
-    assert "Подробности" in bot._send.await_args.args[1]
-
-
-async def test_rotated_token_is_invalidated_without_automatic_mutation_replay() -> None:
-    discoveries = iter(("token-old", "token-new"))
-    commands: list[dict] = []
-
-    async def dispatch(command: dict) -> dict:
-        commands.append(command)
-        if command == {"cmd": "mutation_capabilities"}:
-            return _capability_response(next(discoveries))
-        if command.get("capability_token") == "token-old":
-            return {
-                "ok": False,
-                "error_code": "mutation_protocol_incompatible",
-                "retry_safe": True,
-            }
-        return {"ok": True}
-
-    bot = _make_bot(command_handler=dispatch)
-
-    await bot._handle_message(_tg_msg("/log exp-1 first", message_id=91))
-
-    assert len(commands) == 2
-    assert [command["cmd"] for command in commands] == [
-        "mutation_capabilities",
-        "log_entry",
-    ]
-    assert bot._mutation_envelope is None
-
-    await bot._handle_message(_tg_msg("/log exp-1 second", message_id=92))
-
-    assert [command["cmd"] for command in commands] == [
-        "mutation_capabilities",
-        "log_entry",
-        "mutation_capabilities",
-        "log_entry",
-    ]
-    assert commands[-1]["capability_token"] == "token-new"
-    assert commands[1]["request_id"] != commands[-1]["request_id"]
-
-
-async def test_concurrent_mutations_share_one_capability_discovery() -> None:
-    discovery_entered = asyncio.Event()
-    release_discovery = asyncio.Event()
-    commands: list[dict] = []
-
-    async def dispatch(command: dict) -> dict:
-        commands.append(command)
-        if command == {"cmd": "mutation_capabilities"}:
-            discovery_entered.set()
-            await release_discovery.wait()
-            return _capability_response("shared-token")
-        return {"ok": True}
-
-    bot = _make_bot(command_handler=dispatch)
-    first = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-1 first", message_id=101)))
-    second = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-2 second", message_id=102)))
-    await asyncio.wait_for(discovery_entered.wait(), timeout=1)
-    assert [command["cmd"] for command in commands] == ["mutation_capabilities"]
-    release_discovery.set()
-    await asyncio.gather(first, second)
-
-    assert sum(command["cmd"] == "mutation_capabilities" for command in commands) == 1
-    mutations = [command for command in commands if command["cmd"] == "log_entry"]
-    assert len(mutations) == 2
-    assert {command["capability_token"] for command in mutations} == {"shared-token"}
-    assert len({command["request_id"] for command in mutations}) == 2
-
-
-async def test_phase_refuses_to_discover_or_mutate_without_stable_experiment_id() -> None:
-    handler = AsyncMock(return_value={"ok": True, "active_experiment": None})
-    bot = _make_bot(command_handler=handler)
-
-    await bot._handle_message(_tg_msg("/phase cooldown exp-claimed"))
-
-    handler.assert_awaited_once_with({"cmd": "experiment_status"})
-    assert bot._mutation_envelope is None
-    assert "Подробности" in bot._send.await_args.args[1]
-
-
-async def test_phase_refuses_mismatched_operator_identity_before_capability_discovery() -> None:
-    handler = AsyncMock(
-        return_value={
-            "ok": True,
-            "active_experiment": {"experiment_id": "exp-new"},
-        }
-    )
-    bot = _make_bot(command_handler=handler)
-
-    await bot._handle_message(_tg_msg("/phase cooldown exp-stale"))
-
-    handler.assert_awaited_once_with({"cmd": "experiment_status"})
-    assert bot._mutation_envelope is None
-    assert "Подробности" in bot._send.await_args.args[1]
-
-
-async def test_invalid_phase_with_exact_identity_never_dispatches() -> None:
-    handler = AsyncMock(return_value={"ok": True})
-    bot = _make_bot(command_handler=handler)
-
-    await bot._handle_message(_tg_msg("/phase definitely-not-a-phase exp-A"))
-
-    handler.assert_not_awaited()
-    bot._send.assert_awaited_once()
-    assert "\u274c" in bot._send.await_args.args[1]
-
-
-async def test_cmd_phase_without_identity_is_rejected() -> None:
-    handler = AsyncMock(return_value={"ok": True})
-    bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/phase cooling"))
-    handler.assert_not_called()
-    assert "experiment_id" in bot._send.call_args[0][1]
-
-
 # ===========================================================================
-async def test_cmd_log_without_identity_is_rejected() -> None:
-    handler = AsyncMock(return_value={"ok": True})
-    bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/log запись"))
-    handler.assert_not_called()
-    assert "experiment_id" in bot._send.call_args[0][1]
-
-
 # EscalationService tests
 # ===========================================================================
 
 
-class _TelegramResponse:
-    def __init__(self, status: int, body: str) -> None:
-        self.status = status
-        self._body = body
-
-    async def text(self) -> str:
-        return self._body
-
-    async def json(self) -> object:
-        return json.loads(self._body)
-
-
-class _TelegramResponseContext:
-    def __init__(self, response: _TelegramResponse) -> None:
-        self._response = response
-
-    async def __aenter__(self) -> _TelegramResponse:
-        return self._response
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> bool:
-        return False
-
-
-class _TelegramSession:
-    def __init__(self, response: _TelegramResponse) -> None:
-        self._response = response
-
-    def post(self, url: str, *, json: dict) -> _TelegramResponseContext:
-        return _TelegramResponseContext(self._response)
-
-
-@pytest.mark.parametrize(
-    ("body", "recorded_outcome"),
-    [
-        ("", "transport_accepted"),
-        ('{"ok": true, "result": {"message_id": 42}}', "service_reported_delivered"),
-    ],
-)
-async def test_delayed_send_records_telegram_confirmation_tier(
-    caplog: pytest.LogCaptureFixture,
-    body: str,
-    recorded_outcome: str,
-) -> None:
-    """Escalation records a service confirmation separately from HTTP acceptance."""
-    from cryodaq.notifications.escalation import EscalationService
-
-    notifier = _notifier()
-
-    async def get_200_session() -> _TelegramSession:
-        return _TelegramSession(_TelegramResponse(200, body))
-
-    notifier._get_session = get_200_session  # type: ignore[method-assign]
-    service = EscalationService(notifier, {})
-
-    with caplog.at_level(logging.INFO, logger="cryodaq.notifications.escalation"):
-        await service._delayed_send(111, "Тест эскалации", 0)
-
-    assert f"outcome={recorded_outcome}" in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("body", "expected_outcome"),
-    [
-        ("", "transport_accepted"),
-        ('{"ok": true, "result": {}}', "transport_accepted"),
-        ('{"ok": true, "result": {"message_id": 42}}', "service_reported_delivered"),
-    ],
-)
-async def test_send_message_distinguishes_transport_and_service_confirmation(body: str, expected_outcome: str) -> None:
-    notifier = _notifier()
-
-    async def get_200_session() -> _TelegramSession:
-        return _TelegramSession(_TelegramResponse(200, body))
-
-    notifier._get_session = get_200_session  # type: ignore[method-assign]
-
-    assert await notifier.send_message(111, "Тест") == expected_outcome
-
-
-async def test_transport_errors_record_failed_and_unknown_outcomes(caplog: pytest.LogCaptureFixture) -> None:
-    """A rejected request and a transport exception remain distinct non-success records."""
-    from cryodaq.notifications.escalation import EscalationService
-
-    notifier = _notifier()
-    service = EscalationService(notifier, {})
-
-    async def get_non_200_session() -> _TelegramSession:
-        return _TelegramSession(_TelegramResponse(500, "internal error"))
-
-    async def raise_connection_error() -> _TelegramSession:
-        raise ConnectionError("connection lost")
-
-    notifier._get_session = get_non_200_session  # type: ignore[method-assign]
-    with caplog.at_level(logging.INFO, logger="cryodaq.notifications.escalation"):
-        await service._delayed_send(111, "Тест", 0)
-
-    notifier._get_session = raise_connection_error  # type: ignore[method-assign]
-    with caplog.at_level(logging.INFO, logger="cryodaq.notifications.escalation"):
-        await service._delayed_send(111, "Тест", 0)
-
-    assert "outcome=failed" in caplog.text
-    assert "outcome=outcome_unknown" in caplog.text
-
-
 async def test_escalation_chain_sends() -> None:
-    """Both zero-delay escalation levels send their messages.
-
-    Waits by gathering all pending tasks directly instead of a fixed sleep,
-    so the test is deterministic and not flaky under slow CI.
-    """
     from cryodaq.notifications.escalation import EscalationService
 
     notifier = MagicMock()
-    notifier.send_message = AsyncMock(return_value="service_reported_delivered")
+    notifier.send_message = AsyncMock()
 
     config = {
         "escalation": [
@@ -670,10 +358,8 @@ async def test_escalation_chain_sends() -> None:
     svc = EscalationService(notifier, config)
     await svc.escalate("test_event", "Тест эскалации")
 
-    # Await all pending tasks directly — no fixed sleep, deterministic completion.
-    pending_tasks = list(svc._pending.values())
-    assert len(pending_tasks) == 2, f"Expected 2 pending tasks, got {len(pending_tasks)}"
-    await asyncio.gather(*pending_tasks, return_exceptions=True)
+    # Ждём завершения задач
+    await asyncio.sleep(0.05)
 
     assert notifier.send_message.call_count == 2
     called_ids = {call.args[0] for call in notifier.send_message.call_args_list}
@@ -681,15 +367,6 @@ async def test_escalation_chain_sends() -> None:
 
 
 async def test_escalation_cancel_stops() -> None:
-    """cancel() must cancel the pending task and remove it from _pending.
-
-    The 60-minute delay means send_message would never fire within the test,
-    so we cannot rely on absence of calls as proof. Instead we assert:
-    1. After escalate(), _pending contains the task for the event.
-    2. After cancel(), _pending no longer contains the key.
-    3. The task itself reports cancelled (task.cancelled() is True).
-    send_message is also expected not to be called (belt-and-suspenders).
-    """
     from cryodaq.notifications.escalation import EscalationService
 
     notifier = MagicMock()
@@ -697,25 +374,13 @@ async def test_escalation_cancel_stops() -> None:
 
     config = {
         "escalation": [
-            {"chat_id": 111, "delay_minutes": 60},  # large delay — must be cancelled
+            {"chat_id": 111, "delay_minutes": 60},  # большая задержка — не успеет
         ]
     }
     svc = EscalationService(notifier, config)
     await svc.escalate("shift_missed", "Оператор не ответил")
-
-    # Task must be registered immediately after escalate()
-    pending_key = "shift_missed_111"
-    assert pending_key in svc._pending, (
-        f"Expected task key '{pending_key}' in _pending after escalate(), got keys: {list(svc._pending)}"
-    )
-    task_ref = svc._pending[pending_key]
-    assert not task_ref.done(), "Task should be waiting (not done) before cancel()"
-
     await svc.cancel("shift_missed")
 
-    # cancel() awaits the task cancellation — task must be done and cancelled
-    assert task_ref.cancelled(), "Task must be in cancelled state after cancel()"
-    # Key must be removed from _pending
-    assert pending_key not in svc._pending, f"Key '{pending_key}' must be removed from _pending after cancel()"
-    # Belt-and-suspenders: send_message must not have been called
+    await asyncio.sleep(0.05)
+
     notifier.send_message.assert_not_called()

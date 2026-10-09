@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
-from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability
+from cryodaq.drivers.capability_metadata import INSTRUMENT_DRIVER_METADATA, DriverAuthority, DriverCapability
 
 MAX_IDENTITY_CHARS: Final = 64
 MAX_DISPLAY_NAME_CHARS: Final = 128
@@ -95,9 +95,9 @@ class ProfileInstrument:
     def __post_init__(self) -> None:
         if type(self.type_name) is not str:
             raise LabProfileError("instrument type must be an exact string")
-        spec = BUILTIN_DRIVER_METADATA.get(self.type_name)
+        spec = INSTRUMENT_DRIVER_METADATA.get(self.type_name)
         if spec is None:
-            known = ", ".join(sorted(BUILTIN_DRIVER_METADATA))
+            known = ", ".join(sorted(INSTRUMENT_DRIVER_METADATA))
             raise LabProfileError(
                 f"unknown instrument type {self.type_name!r}: the driver registry is a closed allowlist "
                 f"(known types: {known}); a lab profile cannot declare an unregistered driver"
@@ -159,9 +159,9 @@ class LabCapabilities:
         expected_capabilities: set[DriverCapability] = set()
         expected_trust: set[DriverAuthority] = set()
         for type_name in self.instrument_types:
-            spec = BUILTIN_DRIVER_METADATA.get(type_name)
+            spec = INSTRUMENT_DRIVER_METADATA.get(type_name)
             if spec is None:
-                known = ", ".join(sorted(BUILTIN_DRIVER_METADATA))
+                known = ", ".join(sorted(INSTRUMENT_DRIVER_METADATA))
                 raise LabProfileError(
                     f"unknown instrument type {type_name!r}: the driver registry is a closed allowlist "
                     f"(known types: {known}); a lab profile cannot declare an unregistered driver"
@@ -176,7 +176,7 @@ class LabCapabilities:
             )
         if set(self.capabilities) != expected_capabilities or set(self.trust_classes) != expected_trust:
             raise LabProfileError(
-                "LabCapabilities values must equal the union derived from BUILTIN_DRIVER_METADATA "
+                "LabCapabilities values must equal the union derived from INSTRUMENT_DRIVER_METADATA "
                 "for the declared instrument types; construct one via derive_capabilities"
             )
 

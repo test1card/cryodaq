@@ -4,19 +4,17 @@
 # Любые правки должны быть согласованы с ответственным инженером.
 
 # Каналы, обязательные для разрешения работы нагревателя.
-# Exact canonical descriptor identities. If one stops updating for
-# stale_timeout_s, the safety manager faults.
+# Regex — если канал не обновляется в течение stale_timeout_s → FAULT.
 #
-# Правило конфигурации (2026-05-07): safety FSM используют только объявленные
-# reference-каналы T11 (азотная/1-я ступень, ~40K floor) и T12
-# (холодная/2-я ступень, холодная точка, ~3K floor). Их физическое крепление,
-# соответствие этим ролям и калибровка пока не подтверждены; gate —
-# docs/lab_verification_checklist.md. Другие T-каналы считаются
-# mobile per-experiment; использование их как critical_channels создаёт
-# ложные fault'ы при перестановке датчиков.
+# Architect rule (2026-05-07): только positionally-fixed reference
+# каналы gate the safety FSM. T11 (1-я ступень, ~40K floor) и T12
+# (2-я ступень, холодная точка, ~3K floor) — единственные каналы,
+# физически закреплённые между экспериментами. Другие T-каналы —
+# mobile per-experiment, использование их как critical_channels
+# создаёт ложные fault'ы при перестановке датчиков.
 critical_channels:
-  - "Т11"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)
-  - "Т12"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)
+  - "Т11 .*"    # 1-я ступень GM-cooler (positionally fixed)
+  - "Т12 .*"    # 2-я ступень, холодная точка (positionally fixed)
 
 # Через сколько секунд без обновления критический канал считается устаревшим
 stale_timeout_s: 10.0
@@ -49,23 +47,6 @@ source_limits:
 # Регулярные выражения для определения каналов Keithley (heartbeat check)
 keithley_channels:
   - ".*/smu.*"
-
-# Canonical descriptor identities accepted as heartbeat evidence for each
-# hazardous output. Startup resolves these through the selected descriptor
-# authority to exact (instrument_id, emitted_channel) pairs owned by the
-# reviewed source runtime binding. Runtime code never infers an output from
-# channel spelling.
-keithley_heartbeat_channels:
-  smua:
-    - "Keithley_1/smua/voltage"
-    - "Keithley_1/smua/current"
-    - "Keithley_1/smua/resistance"
-    - "Keithley_1/smua/power"
-  smub:
-    - "Keithley_1/smub/voltage"
-    - "Keithley_1/smub/current"
-    - "Keithley_1/smub/resistance"
-    - "Keithley_1/smub/power"
 
 # Graceful shutdown drain timeout (seconds) before forced cancellation.
 # Scheduler waits this long for in-flight polls to complete persist+publish.

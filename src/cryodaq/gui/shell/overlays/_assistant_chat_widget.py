@@ -118,7 +118,9 @@ class AssistantChatPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("assistantChatPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"#assistantChatPanel {{ background-color: {theme.BACKGROUND}; }}")
+        self.setStyleSheet(
+            f"#assistantChatPanel {{ background-color: {theme.BACKGROUND}; }}"
+        )
 
         # Retain refs so ZmqCommandWorker QThreads don't get GC'd mid-flight
         # while a reply is still pending.
@@ -144,7 +146,9 @@ class AssistantChatPanel(QWidget):
         title_font.setPixelSize(theme.FONT_SIZE_XL)
         title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         header.setFont(title_font)
-        header.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        header.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+        )
         root.addWidget(header)
 
         # Bubble timeline (scroll area)
@@ -225,10 +229,7 @@ class AssistantChatPanel(QWidget):
         )
         self._inflight = worker
         self._workers.append(worker)
-        # Bind the exact owner at connection time.  QObject.sender() is not a
-        # stable ownership primitive across direct/queued delivery or test
-        # event-loop boundaries, and a lost sender retains the QThread.
-        worker.finished.connect(lambda result, owner=worker: self._on_response(result, owner))
+        worker.finished.connect(self._on_response)
         worker.start()
 
     def set_busy(self, busy: bool) -> None:
@@ -263,11 +264,7 @@ class AssistantChatPanel(QWidget):
             scrollbar.setValue(scrollbar.maximum())
 
     @Slot(dict)
-    def _on_response(
-        self,
-        result: dict,
-        owner: ZmqCommandWorker | None = None,
-    ) -> None:
+    def _on_response(self, result: dict) -> None:
         try:
             ok = bool(result.get("ok"))
             if ok:
@@ -280,9 +277,9 @@ class AssistantChatPanel(QWidget):
                 self.response_received.emit(err, True)
         finally:
             # Drop the inflight worker reference so the next send is allowed.
-            sender = owner if owner is not None else self.sender()
-            if sender in self._workers:
-                # v0.55.15 (audit SCOPE 5 finding 5.4) — actually
+            sender = self.sender()
+            if isinstance(sender, ZmqCommandWorker) and sender in self._workers:
+                # v0.55.15 (Codex audit SCOPE 5 finding 5.4) — actually
                 # remove the QThread from the retention list. The previous
                 # comment claimed cleanup but only called wait(0) (a no-op
                 # zero-timeout join), so workers grew unbounded across an

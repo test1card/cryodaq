@@ -43,7 +43,9 @@ async def _poll_until(cond, interval: float = 0.005) -> None:
 
 
 def _write_mgr(**channels: dict) -> ChannelManager:
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
     yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
@@ -64,21 +66,38 @@ def _make_reading(channel: str, value: float = 4.5, unit: str = "K") -> MagicMoc
 
 
 async def test_broker_snapshot_oldest_age_s_returns_none_when_empty() -> None:
-    snap = BrokerSnapshot()
+    broker = MagicMock()
+    broker.subscribe = AsyncMock()
+    snap = BrokerSnapshot(broker)
     assert await snap.oldest_age_s() is None
 
 
 async def test_broker_snapshot_oldest_age_s_returns_float_when_populated() -> None:
-    # B1: BrokerSnapshot now subscribes over ZMQ instead of an in-process
-    # DataBroker — feed the reading straight into the internal callback
-    # instead of a fake broker queue + .start().
+    broker = MagicMock()
+    queue: asyncio.Queue = asyncio.Queue()
+    broker.subscribe = AsyncMock(return_value=queue)
+    broker.unsubscribe = AsyncMock()
+
     reading = _make_reading("Т1", 4.5)
-    snap = BrokerSnapshot()
-    await snap._on_reading(reading)
+    queue.put_nowait(reading)
+
+    snap = BrokerSnapshot(broker)
+    await snap.start()
+
+    # Poll until the consume loop drains the queue — avoids the fixed sleep
+    # race where a slow CI machine may not have processed the item in time.
+    async def _age_ready() -> bool:
+        return await snap.oldest_age_s() is not None
+
+    await asyncio.wait_for(
+        _poll_until(_age_ready),
+        timeout=2.0,
+    )
 
     age = await snap.oldest_age_s()
     assert age is not None
     assert 0 <= age < 5.0
+    await snap.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -87,33 +106,57 @@ async def test_broker_snapshot_oldest_age_s_returns_float_when_populated() -> No
 
 
 def test_broker_snapshot_display_name_no_manager() -> None:
-    snap = BrokerSnapshot()
+    broker = MagicMock()
+    broker.subscribe = AsyncMock()
+    snap = BrokerSnapshot(broker)
     assert snap.display_name("Т7") == "Т7"
 
 
 def test_broker_snapshot_display_name_uses_channel_manager() -> None:
+    broker = MagicMock()
+    broker.subscribe = AsyncMock()
     mgr = _write_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
-    snap = BrokerSnapshot(channel_manager=mgr)
+    snap = BrokerSnapshot(broker, channel_manager=mgr)
     assert snap.display_name("Т7") == "Т7 Детектор"
 
 
 async def test_broker_snapshot_latest_with_labels_empty() -> None:
-    snap = BrokerSnapshot()
+    broker = MagicMock()
+    broker.subscribe = AsyncMock()
+    snap = BrokerSnapshot(broker)
     result = await snap.latest_with_labels()
     assert result == {}
 
 
 async def test_broker_snapshot_latest_with_labels_includes_display_name() -> None:
+    broker = MagicMock()
+    queue: asyncio.Queue = asyncio.Queue()
+    broker.subscribe = AsyncMock(return_value=queue)
+    broker.unsubscribe = AsyncMock()
+
     mgr = _write_mgr(**{"Т7": {"name": "Детектор", "visible": True}})
-    snap = BrokerSnapshot(channel_manager=mgr)
+    snap = BrokerSnapshot(broker, channel_manager=mgr)
+    await snap.start()
 
     reading = _make_reading("Т7", 3.9)
-    await snap._on_reading(reading)
+    queue.put_nowait(reading)
+
+    # Poll until the consume loop processes the reading — avoids the fixed
+    # sleep race on slow CI machines.
+    async def _has_t7() -> bool:
+        return "Т7" in await snap.latest_with_labels()
+
+    await asyncio.wait_for(
+        _poll_until(_has_t7),
+        timeout=2.0,
+    )
 
     result = await snap.latest_with_labels()
     assert "Т7" in result
     assert result["Т7"]["display_name"] == "Т7 Детектор"
     assert result["Т7"]["value"] == 3.9
+
+    await snap.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +223,10 @@ async def test_composite_adapter_snapshot_empty_when_no_data() -> None:
 
 async def test_composite_adapter_snapshot_not_empty_when_has_data() -> None:
     snapshot = MagicMock()
-    snapshot.latest_with_labels = AsyncMock(
-        return_value={
-            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
-        }
-    )
+    snapshot.latest_with_labels = AsyncMock(return_value={
+        "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор",
+               "timestamp": datetime.now(UTC)},
+    })
     snapshot.oldest_age_s = AsyncMock(return_value=2.0)
 
     cooldown = MagicMock()
@@ -210,13 +252,14 @@ async def test_composite_adapter_snapshot_not_empty_when_has_data() -> None:
 
 async def test_composite_adapter_builds_key_temps_from_k_channels() -> None:
     snapshot = MagicMock()
-    snapshot.latest_with_labels = AsyncMock(
-        return_value={
-            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
-            "Т1": {"value": 78.2, "unit": "K", "display_name": "Т1 Криостат верх", "timestamp": datetime.now(UTC)},
-            "P1": {"value": 1e-6, "unit": "mbar", "display_name": "P1", "timestamp": datetime.now(UTC)},
-        }
-    )
+    snapshot.latest_with_labels = AsyncMock(return_value={
+        "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор",
+               "timestamp": datetime.now(UTC)},
+        "Т1": {"value": 78.2, "unit": "K", "display_name": "Т1 Криостат верх",
+               "timestamp": datetime.now(UTC)},
+        "P1": {"value": 1e-6, "unit": "mbar", "display_name": "P1",
+               "timestamp": datetime.now(UTC)},
+    })
     snapshot.oldest_age_s = AsyncMock(return_value=1.0)
 
     cooldown = MagicMock()

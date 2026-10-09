@@ -15,11 +15,21 @@ logic is exercised directly (same rationale as ``_drain_dispatch_tasks`` /
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from cryodaq.core.event_bus import EventBus
-from cryodaq.engine import _dispatch_alarm_notification, _should_dispatch_dead_channel_alarm
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.engine import (
+    _dispatch_alarm_notification,
+    _interlock_dead_channel_handler,
+    _interlock_dead_channel_recovery_handler,
+    _InterlockHandlerContext,
+    _should_dispatch_dead_channel_alarm,
+)
 
 # ---------------------------------------------------------------------------
 # Part (a): _dispatch_alarm_notification
@@ -131,6 +141,51 @@ async def test_dispatch_no_telegram_when_bot_not_configured() -> None:
     assert tasks == set(), "no telegram_bot configured -> no dispatch task created"
 
 
+async def test_running_blind_guard_warning_reports_the_energised_source_truth() -> None:
+    """The production handler must never describe a deliberately running source as inactive."""
+
+    async def record_blind_guard(**_entry: object) -> None:
+        return None
+
+    safety = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=None,
+        mock=True,
+        fault_log_callback=record_blind_guard,
+    )
+    safety._state = SafetyState.RUNNING
+    bus = EventBus()
+    queue = await bus.subscribe("running-blind-guard")
+    context = _InterlockHandlerContext(
+        safety_manager=safety,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent=set(),
+        event_bus=bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="week-long-run"),
+    )
+    condition = SimpleNamespace(name="overheat_zone")
+    reading = Reading.now(
+        "Т5",
+        float("nan"),
+        "K",
+        instrument_id="LS218_1",
+        status=ChannelStatus.SENSOR_ERROR,
+        metadata={
+            "instrument_status_register": "LakeShore 218 RDGST",
+            "instrument_status_fault_reasons": ["sensor_units_over_range"],
+        },
+    )
+
+    settled = await _interlock_dead_channel_handler(condition, reading, context=context)
+
+    event = queue.get_nowait()
+    message = event.payload["message"]
+    assert settled is True, "a durably recorded advisory must settle its poll episode"
+    assert "RUNNING" in message
+    assert "продолжает работать" in message
+    assert "источник неактивен" not in message
+
+
 # ---------------------------------------------------------------------------
 # Part (b): _should_dispatch_dead_channel_alarm debounce gate
 # ---------------------------------------------------------------------------
@@ -177,6 +232,37 @@ def test_channels_are_independent() -> None:
     assert _should_dispatch_dead_channel_alarm("a", False, sent) is True
     assert _should_dispatch_dead_channel_alarm("b", False, sent) is True
     assert sent == {"a", "b"}
+
+
+def test_usable_recovery_rearms_idle_dead_channel_alarm_episode() -> None:
+    class SafetyProbe:
+        def __init__(self) -> None:
+            self.recovered: list[tuple[str, str]] = []
+
+        def on_interlock_channel_recovered(self, condition_name: str, channel: str) -> None:
+            self.recovered.append((condition_name, channel))
+
+    class Condition:
+        name = "overheat_cryostat"
+
+    class Reading:
+        channel = "LS218_1/T1"
+
+    key = f"{Condition.name}:{Reading.channel}"
+    sibling_key = f"detector_warmup:{Reading.channel}"
+    safety = SafetyProbe()
+    context = _InterlockHandlerContext(
+        safety_manager=safety,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent={key, sibling_key},
+    )
+
+    _interlock_dead_channel_recovery_handler(Condition(), Reading(), context=context)
+
+    assert safety.recovered == [(Condition.name, Reading.channel)]
+    assert context.dead_channel_alarm_sent == set()
+    assert _should_dispatch_dead_channel_alarm(key, False, context.dead_channel_alarm_sent) is True
+    assert _should_dispatch_dead_channel_alarm(sibling_key, False, context.dead_channel_alarm_sent) is True
 
 
 if __name__ == "__main__":

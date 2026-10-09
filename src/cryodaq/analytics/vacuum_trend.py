@@ -91,10 +91,7 @@ def _compute_bic(n: int, k: int, residuals: np.ndarray) -> float:
     ss = float(np.sum(residuals**2))
     sigma_sq = ss / n
     if sigma_sq <= 0:
-        # Perfect fit (residuals ≈ 0): clamp to a large finite floor instead of
-        # -inf so the +k*ln(n) complexity penalty still discriminates models and
-        # an overfit high-param fit cannot auto-win selection (min over BIC).
-        return -1e9 + k * math.log(n)
+        return float("-inf")
     return n * math.log(sigma_sq) + k * math.log(n)
 
 
@@ -132,18 +129,8 @@ class VacuumTrendPredictor:
         self._last_update_ts: float = 0.0
 
     def push(self, timestamp: float, pressure_mbar: float) -> None:
-        """Add a pressure reading. Rejects P <= 0 (log₁₀ undefined) and
-        non-finite values (NaN/inf).
-
-        NaN-доктрина: validity is decided at the Reading boundary (engine
-        _vacuum_trend_feed gates on reading.is_usable()). push() is a
-        status-less float API, so both guards stay locally: `P <= 0` is the
-        MORE-restrictive log₁₀ DOMAIN guard (stays regardless of doctrine);
-        the finite check is fail-closed defense-in-depth for any caller that
-        bypasses the boundary — a NaN would pass the `<= 0` guard (NaN
-        comparisons are False), then log10(NaN) poisons the buffer and kills
-        predictions until it ages out (ME-14 / D-C14)."""
-        if not math.isfinite(pressure_mbar) or pressure_mbar <= 0:
+        """Add a pressure reading. Rejects P <= 0 (log₁₀ undefined)."""
+        if pressure_mbar <= 0:
             return
         log_p = math.log10(pressure_mbar)
         self._buffer.append((timestamp, log_p))
@@ -443,24 +430,11 @@ class VacuumTrendPredictor:
         else:
             d_logP_dt = 0.0
 
-        # Rising: sustained positive rate.
-        #
-        # D-C13: the sustained check must not be defeated by sample rate. The
-        # recent n_rate-point window is capped at 30 points, so at high sample
-        # rates it spans far less than rising_sustained_s (e.g. 30 pts @ 10 Hz
-        # ≈ 3 s ≪ 60 s), making "rising" unreachable. Confirm the rise is
-        # genuinely sustained by measuring the rate over a time-based lookback
-        # of rising_sustained_s (independent of the recent rate window used for
-        # the other branches, which is left unchanged).
+        # Rising: sustained positive rate
         if d_logP_dt > self.trend_threshold:
-            cutoff = float(t[-1]) - self.rising_sustained_s
-            idx = int(np.searchsorted(t, cutoff, side="left"))
-            span = float(t[-1] - t[idx])
-            # 0.99 tolerance absorbs sampling granularity at the window edge.
-            if idx < n - 1 and span >= self.rising_sustained_s * 0.99:
-                sustained_rate = float(logP[-1] - logP[idx]) / span
-                if sustained_rate > self.trend_threshold:
-                    return "rising"
+            span = float(t[-1] - t[-n_rate])
+            if span >= self.rising_sustained_s:
+                return "rising"
 
         # Anomaly: recent residuals >> baseline σ (sudden deviation from model)
         # Only check when NOT in a sustained rising trend.

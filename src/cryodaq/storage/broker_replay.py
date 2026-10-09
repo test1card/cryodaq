@@ -501,7 +501,7 @@ class ReplaySource:
         # query_rows already decoded value per NaN-доктрина — do NOT decode again.
         rows = [
             (_parse_timestamp(ts).timestamp(), inst, channel, value, unit, status)
-            for ts, inst, channel, value, unit, status in full
+            for ts, inst, channel, value, unit, status, *_ in full
         ]
         count = await self._replay_rows(rows, generation=generation)
         logger.info("Воспроизведение архива завершено: %d записей", count)
@@ -525,7 +525,8 @@ class ReplaySource:
         channels: list[str] | None,
     ) -> list[tuple[float, str, float, str, str, str]]:
         """Загрузить строки из readings, отсортированные по timestamp."""
-        conn = sqlite3.connect(str(db_path), timeout=10)
+        # Read-only: SELECT-only code needs no write authority.
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
         try:
             query = "SELECT timestamp, channel, value, unit, status, instrument_id FROM readings"
             conditions: list[str] = []

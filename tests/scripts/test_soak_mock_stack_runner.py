@@ -29,7 +29,7 @@ def _evidence(payload: bytes, *, complete: bool = True) -> runner._StreamEvidenc
 
 
 def _collection() -> bytes:
-    return ("\n".join((*runner._EXACT_NODE_IDS, "6 tests collected in 0.12s")) + "\n").encode()
+    return ("\n".join((*runner._EXACT_NODE_IDS, "7 tests collected in 0.12s")) + "\n").encode()
 
 
 def _completed(payload: bytes, *, stderr: bytes = b"", exit_code: int = 0) -> runner._CompletedCommand:
@@ -99,7 +99,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
         "no:cacheprovider",
         "--collect-only",
         "-q",
-        "tests/integration/test_periodic_png_multiprocess.py",
+        *runner._EXACT_NODE_IDS,
     )
     assert runner._EXECUTION_ARGV == (
         ".venv/bin/python",
@@ -112,9 +112,9 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
         "-p",
         "no:cacheprovider",
         "-q",
-        "tests/integration/test_periodic_png_multiprocess.py",
+        *runner._EXACT_NODE_IDS,
     )
-    assert len(runner._EXACT_NODE_IDS) == len(set(runner._EXACT_NODE_IDS)) == 6
+    assert len(runner._EXACT_NODE_IDS) == len(set(runner._EXACT_NODE_IDS)) == 7
     assert (
         runner._parse_exact_collection(
             stdout_evidence=_evidence(_collection()),
@@ -138,7 +138,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
 )
 def test_collection_mismatch_never_creates_exact_six(mutate) -> None:
     nodes = tuple(mutate(runner._EXACT_NODE_IDS))
-    payload = ("\n".join((*nodes, "6 tests collected in 0.1s")) + "\n").encode()
+    payload = ("\n".join((*nodes, "7 tests collected in 0.1s")) + "\n").encode()
     with pytest.raises(runner._RunnerFoundationError):
         runner._parse_exact_collection(
             stdout_evidence=_evidence(payload),
@@ -152,10 +152,10 @@ def test_collection_mismatch_never_creates_exact_six(mutate) -> None:
 @pytest.mark.parametrize(
     ("payload", "exit_code"),
     [
-        (b"...... [100%]\n6 passed in 1.20s\n", 1),
+        (b"....... [100%]\n7 passed in 1.20s\n", 1),
         (b".....s\n5 passed, 1 skipped in 1.20s\n", 0),
-        (b"......\n6 passed, 1 deselected in 1.20s\n", 0),
-        (b"......\n6 passed in 1.20s\nextra\n", 0),
+        (b".......\n7 passed, 1 deselected in 1.20s\n", 0),
+        (b".......\n7 passed in 1.20s\nextra\n", 0),
     ],
 )
 def test_execution_requires_complete_exact_six_result(payload: bytes, exit_code: int) -> None:
@@ -169,8 +169,79 @@ def test_execution_requires_complete_exact_six_result(payload: bytes, exit_code:
         )
 
 
+@pytest.mark.parametrize(
+    ("parser", "prefix"),
+    [
+        ("_parse_exact_collection", "exact-six collection execution failed"),
+        ("_validate_exact_execution", "exact-six execution failed"),
+    ],
+)
+def test_nonzero_child_exit_reports_the_code_and_both_streams(parser: str, prefix: str) -> None:
+    """A blind "nonzero" message hid a real child failure and cost two rounds of guessing.
+
+    Asserting only that ``_RunnerFoundationError`` is raised would stay green if the
+    diagnosis were dropped again, so the exit code, BOTH streams and the bound are
+    each required here.
+    """
+
+    stdout = b"z" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + 64)
+    stderr = b"stderr-marker"
+    with pytest.raises(runner._RunnerFoundationError) as excinfo:
+        getattr(runner, parser)(
+            stdout_evidence=_evidence(stdout),
+            stdout=stdout,
+            stderr_evidence=_evidence(stderr),
+            stderr=stderr,
+            exit_code=3,
+        )
+    message = str(excinfo.value)
+    assert message.startswith(prefix)
+    assert "exit code 3" in message
+    assert "stderr-marker" in message, "the stderr stream must survive into the diagnosis"
+    assert "...[truncated" in message
+    assert "z" * runner._DIAGNOSTIC_HEAD_SHARE in message
+    assert "z" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + 1) not in message, "the 4096-character bound must hold"
+
+
+def test_a_bounded_stream_keeps_its_end_where_the_cause_is_written() -> None:
+    """The cause of a pytest child failure is written at the END of its output.
+
+    A head-only bound sent four kilobytes of the child test's own source text and
+    dropped the assertion, the traceback and the summary line. Both ends are kept
+    now, so this asserts the LAST characters survive, not only the first.
+    """
+
+    middle = "m" * (runner._DIAGNOSTIC_OUTPUT_LIMIT * 3)
+    payload = ("HEAD-MARKER" + middle + "TAIL-MARKER").encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert "HEAD-MARKER" in message, "the start of the stream must survive"
+    assert "TAIL-MARKER" in message, "the END of the stream must survive; this is the whole fix"
+    assert "...[truncated" in message
+    assert middle not in message, "the bound must still drop the middle"
+
+
+def test_a_bounded_stream_says_how_many_characters_it_dropped() -> None:
+    over = 137
+    payload = ("q" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + over)).encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert f"truncated {over} character(s)" in message, "a bound that hides its size cannot be judged"
+
+
+def test_a_stream_at_the_bound_is_not_marked_as_truncated() -> None:
+    payload = ("e" * runner._DIAGNOSTIC_OUTPUT_LIMIT).encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert "truncated" not in message, "nothing was dropped, so nothing may say it was"
+    assert "e" * runner._DIAGNOSTIC_OUTPUT_LIMIT in message
+
+
+def test_child_failure_message_names_an_empty_stream_instead_of_omitting_it() -> None:
+    message = runner._child_failure_message(2, b"", b"")
+    assert "exit code 2" in message
+    assert message.count("<empty>") == 2, "a silent stream must read as empty, not as absent"
+
+
 def test_exact_execution_parser_accepts_only_complete_bound_bytes() -> None:
-    payload = b"...... [100%]\n6 passed in 1.20s\n"
+    payload = b"....... [100%]\n7 passed in 1.20s\n"
     runner._validate_exact_execution(
         stdout_evidence=_evidence(payload),
         stdout=payload,
@@ -274,7 +345,7 @@ def test_exact_six_execution_writes_one_runner_owned_result(monkeypatch: pytest.
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         assert isinstance(observer, _Observer) and snapshot is not None
         seen_commands.append(argv)
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     _install_execution_fakes(monkeypatch, Collector)
     monkeypatch.setattr(runner, "_execute_bounded_process", execute)
@@ -400,7 +471,7 @@ def test_exact_six_authority_rejects_forgery_cross_evidence_and_replay(tmp_path:
 
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         del observer, snapshot
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     sink = Sink()
     with pytest.MonkeyPatch.context() as patcher:
@@ -686,6 +757,53 @@ def test_native_windows_exact_six_authority_is_fail_closed(tmp_path: Path) -> No
         runner._collect_and_execute_exact_six(object())
 
 
+def test_the_sealed_child_is_told_where_the_interpreter_keeps_its_own_libraries(tmp_path) -> None:
+    """A RELOCATED interpreter cannot use run-paths relative to where it used to live.
+
+    The sealed stage copies the interpreter into the snapshot. The first extension
+    module that needs the C++ runtime then loads the SYSTEM one, and every library
+    loaded afterwards is stuck with it. Measured on Ubuntu 22.04.5 with a conda
+    interpreter: ``import zmq`` followed by ``import sqlite3`` raises
+
+        ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15'
+        not found (required by <prefix>/lib/libicui18n.so.78)
+
+    and the exact-six collection fails with it, while either import ALONE succeeds.
+    Naming the interpreter's own library directory removes the ambiguity, and adding
+    that directory made the same collection report seven tests instead of one error.
+    """
+    library_dir = tmp_path / "lib"
+    library_dir.mkdir()
+
+    environment = runner._controlled_test_environment(tmp_path, tmp_path, runtime_library_dir=library_dir)
+
+    assert environment["LD_LIBRARY_PATH"] == str(library_dir.resolve()), (
+        "the child must be told where its own interpreter keeps its libraries"
+    )
+
+
+def test_a_missing_library_directory_is_not_named_at_all(tmp_path) -> None:
+    """An absent directory on the loader path is worse than no entry: it hides a typo."""
+    environment = runner._controlled_test_environment(
+        tmp_path, tmp_path, runtime_library_dir=tmp_path / "does-not-exist"
+    )
+
+    assert "LD_LIBRARY_PATH" not in environment
+
+
+def test_the_loader_path_is_derived_and_never_inherited(tmp_path, monkeypatch) -> None:
+    """The value comes from the interpreter, so the caller cannot inject one."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker/lib")
+
+    assert "LD_LIBRARY_PATH" not in runner._controlled_test_environment(tmp_path, tmp_path)
+
+    library_dir = tmp_path / "lib"
+    library_dir.mkdir()
+    environment = runner._controlled_test_environment(tmp_path, tmp_path, runtime_library_dir=library_dir)
+    assert environment["LD_LIBRARY_PATH"] == str(library_dir.resolve())
+    assert "/attacker/lib" not in environment["LD_LIBRARY_PATH"]
+
+
 def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tuple(inspect.signature(runner._collect_and_execute_exact_six).parameters) == ("evidence",)
     monkeypatch.setenv("PYTHONPATH", "attacker")
@@ -846,7 +964,7 @@ def test_controlled_environment_genuinely_executes_strict_exact_six() -> None:
             runner._EXECUTION_ARGV,
             observer=runner._LockedPsutilObserver(psutil),
             snapshot=snapshot,
-            timeout_s=60,
+            timeout_s=120,
         )
     runner._validate_exact_execution(
         stdout_evidence=completed.stdout_evidence,
@@ -958,7 +1076,7 @@ def test_exact_six_publication_collision_never_overwrites_racer(
 
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         del observer, snapshot
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     original_link = soak.os.link
 

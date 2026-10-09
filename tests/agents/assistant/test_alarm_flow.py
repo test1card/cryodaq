@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent, _format_age
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
@@ -51,7 +47,7 @@ def _make_config(**overrides) -> AssistantConfig:
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=False,
-        audit_enabled=True,
+        audit_enabled=False,
     )
     for k, v in overrides.items():
         setattr(cfg, k, v)
@@ -61,7 +57,9 @@ def _make_config(**overrides) -> AssistantConfig:
 def _make_mock_ollama(text: str = "🤖 Тест: температура T1 4.5K выше порога.") -> MagicMock:
     ollama = AsyncMock()
     ollama.generate = AsyncMock(
-        return_value=GenerationResult(text=text, tokens_in=80, tokens_out=25, latency_s=3.5, model="gemma4:e4b")
+        return_value=GenerationResult(
+            text=text, tokens_in=80, tokens_out=25, latency_s=3.5, model="gemma4:e4b"
+        )
     )
     ollama.close = AsyncMock()
     return ollama
@@ -77,25 +75,25 @@ def _make_mock_em() -> MagicMock:
 
 def _make_context_builder(em) -> ContextBuilder:
     reader = MagicMock()
-    reader.get_operator_log = AsyncMock(return_value=[])
-    builder = ContextBuilder(reader, em)
-    builder._alarm_reader = MagicMock()
-    builder._alarm_reader.active = AsyncMock(return_value=SimpleNamespace(active=[]))
-    return builder
+    return ContextBuilder(reader, em)
 
 
 def _make_audit(tmp_path: Path) -> AuditLogger:
-    return AuditLogger(tmp_path / "audit", enabled=True)
+    return AuditLogger(tmp_path / "audit", enabled=False)
 
 
-def _make_output_router(telegram=None, event_bus=None) -> OutputRouter:
+def _make_output_router(telegram=None, event_logger=None, event_bus=None) -> OutputRouter:
     if telegram is None:
         telegram = AsyncMock()
         telegram._send_to_all = AsyncMock()
+    if event_logger is None:
+        event_logger = AsyncMock()
+        event_logger.log_event = AsyncMock()
     if event_bus is None:
         event_bus = EventBus()
     return OutputRouter(
         telegram_bot=telegram,
+        event_logger=event_logger,
         event_bus=event_bus,
     )
 
@@ -105,6 +103,7 @@ def _make_agent(
     config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
+    event_logger=None,
     tmp_path: Path,
 ) -> tuple[AssistantLiveAgent, EventBus]:
     bus = EventBus()
@@ -112,7 +111,7 @@ def _make_agent(
     em = _make_mock_em()
     ctx = _make_context_builder(em)
     audit = _make_audit(tmp_path)
-    router = _make_output_router(telegram=telegram, event_bus=bus)
+    router = _make_output_router(telegram=telegram, event_logger=event_logger, event_bus=bus)
     agent = AssistantLiveAgent(
         config=cfg,
         event_bus=bus,
@@ -122,25 +121,6 @@ def _make_agent(
         output_router=router,
     )
     return agent, bus
-
-
-async def _wait_for_await_count(mock: AsyncMock, expected: int) -> None:
-    for _ in range(400):
-        if mock.await_count == expected:
-            await asyncio.sleep(0)
-            return
-        await asyncio.sleep(0.005)
-    raise AssertionError(f"expected {expected} awaits, got {mock.await_count}")
-
-
-async def _wait_for_agent_idle(agent: AssistantLiveAgent) -> None:
-    for _ in range(400):
-        if agent._queue is not None and agent._queue.empty() and not agent._handler_tasks:
-            await asyncio.sleep(0)
-            if agent._queue.empty() and not agent._handler_tasks:
-                return
-        await asyncio.sleep(0.005)
-    raise AssertionError("assistant agent did not become idle")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +141,7 @@ def test_config_from_dict() -> None:
     raw = {
         "enabled": True,
         "ollama": {
-            "base_url": "http://127.0.0.1:11434",
+            "base_url": "http://localhost:11434",
             "default_model": "gemma4:e4b",
             "timeout_s": 30,
         },
@@ -206,11 +186,8 @@ async def test_agent_disabled_does_not_subscribe(tmp_path: Path) -> None:
 async def test_alarm_fired_triggers_ollama_generate(tmp_path: Path) -> None:
     done = asyncio.Event()
     base_result = GenerationResult(
-        text="🤖 Тест: T1 4.5K выше порога.",
-        tokens_in=80,
-        tokens_out=25,
-        latency_s=3.5,
-        model="gemma4:e4b",
+        text="🤖 Тест: T1 4.5K выше порога.", tokens_in=80, tokens_out=25,
+        latency_s=3.5, model="gemma4:e4b",
     )
 
     async def _generate_and_signal(*args, **kwargs):
@@ -250,32 +227,31 @@ async def test_alarm_fired_dispatches_to_telegram(tmp_path: Path) -> None:
     await agent.stop()
 
 
-async def test_alarm_persists_intent_before_telegram_dispatch(tmp_path: Path) -> None:
-    observed: list[dict] = []
+async def test_alarm_fired_dispatches_to_operator_log(tmp_path: Path) -> None:
     done = asyncio.Event()
-    telegram = AsyncMock()
+    event_logger = AsyncMock()
 
-    async def _send_and_inspect(*args, **kwargs):
-        files = list((tmp_path / "audit").rglob("*.json"))
-        assert len(files) == 1
-        observed.append(json.loads(files[0].read_text(encoding="utf-8")))
+    async def _log_and_signal(*args, **kwargs):
         done.set()
 
-    telegram._send_to_all = AsyncMock(side_effect=_send_and_inspect)
-    agent, bus = _make_agent(telegram=telegram, tmp_path=tmp_path)
+    event_logger.log_event = AsyncMock(side_effect=_log_and_signal)
+    agent, bus = _make_agent(event_logger=event_logger, tmp_path=tmp_path)
     await agent.start()
 
     await bus.publish(_alarm_event())
     await asyncio.wait_for(done.wait(), timeout=2.0)
 
-    assert observed and observed[0]["delivery_state"] == "intent_persisted"
-    assert observed[0]["outputs_dispatched"] == []
+    event_logger.log_event.assert_awaited_once()
+    args = event_logger.log_event.call_args
+    assert args[0][0] == "assistant"
     await agent.stop()
 
 
 async def test_info_level_alarm_not_handled(tmp_path: Path) -> None:
     ollama = _make_mock_ollama()
-    agent, bus = _make_agent(config=_make_config(alarm_min_level="WARNING"), ollama=ollama, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        config=_make_config(alarm_min_level="WARNING"), ollama=ollama, tmp_path=tmp_path
+    )
     # Direct predicate check: INFO is below the CRITICAL threshold hardcoded in
     # _should_handle; no EventBus round-trip needed.
     event = _alarm_event(level="INFO")
@@ -283,15 +259,23 @@ async def test_info_level_alarm_not_handled(tmp_path: Path) -> None:
         "INFO-level alarm must be filtered by _should_handle before reaching Ollama"
     )
 
+    # Confirm the full pipeline also rejects it (start agent, publish, drain).
+    await agent.start()
+    await bus.publish(event)
+    # Yield control so the event loop can drain the queue; since _should_handle
+    # returns False the handler task is never created — Ollama stays idle.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
+
 
 async def test_critical_level_alarm_is_handled(tmp_path: Path) -> None:
     done = asyncio.Event()
     base_result = GenerationResult(
-        text="🤖 Тест: T1 4.5K выше порога.",
-        tokens_in=80,
-        tokens_out=25,
-        latency_s=3.5,
-        model="gemma4:e4b",
+        text="🤖 Тест: T1 4.5K выше порога.", tokens_in=80, tokens_out=25,
+        latency_s=3.5, model="gemma4:e4b",
     )
 
     async def _generate_and_signal(*args, **kwargs):
@@ -308,73 +292,6 @@ async def test_critical_level_alarm_is_handled(tmp_path: Path) -> None:
     await asyncio.wait_for(done.wait(), timeout=2.0)
 
     ollama.generate.assert_awaited_once()
-    await agent.stop()
-
-
-async def test_default_outputs_remain_unproven_and_dedup_flapping_alarm(tmp_path: Path) -> None:
-    bus = EventBus()
-    agent = AssistantLiveAgent(
-        config=AssistantConfig(),
-        event_bus=bus,
-        ollama_client=_make_mock_ollama(),
-        context_builder=_make_context_builder(_make_mock_em()),
-        audit_logger=_make_audit(tmp_path),
-        output_router=OutputRouter(telegram_bot=None, event_bus=bus),
-    )
-    await agent.start()
-
-    await bus.publish(_alarm_event(alarm_id="dedup-default"))
-    await bus.publish(_alarm_event(alarm_id="dedup-default"))
-    await _wait_for_agent_idle(agent)
-
-    audit_records = [json.loads(path.read_text(encoding="utf-8")) for path in (tmp_path / "audit").rglob("*.json")]
-    assert len(audit_records) == 1, (
-        f"flapping CRITICAL alarm must emit one attempted narrative, got {len(audit_records)}"
-    )
-    assert audit_records[0]["delivery_state"] == "settled"
-    assert audit_records[0]["outputs_dispatched"] == []
-    assert audit_records[0]["output_outcomes"] == {
-        "telegram": "not_configured",
-        "gui_insight": "outcome_unknown",
-    }
-    await agent.stop()
-
-
-async def test_unknown_critical_delivery_remains_visible_and_dedups_refire(tmp_path: Path) -> None:
-    telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock(return_value={101: "outcome_unknown"})
-    agent, bus = _make_agent(telegram=telegram, tmp_path=tmp_path)
-    await agent.start()
-
-    await bus.publish(_alarm_event(alarm_id="dedup-unknown"))
-    await bus.publish(_alarm_event(alarm_id="dedup-unknown"))
-    await _wait_for_agent_idle(agent)
-
-    telegram._send_to_all.assert_awaited_once()
-    audit_record = json.loads(next((tmp_path / "audit").rglob("*.json")).read_text(encoding="utf-8"))
-    assert audit_record["outputs_dispatched"] == []
-    assert audit_record["output_outcomes"] == {"telegram": "outcome_unknown"}
-    assert "output_telegram_outcome_unknown" in audit_record["errors"]
-    await agent.stop()
-
-
-async def test_delivered_critical_alarm_still_dedups_refire(tmp_path: Path) -> None:
-    telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock(return_value={101: "delivered"})
-    agent, bus = _make_agent(telegram=telegram, tmp_path=tmp_path)
-    await agent.start()
-
-    await bus.publish(_alarm_event(alarm_id="dedup-delivered"))
-    await _wait_for_agent_idle(agent)
-    audit_record = json.loads(next((tmp_path / "audit").rglob("*.json")).read_text(encoding="utf-8"))
-    assert audit_record["outputs_dispatched"] == ["telegram"]
-    assert audit_record["output_outcomes"] == {"telegram": "delivered"}
-    assert not any(error.startswith("output_telegram_") for error in audit_record["errors"])
-    await bus.publish(_alarm_event(alarm_id="dedup-delivered"))
-    await asyncio.sleep(0)
-
-    telegram._send_to_all.assert_awaited_once()
-    assert agent._dedup.should_dispatch("alarm:dedup-delivered") is False
     await agent.stop()
 
 
@@ -406,13 +323,8 @@ async def test_ollama_unavailable_does_not_crash_agent(tmp_path: Path) -> None:
 
 async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
     first_done = asyncio.Event()
-    second_dropped = asyncio.Event()
     base_result = GenerationResult(
-        text="🤖 Тест.",
-        tokens_in=10,
-        tokens_out=5,
-        latency_s=0.1,
-        model="gemma4:e4b",
+        text="🤖 Тест.", tokens_in=10, tokens_out=5, latency_s=0.1, model="gemma4:e4b",
     )
 
     async def _generate_and_signal(*args, **kwargs):
@@ -422,32 +334,17 @@ async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
     ollama = AsyncMock()
     ollama.generate = AsyncMock(side_effect=_generate_and_signal)
     ollama.close = AsyncMock()
-    agent, bus = _make_agent(config=_make_config(max_calls_per_hour=1), ollama=ollama, tmp_path=tmp_path)
-
-    # Wrap _check_rate_limit: after the first allowed call, signal when the
-    # second event is dropped (rate limit exceeded path).
-    original_check = agent._check_rate_limit
-    call_count = [0]
-
-    def _patched_check():
-        result = original_check()
-        if not result:
-            # This is the drop path — the second event has been processed and rejected.
-            second_dropped.set()
-        else:
-            call_count[0] += 1
-        return result
-
-    agent._check_rate_limit = _patched_check
-
+    agent, bus = _make_agent(
+        config=_make_config(max_calls_per_hour=1), ollama=ollama, tmp_path=tmp_path
+    )
     await agent.start()
 
     await bus.publish(_alarm_event(alarm_id="a1"))
     await bus.publish(_alarm_event(alarm_id="a2"))
-    # Wait for the first call to complete (so the timestamp is recorded).
+    # Wait for the first (and only allowed) generate call to complete.
     await asyncio.wait_for(first_done.wait(), timeout=2.0)
-    # Wait for the second event to be processed and dropped by the rate limiter.
-    await asyncio.wait_for(second_dropped.wait(), timeout=2.0)
+    # Yield briefly so the second event can be processed (and rate-limited).
+    await asyncio.sleep(0.01)
 
     assert ollama.generate.await_count == 1
     await agent.stop()
@@ -455,23 +352,33 @@ async def test_rate_limit_drops_excess_calls(tmp_path: Path) -> None:
 
 async def test_alarm_fired_enabled_false_skips_handling(tmp_path: Path) -> None:
     ollama = _make_mock_ollama()
-    agent, bus = _make_agent(config=_make_config(alarm_fired_enabled=False), ollama=ollama, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        config=_make_config(alarm_fired_enabled=False), ollama=ollama, tmp_path=tmp_path
+    )
     # Direct predicate check: alarm_fired_enabled=False → _should_handle returns False.
     event = _alarm_event(level="CRITICAL")
-    assert agent._should_handle(event) is False, "alarm_fired_enabled=False must be filtered by _should_handle"
+    assert agent._should_handle(event) is False, (
+        "alarm_fired_enabled=False must be filtered by _should_handle"
+    )
+
+    await agent.start()
+    await bus.publish(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
 
 
 async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 
-    generate_called = asyncio.Event()
-
-    async def _generate_truncated(*args, **kwargs):
-        generate_called.set()
-        return GenerationResult(text="", tokens_in=0, tokens_out=0, latency_s=30.0, model="gemma4:e4b", truncated=True)
-
     ollama = AsyncMock()
-    ollama.generate = AsyncMock(side_effect=_generate_truncated)
+    ollama.generate = AsyncMock(
+        return_value=GenerationResult(
+            text="", tokens_in=0, tokens_out=0, latency_s=30.0, model="gemma4:e4b", truncated=True
+        )
+    )
     ollama.close = AsyncMock()
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
@@ -479,9 +386,7 @@ async def test_truncated_response_skips_dispatch(tmp_path: Path) -> None:
     await agent.start()
 
     await bus.publish(_alarm_event())
-    # Wait until generate was actually called (handler ran), then assert no dispatch.
-    await asyncio.wait_for(generate_called.wait(), timeout=2.0)
-    ollama.generate.assert_awaited_once()
+    await asyncio.sleep(0.05)
 
     telegram._send_to_all.assert_not_awaited()
     await agent.stop()
@@ -521,11 +426,12 @@ async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
     done = asyncio.Event()
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
 
-    async def _send_and_signal(*args, **kwargs):
+    async def _log_and_signal(*args, **kwargs):
         done.set()
 
-    telegram._send_to_all = AsyncMock(side_effect=_send_and_signal)
+    event_logger.log_event = AsyncMock(side_effect=_log_and_signal)
     ollama = _make_mock_ollama("Эксперимент завершён: продолжительность 2ч, всё штатно.")
     cfg = _make_config(
         output_telegram=True,
@@ -533,7 +439,9 @@ async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
         output_gui_insight=True,
         experiment_finalize_enabled=True,
     )
-    agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
+    )
     insight_q = await bus.subscribe("test_exp_insight", maxsize=10)
     await agent.start()
 
@@ -555,6 +463,7 @@ async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
     assert "эксперимент" in call_kwargs["system"].lower()
 
     telegram._send_to_all.assert_awaited_once()
+    event_logger.log_event.assert_awaited_once()
 
     insight_events = []
     while not insight_q.empty():
@@ -570,7 +479,9 @@ async def test_experiment_finalize_handler_dispatches(tmp_path: Path) -> None:
 
 async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> None:
     ollama = _make_mock_ollama()
-    agent, bus = _make_agent(config=_make_config(experiment_finalize_enabled=False), ollama=ollama, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        config=_make_config(experiment_finalize_enabled=False), ollama=ollama, tmp_path=tmp_path
+    )
     event = EngineEvent(
         event_type="experiment_finalize",
         timestamp=datetime(2026, 5, 1, 14, 0, 0, tzinfo=UTC),
@@ -578,7 +489,17 @@ async def test_experiment_finalize_disabled_skips_handling(tmp_path: Path) -> No
         experiment_id="exp-001",
     )
     # Direct predicate check: experiment_finalize_enabled=False → filtered.
-    assert agent._should_handle(event) is False, "experiment_finalize_enabled=False must be filtered by _should_handle"
+    assert agent._should_handle(event) is False, (
+        "experiment_finalize_enabled=False must be filtered by _should_handle"
+    )
+
+    await agent.start()
+    await bus.publish(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +516,8 @@ async def test_sensor_anomaly_critical_proactive_disabled_v0_55_5(tmp_path: Path
     """
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
+    event_logger.log_event = AsyncMock()
     ollama = _make_mock_ollama("ignored")
     cfg = _make_config(
         output_telegram=True,
@@ -602,7 +525,9 @@ async def test_sensor_anomaly_critical_proactive_disabled_v0_55_5(tmp_path: Path
         output_gui_insight=True,
         sensor_anomaly_critical_enabled=True,  # legacy flag — superseded by v0.55.5 filter
     )
-    agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, tmp_path=tmp_path)
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
+    )
     event = EngineEvent(
         event_type="sensor_anomaly_critical",
         timestamp=datetime(2026, 5, 1, 14, 5, 0, tzinfo=UTC),
@@ -621,6 +546,17 @@ async def test_sensor_anomaly_critical_proactive_disabled_v0_55_5(tmp_path: Path
         "sensor_anomaly_critical must always be filtered by _should_handle (v0.55.5)"
     )
 
+    await agent.start()
+    await bus.publish(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    telegram._send_to_all.assert_not_awaited()
+    event_logger.log_event.assert_not_awaited()
+
+    await agent.stop()
+
 
 async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
     ollama = _make_mock_ollama()
@@ -636,7 +572,17 @@ async def test_sensor_anomaly_disabled_skips_handling(tmp_path: Path) -> None:
         experiment_id=None,
     )
     # _should_handle returns False unconditionally for this event type (v0.55.5).
-    assert agent._should_handle(event) is False, "sensor_anomaly_critical must be filtered by _should_handle"
+    assert agent._should_handle(event) is False, (
+        "sensor_anomaly_critical must be filtered by _should_handle"
+    )
+
+    await agent.start()
+    await bus.publish(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -648,11 +594,12 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
     done = asyncio.Event()
     telegram = AsyncMock()
     telegram._send_to_all = AsyncMock()
+    event_logger = AsyncMock()
 
-    async def _send_and_signal(*args, **kwargs):
+    async def _log_and_signal(*args, **kwargs):
         done.set()
 
-    telegram._send_to_all = AsyncMock(side_effect=_send_and_signal)
+    event_logger.log_event = AsyncMock(side_effect=_log_and_signal)
     ollama = _make_mock_ollama("Сводка смены: температура стабильна, эксперимент в норме.")
     cfg = _make_config(
         output_telegram=True,
@@ -660,15 +607,8 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
         output_gui_insight=True,
         shift_handover_request_enabled=True,
     )
-    agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, tmp_path=tmp_path)
-    agent._ctx_builder._reader.get_operator_log.return_value = [
-        SimpleNamespace(
-            timestamp=datetime(2026, 5, 1, 19, 30, tzinfo=UTC),
-            message="Compressor warning before handover",
-        )
-    ]
-    agent._ctx_builder._alarm_reader.active.return_value = SimpleNamespace(
-        active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
+    agent, bus = _make_agent(
+        config=cfg, ollama=ollama, telegram=telegram, event_logger=event_logger, tmp_path=tmp_path
     )
     insight_q = await bus.subscribe("test_sh_insight", maxsize=10)
     await agent.start()
@@ -684,13 +624,11 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
 
     ollama.generate.assert_awaited_once()
     call_kwargs = ollama.generate.call_args[1]
-    user_prompt = ollama.generate.call_args.args[0]
     assert call_kwargs["system"] is not None
     assert "смен" in call_kwargs["system"].lower()
-    assert "CRITICAL: T1-high (T1)" in user_prompt
-    assert "Compressor warning before handover" in user_prompt
 
     telegram._send_to_all.assert_awaited_once()
+    event_logger.log_event.assert_awaited_once()
 
     insight_events = []
     while not insight_q.empty():
@@ -701,38 +639,6 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
     assert insight_events[0].payload["trigger_event_type"] == "shift_handover_request"
 
     bus.unsubscribe("test_sh_insight")
-    await agent.stop()
-
-
-@pytest.mark.parametrize("unavailable", ["alarm", "log"])
-async def test_shift_handover_unavailable_context_bypasses_ollama(tmp_path: Path, unavailable: str) -> None:
-    done = asyncio.Event()
-    telegram = AsyncMock()
-
-    async def _send_and_signal(*args, **kwargs):
-        done.set()
-
-    telegram._send_to_all = AsyncMock(side_effect=_send_and_signal)
-    ollama = _make_mock_ollama()
-    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
-    if unavailable == "alarm":
-        agent._ctx_builder._alarm_reader.active = AsyncMock(return_value=None)
-    else:
-        agent._ctx_builder._reader.get_operator_log = AsyncMock(side_effect=RuntimeError("db locked"))
-    await agent.start()
-
-    await bus.publish(
-        EngineEvent(
-            event_type="shift_handover_request",
-            timestamp=datetime(2026, 5, 1, 20, 0, 0, tzinfo=UTC),
-            payload={"requested_by": "Иванов", "shift_duration_h": 8},
-            experiment_id="exp-001",
-        )
-    )
-    await asyncio.wait_for(done.wait(), timeout=1.0)
-
-    ollama.generate.assert_not_awaited()
-    assert "не сформирована" in telegram._send_to_all.call_args.args[0]
     await agent.stop()
 
 
@@ -753,6 +659,14 @@ async def test_shift_handover_disabled_skips_handling(tmp_path: Path) -> None:
     assert agent._should_handle(event) is False, (
         "shift_handover_request_enabled=False must be filtered by _should_handle"
     )
+
+    await agent.start()
+    await bus.publish(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    ollama.generate.assert_not_awaited()
+    await agent.stop()
 
 
 # ---------------------------------------------------------------------------

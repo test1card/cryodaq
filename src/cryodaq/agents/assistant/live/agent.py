@@ -4,8 +4,8 @@ Service named Гемма (after the underlying Gemma 4 model via Ollama).
 Subscribes to EventBus, generates Russian-language operator insights,
 dispatches to Telegram + operator log + GUI insight panel.
 
-Constraints (docs/ORCHESTRATION.md, "Product assistant boundary"):
-- Uses only exact allowlisted read-only queries; never mutates engine state.
+Constraints (ORCHESTRATION v1.3 §13):
+- NEVER executes engine commands or modifies engine state.
 - Text-only output channels (Telegram, log, GUI).
 - Fails gracefully if Ollama is unavailable — engine continues.
 """
@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cryodaq.agents.assistant.live.context_builder import ContextBuilder, normalize_sensor_health_summary
-from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget, _is_delivered_outcome
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget
 from cryodaq.agents.assistant.live.prompts import (
     ALARM_SUMMARY_SYSTEM,
     ALARM_SUMMARY_USER,
@@ -53,7 +53,7 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 @dataclass
 class AssistantConfig:
     enabled: bool = True
-    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_base_url: str = "http://localhost:11434"
     default_model: str = "gemma4:e4b"
     timeout_s: float = 60.0
     temperature: float = 0.3
@@ -110,32 +110,46 @@ class AssistantConfig:
         cfg.num_ctx = int(_num_ctx) if _num_ctx is not None else None
         rl = d.get("rate_limit", {})
         cfg.max_calls_per_hour = int(rl.get("max_calls_per_hour", cfg.max_calls_per_hour))
-        cfg.max_concurrent_inferences = int(rl.get("max_concurrent_inferences", cfg.max_concurrent_inferences))
+        cfg.max_concurrent_inferences = int(
+            rl.get("max_concurrent_inferences", cfg.max_concurrent_inferences)
+        )
         triggers = d.get("triggers", {})
         alarm_t = triggers.get("alarm_fired", {})
         if isinstance(alarm_t, dict):
             cfg.alarm_fired_enabled = bool(alarm_t.get("enabled", cfg.alarm_fired_enabled))
             raw_level = str(alarm_t.get("min_level", cfg.alarm_min_level)).upper()
             if raw_level not in _MIN_LEVELS:
-                raise ValueError(f"alarm_min_level must be one of {list(_MIN_LEVELS)}, got {raw_level!r}")
+                raise ValueError(
+                    f"alarm_min_level must be one of {list(_MIN_LEVELS)}, got {raw_level!r}"
+                )
             cfg.alarm_min_level = raw_level
         exp_t = triggers.get("experiment_finalize", {})
         if isinstance(exp_t, dict):
-            cfg.experiment_finalize_enabled = bool(exp_t.get("enabled", cfg.experiment_finalize_enabled))
+            cfg.experiment_finalize_enabled = bool(
+                exp_t.get("enabled", cfg.experiment_finalize_enabled)
+            )
         sa_t = triggers.get("sensor_anomaly_critical", {})
         if isinstance(sa_t, dict):
-            cfg.sensor_anomaly_critical_enabled = bool(sa_t.get("enabled", cfg.sensor_anomaly_critical_enabled))
+            cfg.sensor_anomaly_critical_enabled = bool(
+                sa_t.get("enabled", cfg.sensor_anomaly_critical_enabled)
+            )
         sh_t = triggers.get("shift_handover_request", {})
         if isinstance(sh_t, dict):
-            cfg.shift_handover_request_enabled = bool(sh_t.get("enabled", cfg.shift_handover_request_enabled))
+            cfg.shift_handover_request_enabled = bool(
+                sh_t.get("enabled", cfg.shift_handover_request_enabled)
+            )
         pr_t = triggers.get("periodic_report", {})
         if isinstance(pr_t, dict):
             cfg.periodic_report_enabled = bool(pr_t.get("enabled", cfg.periodic_report_enabled))
             cfg.periodic_report_interval_minutes = int(
                 pr_t.get("interval_minutes", cfg.periodic_report_interval_minutes)
             )
-            cfg.periodic_report_skip_if_idle = bool(pr_t.get("skip_if_idle", cfg.periodic_report_skip_if_idle))
-            cfg.periodic_report_min_events = int(pr_t.get("min_events_for_dispatch", cfg.periodic_report_min_events))
+            cfg.periodic_report_skip_if_idle = bool(
+                pr_t.get("skip_if_idle", cfg.periodic_report_skip_if_idle)
+            )
+            cfg.periodic_report_min_events = int(
+                pr_t.get("min_events_for_dispatch", cfg.periodic_report_min_events)
+            )
         outputs = d.get("outputs", {})
         cfg.output_telegram = bool(outputs.get("telegram", cfg.output_telegram))
         cfg.output_operator_log = bool(outputs.get("operator_log", cfg.output_operator_log))
@@ -143,7 +157,9 @@ class AssistantConfig:
         slices = d.get("slices", {})
         cfg.slice_a_notification = bool(slices.get("a_notification", cfg.slice_a_notification))
         cfg.slice_b_suggestion = bool(slices.get("b_suggestion", cfg.slice_b_suggestion))
-        cfg.slice_c_campaign_report = bool(slices.get("c_campaign_report", cfg.slice_c_campaign_report))
+        cfg.slice_c_campaign_report = bool(
+            slices.get("c_campaign_report", cfg.slice_c_campaign_report)
+        )
         audit = d.get("audit", {})
         cfg.audit_enabled = bool(audit.get("enabled", cfg.audit_enabled))
         cfg.audit_retention_days = int(audit.get("retention_days", cfg.audit_retention_days))
@@ -158,10 +174,18 @@ class AssistantConfig:
             _fm = q.get("format_model")
             if _fm:
                 cfg.query_format_model = str(_fm)
-            cfg.query_intent_temperature = float(q.get("intent_temperature", cfg.query_intent_temperature))
-            cfg.query_format_temperature = float(q.get("format_temperature", cfg.query_format_temperature))
-            cfg.query_intent_timeout_s = float(q.get("intent_timeout_s", cfg.query_intent_timeout_s))
-            cfg.query_format_timeout_s = float(q.get("format_timeout_s", cfg.query_format_timeout_s))
+            cfg.query_intent_temperature = float(
+                q.get("intent_temperature", cfg.query_intent_temperature)
+            )
+            cfg.query_format_temperature = float(
+                q.get("format_temperature", cfg.query_format_temperature)
+            )
+            cfg.query_intent_timeout_s = float(
+                q.get("intent_timeout_s", cfg.query_intent_timeout_s)
+            )
+            cfg.query_format_timeout_s = float(
+                q.get("format_timeout_s", cfg.query_format_timeout_s)
+            )
             _rl = q.get("rate_limit", {})
             if isinstance(_rl, dict):
                 cfg.query_max_per_chat_per_hour = int(
@@ -173,7 +197,6 @@ class AssistantConfig:
     def from_yaml_string(cls, content: str) -> AssistantConfig:
         """Load from YAML string; handles agent.* and legacy gemma.* namespaces."""
         import yaml  # noqa: PLC0415
-
         raw = yaml.safe_load(content) or {}
         return cls._from_raw(raw)
 
@@ -181,7 +204,6 @@ class AssistantConfig:
     def from_yaml_path(cls, path: Path) -> AssistantConfig:
         """Load from agent.yaml file; handles agent.* and legacy gemma.* namespaces."""
         import yaml  # noqa: PLC0415
-
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         return cls._from_raw(raw)
 
@@ -214,25 +236,26 @@ class _EventDedup:
         self._window_s = window_s
         self._seen: dict[str, float] = {}
 
-    def should_dispatch(self, event_id: str) -> bool:
+    def is_new(self, event_id: str) -> bool:
         now = time.monotonic()
         cutoff = now - self._window_s
         last = self._seen.get(event_id)
+        if last is not None and last >= cutoff:
+            # Still inside the window — refresh the timestamp so the next
+            # re-fire keeps the window sliding (one narrative per burst).
+            self._seen[event_id] = now
+            return False
+        # Fresh sighting — record and lazily prune expired keys to bound
+        # the dict size when many distinct alarm_ids cycle through.
         self._seen[event_id] = now
-        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
-        return last is None or last < cutoff
-
-    def mark_delivered(self, event_id: str) -> None:
-        now = time.monotonic()
-        cutoff = now - self._window_s
-        self._seen[event_id] = now
-        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
+        self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
+        return True
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
     """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
 
-    Cycle-2 fix from commit 53981a1: the previous
+    Cycle-2 fix for Codex finding on commit 53981a1: the previous
     implementation derived the bucket from ``time.monotonic() // window_s``,
     which let an alarm at ``t=29.9 s`` and a re-fire at ``t=30.1 s`` produce
     different bucket ids (0 then 1) and pass through despite being 0.2 s
@@ -314,75 +337,6 @@ class AssistantLiveAgent:
         await self._ollama.close()
         logger.info("AssistantLiveAgent (Гемма): остановлен")
 
-    async def _dispatch_with_audit(
-        self,
-        *,
-        event: EngineEvent,
-        audit_id: str,
-        payload: dict[str, Any],
-        context_assembled: str,
-        prompt_template: str,
-        model: str,
-        system_prompt: str,
-        user_prompt: str,
-        response: str,
-        tokens: dict[str, int],
-        latency_s: float,
-        errors: list[str],
-        targets: list[OutputTarget],
-        prefix_suffix: str = "",
-        allow_dispatch: bool = True,
-    ) -> tuple[list[str], dict[str, Any]]:
-        """Persist intent, dispatch, and persist exact per-target settlement."""
-        trigger_event = {
-            "event_type": event.event_type,
-            "payload": payload,
-            "experiment_id": event.experiment_id,
-        }
-        intent_path = await self._audit.prepare(
-            audit_id=audit_id,
-            trigger_event=trigger_event,
-            context_assembled=context_assembled,
-            prompt_template=prompt_template,
-            model=model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            response=response,
-            tokens=tokens,
-            latency_s=latency_s,
-            errors=errors,
-        )
-        if intent_path is None:
-            errors.append("audit_intent_persist_failed")
-            logger.error("AssistantLiveAgent: output blocked before durable intent (audit_id=%s)", audit_id)
-            return [], {"audit": "failed"}
-
-        outcomes: dict[str, Any] = {}
-        if allow_dispatch and not errors and response.strip():
-            outcomes = await self._router.dispatch_detailed(
-                event,
-                response,
-                targets=targets,
-                audit_id=audit_id,
-                prefix_suffix=prefix_suffix,
-            )
-            for target, state in outcomes.items():
-                if not _is_delivered_outcome(state):
-                    errors.append(f"output_{target}_{state}")
-
-        dispatched = [target for target, state in outcomes.items() if _is_delivered_outcome(state)]
-        if (
-            await self._audit.complete(
-                audit_id=audit_id,
-                outputs_dispatched=dispatched,
-                output_outcomes=outcomes,
-                errors=errors,
-            )
-            is None
-        ):
-            errors.append("audit_settlement_persist_failed")
-        return dispatched, outcomes
-
     async def _event_loop(self) -> None:
         """Drain the EventBus queue and dispatch handlers."""
         assert self._queue is not None
@@ -393,7 +347,7 @@ class AssistantLiveAgent:
                     # F-BotPolish: pre-invocation dedup gate — slice handler
                     # logic itself is unchanged.
                     dedup_id = _event_dedup_id(event)
-                    if dedup_id is not None and not self._dedup.should_dispatch(dedup_id):
+                    if dedup_id is not None and not self._dedup.is_new(dedup_id):
                         logger.debug(
                             "AssistantLiveAgent: dropping duplicate event %s",
                             dedup_id,
@@ -479,7 +433,9 @@ class AssistantLiveAgent:
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                 logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
             except Exception:
-                logger.warning("AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True)
+                logger.warning(
+                    "AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True
+                )
 
     async def _handle_alarm_fired(self, event: EngineEvent) -> None:
         audit_id = self._audit.make_audit_id()
@@ -526,10 +482,19 @@ class AssistantLiveAgent:
                 result.truncated,
                 audit_id,
             )
-        dispatched, _ = await self._dispatch_with_audit(
-            event=event,
+            dispatched: list[str] = []
+        else:
+            dispatched = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="alarm_summary",
             model=result.model,
@@ -538,9 +503,8 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched,
             errors=errors,
-            targets=targets,
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
 
         logger.info(
@@ -552,7 +516,10 @@ class AssistantLiveAgent:
         if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
             await self._generate_diagnostic_suggestion(event, payload)
 
-    async def _generate_diagnostic_suggestion(self, event: EngineEvent, alarm_payload: dict[str, Any]) -> None:
+
+    async def _generate_diagnostic_suggestion(
+        self, event: EngineEvent, alarm_payload: dict[str, Any]
+    ) -> None:
         """Generate and dispatch Slice B diagnostic suggestion (second LLM call).
 
         Records a separate rate-limit timestamp so each Ollama call counts
@@ -588,15 +555,26 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: diagnostic ответ обрезан (audit_id=%s)", audit_id)
+            logger.warning(
+                "AssistantLiveAgent: diagnostic ответ обрезан (audit_id=%s)", audit_id
+            )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
             logger.warning("AssistantLiveAgent: пустой diagnostic ответ (audit_id=%s)", audit_id)
-        dispatched_diag, _ = await self._dispatch_with_audit(
-            event=event,
+            dispatched_diag: list[str] = []
+        else:
+            dispatched_diag = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=alarm_payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": alarm_payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="diagnostic_suggestion",
             model=result.model,
@@ -605,9 +583,8 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched_diag,
             errors=errors,
-            targets=targets,
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
         logger.info(
             "AssistantLiveAgent: diagnostic_suggestion dispatched (audit_id=%s, latency=%.1fs)",
@@ -646,15 +623,28 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: ответ обрезан (experiment_finalize, audit_id=%s)", audit_id)
+            logger.warning(
+                "AssistantLiveAgent: ответ обрезан (experiment_finalize, audit_id=%s)", audit_id
+            )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
-            logger.warning("AssistantLiveAgent: пустой ответ experiment_finalize (audit_id=%s)", audit_id)
-        dispatched, _ = await self._dispatch_with_audit(
-            event=event,
+            logger.warning(
+                "AssistantLiveAgent: пустой ответ experiment_finalize (audit_id=%s)", audit_id
+            )
+            dispatched: list[str] = []
+        else:
+            dispatched = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="experiment_finalize",
             model=result.model,
@@ -663,9 +653,8 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched,
             errors=errors,
-            targets=targets,
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
         logger.info(
             "AssistantLiveAgent: %s обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
@@ -704,15 +693,28 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: ответ обрезан (sensor_anomaly, audit_id=%s)", audit_id)
+            logger.warning(
+                "AssistantLiveAgent: ответ обрезан (sensor_anomaly, audit_id=%s)", audit_id
+            )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
-            logger.warning("AssistantLiveAgent: пустой ответ sensor_anomaly (audit_id=%s)", audit_id)
-        dispatched_sa, _ = await self._dispatch_with_audit(
-            event=event,
+            logger.warning(
+                "AssistantLiveAgent: пустой ответ sensor_anomaly (audit_id=%s)", audit_id
+            )
+            dispatched_sa: list[str] = []
+        else:
+            dispatched_sa = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="sensor_anomaly",
             model=result.model,
@@ -721,12 +723,12 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched_sa,
             errors=errors,
-            targets=targets,
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
         logger.info(
-            "AssistantLiveAgent: sensor_anomaly_critical обработан (audit_id=%s, latency=%.1fs, channel=%s)",
+            "AssistantLiveAgent: sensor_anomaly_critical обработан "
+            "(audit_id=%s, latency=%.1fs, channel=%s)",
             audit_id,
             result.latency_s,
             ctx.channel,
@@ -739,15 +741,6 @@ class AssistantLiveAgent:
         payload = event.payload
 
         ctx = await self._ctx_builder.build_shift_handover_context(payload)
-        if ctx.context_unavailable:
-            await self._dispatch_unavailable_context(
-                event=event,
-                audit_id=audit_id,
-                payload=payload,
-                kind="shift_handover",
-                message="Сводка смены не сформирована: данные тревог или событий недоступны.",
-            )
-            return
         user_prompt = SHIFT_HANDOVER_USER.format(
             experiment_id=ctx.experiment_id or "нет активного эксперимента",
             phase=ctx.phase or "—",
@@ -769,15 +762,28 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: ответ обрезан (shift_handover, audit_id=%s)", audit_id)
+            logger.warning(
+                "AssistantLiveAgent: ответ обрезан (shift_handover, audit_id=%s)", audit_id
+            )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
-            logger.warning("AssistantLiveAgent: пустой ответ shift_handover (audit_id=%s)", audit_id)
-        dispatched_sh, _ = await self._dispatch_with_audit(
-            event=event,
+            logger.warning(
+                "AssistantLiveAgent: пустой ответ shift_handover (audit_id=%s)", audit_id
+            )
+            dispatched_sh: list[str] = []
+        else:
+            dispatched_sh = await self._router.dispatch(
+                event, result.text, targets=targets, audit_id=audit_id
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="shift_handover",
             model=result.model,
@@ -786,15 +792,15 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched_sh,
             errors=errors,
-            targets=targets,
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
         logger.info(
             "AssistantLiveAgent: shift_handover_request обработан (audit_id=%s, latency=%.1fs)",
             audit_id,
             result.latency_s,
         )
+
 
     async def _handle_periodic_report(self, event: EngineEvent) -> None:
         audit_id = self._audit.make_audit_id()
@@ -803,25 +809,20 @@ class AssistantLiveAgent:
         ctx = await self._ctx_builder.build_periodic_report_context(
             window_minutes=window_minutes,
         )
-        sensor_health_summary = normalize_sensor_health_summary(ctx.sensor_health_summary)
 
-        if ctx.context_read_failed or (ctx.sensor_health_summary is not None and sensor_health_summary is None):
-            await self._dispatch_unavailable_context(
-                event=event,
-                audit_id=audit_id,
-                payload=event.payload,
-                kind="periodic_report",
-                message="Периодический отчёт не сформирован: данные за интервал недоступны.",
+        if ctx.context_read_failed:
+            logger.warning(
+                "AssistantLiveAgent: periodic report context read failed "
+                "(audit_id=%s) — proceeding with empty context",
+                audit_id,
             )
-            return
         elif (
             self._config.periodic_report_skip_if_idle
             and ctx.total_event_count < self._config.periodic_report_min_events
-            and not ctx.source_saturated
-            and (sensor_health_summary is None or sensor_health_summary.critical == 0)
         ):
             logger.debug(
-                "AssistantLiveAgent: periodic report skipped (idle: %d events < min=%d)",
+                "AssistantLiveAgent: periodic report skipped "
+                "(idle: %d events < min=%d)",
                 ctx.total_event_count,
                 self._config.periodic_report_min_events,
             )
@@ -845,15 +846,32 @@ class AssistantLiveAgent:
         errors: list[str] = []
         if result.truncated:
             errors.append("timeout_truncated")
-            logger.warning("AssistantLiveAgent: periodic report обрезан (audit_id=%s)", audit_id)
+            logger.warning(
+                "AssistantLiveAgent: periodic report обрезан (audit_id=%s)", audit_id
+            )
 
         targets = _build_targets(self._config)
         if result.truncated or not result.text.strip():
-            logger.warning("AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id)
-        dispatched_pr, _ = await self._dispatch_with_audit(
-            event=event,
+            logger.warning(
+                "AssistantLiveAgent: пустой periodic report (audit_id=%s)", audit_id
+            )
+            dispatched_pr: list[str] = []
+        else:
+            dispatched_pr = await self._router.dispatch(
+                event,
+                result.text,
+                targets=targets,
+                audit_id=audit_id,
+                prefix_suffix=f"(отчёт {_report_window_label(window_minutes)})",
+            )
+
+        await self._audit.log(
             audit_id=audit_id,
-            payload=event.payload,
+            trigger_event={
+                "event_type": event.event_type,
+                "payload": event.payload,
+                "experiment_id": event.experiment_id,
+            },
             context_assembled=user_prompt,
             prompt_template="periodic_report",
             model=result.model,
@@ -862,10 +880,8 @@ class AssistantLiveAgent:
             response=result.text,
             tokens={"in": result.tokens_in, "out": result.tokens_out},
             latency_s=result.latency_s,
+            outputs_dispatched=dispatched_pr,
             errors=errors,
-            targets=targets,
-            prefix_suffix=f"(отчёт {_report_window_label(window_minutes)})",
-            allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
         logger.info(
             "AssistantLiveAgent: periodic_report_request обработан "
@@ -876,37 +892,13 @@ class AssistantLiveAgent:
             dispatched_pr,
         )
 
-    async def _dispatch_unavailable_context(
-        self,
-        *,
-        event: EngineEvent,
-        audit_id: str,
-        payload: dict[str, Any],
-        kind: str,
-        message: str,
-    ) -> None:
-        logger.warning("AssistantLiveAgent: %s context unavailable (audit_id=%s)", kind, audit_id)
-        await self._dispatch_with_audit(
-            event=event,
-            audit_id=audit_id,
-            payload=payload,
-            context_assembled=message,
-            prompt_template=f"{kind}_context_unavailable",
-            model="deterministic",
-            system_prompt="",
-            user_prompt=message,
-            response=message,
-            tokens={"in": 0, "out": 0},
-            latency_s=0.0,
-            errors=[],
-            targets=_build_targets(self._config),
-        )
-
 
 def _build_targets(config: AssistantConfig) -> list[OutputTarget]:
     targets = []
     if config.output_telegram:
         targets.append(OutputTarget.TELEGRAM)
+    if config.output_operator_log:
+        targets.append(OutputTarget.OPERATOR_LOG)
     if config.output_gui_insight:
         targets.append(OutputTarget.GUI_INSIGHT)
     return targets

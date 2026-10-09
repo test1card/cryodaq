@@ -4,7 +4,7 @@ keywords: phase, stepper, progression, experiment, cooldown, warmup, sequence, a
 applies_to: sequential phase progression display + manual advance controls
 status: active
 implements: src/cryodaq/gui/dashboard/phase_stepper.py (extracted Phase B.5.5); src/cryodaq/gui/dashboard/phase_aware_widget.py (parent; Phase B.5 + B.5.6)
-last_updated: 2026-07-19
+last_updated: 2026-04-17
 references: rules/color-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
@@ -14,8 +14,7 @@ Horizontal sequential phase indicator with optional manual-advance controls. Sho
 
 > **Implementation status.** The shipped phase stepper at
 > `src/cryodaq/gui/dashboard/phase_stepper.py` is aligned with
-> this spec. Active phase uses `ACCENT`; completed phases use neutral filled
-> progress chrome. Neither state consumes a safety color.
+> this spec. Active phase uses `STATUS_OK`.
 
 **When to use:**
 - Experiment card / experiment overlay — showing progression through phases
@@ -46,7 +45,7 @@ Each has distinct visual convention. Stepper uses arrows/connectors between node
 │   │      │      │      │      │      │                                       │
 │  Готов  Ох-е  Захол  Изм-е  Отогр  Завер                                    │
 │                       ▲                                                      │
-│                       └── active phase label UPPERCASE + ACCENT            │
+│                       └── active phase label UPPERCASE + STATUS_OK         │
 │                                                                              │
 │                       [  Следующая фаза →  ]                                 │
 │                                                                              │
@@ -63,15 +62,13 @@ Phase count is parameterizable (typically 6 for canonical experiment, 7 for exte
 
 | Phase state | Node | Connector | Label |
 |---|---|---|---|
-| **Completed** (past) | ● neutral filled SECONDARY; hollow-vs-filled is the non-color cue | solid BORDER line | FOREGROUND, regular |
-| **Active** (current) | ACCENT outline/ring + SECONDARY fill | BORDER line before/after | FOREGROUND, UPPERCASE + letter-spacing, semibold |
+| **Completed** (past) | ●  filled STATUS_OK, check icon optional | solid STATUS_OK line | MUTED_FOREGROUND, regular |
+| **Active** (current) | ●  filled STATUS_OK, glow or ring | STATUS_OK line before it; BORDER line after | FOREGROUND, UPPERCASE + letter-spacing, semibold |
 | **Pending** (future) | ○  outlined BORDER, hollow | BORDER dashed or dim line | MUTED_FOREGROUND, regular |
 | **Skipped** | ○  outlined STATUS_STALE, dim | BORDER line | STATUS_STALE |
 | **Faulted** | ✕ filled STATUS_FAULT | STATUS_FAULT line into it | STATUS_FAULT label |
 
-**Color rule:** active and completed describe progress, not health. Active uses
-ACCENT/SECONDARY selection chrome; completed uses neutral SECONDARY/BORDER.
-Health is rendered separately and owns STATUS_OK.
+**Color caveat:** Active phase uses STATUS_OK (green) — NOT ACCENT. This is the correction from Phase 0 dashboard PhaseStepper which used ACCENT violet; that violated RULE-COLOR-004. «Active operational state» IS a status (running healthy), hence STATUS_OK. If ACCENT were used, it would mean selection — but operator did not select this phase, the system transitioned to it.
 
 ## Parts
 
@@ -85,16 +82,13 @@ Health is rendered separately and owns STATUS_OK.
 
 ## Invariants
 
-1. **Active phase uses ACCENT; completed uses neutral progress chrome.** Neither
-   may use STATUS_OK. (RULE-COLOR-002, RULE-COLOR-004)
+1. **Active phase uses STATUS_OK, NOT ACCENT.** Per Phase 0 product decision. (RULE-COLOR-002, RULE-COLOR-004)
 2. **Fixed phase order.** Phases cannot be reordered at runtime. The sequence is part of the experiment template.
-3. **Only one phase active at a time.** No two nodes may carry the active
-   ACCENT ring simultaneously. Progression is strictly sequential.
+3. **Only one phase active at a time.** No two circles simultaneously filled green with glow. Progression is strictly sequential.
 4. **Labels UPPERCASE for active phase only** per RULE-TYPO-008 category emphasis. Other labels sentence case.
 5. **Manual advance button only active when allowed.** Automatic transitions (time-based, temperature-based) do not need manual advance; button hidden or disabled. Button enable state driven by engine.
 6. **Abort requires confirmation.** Destructive action — uses Dialog confirm or hold-confirm button pattern. (RULE-INTER-004)
-7. **Connector color stays neutral BORDER.** Progress position and filled/hollow
-   nodes communicate completion without implying health.
+7. **Connector color matches the earlier-side node state.** Line between completed and active is STATUS_OK (from completed node). Line between active and pending is BORDER (toward pending side).
 8. **No animation on state transitions by default.** Phase transitions are important events; snapping is OK. Optional fade for visual polish, 200ms max.
 9. **Cyrillic labels only.** Phase names are Russian: «Готов», «Охлаждение», «Захолаживание», «Измерение», «Отогрев», «Завершение». (RULE-COPY-001, RULE-COPY-002)
 10. **Keyboard: Right arrow advances if allowed.** Optional — depends on context (works in experiment card overlay where stepper has focus).
@@ -181,11 +175,11 @@ class PhaseNode(QWidget):
         self._apply_state()
     
     def _apply_state(self) -> None:
-        # DESIGN: RULE-COLOR-002, RULE-COLOR-004 (active=ACCENT, never STATUS_OK)
+        # DESIGN: RULE-COLOR-002, RULE-COLOR-004 (active=STATUS_OK not ACCENT)
         node_style_map = {
             "pending":   (theme.SURFACE_CARD, theme.BORDER),         # hollow, BORDER
-            "active":    (theme.ACCENT,       theme.SECONDARY),       # selected progress
-            "completed": (theme.BORDER,       theme.SECONDARY),       # neutral filled progress
+            "active":    (theme.STATUS_OK,    theme.STATUS_OK),       # filled OK
+            "completed": (theme.STATUS_OK,    theme.STATUS_OK),       # filled OK (same as active but label differs)
             "skipped":   (theme.SURFACE_CARD, theme.STATUS_STALE),    # hollow stale
             "faulted":   (theme.STATUS_FAULT, theme.STATUS_FAULT),   # filled fault
         }
@@ -248,8 +242,8 @@ class PhaseConnector(QFrame):
     
     def _apply_state(self) -> None:
         color = {
-            "completed": theme.BORDER,
-            "active":    theme.ACCENT,
+            "completed": theme.STATUS_OK,
+            "active":    theme.STATUS_OK,
             "pending":   theme.BORDER,
             "skipped":   theme.STATUS_STALE,
             "faulted":   theme.STATUS_FAULT,
@@ -401,22 +395,17 @@ B.5.5 added 7th phase (`preflight`) before index 0.
 
 ## Common mistakes
 
-1. **Active or completed phase in STATUS_OK.** Progress is not health. Use
-   ACCENT for current selection and neutral filled chrome for completion.
+1. **Active phase in ACCENT (violet).** Violates RULE-COLOR-004. Phase 0 dashboard bug — corrected to STATUS_OK. Active phase IS a status (operational), not a selection.
 
 2. **All phases UPPERCASE.** Over-emphasis. Only active phase uppercase per RULE-TYPO-008 discipline.
 
 3. **Advance button always enabled.** Operator clicks, engine rejects — frustration. Button enable state mirrors engine's `phase_can_advance` signal.
 
-4. **Abort as an unconfirmed regular button.** A direct single-click abort
-   violates RULE-INTER-004. Use the action's implemented reviewed confirmation
-   pattern; do not claim a HoldConfirm gesture unless it actually ships.
+4. **Abort as regular button.** Single click aborts experiment. Violates RULE-INTER-004. Use HoldConfirmButton.
 
 5. **Animated node fill on transition.** Glitch-prone. Atomic is safer.
 
-6. **Connector state from wrong side.** Connector between active and pending:
-   using active ACCENT makes the upcoming path look already traversed. Keep the
-   connector neutral BORDER.
+6. **Connector state from wrong side.** Connector between active and pending: using active side (STATUS_OK) makes upcoming path look "already done". Should use pending side (BORDER).
 
 7. **Latin phase keys in operator-facing labels.** `"cooldown"` shown to operator; should be `«Захолаживание»`. Keys stay internal, labels are Russian.
 
@@ -435,6 +424,4 @@ B.5.5 added 7th phase (`preflight`) before index 0.
 
 ## Changelog
 
-- 2026-07-15 (v4.0.0): Reserved safety colors for health; active phase uses
-  ACCENT and completed phases use neutral filled progress chrome.
-- 2026-04-17: Initial Phase B.5/B.5.5/B.5.6 specification.
+- 2026-04-17: Initial version. Documents Phase B.5 / B.5.5 / B.5.6 implementations. Active phase color corrected to STATUS_OK per Phase 0 product decision (was ACCENT violet). Compact variant for inline dashboard tile use.

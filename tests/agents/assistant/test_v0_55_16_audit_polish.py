@@ -1,6 +1,6 @@
 """v0.55.16 — regression guards for the audit-polish hotfix release.
 
-Covers audit follow-ups not addressed in earlier hotfixes:
+Covers Codex audit follow-ups not addressed in earlier hotfixes:
 - 3.6 — archive_detail format prompt no longer leaks English ("Cooldown:"
   → "Захолаживание:") and raw phase identifiers are localised via
   `phase_display_name`.
@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
 from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
@@ -25,18 +25,6 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _fake_client(**cmd_replies: dict) -> MagicMock:
-    """B1: ArchiveAdapter now calls the engine's read-only REP commands
-    over ZMQ — stand-in for EngineQueryClient dispatching by cmd["cmd"]."""
-    client = MagicMock()
-
-    async def _call(cmd: dict) -> dict:
-        return cmd_replies.get(cmd["cmd"], {"ok": False, "error": "not stubbed"})
-
-    client.call = AsyncMock(side_effect=_call)
-    return client
-
-
 # ---------------------------------------------------------------------------
 # 3.6 — Russian operator output
 # ---------------------------------------------------------------------------
@@ -46,7 +34,7 @@ def test_archive_detail_prompt_has_no_english_label() -> None:
     """v0.55.16 — the archive-detail format prompt must use Russian
     section labels. Previously the cooldown summary header was the
     English string "Cooldown:" which leaked into operator-facing
-    output (audit SCOPE 3 finding 3.6)."""
+    output (Codex audit SCOPE 3 finding 3.6)."""
     assert "Cooldown:" not in FORMAT_ARCHIVE_DETAIL_USER
     assert "Захолаживание:" in FORMAT_ARCHIVE_DETAIL_USER
 
@@ -82,7 +70,9 @@ def test_archive_detail_prompt_localises_phase_names() -> None:
     # Raw English phase identifiers should NOT appear in the prompt
     # body (the localiser maps them to Russian display names).
     body_lines = prompt.splitlines()
-    phase_block = "\n".join(line for line in body_lines if line.startswith("- "))
+    phase_block = "\n".join(
+        line for line in body_lines if line.startswith("- ")
+    )
     assert "preparation" not in phase_block
     assert "cooldown" not in phase_block
     assert "measurement" not in phase_block
@@ -131,47 +121,58 @@ def test_archive_detail_prompt_filters_non_dict_phase_entries() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _entry_payload(
-    *,
-    experiment_id: str,
-    metadata_path: Path,
-    sample: str = "sample-A",
-    operator: str = "Иванов",
-    status: str = "completed",
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
-) -> dict:
-    start_time = start_time or datetime.now(UTC) - timedelta(days=1)
-    return {
-        "experiment_id": experiment_id,
-        "title": "",
-        "sample": sample,
-        "operator": operator,
-        "status": status,
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat() if end_time else None,
-        "metadata_path": str(metadata_path),
-    }
+class _ArchiveEntry:
+    def __init__(
+        self,
+        *,
+        experiment_id: str,
+        metadata_path: Path,
+        sample: str = "sample-A",
+        operator: str = "Иванов",
+        status: str = "completed",
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> None:
+        self.experiment_id = experiment_id
+        self.title = ""
+        self.sample = sample
+        self.operator = operator
+        self.status = status
+        self.start_time = start_time or datetime.now(UTC) - timedelta(days=1)
+        self.end_time = end_time
+        self.metadata_path = metadata_path
+        self.run_records = ()
+        self.artifact_index = ()
+        self.result_tables = ()
+
+
+class _ExperimentManager:
+    def __init__(self, entries: list[_ArchiveEntry]) -> None:
+        self._entries = entries
+
+    def get_archive_item(self, experiment_id: str):
+        for e in self._entries:
+            if e.experiment_id == experiment_id:
+                return e
+        return None
 
 
 def test_get_detail_handles_malformed_metadata_json(tmp_path: Path) -> None:
-    """v0.55.16 (audit SCOPE 3 finding 3.7) — corrupted JSON in
+    """v0.55.16 (Codex audit SCOPE 3 finding 3.7) — corrupted JSON in
     metadata.json must NOT crash the adapter; phases collapse to []
     and cooldown_metrics to None, while the rest of the detail
     (sample, operator, status, dates) still renders."""
     md_path = tmp_path / "metadata.json"
     md_path.write_text("{not valid json at all", encoding="utf-8")
 
-    entry = _entry_payload(
+    entry = _ArchiveEntry(
         experiment_id="exp-corrupt",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
-        archive_root=tmp_path,
-    )
+    em = _ExperimentManager([entry])
+    adapter = ArchiveAdapter(em)
 
     result = _run(adapter.get_detail("exp-corrupt"))
 
@@ -203,16 +204,14 @@ def test_get_detail_handles_invalid_iso_date_in_metadata(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    entry = _entry_payload(
+    entry = _ArchiveEntry(
         experiment_id="exp-bad-date",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
-        archive_root=tmp_path,
-    )
+    em = _ExperimentManager([entry])
+    adapter = ArchiveAdapter(em)
 
     result = _run(adapter.get_detail("exp-bad-date"))
 
@@ -236,15 +235,13 @@ def test_get_detail_handles_phases_field_being_a_string(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    entry = _entry_payload(
+    entry = _ArchiveEntry(
         experiment_id="exp-bad-shape",
         metadata_path=md_path,
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
     )
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
-        archive_root=tmp_path,
-    )
+    em = _ExperimentManager([entry])
+    adapter = ArchiveAdapter(em)
 
     result = _run(adapter.get_detail("exp-bad-shape"))
 

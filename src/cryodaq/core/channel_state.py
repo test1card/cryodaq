@@ -6,7 +6,6 @@ readings для intermittent fault detection.
 
 from __future__ import annotations
 
-import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -31,14 +30,6 @@ class ChannelState:
     instrument_id: str
     is_stale: bool = False
     fault_count_window: int = 0  # количество fault readings в окне (заполняется трекером)
-
-    @property
-    def is_usable(self) -> bool:
-        """Whether this state still represents a finite, fresh measurement."""
-        try:
-            return not self.is_stale and math.isfinite(self.value)
-        except TypeError:
-            return False
 
 
 class ChannelStateTracker:
@@ -72,17 +63,13 @@ class ChannelStateTracker:
         регистрирует fault.
         """
         ts = reading.timestamp.timestamp()
-        unusable = not reading.is_usable()
         state = ChannelState(
             channel=reading.channel,
             value=reading.value,
             timestamp=ts,
             unit=reading.unit,
             instrument_id=reading.instrument_id,
-            # A received error/NaN is evidence that the measurement is unknown,
-            # not a fresh quiet value. Preserve the sample for diagnostics while
-            # exposing it to every consumer through the existing stale contract.
-            is_stale=unusable,
+            is_stale=False,
         )
         self._states[reading.channel] = state
 
@@ -93,7 +80,7 @@ class ChannelStateTracker:
 
         # Fault detection: только для temperature channels (unit == "K")
         if reading.unit == "K":
-            if unusable or reading.value < _FAULT_MIN or reading.value > _FAULT_MAX:
+            if reading.value < _FAULT_MIN or reading.value > _FAULT_MAX:
                 self.record_fault(reading.channel, ts)
 
         # Обновляем fault_count в state
@@ -112,7 +99,7 @@ class ChannelStateTracker:
         if state is None:
             return None
         # Обновляем is_stale на момент запроса
-        state.is_stale = state.is_stale or ((time.time() - state.timestamp) > self._stale_timeout)
+        state.is_stale = (time.time() - state.timestamp) > self._stale_timeout
         state.fault_count_window = self.get_fault_count(channel)
         return state
 
@@ -120,7 +107,7 @@ class ChannelStateTracker:
         """Каналы без обновлений дольше timeout_s (или stale_timeout_s по умолчанию)."""
         threshold = timeout_s if timeout_s is not None else self._stale_timeout
         now = time.time()
-        return [ch for ch, st in self._states.items() if st.is_stale or (now - st.timestamp) > threshold]
+        return [ch for ch, st in self._states.items() if (now - st.timestamp) > threshold]
 
     def record_fault(self, channel: str, timestamp: float) -> None:
         """Записать fault reading для intermittent fault detection."""

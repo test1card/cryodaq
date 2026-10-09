@@ -135,7 +135,9 @@ def _title_label(text: str) -> QLabel:
     font.setPixelSize(theme.FONT_SIZE_LG)
     font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
     label.setFont(font)
-    label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 0.5px;")
+    label.setStyleSheet(
+        f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 0.5px;"
+    )
     return label
 
 
@@ -386,7 +388,10 @@ class TemperatureOverviewWidget(_WorkerCleanupMixin, QWidget):
 
         cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
         threshold = max(cached_span * 0.15, 0.5)
-        if abs(new_lo - self._y_cache_lo) > threshold or abs(new_hi - self._y_cache_hi) > threshold:
+        if (
+            abs(new_lo - self._y_cache_lo) > threshold
+            or abs(new_hi - self._y_cache_hi) > threshold
+        ):
             pi.setYRange(new_lo, new_hi, padding=0)
             self._y_cache_lo = new_lo
             self._y_cache_hi = new_hi
@@ -395,7 +400,6 @@ class TemperatureOverviewWidget(_WorkerCleanupMixin, QWidget):
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
         import math
         import time
-
         if time.time() - self._last_history_fetch_ts < 1.0:
             return
         # Check if any series has enough data to cover the window.
@@ -418,7 +422,6 @@ class TemperatureOverviewWidget(_WorkerCleanupMixin, QWidget):
         channels = [channel_mgr.get_display_name(ch) for ch in cold_ids] or None
         window = self._window_selector.get_window()
         import math as _math
-
         span = window.seconds if _math.isfinite(window.seconds) else 7 * 24 * 3600.0
         cmd = {
             "cmd": "readings_history",
@@ -686,6 +689,16 @@ class VacuumPredictionWidget(QWidget):
 
     @Slot(dict)
     def _on_trend_result(self, result: dict) -> None:
+        # D2 INSTRUMENTATION — remove before fix commit
+        import logging as _dbg_log
+        _dbglog = _dbg_log.getLogger("cryodaq.dbg.vacuum")
+        _dbglog.warning(
+            "[D2] _on_trend_result: ok=%s status=%s extrap_t_n=%d residual_std=%s",
+            result.get("ok"),
+            result.get("status"),
+            len(result.get("extrapolation_t") or []),
+            result.get("residual_std"),
+        )
         if not result.get("ok") or result.get("status") == "no_data":
             # Clear any previously-rendered forecast so no stale overlay persists
             # after a bridge restart, disabled predictor, or empty buffer.
@@ -703,13 +716,25 @@ class VacuumPredictionWidget(QWidget):
         now = time.time()
         t0 = now - extrap_t[0]
 
-        central = [(t0 + t, 10.0**lp) for t, lp in zip(extrap_t, extrap_logP) if math.isfinite(lp)]
+        central = [
+            (t0 + t, 10.0**lp)
+            for t, lp in zip(extrap_t, extrap_logP)
+            if math.isfinite(lp)
+        ]
         if not central:
             return
 
         if residual_std > 0:
-            lower = [(t0 + t, 10.0 ** (lp - residual_std)) for t, lp in zip(extrap_t, extrap_logP) if math.isfinite(lp)]
-            upper = [(t0 + t, 10.0 ** (lp + residual_std)) for t, lp in zip(extrap_t, extrap_logP) if math.isfinite(lp)]
+            lower = [
+                (t0 + t, 10.0 ** (lp - residual_std))
+                for t, lp in zip(extrap_t, extrap_logP)
+                if math.isfinite(lp)
+            ]
+            upper = [
+                (t0 + t, 10.0 ** (lp + residual_std))
+                for t, lp in zip(extrap_t, extrap_logP)
+                if math.isfinite(lp)
+            ]
         else:
             lower = central
             upper = central
@@ -742,7 +767,6 @@ class CooldownPredictionWidget(QWidget):
     # with margin. VacuumPredictionWidget left at 5000 — its replay
     # cadence has not surfaced the same UX issue.
     _MAX_RAW_PTS: int = 50000
-    _IDLE_MESSAGE = "Охлаждение не активно — прогноз недоступен"
     # Canonical cold-stage landmark id from config/physical_alarms.yaml.
     # MainWindowV2 routes only readings whose channel resolves to this id;
     # configuration-decoupling is left to a future spec per architect.
@@ -764,7 +788,7 @@ class CooldownPredictionWidget(QWidget):
         # Idle placeholder as pg.TextItem on the plot canvas — plot uses
         # full vertical space rather than being clipped by a label above it.
         self._placeholder = pg.TextItem(
-            self._IDLE_MESSAGE,
+            "Охлаждение не активно — прогноз недоступен",
             anchor=(0.5, 0.5),
             color=QColor(theme.MUTED_FOREGROUND),
         )
@@ -836,10 +860,6 @@ class CooldownPredictionWidget(QWidget):
         """
         if reading is None:
             return
-        # NaN-доктрина (A3): status — дискриминатор годности, не float-конечность.
-        # Не годное показание (ошибка статуса / NaN / ±inf) не питает предиктор.
-        if not reading.is_usable():
-            return
         ts = reading.timestamp.timestamp()
         val = float(reading.value)
         self._raw_cold_buffer.append((ts, val))
@@ -856,20 +876,6 @@ class CooldownPredictionWidget(QWidget):
             self._last_ts_seen = ts
         self._ss_predictor.update(time.time())
         self._inner.set_history(list(self._raw_cold_buffer))
-
-    def set_cold_stage_unavailable(self, reason: str) -> None:
-        """Show that no authoritative cold-stage declaration was supplied."""
-        self._inner.set_prediction([], [], [], ci_level_pct=67.0)
-        self._asym_line.setVisible(False)
-        self._asym_band.setVisible(False)
-        self._steady_badge.setVisible(False)
-        self._placeholder.setText(reason)
-        self._placeholder.setVisible(True)
-
-    def clear_cold_stage_unavailable(self) -> None:
-        """Remove the unavailable claim once the declared slot is established."""
-        self._placeholder.setText(self._IDLE_MESSAGE)
-        self._placeholder.setVisible(not (self._inner._history or self._inner._central))
 
     def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
@@ -924,12 +930,17 @@ class CooldownPredictionWidget(QWidget):
             self._asym_line.setVisible(False)
             self._asym_band.setVisible(False)
             self._steady_badge.setPlainText(
-                f"Стационар: T = {pred.t_current:.2f} ± {pred.stddev_k:.2f} K, дрейф {pred.drift_rate_k_per_h:+.2f} К/ч"
+                f"Стационар: T = {pred.t_current:.2f} ± {pred.stddev_k:.2f} K, "
+                f"дрейф {pred.drift_rate_k_per_h:+.2f} К/ч"
             )
             self._steady_badge.setVisible(True)
             self._placeholder.setVisible(False)
             self._reposition_overlays()
-        elif pred is not None and pred.valid and pred.percent_settled >= self._SETTLE_THRESHOLD:
+        elif (
+            pred is not None
+            and pred.valid
+            and pred.percent_settled >= self._SETTLE_THRESHOLD
+        ):
             t_inf = pred.t_predicted
             sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
             self._asym_line.setPos(t_inf)
@@ -977,7 +988,9 @@ class RThermalLiveWidget(QWidget):
         self._value_label = _mono_value_label("—")
         lay.addWidget(self._value_label)
         self._delta_label = QLabel("ΔR / мин: —")
-        self._delta_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        self._delta_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         lay.addWidget(self._delta_label)
         self._plot = pg.PlotWidget()
         apply_plot_style(self._plot)
@@ -1049,9 +1062,6 @@ class RThermalLiveWidget(QWidget):
             self._curve.setData(x=xs, y=ys)
 
             # Feed only new history points into the predictor.
-            # NaN-доктрина (A3): buffer replay — только (ts, float), без Reading
-            # со статусом; годность уже отфильтрована выше по потоку. Гейтить
-            # нечем, оставляем float-питание как есть.
             for ts, val in history:
                 if ts > self._last_r_ts:
                     self._ss_predictor.add_point("R_thermal", ts, val)
@@ -1104,7 +1114,9 @@ class PressureCurrentWidget(QWidget):
             pass
         self._window_selector.window_changed.connect(self._plot._apply_window)
         self._plot._apply_window(self._window_selector.get_window())
-        self._window_selector.window_changed.connect(lambda w: self._maybe_refetch_history(w))
+        self._window_selector.window_changed.connect(
+            lambda w: self._maybe_refetch_history(w)
+        )
         lay.addWidget(self._plot, stretch=1)
         self._series: list[tuple[float, float]] = []
         self._history_worker = None
@@ -1137,7 +1149,6 @@ class PressureCurrentWidget(QWidget):
         self._last_history_fetch_ts = _time.time()
         window = self._window_selector.get_window()
         import math as _math
-
         span = window.seconds if _math.isfinite(window.seconds) else 24 * 3600.0
         cmd = {
             "cmd": "readings_history",
@@ -1153,7 +1164,6 @@ class PressureCurrentWidget(QWidget):
     def _maybe_refetch_history(self, window: TimeWindow) -> None:
         import math
         import time
-
         if time.time() - self._last_history_fetch_ts < 1.0:
             return
         requested_secs = window.seconds if math.isfinite(window.seconds) else 24 * 3600.0
@@ -1197,7 +1207,9 @@ class SensorHealthSummaryWidget(QWidget):
         lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         lay.setSpacing(theme.SPACE_2)
         lay.addWidget(_title_label("Диагностика датчиков"))
-        self._empty_label = _muted_label("Датчики без аномалий — свежих диагностических данных нет.")
+        self._empty_label = _muted_label(
+            "Датчики без аномалий — свежих диагностических данных нет."
+        )
         lay.addWidget(self._empty_label)
         self._grid = QGridLayout()
         self._grid.setSpacing(theme.SPACE_1)
@@ -1224,7 +1236,9 @@ class SensorHealthSummaryWidget(QWidget):
         row = 0
         for name, severity in sorted(health.items()):
             name_label = QLabel(name)
-            name_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+            name_label.setStyleSheet(
+                f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+            )
             chip = SeverityChip(severity.upper())
             self._grid.addWidget(name_label, row, 0)
             self._grid.addWidget(chip, row, 1)
@@ -1250,7 +1264,9 @@ class KeithleyPowerWidget(QWidget):
         grid.setSpacing(theme.SPACE_1)
         for col, channel in enumerate(("A", "B")):
             header = QLabel(f"Канал {channel}")
-            header.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+            header.setStyleSheet(
+                f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+            )
             grid.addWidget(header, 0, col)
             for row, key in enumerate(("voltage", "current", "power"), start=1):
                 value = _mono_value_label("—")
@@ -1382,7 +1398,8 @@ class _ClickableLabel(QLabel):
         if path:
             self.setText(path)
             self.setStyleSheet(
-                f"color: {theme.ACCENT}; text-decoration: underline; background: transparent; border: none;"
+                f"color: {theme.ACCENT}; text-decoration: underline; "
+                "background: transparent; border: none;"
             )
         else:
             self.setText("—")
@@ -1452,6 +1469,7 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(card)
 
+
     def _add_link_row(self, layout: QVBoxLayout, label_text: str) -> _ClickableLabel:
         """Create a label row where the value is a clickable file link (F19 sub-item 3)."""
         row = QWidget()
@@ -1464,7 +1482,9 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
         key_font = QFont(theme.FONT_BODY)
         key_font.setPixelSize(theme.FONT_BODY_SIZE)
         key.setFont(key_font)
-        key.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        key.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         key.setFixedWidth(140)
 
         val = _ClickableLabel()
@@ -1490,7 +1510,9 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
         key_font = QFont(theme.FONT_BODY)
         key_font.setPixelSize(theme.FONT_BODY_SIZE)
         key.setFont(key_font)
-        key.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        key.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         key.setFixedWidth(140)
 
         val = QLabel("—")
@@ -1609,7 +1631,7 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             "cmd": "readings_history",
             "from_ts": start_ts,
             "to_ts": to_ts,
-            # 50k samples covers ~7h at 0.5s polling cadence (P2: 5k was 42 min)
+            # 50k samples covers ~7h at 0.5s polling cadence (Codex P2: 5k was 42 min)
             "limit_per_channel": 50000,
         }
         self._stats_worker = ZmqCommandWorker(cmd, parent=self)
@@ -1629,7 +1651,10 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
 
         lines: list[str] = []
         # Show temperature channels (K) first, then others
-        temp_chs = sorted(ch for ch in data if ch.startswith("Т") or ch.startswith("T"))
+        temp_chs = sorted(
+            ch for ch in data
+            if ch.startswith("Т") or ch.startswith("T")
+        )
         other_chs = sorted(ch for ch in data if ch not in temp_chs)
         ordered = (temp_chs + other_chs)[:12]  # limit display
 
@@ -1637,11 +1662,8 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             pts = data[ch]
             if not pts:
                 continue
-            # Non-finite samples mean "no reading" — aggregating over them would
-            # print a confident "nan" at the moment the data became unavailable.
-            vals = [float(p[1]) for p in pts if len(p) >= 2 and math.isfinite(p[1])]
+            vals = [float(p[1]) for p in pts if len(p) >= 2]
             if not vals:
-                lines.append(f"{ch}: —")
                 continue
             mn = min(vals)
             mx = max(vals)
@@ -1753,9 +1775,12 @@ class TemperatureSteadyStateWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._predictors: dict[str, SteadyStatePredictor] = {
-            key: SteadyStatePredictor(window_s=600.0, update_interval_s=30.0) for _, key, _ in self._LANDMARKS
+            key: SteadyStatePredictor(window_s=600.0, update_interval_s=30.0)
+            for _, key, _ in self._LANDMARKS
         }
-        self._buffers: dict[str, list[tuple[float, float]]] = {key: [] for _, key, _ in self._LANDMARKS}
+        self._buffers: dict[str, list[tuple[float, float]]] = {
+            key: [] for _, key, _ in self._LANDMARKS
+        }
         self._last_ts: dict[str, float] = {key: 0.0 for _, key, _ in self._LANDMARKS}
         # 2026-05-08 (v0.56.3 amend): widget-side Y-range cache for the
         # cache-driven deadband helper.
@@ -1857,9 +1882,6 @@ class TemperatureSteadyStateWidget(QWidget):
             key = self._key_for_short_id(short_id)
             if key is None:
                 continue
-            # NaN-доктрина (A3): не годное показание не питает предиктор.
-            if not reading.is_usable():
-                continue
             try:
                 value = float(reading.value)
             except (TypeError, ValueError):
@@ -1901,7 +1923,11 @@ class TemperatureSteadyStateWidget(QWidget):
 
             self._predictors[key].update(now)
             pred = self._predictors[key].get_prediction(key)
-            if pred is not None and pred.valid and pred.percent_settled >= self._SETTLE_THRESHOLD:
+            if (
+                pred is not None
+                and pred.valid
+                and pred.percent_settled >= self._SETTLE_THRESHOLD
+            ):
                 t_inf = pred.t_predicted
                 sigma = abs(pred.amplitude) * max(0.0, 1.0 - pred.confidence)
                 asym.setPos(t_inf)
@@ -1961,7 +1987,10 @@ class TemperatureSteadyStateWidget(QWidget):
 
         cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
         threshold = max(cached_span * 0.15, 0.5)
-        if abs(new_lo - self._y_cache_lo) > threshold or abs(new_hi - self._y_cache_hi) > threshold:
+        if (
+            abs(new_lo - self._y_cache_lo) > threshold
+            or abs(new_hi - self._y_cache_hi) > threshold
+        ):
             pi.setYRange(new_lo, new_hi, padding=0)
             self._y_cache_lo = new_lo
             self._y_cache_hi = new_hi

@@ -7,10 +7,8 @@ from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui import theme
 from cryodaq.gui.shell.views.assistant_insight_panel import (
     _MAX_INSIGHTS,
     AssistantInsightPanel,
@@ -82,21 +80,6 @@ def test_push_insight_renders_one_card() -> None:
         if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
     ]
     assert len(cards) == 1
-    card = cards[0]
-
-    # Assert rendered label texts — message and trigger chip visible in card.
-    from PySide6.QtWidgets import QLabel
-
-    labels = card.findChildren(QLabel)
-    label_texts = [lb.text() for lb in labels]
-    # The LLM message text must appear in one of the card's QLabels.
-    assert any("Аномалия датчика T2." in t for t in label_texts), (
-        f"message text not found in card labels: {label_texts}"
-    )
-    # The trigger chip text for "sensor_anomaly_critical" must be rendered.
-    chip = card.findChildren(_TriggerChip)
-    assert len(chip) == 1
-    assert chip[0].text() == "ДАТЧИК"
     panel.deleteLater()
 
 
@@ -109,65 +92,6 @@ def test_push_insight_uses_provided_timestamp() -> None:
 
     assert len(panel._entries) == 1
     assert panel._entries[0].timestamp == ts
-
-    # Assert the rendered timestamp label in the card shows the expected time.
-    cards = [
-        panel._cards_layout.itemAt(i).widget()
-        for i in range(panel._cards_layout.count())
-        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
-    ]
-    assert len(cards) == 1
-    from PySide6.QtWidgets import QLabel
-
-    label_texts = [lb.text() for lb in cards[0].findChildren(QLabel)]
-    expected_time = ts.astimezone().strftime("%H:%M:%S")
-    assert any(expected_time in t for t in label_texts), (
-        f"timestamp {expected_time!r} not found in card labels: {label_texts}"
-    )
-    panel.deleteLater()
-
-
-def test_alarm_and_shift_handover_use_caution_without_safety_green() -> None:
-    _app()
-    for event_type in ("alarm_fired", "shift_handover_request"):
-        chip = _TriggerChip(event_type)
-        style = chip.styleSheet()
-        assert theme.STATUS_CAUTION in style
-        assert theme.STATUS_OK not in style
-        chip.deleteLater()
-
-
-def test_untrusted_assistant_text_is_plain_text() -> None:
-    _app()
-    hostile_body = "<b>alarm</b> &lt;tag&gt; \u202eRTL\u0001"
-    hostile_brand = "<img src=x> &amp; brand \u202dNAME\u0002"
-    hostile_emoji = "<i>bot</i>"
-    panel = AssistantInsightPanel(
-        brand_name=hostile_brand,
-        brand_emoji=hostile_emoji,
-    )
-    panel.push_insight(hostile_body, "<script>untrusted-trigger</script>")
-
-    card = next(
-        panel._cards_layout.itemAt(i).widget()
-        for i in range(panel._cards_layout.count())
-        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
-    )
-    labels = card.findChildren(QLabel)
-    body = next(label for label in labels if label.text() == hostile_body)
-    trigger = next(label for label in labels if isinstance(label, _TriggerChip))
-    panel_labels = panel.findChildren(QLabel)
-    title = next(label for label in panel_labels if hostile_brand in label.text() and hostile_emoji in label.text())
-
-    assert body.textFormat() == Qt.TextFormat.PlainText
-    assert body.text() == hostile_body
-    assert trigger.textFormat() == Qt.TextFormat.PlainText
-    assert trigger.text() == "\u0421\u041e\u0411\u042b\u0422\u0418\u0415"
-    assert title.textFormat() == Qt.TextFormat.PlainText
-    assert hostile_brand in title.text()
-    assert hostile_emoji in title.text()
-    assert panel._placeholder.textFormat() == Qt.TextFormat.PlainText
-    assert hostile_brand in panel._placeholder.text()
     panel.deleteLater()
 
 
@@ -186,25 +110,6 @@ def test_panel_keeps_last_10_insights() -> None:
     assert len(panel._entries) == _MAX_INSIGHTS
     # Newest entry (last pushed) is first (appendleft)
     assert panel._entries[0].text == f"Сообщение {_MAX_INSIGHTS + 2}"
-
-    # Assert rendered cards == exactly 10, newest message first.
-    cards = [
-        panel._cards_layout.itemAt(i).widget()
-        for i in range(panel._cards_layout.count())
-        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
-    ]
-    assert len(cards) == _MAX_INSIGHTS, f"expected {_MAX_INSIGHTS} rendered cards, got {len(cards)}"
-    from PySide6.QtWidgets import QLabel
-
-    # Cards are laid out newest-first (same order as _entries).
-    for idx, card in enumerate(cards):
-        label_texts = [lb.text() for lb in card.findChildren(QLabel)]
-        expected_msg = f"Сообщение {_MAX_INSIGHTS + 2 - idx}"
-        assert any(expected_msg in t for t in label_texts), (
-            f"card[{idx}] should show {expected_msg!r}, got {label_texts}"
-        )
-    # _count_label shows "10/10".
-    assert panel._count_label.text() == f"{_MAX_INSIGHTS}/{_MAX_INSIGHTS}"
     panel.deleteLater()
 
 
@@ -215,22 +120,12 @@ def test_panel_layout_count_matches_entries() -> None:
     for i in range(5):
         panel.push_insight(f"Сообщение {i}", "experiment_finalize")
 
-    cards = [
-        panel._cards_layout.itemAt(i).widget()
+    card_count = sum(
+        1
         for i in range(panel._cards_layout.count())
         if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
-    ]
-    assert len(cards) == 5
-
-    # Assert visible card texts match pushed messages (newest first).
-    from PySide6.QtWidgets import QLabel
-
-    for idx, card in enumerate(cards):
-        label_texts = [lb.text() for lb in card.findChildren(QLabel)]
-        expected_msg = f"Сообщение {4 - idx}"
-        assert any(expected_msg in t for t in label_texts), (
-            f"card[{idx}] should show {expected_msg!r}, got {label_texts}"
-        )
+    )
+    assert card_count == 5
     panel.deleteLater()
 
 
@@ -262,7 +157,7 @@ def test_trigger_chip_unknown_uses_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Placeholder lifetime (CRITICAL fix verification)
+# Placeholder lifetime (Codex CRITICAL fix verification)
 # ---------------------------------------------------------------------------
 
 

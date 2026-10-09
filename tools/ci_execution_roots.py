@@ -38,6 +38,7 @@ EXECUTION_ROOTS = (
         files=(
             "tests/docs/test_docs_freshness.py",
             "tests/governance/test_agent_formatter_gate.py",
+            "tests/governance/test_no_fixed_test_ports.py",
             "tests/governance/test_red_reproduction_immutability.py",
             "tests/test_claudemd_index.py",
         ),
@@ -64,6 +65,14 @@ EXECUTION_ROOTS = (
             ),
             (
                 "tests/governance/test_red_reproduction.py"
+                "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-mismatch]"
+            ),
+            (
+                "tests/governance/test_red_reproduction.py"
+                "::test_red_reproduction_receipt_refusals_are_independent[guard-blob-node-mismatch]"
+            ),
+            (
+                "tests/governance/test_red_reproduction.py"
                 "::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]"
             ),
             (
@@ -79,6 +88,21 @@ EXECUTION_ROOTS = (
                 "::test_controlled_environment_genuinely_executes_strict_exact_six"
             ),
         ),
+    ),
+    # OB-006.  The release gate runs `tools.ci_active_checkout_runner --suite release`, and that
+    # runner derives EVERYTHING it executes from this registry: `run_suite` takes its ordinary
+    # selection from here and then keeps only the active guards whose node lives inside this
+    # selection (`execution_root="git-index"`).  Without this entry the release suite selects the
+    # empty set, `_strict_guard_command` returns None, and the runner exits 0 having executed
+    # nothing -- a green that proves less than the plain `pytest tests/release` it replaced.
+    # The module belongs here on its own merits: every test in it shells out to `git` against the
+    # candidate INDEX (`git diff --cached`, `git show :<path>`), which an exported tree with no
+    # `.git` cannot answer.
+    ExecutionSelection(
+        execution_root="git-index",
+        suite="release",
+        files=("tests/release/test_whole_tree_artifact_freshness.py",),
+        nodes=(),
     ),
 )
 

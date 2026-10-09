@@ -23,7 +23,9 @@ from cryodaq.core.channel_manager import ChannelManager
 
 
 def _make_mgr(**channels: dict) -> ChannelManager:
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
     yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
@@ -40,7 +42,9 @@ def test_classifier_prompt_no_latin_t_digit_pattern() -> None:
     stripped = re.sub(r"\{[^}]+\}", "", p.INTENT_CLASSIFIER_SYSTEM)
     # Find Latin T followed by digit — these should be Cyrillic in channel context
     latin_t_channel = re.findall(r"\bT\d+\b", stripped)
-    assert not latin_t_channel, f"Latin T<digit> in INTENT_CLASSIFIER_SYSTEM: {latin_t_channel}"
+    assert not latin_t_channel, (
+        f"Latin T<digit> in INTENT_CLASSIFIER_SYSTEM: {latin_t_channel}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -112,48 +116,37 @@ def test_router_resolves_latin_t_via_channelmanager() -> None:
 
 
 async def test_experiment_adapter_populates_started_human() -> None:
-    """B1: ``experiment_started_human`` is documented dead-attribute parity
-    (see experiment_adapter.py module docstring) — ``ExperimentInfo`` never
-    exposed ``started_at``/``target_temp``/``sample_id`` in production (it's
-    a ``slots=True`` dataclass without those fields), so the original
-    ``getattr(active, "started_at", None)`` always returned ``None`` and
-    this always rendered as ``None`` too. Pinning that here so a future
-    change notices if it silently starts fabricating a value.
-    """
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
 
     from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
 
-    client = MagicMock()
-    client.call = AsyncMock(
-        return_value={
-            "ok": True,
-            "current_phase": "measurement",
-            "phase_started_at": 1746100000.0,
-            "active_experiment": {"experiment_id": "exp-001"},
-        }
-    )
-    adapter = ExperimentAdapter(client)
+    em = MagicMock()
+    em.active_experiment_id = "exp-001"
+    active = MagicMock()
+    active.started_at = 1746100000.0  # some real Unix timestamp
+    active.target_temp = 4.0
+    active.sample_id = None
+    em.active_experiment = active
+
+    adapter = ExperimentAdapter(em)
     status = await adapter.status()
     assert status is not None
-    assert status.experiment_started_human is None
+    # 1746100000.0 UTC → "11:46 UTC 01.05.2025" (verified with datetime.fromtimestamp)
+    assert status.experiment_started_human == "11:46 UTC 01.05.2025"
 
 
 async def test_experiment_adapter_started_human_none_when_no_start_time() -> None:
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
 
     from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
 
-    client = MagicMock()
-    client.call = AsyncMock(
-        return_value={
-            "ok": True,
-            "current_phase": None,
-            "phase_started_at": None,
-            "active_experiment": {"experiment_id": "exp-001"},
-        }
-    )
-    adapter = ExperimentAdapter(client)
+    em = MagicMock()
+    em.active_experiment_id = "exp-001"
+    active = MagicMock()
+    active.started_at = None  # no start time
+    em.active_experiment = active
+
+    adapter = ExperimentAdapter(em)
     status = await adapter.status()
     assert status is not None
     assert status.experiment_started_human is None

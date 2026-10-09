@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import cryodaq.engine as engine
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
@@ -21,6 +22,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+from tests.core.test_startup_safety_liveness_gate import _install_engine_startup_harness
 from tests.qualification_support import issued_test_qualification_receipt
 
 
@@ -412,6 +414,30 @@ async def test_c_authorized_critical_input_rename_still_works(tmp_path: Path) ->
         assert driver.emergency_off_calls == 0
     finally:
         await manager.stop()
+
+
+async def test_d_startup_rejects_misspelled_declared_critical_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine validates its selected safety manager before persistence."""
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
+        safety_manager_type=SafetyManager,
+    )
+    safety_path = tmp_path / "config" / "safety.yaml"
+    safety_path.write_text("critical_channels:\n  - 'gaurd'\n", encoding="utf-8")
+
+    with pytest.raises(SafetyConfigError) as exc_info:
+        await engine._run_engine(mock=True)
+
+    message = str(exc_info.value)
+    assert "gaurd" in message
+    assert "canonical identity resolution to raw emitted label" in message
+    assert observed["writer_called"] is False
 
 
 @pytest.mark.parametrize(

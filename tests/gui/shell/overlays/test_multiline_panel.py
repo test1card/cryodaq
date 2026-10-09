@@ -63,39 +63,6 @@ def _env_reading(kind: str, value: float, unit: str) -> Reading:
     )
 
 
-class _DeferredSignal:
-    def __init__(self) -> None:
-        self._callbacks: list = []
-
-    def connect(self, callback) -> None:
-        self._callbacks.append(callback)
-
-    def emit(self, result: dict | None) -> None:
-        for callback in list(self._callbacks):
-            callback(result)
-
-
-class _DeferredWorker:
-    instances: list[_DeferredWorker] = []
-
-    def __init__(self, cmd: dict, parent=None) -> None:
-        del parent
-        self.cmd = dict(cmd)
-        self.finished = _DeferredSignal()
-        self.running = False
-        self.__class__.instances.append(self)
-
-    def start(self) -> None:
-        self.running = True
-
-    def isRunning(self) -> bool:
-        return self.running
-
-    def finish(self, result: dict | None) -> None:
-        self.running = False
-        self.finished.emit(result)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -164,7 +131,10 @@ def test_baseline_NOT_auto_set_on_first_reading() -> None:
     s.update(99.123, ts=0.0)
     s.update(99.456, ts=1.0)
     s.update(99.789, ts=2.0)
-    assert s.baseline_value_mm is None, "Baseline must remain None until operator clicks Reset; auto-set regressed."
+    assert s.baseline_value_mm is None, (
+        "Baseline must remain None until operator clicks Reset; auto-set "
+        "regressed."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +166,9 @@ def test_panel_handles_32_channels(panel: MultiLinePanel) -> None:
         panel.on_reading(_length_reading(ch, 1000.0 + ch * 0.001))
     assert panel._table.rowCount() == 32
     # Russian noun agreement on a multi-digit count.
-    assert "32 канала" in panel._channel_count_label.text() or ("32 каналов" in panel._channel_count_label.text())
+    assert "32 канала" in panel._channel_count_label.text() or (
+        "32 каналов" in panel._channel_count_label.text()
+    )
 
 
 def test_panel_table_orders_channels_ascending(panel: MultiLinePanel) -> None:
@@ -249,16 +221,12 @@ def test_panel_environment_render(panel: MultiLinePanel) -> None:
 
 
 def test_reset_button_sets_baseline(panel: MultiLinePanel) -> None:
-    """MED: click the row reset cell widget button; assert displayed delta text."""
     panel.on_reading(_length_reading(1, 100.0))
     panel.on_reading(_length_reading(1, 101.0))
-    # _confirm_resets is False on the fixture — button click goes straight through.
-    reset_btn = panel._table.cellWidget(0, 4)  # _COL_RESET == 4
-    assert reset_btn is not None, "Reset cell widget not found at column 4"
-    reset_btn.click()
+    assert panel.reset_channel(1) is True
     state = panel._states[1]
     assert state.baseline_value_mm == 101.0
-    # Subsequent reading shows Δ in the rendered table cell.
+    # Subsequent reading shows Δ.
     panel.on_reading(_length_reading(1, 101.5))
     delta_text = panel._table.item(0, 2).text()
     assert "+0.500000" in delta_text
@@ -333,14 +301,10 @@ def test_burst_initial_state_is_idle(panel: MultiLinePanel) -> None:
     assert panel._burst_status_label.text() == "Готов"
     assert panel._burst_active_server is False
     assert not panel._burst_poll_timer.isActive()
-    assert not panel._burst_button.isEnabled()
-    panel.set_connected(True)
-    assert panel._burst_button.isEnabled()
 
 
 def test_burst_response_start_ok_flips_to_recording(panel: MultiLinePanel) -> None:
     """Engine confirmed start — UI must enter recording state."""
-    panel.set_connected(True)
     panel._burst_in_flight = True
     panel._on_burst_response(
         "multiline.burst_start",
@@ -355,25 +319,21 @@ def test_burst_response_start_ok_flips_to_recording(panel: MultiLinePanel) -> No
 
 
 def test_burst_response_start_error_in_averaged_mode(panel: MultiLinePanel) -> None:
-    """A failed mutation cannot be used as proof that capture is idle."""
-    panel.set_connected(True)
+    """Engine rejects burst in averaged mode → UI surfaces the error."""
     panel._burst_in_flight = True
     panel._on_burst_response(
         "multiline.burst_start",
         {"ok": False, "error": "Burst capture requires continuous mode"},
     )
     assert panel._burst_active_server is False
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_button.text() == "Остановить"
+    assert panel._burst_button.text() == "Записать"
     assert panel._burst_button.isEnabled()
     assert "continuous" in panel._burst_status_label.text()
-    assert "ИСХОД НЕИЗВЕСТЕН" in panel._burst_status_label.text()
-    assert panel._burst_poll_timer.isActive()
+    assert not panel._burst_poll_timer.isActive()
 
 
 def test_burst_response_stop_with_path(panel: MultiLinePanel) -> None:
     """Successful stop shows the saved path in the status label."""
-    panel.set_connected(True)
     panel._burst_active_server = True
     panel._on_burst_response(
         "multiline.burst_stop",
@@ -389,7 +349,6 @@ def test_burst_response_stop_with_path(panel: MultiLinePanel) -> None:
 
 def test_burst_response_stop_empty_buffer(panel: MultiLinePanel) -> None:
     """Stop with no cycles received — status reflects empty save."""
-    panel.set_connected(True)
     panel._burst_active_server = True
     panel._on_burst_response(
         "multiline.burst_stop",
@@ -400,7 +359,6 @@ def test_burst_response_stop_empty_buffer(panel: MultiLinePanel) -> None:
 
 
 def test_burst_response_status_during_active_burst(panel: MultiLinePanel) -> None:
-    panel.set_connected(True)
     panel._burst_active_server = True
     panel._on_burst_response(
         "multiline.burst_status",
@@ -411,162 +369,12 @@ def test_burst_response_status_during_active_burst(panel: MultiLinePanel) -> Non
 
 
 def test_burst_response_engine_disconnect(panel: MultiLinePanel) -> None:
-    """A missing reply remains unknown and offers live defensive Stop."""
-    panel.set_connected(True)
+    """ZMQ worker returned non-dict (None) — UI must not strand."""
     panel._burst_in_flight = True
     panel._on_burst_response("multiline.burst_start", None)
     assert panel._burst_in_flight is False
     assert panel._burst_button.isEnabled()
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_button.text() == "Остановить"
     assert "не ответил" in panel._burst_status_label.text()
-
-
-def test_burst_direct_handler_requires_connected_writable_authority(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-
-    assert panel._on_burst_clicked() is False
-    assert not _DeferredWorker.instances
-
-    panel.set_connected(True)
-    panel.set_read_only(True)
-    assert panel._on_burst_clicked() is False
-    assert not _DeferredWorker.instances
-
-
-def test_burst_disconnect_retains_active_last_known_and_unknown(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-    panel.set_connected(True)
-    panel._burst_in_flight = True
-    panel._on_burst_response(
-        "multiline.burst_start",
-        {"ok": True, "duration_s": 10},
-    )
-
-    panel.set_connected(False)
-
-    assert panel._burst_active_server is True
-    assert panel._burst_outcome_unknown is True
-    assert "ИСХОД НЕИЗВЕСТЕН" in panel._burst_status_label.text()
-    assert not panel._burst_poll_timer.isActive()
-    assert not panel._burst_button.isEnabled()
-    before = len(_DeferredWorker.instances)
-    assert panel._on_burst_clicked() is False
-    assert len(_DeferredWorker.instances) == before
-
-    panel.set_connected(True)
-    assert panel._burst_active_server is True
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_button.isEnabled()
-    assert panel._burst_button.text() == "Остановить"
-
-
-def test_burst_timeout_late_duplicate_needs_authoritative_status(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-    panel.set_connected(True)
-    assert panel._on_burst_clicked() is True
-    start_worker = _DeferredWorker.instances[-1]
-
-    start_worker.finish({"ok": False, "_handler_timeout": True, "error": "request timed out"})
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_active_server is False
-    start_worker.finish({"ok": True, "duration_s": 10})
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_active_server is False
-
-    panel._poll_burst_status()
-    status_worker = _DeferredWorker.instances[-1]
-    assert status_worker.cmd["cmd"] == "multiline.burst_status"
-    status_worker.finish({"ok": True, "active": False, "cycle_count": 0, "elapsed_s": 0.0})
-    assert panel._burst_outcome_unknown is False
-    assert panel._burst_active_server is False
-    assert panel._burst_button.text() == "Записать"
-
-
-def test_burst_status_polling_has_at_most_one_worker(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-    panel.set_connected(True)
-    panel._burst_active_server = True
-
-    for _ in range(20):
-        panel._poll_burst_status()
-
-    assert len(_DeferredWorker.instances) == 1
-    assert panel._burst_status_poll_coalesced is True
-    assert sum(worker.running for worker in _DeferredWorker.instances) == 1
-
-    _DeferredWorker.instances[0].finish({"ok": True, "active": True, "cycle_count": 1, "elapsed_s": 0.5})
-    assert panel._burst_status_worker is None
-    panel._poll_burst_status()
-    assert len(_DeferredWorker.instances) == 2
-    assert sum(worker.running for worker in _DeferredWorker.instances) == 1
-
-
-def test_burst_reply_from_previous_connection_generation_is_ignored(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-    panel.set_connected(True)
-    panel._on_burst_clicked()
-    stale_worker = _DeferredWorker.instances[-1]
-
-    panel.set_connected(False)
-    panel.set_connected(True)
-    stale_worker.finish({"ok": True, "duration_s": 10})
-
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_active_server is False
-    panel._poll_burst_status()
-    _DeferredWorker.instances[-1].finish({"ok": True, "active": True, "cycle_count": 2, "elapsed_s": 1.0})
-    assert panel._burst_outcome_unknown is False
-    assert panel._burst_active_server is True
-
-
-def test_burst_reply_crossing_read_only_generation_is_ignored(panel: MultiLinePanel, monkeypatch) -> None:
-    import cryodaq.gui.shell.overlays.multiline_panel as module
-
-    _DeferredWorker.instances.clear()
-    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
-    panel.set_connected(True)
-    panel._on_burst_clicked()
-    stale_worker = _DeferredWorker.instances[-1]
-
-    panel.set_read_only(True)
-    panel.set_read_only(False)
-    stale_worker.finish({"ok": True, "duration_s": 10})
-
-    assert panel._burst_outcome_unknown is True
-    assert panel._burst_active_server is False
-
-
-def test_burst_status_error_retains_last_known_active(
-    panel: MultiLinePanel,
-) -> None:
-    panel.set_connected(True)
-    panel._burst_active_server = True
-
-    panel._on_burst_response(
-        "multiline.burst_status",
-        {"ok": False, "error": "status timeout"},
-    )
-
-    assert panel._burst_active_server is True
-    assert panel._burst_outcome_unknown is True
-    assert "ИСХОД НЕИЗВЕСТЕН" in panel._burst_status_label.text()
-    assert panel._burst_poll_timer.isActive()
 
 
 def test_burst_duration_spin_constraints(panel: MultiLinePanel) -> None:

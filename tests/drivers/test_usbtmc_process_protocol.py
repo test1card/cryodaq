@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -118,6 +120,62 @@ def test_production_transport_has_no_executor_or_mutable_process_target_seam() -
     assert not hasattr(transport, "_process_target")
 
 
+def test_process_entry_requires_and_forwards_captured_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = _Connection()
+    bound_parent_ids: list[int] = []
+    worker_connections: list[_Connection] = []
+    monkeypatch.setattr(usbtmc, "_bind_lifetime_to_parent", bound_parent_ids.append)
+    monkeypatch.setattr(usbtmc, "_visa_worker_loop", worker_connections.append)
+
+    usbtmc._visa_process_main(connection, 321)
+
+    assert bound_parent_ids == [321]
+    assert worker_connections == [connection]
+    with pytest.raises(TypeError):
+        usbtmc._visa_process_main(connection)
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="pins the OPEN Windows gate: the unbound source worker refuses to start until a real binding exists",
+)
+def test_windows_lifetime_binding_refuses_unprotected_visa_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Windows must not create a VISA owner without parent-death binding.
+
+    The parent identity check is satisfied legitimately -- the expected pid is this
+    process and getppid answers with it -- so the exit can only come from the platform
+    refusal branch under test, and its logged operator text is pinned exactly. Passing
+    an unrelated expected pid would exit through the reparented-child branch instead,
+    leaving this branch unexecuted while the test stayed green.
+    """
+
+    exits: list[int] = []
+
+    def exit_child(status: int) -> None:
+        exits.append(status)
+        raise SystemExit(status)
+
+    expected_parent = os.getpid()
+    monkeypatch.setattr(usbtmc.os, "getppid", lambda: expected_parent)
+    monkeypatch.setattr(usbtmc.sys, "platform", "win32")
+    monkeypatch.setattr(usbtmc.os, "_exit", exit_child)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit, match="0"):
+            usbtmc._bind_lifetime_to_parent(expected_parent)
+
+    assert exits == [0]
+    refusals = [record for record in caplog.records if record.name == usbtmc.log.name]
+    assert len(refusals) == 1, f"the unbound-worker refusal must be logged exactly once before exit, got {refusals!r}"
+    assert refusals[0].levelno == logging.WARNING
+    assert refusals[0].getMessage() == (
+        "USBTMC: платформа win32 без привязки VISA-процесса к родителю — воркер не стартует (открытый шлюз)"
+    ), refusals[0].getMessage()
+
+
 @pytest.mark.parametrize(
     "frame",
     [
@@ -224,7 +282,7 @@ def test_worker_rejects_invalid_operation_payload_with_fixed_code(monkeypatch, p
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (object(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert len(connection.sent) == 2
     error = usbtmc._decode_ipc_frame(connection.sent[1])
@@ -260,7 +318,7 @@ def test_worker_exports_fixed_error_code_without_exception_text(monkeypatch) -> 
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (object(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     wire = b"".join(connection.sent)
     assert secret.encode() not in wire
@@ -334,7 +392,7 @@ def test_worker_rejects_invalid_initial_request_before_native_open(
         lambda _resource: native_calls.append("open") or (object(), object()),
     )
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True
@@ -384,7 +442,7 @@ def test_worker_rejects_invalid_query_or_close_before_native_call(
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (Manager(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True
@@ -415,7 +473,7 @@ def test_worker_rejects_float_timeout_frame_before_native_call(monkeypatch: pyte
         lambda _resource: (object(), type("Resource", (), {"query": lambda *_args: native_calls.append("query")})()),
     )
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True

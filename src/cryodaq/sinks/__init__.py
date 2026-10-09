@@ -7,12 +7,14 @@ on dispatch.
 """
 
 from cryodaq.sinks.base import ExperimentExport, Sink, SinkResult
+from cryodaq.sinks.rag_index_sink import RAGIndexSink
 from cryodaq.sinks.registry import SinkRegistry
 from cryodaq.sinks.vault_sink import VaultSink
 from cryodaq.sinks.webhook_sink import WebhookSink
 
 __all__ = [
     "ExperimentExport",
+    "RAGIndexSink",
     "Sink",
     "SinkRegistry",
     "SinkResult",

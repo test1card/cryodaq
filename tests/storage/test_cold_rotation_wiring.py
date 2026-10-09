@@ -109,7 +109,7 @@ def test_relocated_state_root_rotates_then_reads_from_its_archive(
     assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
 
     rows = ArchiveReader(data_dir, archive_dir).query_rows(old_day, TODAY, None, None)
-    assert [value for _ts, _instrument, _channel, value, _unit, _status in rows] == [70.0]
+    assert [value for _ts, _instrument, _channel, value, _unit, _status, *_ in rows] == [70.0]
 
 
 def test_relocated_state_root_refuses_unmigrated_legacy_archive(
@@ -252,9 +252,13 @@ def test_xlsx_export_spans_rotated_day(tmp_path: Path) -> None:
     XLSXExporter(data_dir, archive_dir=archive_dir).export(out, start=old_day, end=TODAY)
 
     ws = openpyxl.load_workbook(out)["Данные"]
-    header = [c.value for c in ws[1]]
-    assert "Т1" in header, "rotated-day channel missing from XLSX"
-    assert "Т2" in header, "hot-day channel missing from XLSX"
+    # Row 1 is instrument_id, row 2 is channel, row 3 is descriptor_hash:
+    # every data column is keyed by the full identity, so a channel name is
+    # never a derived header. Reading row 1 for a channel finds the
+    # instrument instead, which is what this assertion used to do.
+    channels = [c.value for c in ws[2]]
+    assert "Т1" in channels, "rotated-day channel missing from XLSX"
+    assert "Т2" in channels, "hot-day channel missing from XLSX"
 
 
 def test_disabled_flag_hot_only(tmp_path: Path) -> None:
@@ -295,7 +299,7 @@ def test_query_rows_masks_sentinel_from_parquet(tmp_path: Path) -> None:
 
     reader = ArchiveReader(data_dir, archive_dir)
     rows = reader.query_rows(old_day, TODAY, None, None)
-    vals = [v for _ts, _inst, _ch, v, _u, _s in rows]
+    vals = [v for _ts, _inst, _ch, v, _u, _s, *_ in rows]
     assert SENTINEL not in vals, "raw sentinel leaked out of query_rows"
     assert sum(1 for v in vals if math.isnan(v)) == 1, "sentinel row must present as NaN"
     assert 70.0 in vals, "usable reading must survive"
@@ -341,7 +345,7 @@ def test_query_rows_unions_backdated_hot_over_archived_day(tmp_path: Path) -> No
 
     reader = ArchiveReader(data_dir, archive_dir)
     rows = reader.query_rows(old_day, TODAY, None, None)
-    vals = [v for _ts, _inst, _ch, v, _u, _s in rows]
+    vals = [v for _ts, _inst, _ch, v, _u, _s, *_ in rows]
     assert 71.5 in vals, "backdated restored row must not be shadowed by the archive"
     assert vals.count(70.0) == 1, "exact (ts, instrument, channel) duplicate must dedup to one"
     assert len(rows) == 2, f"expected union-deduped 2 rows, got {rows}"
@@ -380,7 +384,7 @@ def test_cold_rotation_ingests_legacy_gz(tmp_path: Path) -> None:
 
     reader = ArchiveReader(data_dir, archive_dir)
     rows = reader.query_rows(old_day, TODAY, None, None)
-    vals = [v for _ts, _inst, _ch, v, _u, _s in rows]
+    vals = [v for _ts, _inst, _ch, v, _u, _s, *_ in rows]
     assert 77.0 in vals, "rotated legacy-gz rows must be queryable"
 
 

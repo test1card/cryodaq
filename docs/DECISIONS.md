@@ -213,3 +213,189 @@ that trigger’s `GITHUB_SHA` and `GITHUB_REF` to the pull request’s base/defa
 branch, while a required status must pass on the latest pull-request head SHA.
 That native job therefore cannot prove the candidate head merely because it can
 read the pull-request payload.
+
+## [Owner] 2026-08-05 — Unmatched channels render desaturated with a Russian marker
+
+A channel with no descriptor match is an **operator-visible option**: the
+operator chooses whether such channels are obscured. The default renders the
+channel **desaturated** with the Russian marker `н/о`, and the unambiguous
+wording (`без дескриптора`) in the tooltip and accessible name.
+
+**Which element the desaturation lands on is a design-system question, not part
+of the owner's ruling.** An earlier draft of this entry put
+`theme.MUTED_FOREGROUND` on the numeric value; `RULE-DATA-005` holds the value at
+`FOREGROUND` in normal, caution, fault and stale alike, and carries state on the
+chrome, the label and the marker. The unclassified state takes the same
+treatment, for the same reason as the `—` constraint below: the reading is
+available and correct, and a dimmed number claims the reading is degraded when
+only its classification is missing. The contract is
+`docs/design-system/patterns/state-visualization.md`.
+
+Owner, on the marker: *"н/о это норм вариант, оператор не обезьяна, а другие
+варианты слишком длинные для маленького поля под число"* — the field is a narrow
+numeric one and the operator is trained.
+
+Three constraints ride with the decision, each from a measured failure:
+
+- **Not `—`.** `src/cryodaq/reporting/sections.py` documents `—` as the
+  UNAVAILABLE marker, under a NaN-доктрина whose stated reason is that an
+  operator would otherwise "read a confident number where none exists". An
+  unclassified channel's value IS available; only its classification is missing,
+  so one glyph must not carry both meanings.
+- **The textual marker is load-bearing, not decorative.** The panel conformance
+  obligations require non-colour state cues; desaturation alone is colour-only.
+- **Obscuring must be discoverable.** When hidden channels exist, show a count
+  (`скрыто: N`) or keep them listed on the settings surface. A live reading that
+  becomes invisible by configuration is the vanishing-readout failure returning
+  through a setting — the failure behind the `169f7e96` / `0bea0449` revert.
+
+This decision gates the OC-008/OC-030 site migrations; its absence is what the
+ratified plan names as the cause of that revert.
+
+## [Owner] 2026-08-05 — A still-active CRITICAL must break its own silence
+
+The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
+
+- **A — a narration that reached nobody buys no silence.** If no target accepted
+  it, that alarm is re-armed rather than held quiet for the full window.
+
+  **A is bounded, and the unbounded reading was reviewed out.** "The next
+  occurrence is not suppressed" is not what shipped: during a transport outage
+  every refire would become another generation and send, which is the storm the
+  window exists to prevent, arriving by the recovery path. The retry is admitted
+  once `window_s` has elapsed since the failed attempt. Allowing an attempt also
+  clears the failure marker, so the bound is measured against the attempt in
+  flight and not against one already superseded — without that, a refire during
+  an in-flight retry starts a second one, because the default Ollama timeout is
+  longer than the 30 s window.
+
+  **A cancelled attempt counts as undelivered.** `stop()` cancels in-flight
+  handlers and `CancelledError` is a `BaseException`, so it does not reach the
+  `except Exception` paths that report the outcome. The gate has already moved
+  its clock by then, so a killed narration would otherwise buy real silence.
+- **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
+  currently 300 s, rather than being silenced for as long as it keeps firing.
+
+  **What is bounded is ADMISSION, not receipt, and two earlier versions of this
+  entry said otherwise.** The clock is anchored at CONFIRMED DELIVERY rather
+  than at the moment the gate admitted an attempt, so the interval between
+  admissions of a live CRITICAL is `300 s + one refire interval` measured from
+  when the operator was last told.
+
+  It does **not** follow that the operator hears from us within that interval.
+  Between admission and delivery sit the hourly rate limit — which can reject an
+  admitted escalation outright until its bucket drains — the inference
+  semaphore, context assembly, audit-intent persistence, generation, and
+  sequential per-recipient transport acknowledgements. No end-to-end deadline
+  spans them. A rejected or slow attempt reports undelivered and is retried ON THE NEXT
+  REFIRE -- and only then. `engine_wiring/runtime_tasks.py` publishes
+  `alarm_fired` on a `TRIGGERED` transition, and no timer consumes the
+  undelivered marker, so a CRITICAL whose sole transition was rejected by the
+  hourly rate limit and which then stays active without transitioning again
+  is never narrated at all. Saying silence is not permanent, unqualified, was
+  false; that is a weaker statement than a bound and is
+  deliberately written as one. The first version of this entry claimed 300 s
+  flat, the second claimed `300 s + refire + timeout_s`, and both were false.
+  A real received-to-received deadline would be a design change beyond OC-028.
+
+  **An outcome belongs to the attempt that produced it.** Two inferences can run
+  concurrently and each may take up to `timeout_s`, so the same alarm can have
+  two narrations in flight. A late failure from a superseded attempt must not
+  re-arm an alarm a newer attempt already delivered, and an attempt settles
+  once — so a cancellation arriving after a successful send cannot overwrite a
+  delivery the operator has read.
+
+**Why the interval is elapsed time and not a count of suppressed events.** The
+decision was first phrased as "after 10 suppressed windows (5 minutes)". Those
+are not the same thing: an alarm re-firing every second reaches ten suppressed
+events in ten seconds. The operator-facing meaning is the wall-clock silence, so
+that is what the code measures. What
+`tests/agents/assistant/test_agent_narration_floor.py` asserts is the longest
+gap between **admissions** of a live CRITICAL — not the number of them, and
+**not** the gap between narrations the operator received. Calling admissions
+"narrations" would restore, in the evidence sentence, exactly the
+operator-visible claim the paragraph above withdraws; the guard records
+`admitted_at` and deliberately asserts nothing about receipt.
+
+**Severity scope needs no separate rule.** `_should_handle` already filters this
+path to CRITICAL, so every event reaching the ledger is CRITICAL and there is no
+lower severity here to treat differently.
+
+**What made this reachable at all:** `mark_delivered` existed but appeared
+exactly once in `src/` — its own definition. Production never reported a delivery
+outcome, only tests called it, so a narration lost to a broken transport was
+indistinguishable from one the operator read. The outcome is now reported from
+the dispatch path.
+
+## [Owner] 2026-08-01 — Every change goes through a pull request with independent agent review
+
+> *"from now on, dont commit straight away. open PRs, make other agents review
+> them and so on"*
+
+No direct commits to `master`. Each item: branch off `master` → focused
+commits → push → open a PR → independent reviewers at the exact head → the
+merge gate. Recorded here because it was previously held only in an
+out-of-tree working file, where repository search could not find it.
+
+## [Owner] 2026-08-01 — Keep the two landed campaign branches
+
+> *"2 big branches are def not okay, they are already in. dont delete them
+> though, just keep for a good measure."*
+
+`feat/montana-phase-a` and `review/montana-cli-corrections-staging` are
+superseded trunks whose content is in `master`. They stay.
+
+## [Owner] 2026-08-01 — Agent approvals are internal records, not GitHub review states
+
+> *"agent approval is internal, no need to put it into github"*
+
+The authoritative approval records for the qualification-campaign merge are
+the out-of-tree approver transcripts and verdicts, retained in the archived
+campaign layer. The absence of GitHub `APPROVED` review states is by design
+(the PR author cannot approve their own PR, and there are no other human
+maintainers); do not treat that absence as an open item, and never submit an
+approval under the owner's identity representing a model's judgement as his.
+
+## [Owner] 2026-08-04 — Review rounds are not divergence
+
+> *"rounds dont matter. it matters to find real errors and correct them. it
+> matters not to repeat our own errors."*
+
+Do not apply a round cap or treat a high round count as failure. Measured on
+merged PRs: inline-finding counts in the high twenties converged and merged.
+
+## [Owner] 2026-08-06 — Bench and hardware evidence waits for a settled branch
+
+> *"We have to finish the software side. And then only when the main branch
+> stops moving due to the logic changes and other stuff. Only then I would go
+> to the lab and test everything myself… I already bench tested a lot of
+> stuff. But since the code is moving, I still need to recheck everything."*
+
+Hardware items (independent physical-OFF proof; the hardware half of the
+critical-input identity work) are not queueable pending work: asking him to go
+to the lab before the code settles is asking him to do it twice.
+
+## [Owner] 2026-08-08 — Pushes, PR openings, and gate-met merges are pre-authorized
+
+> *"i landed pr 17 and from now on i explicitly approve your pushes and merges
+> to remote. when all necessary gates are met"* · *"I approve openings of new
+> prs and pushes to remote and merges"*
+
+Within this repository, the coordinator pushes, opens PRs, and merges by CLI
+fast-forward once the gates are verified in the merging turn on the exact
+head: green CI **and** a positive Codex verdict bound to that same SHA, plus a
+clean fast-forward check. Anything outside this repository remains owner-only.
+
+## [Owner] 2026-08-09 — The agent working layer moves out of temp; obligations are registered in-tree
+
+The out-of-tree agent working layer (state, plans, evidence, campaign history)
+moved from the machine temp directory into a durable, agent-agnostic workspace
+beside the repository checkout, with one live state file and an integrity
+guard. Owner directions that are deferred behind trigger conditions are
+registered in `docs/OBLIGATIONS.md` — the register is the single home for such
+directions and repository search must be able to find them.
+
+**Why:** two owner directions recorded 2026-07-31 in a temp-directory file
+were invisible to repository search; one had its trigger fire and sat
+undischarged for nine days. Preservation, classification, and the migration
+were verified against byte-exact snapshots before anything was deleted.

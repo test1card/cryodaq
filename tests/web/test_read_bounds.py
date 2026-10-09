@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -87,7 +89,13 @@ def test_query_history_skips_archive_files_outside_window(monkeypatch) -> None:
             pass
 
     def _connect(path, **_kwargs):
-        opened.append(str(path))
+        # _query_history opens encoded read-only URIs ("file:///...db?mode=ro"),
+        # so record the database NAME. This test is about WHICH daily files are
+        # opened for a short window, not about the connection mode.
+        target = str(path)
+        if target.startswith("file:"):
+            target = unquote(urlparse(target).path)
+        opened.append(Path(target).name)
         return _FakeConn()
 
     monkeypatch.setattr(server, "_DATA_DIR", _PatchedDir([old, recent, future]))
@@ -95,9 +103,9 @@ def test_query_history_skips_archive_files_outside_window(monkeypatch) -> None:
 
     server._query_history(1)
 
-    assert str(recent) in opened
-    assert str(old) not in opened
-    assert str(future) not in opened
+    assert recent.name in opened
+    assert old.name not in opened
+    assert future.name not in opened
 
 
 def test_api_log_clamps_oversized_limit(monkeypatch) -> None:

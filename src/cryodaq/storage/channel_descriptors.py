@@ -6,6 +6,7 @@ publish readings, infer vendor semantics, or grant source/control authority.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -21,6 +22,7 @@ from weakref import WeakKeyDictionary
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.channels.descriptors import (
     MAX_CATALOG_DESCRIPTORS,
     ChannelCatalog,
@@ -181,8 +183,113 @@ class ChannelDescriptorStorageError(RuntimeError):
     """The SQLite descriptor authority is malformed, corrupt, or ambiguous."""
 
 
-class _StrictDescriptorLoader(yaml.SafeLoader):
-    """Bounded YAML grammar with neither aliases nor duplicate mapping keys."""
+_CHANNEL_DESCRIPTOR_PROJECTION_PROVENANCE: Final = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ChannelDescriptorProjection:
+    """Passive data-only projection of one verified channel descriptor."""
+
+    channel_id: str
+    instrument_id: str
+    source_key: str
+    quantity: str
+    unit: str
+    descriptor_hash: str
+    descriptor_revision: int
+    canonical_json: bytes
+    envelope_json: bytes
+    _provenance: object
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("channel descriptor projections are issued only by the descriptor adapter")
+
+    @classmethod
+    def _issue(
+        cls,
+        descriptor: ChannelDescriptorV1,
+        *,
+        envelope_json: bytes,
+    ) -> ChannelDescriptorProjection:
+        projection = object.__new__(cls)
+        object.__setattr__(projection, "channel_id", descriptor.channel_id)
+        object.__setattr__(projection, "instrument_id", descriptor.instrument_id)
+        object.__setattr__(projection, "source_key", descriptor.source_key)
+        object.__setattr__(projection, "quantity", descriptor.quantity.value)
+        object.__setattr__(projection, "unit", descriptor.unit)
+        object.__setattr__(projection, "descriptor_hash", descriptor.descriptor_hash)
+        object.__setattr__(projection, "descriptor_revision", descriptor.descriptor_revision)
+        object.__setattr__(projection, "canonical_json", descriptor.canonical_json)
+        object.__setattr__(projection, "envelope_json", envelope_json)
+        object.__setattr__(projection, "_provenance", _CHANNEL_DESCRIPTOR_PROJECTION_PROVENANCE)
+        return projection
+
+    def envelope_payload(self) -> dict[str, object]:
+        """Return a fresh JSON-data copy of the verified persisted envelope."""
+
+        if self._provenance is not _CHANNEL_DESCRIPTOR_PROJECTION_PROVENANCE:
+            raise ChannelDescriptorStorageError("channel descriptor projection provenance is invalid")
+        payload = json.loads(self.envelope_json)
+        if type(payload) is not dict:
+            raise ChannelDescriptorStorageError("channel descriptor envelope projection is not an object")
+        return payload
+
+
+def _project_channel_descriptor_envelope(envelope: PersistedChannelEnvelopeV1) -> ChannelDescriptorProjection:
+    descriptor = envelope.descriptor
+    if envelope.canonical_json != PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json:
+        raise ChannelDescriptorStorageError("channel descriptor envelope projection is not canonical")
+    return ChannelDescriptorProjection._issue(descriptor, envelope_json=envelope.canonical_json)
+
+
+def project_channel_descriptor(candidate: object) -> ChannelDescriptorProjection:
+    """Validate a descriptor at the approved passive adapter boundary."""
+
+    if type(candidate) is ChannelDescriptorProjection:
+        if candidate._provenance is not _CHANNEL_DESCRIPTOR_PROJECTION_PROVENANCE:
+            raise ChannelDescriptorStorageError("channel descriptor projection provenance is invalid")
+        return candidate
+    try:
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(candidate)
+        verified = decode_persisted_channel_envelope(envelope.canonical_json)
+    except (TypeError, ValueError, ChannelDescriptorError, PersistedChannelEnvelopeError) as exc:
+        raise ChannelDescriptorStorageError("channel descriptor projection is invalid") from exc
+    return _project_channel_descriptor_envelope(verified)
+
+
+def project_channel_descriptor_payload(payload: object) -> ChannelDescriptorProjection:
+    """Decode one exact canonical persisted-envelope JSON object to passive data."""
+
+    if type(payload) is not dict:
+        raise ChannelDescriptorStorageError("channel descriptor envelope projection must be an object")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        envelope = decode_persisted_channel_envelope(encoded)
+    except (TypeError, ValueError, PersistedChannelEnvelopeError) as exc:
+        raise ChannelDescriptorStorageError("channel descriptor envelope projection is invalid") from exc
+    if encoded != envelope.canonical_json:
+        raise ChannelDescriptorStorageError("channel descriptor envelope projection is not canonical")
+    return _project_channel_descriptor_envelope(envelope)
+
+
+class _StrictDescriptorLoader(OwnedSafeLoader):
+    """Bounded YAML grammar with neither aliases nor duplicate mapping keys.
+
+    Derives from the SHARED owned loader rather than repeating its table copies.
+    An earlier version of this class copied them locally, which read as
+    equivalent and is not: a later hardening that replaces `OwnedSafeLoader`'s
+    copies with package-owned pristine constructors would have left this loader
+    behind on the old, pre-import-poisonable path while the register recorded
+    the class as handled.  `tests/core/test_yaml_loader_table_ownership.py`
+    asserts the subclass relationship so the sharing claim stays checkable
+    rather than asserted.
+    """
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)
@@ -808,6 +915,15 @@ class LiveChannelDescriptorCatalog:
 
         return snapshot_catalog(self._catalog)
 
+    def emitted_channel_for_channel_id(self, channel_id: str) -> str:
+        """Return the exact pre-bind emitted label for one declared channel."""
+        if type(channel_id) is not str:
+            raise TypeError("channel_id must be an exact string")
+        for (_instrument_id, emitted_channel), bound_channel_id in self._bindings.items():
+            if bound_channel_id == channel_id:
+                return emitted_channel
+        raise ChannelDescriptorStorageError("declared channel has no emitted-channel binding")
+
     def require_exact_instruments(self, instrument_ids: object) -> None:
         """Fail startup unless manifest and driver configuration agree exactly."""
 
@@ -1352,6 +1468,7 @@ __all__ = [
     "MAX_LIVE_METADATA_ITEMS",
     "MAX_LIVE_METADATA_TEXT_BYTES",
     "MAX_LIVE_READING_TEXT_BYTES",
+    "ChannelDescriptorProjection",
     "ChannelDescriptorStorageError",
     "DescriptorBoundReading",
     "LiveChannelDescriptorCatalog",
@@ -1360,6 +1477,8 @@ __all__ = [
     "initialize_descriptor_storage",
     "install_catalog",
     "load_live_channel_descriptor_catalog",
+    "project_channel_descriptor",
+    "project_channel_descriptor_payload",
     "read_sqlite_reading",
     "resolve_sqlite_descriptor",
     "snapshot_catalog",

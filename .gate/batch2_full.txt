@@ -1,0 +1,130 @@
+........................................................................ [  2%]
+........................................................................ [  4%]
+........................................................................ [  6%]
+........................................................................ [  8%]
+........................................................................ [ 11%]
+........................................................................ [ 13%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+......................s...........ss.................................... [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 28%]
+........................................................................ [ 30%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+........................................................................ [ 37%]
+........................................................................ [ 39%]
+........................................................................ [ 41%]
+........................................................................ [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 48%]
+........................................................................ [ 50%]
+........................................................................ [ 52%]
+........................................................................ [ 55%]
+........................................................................ [ 57%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+...................................................s...s................ [ 66%]
+........................................................................ [ 68%]
+........................................................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+..................................................................s..... [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 83%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+...............................................................ss....... [ 90%]
+........................................................................ [ 92%]
+........................................................................ [ 94%]
+........................................................................ [ 97%]
+........................................................................ [ 99%]
+.......................                                                  [100%]
+=============================== warnings summary ===============================
+tests/test_web_dashboard.py:8
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/test_web_dashboard.py:8: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient
+
+src/cryodaq/web/server.py:309
+tests/test_web_dashboard.py::test_root_returns_html
+tests/test_web_dashboard.py::test_api_status_returns_json
+tests/test_web_dashboard.py::test_api_log_returns_entries
+tests/test_web_dashboard.py::test_status_endpoint_returns_json
+tests/test_web_dashboard.py::test_api_status_logs_alarm_failure
+tests/test_web_dashboard.py::test_api_log_logs_failure
+  /Users/vladimir/Projects/cryodaq-prodfix/src/cryodaq/web/server.py:309: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @application.on_event("startup")
+
+.venv/lib/python3.14/site-packages/fastapi/applications.py:4675: 2 warnings
+tests/test_web_dashboard.py: 12 warnings
+  /Users/vladimir/Projects/cryodaq-prodfix/.venv/lib/python3.14/site-packages/fastapi/applications.py:4675: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+src/cryodaq/web/server.py:318
+tests/test_web_dashboard.py::test_root_returns_html
+tests/test_web_dashboard.py::test_api_status_returns_json
+tests/test_web_dashboard.py::test_api_log_returns_entries
+tests/test_web_dashboard.py::test_status_endpoint_returns_json
+tests/test_web_dashboard.py::test_api_status_logs_alarm_failure
+tests/test_web_dashboard.py::test_api_log_logs_failure
+  /Users/vladimir/Projects/cryodaq-prodfix/src/cryodaq/web/server.py:318: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @application.on_event("shutdown")
+
+tests/core/test_calibration_acquisition.py::test_service_inactive_by_default
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:63: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg, srdg)
+
+tests/core/test_calibration_acquisition.py::test_activate_starts_recording
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:74: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg, srdg)
+
+tests/core/test_calibration_acquisition.py::test_deactivate_stops_recording
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:92: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg, srdg)
+
+tests/core/test_calibration_acquisition.py::test_stats_tracking
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:102: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg, srdg)
+
+tests/core/test_calibration_acquisition.py::test_stats_tracking
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:113: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg2, srdg2)
+
+tests/core/test_calibration_acquisition.py::test_only_target_channels_recorded
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:130: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings(krdg, srdg)
+
+tests/core/test_calibration_acquisition.py::test_reference_updates_temp_range
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:140: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings([_reading("Т1", 300.0)], [_srdg_reading("Т2", 5.0)])
+
+tests/core/test_calibration_acquisition.py::test_reference_updates_temp_range
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:144: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings([_reading("Т1", 4.2)], [_srdg_reading("Т2", 80.0)])
+
+tests/core/test_calibration_acquisition.py::test_reference_updates_temp_range
+  /Users/vladimir/Projects/cryodaq-prodfix/tests/core/test_calibration_acquisition.py:149: DeprecationWarning: on_readings is deprecated; use prepare_srdg_readings + on_srdg_persisted
+    await service.on_readings([_reading("Т5", 1000.0)], [_srdg_reading("Т2", 50.0)])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3255 passed, 8 skipped, 8 deselected, 38 warnings in 903.87s (0:15:03)
+FULL_EXIT=0

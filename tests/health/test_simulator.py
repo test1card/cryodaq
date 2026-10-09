@@ -5,7 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from cryodaq.health.contract import HealthFreshness, HealthTelemetryError
-from cryodaq.health.simulator import DeterministicFleetHealthSimulator
+from cryodaq.health.simulator import DeterministicFleetHealthSimulator, DeterministicHealthTelemetryNode
+
+
+def test_deterministic_health_node_defaults_construct_and_emit() -> None:
+    node = DeterministicHealthTelemetryNode(
+        device_id="compressor.primary",
+        component_type="compressor",
+    )
+
+    snapshot = node.read_health_snapshot(observed_time_s=10.0)
+
+    assert snapshot.revision == 1
+    assert snapshot.descriptor is node.health_descriptor
+    assert snapshot.freshness is HealthFreshness.FRESH
 
 
 def test_default_fleet_is_stable_100_devices_2000_metrics_at_two_hz() -> None:
@@ -50,6 +63,21 @@ def test_simulator_rejects_non_human_readable_cadence(cadence: float) -> None:
 def test_simulator_rejects_invalid_manual_clock_origin(start: float) -> None:
     with pytest.raises(HealthTelemetryError, match="start_time_s"):
         DeterministicFleetHealthSimulator(start_time_s=start)
+
+
+@pytest.mark.parametrize(
+    ("cadence_hz", "start_time_s"),
+    [
+        (2.0, 1e308),
+        (float.fromhex("0x0.0000000000001p-1022"), 10.0),
+    ],
+)
+def test_fleet_clock_rejects_ranges_without_finite_distinct_ticks(
+    cadence_hz: float,
+    start_time_s: float,
+) -> None:
+    with pytest.raises(HealthTelemetryError, match="finite, distinct simulator ticks"):
+        DeterministicFleetHealthSimulator(cadence_hz=cadence_hz, start_time_s=start_time_s)
 
 
 def test_frames_are_aggregation_ready_and_faults_are_not_diluted() -> None:

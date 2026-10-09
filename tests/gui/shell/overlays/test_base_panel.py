@@ -23,7 +23,14 @@ class _FakeSignal:
 
 
 class _FakeWorker:
-    """Stand-in for ZmqCommandWorker: records start(), controls isRunning()."""
+    """Stand-in for ZmqCommandWorker: records start(), controls in-flight state.
+
+    Production asks ``gui_worker_poll_in_flight``, which calls ``isFinished()``
+    -- the question a caller can still ask after the registry has destroyed a
+    settled worker. This fake offered only ``isRunning()``, so it stopped
+    modelling the object under test when worker release became opt-in, and the
+    panel raised AttributeError against its own test double.
+    """
 
     def __init__(self) -> None:
         self.finished = _FakeSignal()
@@ -35,6 +42,9 @@ class _FakeWorker:
 
     def isRunning(self) -> bool:  # noqa: N802 — Qt method name
         return self._running
+
+    def isFinished(self) -> bool:  # noqa: N802 — Qt method name
+        return not self._running
 
 
 class _Panel(OverlayPanelBase):

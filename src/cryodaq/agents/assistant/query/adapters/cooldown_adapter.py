@@ -1,74 +1,46 @@
-"""CooldownAdapter — reads the engine's live cooldown ETA prediction.
-
-B1: previously wrapped a direct reference to the in-process
-``CooldownService``; now calls the engine's read-only ``cooldown_eta_get``
-REP command (new, additive — mirrors the existing ``get_vacuum_trend``
-read command, exposing ``CooldownService.last_prediction()`` the same way).
-"""
+"""CooldownAdapter — wraps CooldownService.last_prediction() for query agent."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from cryodaq.agents.assistant.query.adapters._reply import (
-    reply_declares_absence,
-    reply_failure_reason,
-    reply_is_success,
-)
 from cryodaq.agents.assistant.query.schemas import CooldownETA
-from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
+
+if TYPE_CHECKING:
+    from cryodaq.analytics.cooldown_service import CooldownService
 
 logger = logging.getLogger(__name__)
 
 
 class CooldownAdapter:
-    """Read the engine's cached cooldown prediction over ZMQ. Read-only."""
+    """Read cached cooldown prediction from CooldownService.
 
-    def __init__(self, engine_client: EngineQueryClient) -> None:
-        self._client = engine_client
+    CooldownService runs predict() every 30s and caches the result via
+    last_prediction(). We read that cache; no new computation here.
+    """
+
+    def __init__(self, cooldown_service: CooldownService | None) -> None:
+        self._service = cooldown_service
 
     async def eta(self) -> CooldownETA | None:
-        try:
-            reply = await self._client.call({"cmd": "cooldown_eta_get"})
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            return self._unavailable(f"cooldown prediction unavailable: {exc}")
-        if not reply_is_success(reply):
-            return self._unavailable(reply_failure_reason(reply, "cooldown prediction unavailable"))
-        if reply_declares_absence(reply, "prediction"):
+        if self._service is None:
+            return None
+        pred: dict[str, Any] | None = self._service.last_prediction()
+        if pred is None:
             return None
         try:
-            pred: Any = reply["prediction"]
-            if not isinstance(pred, dict):
-                raise ValueError("prediction must be an object")
-            interval = pred["t_remaining_ci68"]
-            if not isinstance(interval, (tuple, list)) or len(interval) != 2:
-                raise ValueError("t_remaining_ci68 must have two values")
-            phase = pred["phase"]
-            if not isinstance(phase, str):
-                raise ValueError("phase must be a string")
-            n_references = pred["n_references"]
-            cooldown_active = pred["cooldown_active"]
-            if type(n_references) is not int or type(cooldown_active) is not bool:
-                raise ValueError("prediction flags have invalid types")
             return CooldownETA(
-                t_remaining_hours=float(pred["t_remaining_hours"]),
-                t_remaining_low_68=float(interval[0]),
-                t_remaining_high_68=float(interval[1]),
-                progress=float(pred["progress"]),
-                phase=phase,
-                n_references=n_references,
-                cooldown_active=cooldown_active,
+                t_remaining_hours=float(pred.get("t_remaining_hours", 0.0)),
+                t_remaining_low_68=float(pred.get("t_remaining_ci68", (0.0, 0.0))[0]),
+                t_remaining_high_68=float(pred.get("t_remaining_ci68", (0.0, 0.0))[1]),
+                progress=float(pred.get("progress", 0.0)),
+                phase=str(pred.get("phase", "unknown")),
+                n_references=int(pred.get("n_references", 0)),
+                cooldown_active=bool(pred.get("cooldown_active", False)),
                 T_cold=pred.get("T_cold"),
                 T_warm=pred.get("T_warm"),
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except Exception as exc:
             logger.warning("CooldownAdapter: failed to parse prediction: %s", exc)
-            return self._unavailable("cooldown prediction response is malformed")
-
-    @staticmethod
-    def _unavailable(reason: str) -> CooldownETA:
-        return CooldownETA(0.0, 0.0, 0.0, 0.0, "", 0, False, available=False, stale=True, reason=reason)
+            return None

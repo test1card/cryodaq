@@ -46,6 +46,7 @@ from cryodaq.engine import (
     _EngineTeardownSequence,
     _EngineTeardownState,
     _handle_supervised_task_exit,
+    _run_engine,
     _settle_command_server_before_safety,
     _settle_engine_shutdown_phase,
     _settle_engine_shutdown_plan,
@@ -1435,3 +1436,96 @@ async def test_engine_startup_cancellation_settles_initialization_before_writer_
         "initialization-settled",
         "writer-stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_engine_registers_safety_tasks_before_installing_startup_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The real startup path must advance past live safety-task registration."""
+
+    class _ReachedPostRegistrationStartup(RuntimeError):
+        pass
+
+    registered: list[tuple[str, bool]] = []
+    original_register = TaskSupervisor.register
+
+    def _record_register(
+        self: TaskSupervisor,
+        name: str,
+        task: asyncio.Task[object],
+        *args: object,
+        **kwargs: object,
+    ) -> asyncio.Task[object]:
+        registered.append((name, not task.done()))
+        return original_register(self, name, task, *args, **kwargs)
+
+    def _stop_after_registration(*_args: object, **_kwargs: object) -> None:
+        raise _ReachedPostRegistrationStartup
+
+    monkeypatch.setattr(engine_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(TaskSupervisor, "register", _record_register)
+    monkeypatch.setattr(engine_module, "install_loop_exception_backstop", _stop_after_registration)
+
+    try:
+        with pytest.raises(_ReachedPostRegistrationStartup):
+            await asyncio.wait_for(_run_engine(mock=True), timeout=5.0)
+    except TimeoutError:  # pragma: no cover - exercised by the pre-fix startup hang
+        raise AssertionError(
+            "_run_engine awaited the live safety task during registration and "
+            "never reached the post-registration startup step"
+        ) from None
+
+    assert [name for name, _was_live in registered] == ["safety_collect", "safety_monitor"]
+    assert all(was_live for _name, was_live in registered)
+
+
+@pytest.mark.asyncio
+async def test_startup_call_does_not_await_a_returned_task() -> None:
+    """Startup must RECEIVE a supervised task, never wait for it to finish.
+
+    `inspect.isawaitable` is True for a Task, because a Task is a Future. A
+    registration helper returns the task it just started, so awaiting that
+    return value waits for a supervised loop that never ends. That blocked
+    engine startup permanently at `supervisor.register("safety_collect", ...)`,
+    so the SIGTERM handler installed further down was never reached and the
+    engine died on the signal a real deployment sends -- the failure mode of the
+    nightly bounded mock soak.
+
+    Without the fix this test does not fail with an assertion; it HANGS, which
+    is exactly what the engine did. The timeout is the assertion.
+    """
+    from cryodaq.engine import _EngineStartupRollback
+
+    async def never_finishes() -> None:
+        # An Event that nobody sets, not a sleep loop. The task must be
+        # genuinely unresolvable for the whole test, because the defect being
+        # pinned is that startup waits for something that never completes.
+        await asyncio.Event().wait()
+
+    startup = _EngineStartupRollback()
+    running = asyncio.create_task(never_finishes())
+    try:
+        returned = await asyncio.wait_for(startup.call(lambda: running), timeout=5.0)
+        assert returned is running, "startup.call must hand back the task itself, not its result"
+        assert not running.done(), "the supervised task must still be running"
+    except TimeoutError:  # pragma: no cover - the defect being pinned
+        raise AssertionError(
+            "startup.call awaited a returned Task and blocked; engine startup "
+            "cannot complete when a registration helper returns a live task"
+        ) from None
+    finally:
+        running.cancel()
+
+
+@pytest.mark.asyncio
+async def test_startup_call_still_awaits_a_coroutine() -> None:
+    """The narrowing must not stop coroutines from being awaited."""
+    from cryodaq.engine import _EngineStartupRollback
+
+    async def produces_a_value() -> str:
+        return "awaited"
+
+    startup = _EngineStartupRollback()
+    assert await startup.call(produces_a_value) == "awaited"

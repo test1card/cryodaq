@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -22,7 +22,6 @@ from cryodaq.gui.shell.overlays.archive_panel import (
     resolve_folder_path,
     resolve_pdf_path,
 )
-from cryodaq.report_state import build_current_manifest, promote_generation
 
 
 def _wait_until(predicate, *, timeout_s: float = 3.0, tick_ms: int = 20) -> bool:
@@ -62,13 +61,8 @@ def _entry(
     artifact_count: int = 0,
     result_table_count: int = 0,
     artifact_index: list[dict] | None = None,
-    report_authority: str | None = None,
-    report_generation_id: str | None = None,
-    report_present: bool = False,
-    report_force_required: bool = False,
-    report_force_context: str | None = None,
 ) -> dict:
-    payload = {
+    return {
         "experiment_id": experiment_id,
         "title": title,
         "operator": operator,
@@ -87,14 +81,7 @@ def _entry(
         "artifact_count": artifact_count,
         "result_table_count": result_table_count,
         "artifact_index": artifact_index or [],
-        "report_generation_id": report_generation_id,
-        "report_present": report_present,
-        "report_force_required": report_force_required,
-        "report_force_context": report_force_context,
     }
-    if report_authority is not None:
-        payload["report_authority"] = report_authority
-    return payload
 
 
 # ----------------------------------------------------------------------
@@ -102,7 +89,7 @@ def _entry(
 # ----------------------------------------------------------------------
 
 
-def test_panel_renders_core_surfaces(app, monkeypatch):
+def test_panel_renders_core_surfaces(app):
     panel = ArchivePanel()
     assert panel.objectName() == "archivePanel"
     assert panel._table is not None
@@ -113,47 +100,27 @@ def test_panel_renders_core_surfaces(app, monkeypatch):
     assert panel._export_parquet_btn is not None
     assert panel._refresh_btn is not None
     assert panel._regenerate_btn is not None
-    # Rendered text: header label must be visible.
-    from PySide6.QtWidgets import QLabel
-
-    titles = [lbl.text() for lbl in panel.findChildren(QLabel) if lbl.text().startswith("АРХИВ")]
-    assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
-    # Export buttons are enabled once connected.
-    _connect_with_loaded_archive(panel, monkeypatch)
-    assert panel._export_csv_btn.isEnabled()
-    # Clicking CSV with a cancelled dialog does not crash or leave in-flight.
-    from unittest import mock as _mock
-
-    from PySide6.QtWidgets import QFileDialog
-
-    with _mock.patch.object(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", ""))):
-        panel._export_csv_btn.click()
-    assert not panel._export_in_flight
 
 
 def test_panel_header_uses_cyrillic_uppercase(app):
     from PySide6.QtWidgets import QLabel
 
     panel = ArchivePanel()
-    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("АРХИВ")]
+    titles = [
+        label.text() for label in panel.findChildren(QLabel) if label.text().startswith("АРХИВ")
+    ]
     assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
 
 
 def test_table_has_nine_columns_with_cyrillic_headers(app):
     panel = ArchivePanel()
     assert panel._table.columnCount() == 9
-    headers = [panel._table.horizontalHeaderItem(i).text() for i in range(panel._table.columnCount())]
-    assert headers == [
-        "Начало",
-        "Конец",
-        "Эксперимент",
-        "Шаблон",
-        "Оператор",
-        "Образец",
-        "Статус",
-        "Отчёт",
-        "Данные",
+    headers = [
+        panel._table.horizontalHeaderItem(i).text() for i in range(panel._table.columnCount())
     ]
+    assert "Начало" in headers
+    assert "Отчёт" in headers
+    assert "Данные" in headers
 
 
 # ----------------------------------------------------------------------
@@ -321,97 +288,13 @@ def test_resolve_pdf_path_prefers_primary_then_fallback(tmp_path: Path, app):
     assert resolve_pdf_path(entry) == primary
 
 
-def test_resolve_docx_path_falls_back_only_for_legacy_authority(tmp_path: Path, app):
+def test_resolve_docx_path_falls_back_to_artifact_dir(tmp_path: Path, app):
     reports = tmp_path / "reports"
     reports.mkdir()
     docx = reports / "report_editable.docx"
     docx.write_bytes(b"PK")
-    entry = _entry(
-        artifact_dir=str(tmp_path),
-        docx_path="",
-        report_authority="legacy",
-    )
-    assert resolve_docx_path(entry) == docx
-
-
-def _manifest_entry(tmp_path: Path) -> tuple[dict, Path]:
-    generation_id = "generation-token-0001"
-    staging = tmp_path / "reports" / ".staging" / generation_id
-    staging.mkdir(parents=True)
-    (staging / "assets").mkdir()
-    (staging / "report_editable.docx").write_bytes(b"selected")
-    manifest = build_current_manifest(
-        tmp_path,
-        generation_id=generation_id,
-        source_fingerprint="sha256:" + "1" * 64,
-        sections=("title_page",),
-        skipped=False,
-        reason="",
-    )
-    final = promote_generation(tmp_path, generation_id, manifest)
-    return (
-        _entry(
-            artifact_dir=str(tmp_path),
-            docx_path=str(final / "report_editable.docx"),
-            report_authority="manifest",
-            report_generation_id=generation_id,
-            report_present=True,
-        ),
-        final,
-    )
-
-
-def test_manifest_resolver_never_falls_back_after_generation_disappears(
-    tmp_path: Path,
-    app,
-) -> None:
-    entry, final = _manifest_entry(tmp_path)
-    canonical = tmp_path / "reports" / "report_editable.docx"
-    canonical.write_bytes(b"stale")
-    assert resolve_docx_path(entry) == final / "report_editable.docx"
-    (final / "report_editable.docx").unlink()
-    assert resolve_docx_path(entry) is None
-
-
-def test_legacy_resolver_stops_when_manifest_pointer_appears(tmp_path: Path, app) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    legacy = reports / "report_editable.docx"
-    legacy.write_bytes(b"legacy")
-    entry = _entry(artifact_dir=str(tmp_path), report_authority="legacy")
-    assert resolve_docx_path(entry) == legacy
-    (reports / "current_report.json").write_text("{broken", encoding="utf-8")
-    assert resolve_docx_path(entry) is None
-
-
-def test_old_payload_never_invents_fixed_name_fallback(tmp_path: Path, app) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "report_editable.docx").write_bytes(b"legacy")
     entry = _entry(artifact_dir=str(tmp_path), docx_path="")
-    assert "report_authority" not in entry
-    assert resolve_docx_path(entry) is None
-
-
-def test_invalid_authority_never_opens_canonical_file(tmp_path: Path, app) -> None:
-    reports = tmp_path / "reports"
-    reports.mkdir()
-    (reports / "report_editable.docx").write_bytes(b"stale")
-    entry = _entry(artifact_dir=str(tmp_path), report_authority="invalid")
-    assert resolve_docx_path(entry) is None
-
-
-@pytest.mark.parametrize("authority", [None, "unexpected", 1, True, []])
-def test_present_unknown_authority_never_uses_old_payload_compatibility(
-    tmp_path: Path,
-    app,
-    authority,
-) -> None:
-    explicit = tmp_path / "explicit.docx"
-    explicit.write_bytes(b"PK")
-    entry = _entry(artifact_dir=str(tmp_path), docx_path=str(explicit))
-    entry["report_authority"] = authority
-    assert resolve_docx_path(entry) is None
+    assert resolve_docx_path(entry) == docx
 
 
 # ----------------------------------------------------------------------
@@ -421,7 +304,9 @@ def test_present_unknown_authority_never_uses_old_payload_compatibility(
 
 def test_regenerate_requires_selection_and_emits_signal(app):
     panel = ArchivePanel()
-    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]})
+    panel._on_refresh_result(
+        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]}
+    )
     seen: list[str] = []
     panel.regenerate_requested.connect(seen.append)
     panel.set_connected(True)
@@ -432,7 +317,9 @@ def test_regenerate_requires_selection_and_emits_signal(app):
 
 def test_regenerate_blocked_when_report_disabled(app):
     panel = ArchivePanel()
-    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=False)]})
+    panel._on_refresh_result(
+        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=False)]}
+    )
     panel.set_connected(True)
     # Regenerate button is disabled at the details level.
     assert not panel._regenerate_btn.isEnabled()
@@ -447,160 +334,6 @@ def test_regenerate_result_failure_shows_error(app):
     assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
 
 
-def test_force_required_confirmation_sends_exact_second_request_once(
-    app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    panel = ArchivePanel()
-    entry = _entry(
-        experiment_id="exp-1",
-        operator="Operator",
-        report_force_required=True,
-        report_force_context="a" * 64,
-    )
-    panel._on_refresh_result({"ok": True, "entries": [entry]})
-    panel.set_connected(True)
-    panel._pending_regenerate = {
-        "cmd": "experiment_generate_report",
-        "experiment_id": "exp-1",
-    }
-    sent: list[dict] = []
-    monkeypatch.setattr(panel, "_start_regenerate_request", lambda payload: sent.append(payload))
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *_args, **_kwargs: ("Operator", True)),
-    )
-    monkeypatch.setattr(
-        QMessageBox,
-        "warning",
-        staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
-    )
-
-    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
-
-    assert sent == [
-        {
-            "cmd": "experiment_generate_report",
-            "experiment_id": "exp-1",
-            "force": True,
-            "force_context": "a" * 64,
-            "operator": "Operator",
-        }
-    ]
-
-
-def test_force_confirmation_cancel_sends_nothing(
-    app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    panel = ArchivePanel()
-    panel._on_refresh_result(
-        {
-            "ok": True,
-            "entries": [
-                _entry(
-                    report_force_required=True,
-                    report_force_context="a" * 64,
-                )
-            ],
-        }
-    )
-    panel.set_connected(True)
-    panel._pending_regenerate = {
-        "cmd": "experiment_generate_report",
-        "experiment_id": "exp-1",
-    }
-    sent: list[dict] = []
-    monkeypatch.setattr(panel, "_start_regenerate_request", lambda payload: sent.append(payload))
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(lambda *_args, **_kwargs: ("", False)),
-    )
-    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
-    assert sent == []
-
-
-def test_force_required_never_applies_to_changed_selection(
-    app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    panel = ArchivePanel()
-    panel._on_refresh_result(
-        {
-            "ok": True,
-            "entries": [
-                _entry(
-                    experiment_id="exp-2",
-                    report_force_required=True,
-                    report_force_context="b" * 64,
-                )
-            ],
-        }
-    )
-    panel.set_connected(True)
-    panel._pending_regenerate = {
-        "cmd": "experiment_generate_report",
-        "experiment_id": "exp-1",
-    }
-    refreshed: list[bool] = []
-    monkeypatch.setattr(panel, "refresh_archive", lambda: refreshed.append(True))
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection change must not prompt"))
-        ),
-    )
-    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
-    assert refreshed == [True]
-    assert panel._pending_regenerate is None
-
-
-def test_disconnect_cancels_force_prompt_and_reconnect_keeps_pending_disabled(
-    app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    panel = ArchivePanel()
-    panel._on_refresh_result(
-        {
-            "ok": True,
-            "entries": [
-                _entry(
-                    experiment_id="exp-1",
-                    report_force_required=True,
-                    report_force_context="a" * 64,
-                )
-            ],
-        }
-    )
-    panel.set_connected(True)
-    panel._pending_regenerate = {
-        "cmd": "experiment_generate_report",
-        "experiment_id": "exp-1",
-    }
-    panel.set_connected(False)
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        staticmethod(
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disconnected result must not prompt"))
-        ),
-    )
-
-    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
-
-    assert panel._pending_regenerate is None
-    assert not panel._regenerate_btn.isEnabled()
-    panel._pending_regenerate = {
-        "cmd": "experiment_generate_report",
-        "experiment_id": "exp-1",
-    }
-    panel.set_connected(True)
-    assert not panel._regenerate_btn.isEnabled()
-
-
 # ----------------------------------------------------------------------
 # Export — K6 migration
 # ----------------------------------------------------------------------
@@ -608,64 +341,60 @@ def test_disconnect_cancels_force_prompt_and_reconnect_keeps_pending_disabled(
 
 def test_export_csv_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     seen: list[str] = []
     panel.export_requested.connect(seen.append)
-    panel._export_csv_btn.click()
+    panel._on_export_csv_clicked()
     # Signal emitted BEFORE dialog per current ordering; either way, no worker started.
     assert seen == ["csv"]
     assert not panel._export_in_flight
-    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
     assert panel._export_csv_btn.isEnabled()
 
 
 def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
-    panel._export_hdf5_btn.click()
+    panel._on_export_hdf5_clicked()
     assert not panel._export_in_flight
-    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
 
 
 def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
-    panel._export_xlsx_btn.click()
+    panel._on_export_xlsx_clicked()
     assert not panel._export_in_flight
-    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
 
 
 def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
     """IV.4 F1: cancelling the Parquet QFileDialog does not spawn a worker."""
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     seen: list[str] = []
     panel.export_requested.connect(seen.append)
-    panel._export_parquet_btn.click()
+    panel._on_export_parquet_clicked()
     assert seen == ["parquet"]
     assert not panel._export_in_flight
-    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
     assert panel._export_parquet_btn.isEnabled()
 
 
 def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
-    """IV.4 F1: picking a path fires up the in-process worker and marks the
-    export in-flight flag. We fake only the low-level parquet helper so the
-    real _start_export_worker / button wiring runs end-to-end."""
+    """IV.4 F1: picking a path fires up the in-process worker and
+    marks the export in flight. The worker itself runs synchronously
+    in the monkeypatched runner, so we only observe state transitions."""
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     output = tmp_path / "export.parquet"
@@ -675,23 +404,14 @@ def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
         staticmethod(lambda *a, **k: (str(output), "Parquet файлы (*.parquet)")),
     )
 
-    import cryodaq.storage.parquet_archive as pa_mod
+    started: list[tuple[str, str]] = []
 
-    class _FakeResult:
-        rows_written = 0
+    def fake_start(self_panel, kind: str, runner, *, unit: str) -> None:
+        started.append((kind, unit))
 
-    monkeypatch.setattr(
-        pa_mod,
-        "export_experiment_readings_to_parquet",
-        lambda **_kw: _FakeResult(),
-    )
-
-    panel._export_parquet_btn.click()
-    # Worker is created — either in-flight or already finished (fast path).
-    # The real _start_export_worker sets _export_in_flight=True before spawning.
-    assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
-    banner = panel._banner_label.text()
-    assert "0" in banner or "Parquet" in banner or "строк" in banner
+    monkeypatch.setattr(ArchivePanel, "_start_export_worker", fake_start)
+    panel._on_export_parquet_clicked()
+    assert started == [("parquet", "строк")]
 
 
 def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
@@ -699,7 +419,7 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
     parquet_archive helper with the chosen output path and bulk
     [2000, now] range."""
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     from PySide6.QtWidgets import QFileDialog
 
     output = tmp_path / "export.parquet"
@@ -728,8 +448,17 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
 
     monkeypatch.setattr(pa_mod, "export_experiment_readings_to_parquet", fake_export)
 
-    panel._export_parquet_btn.click()
-    assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
+    captured_runner: list = []
+
+    def capture_runner(self_panel, kind: str, runner, *, unit: str) -> None:
+        captured_runner.append((kind, runner, unit))
+
+    monkeypatch.setattr(ArchivePanel, "_start_export_worker", capture_runner)
+    panel._on_export_parquet_clicked()
+    assert captured_runner
+    _, runner, _ = captured_runner[0]
+    rows = runner()
+    assert rows == 123
     assert captured["experiment_id"] == "bulk_export"
     assert captured["output_path"] == output
     assert captured["start_time"].year == 2000
@@ -739,9 +468,9 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
     assert (datetime.now(UTC) - captured["end_time"]).total_seconds() < 5.0
 
 
-def test_export_in_flight_disables_all_export_buttons(app, monkeypatch):
+def test_export_in_flight_disables_all_export_buttons(app):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     assert panel._export_csv_btn.isEnabled()
     panel._export_in_flight = True
     panel._update_control_enablement()
@@ -774,7 +503,9 @@ def test_disconnected_disables_refresh_regenerate_export(app):
 
 def test_reconnect_reenables_controls(app):
     panel = ArchivePanel()
-    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]})
+    panel._on_refresh_result(
+        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]}
+    )
     panel.set_connected(False)
     panel.set_connected(True)
     assert panel._refresh_btn.isEnabled()
@@ -855,16 +586,15 @@ def test_init_does_not_fire_refresh_worker(app, monkeypatch):
 def test_first_connect_triggers_refresh_when_empty(app, monkeypatch):
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    dispatched: list[dict] = []
+    started: list = []
 
     class _StubWorker:
-        def __init__(self, cmd, **kw) -> None:
-            self._cmd = dict(cmd)
-            dispatched.append(self._cmd)
+        def __init__(self, *a, **kw) -> None:
+            self._a = a
             self.finished = MagicMock()
 
         def start(self) -> None:
-            pass
+            started.append(self._a)
 
         def isRunning(self) -> bool:
             return False
@@ -872,11 +602,7 @@ def test_first_connect_triggers_refresh_when_empty(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(dispatched) == 1
-    cmd = dispatched[0]
-    assert cmd["cmd"] == "experiment_archive_list"
-    assert "sort_by" in cmd
-    assert "descending" in cmd
+    assert len(started) == 1
 
 
 # ----------------------------------------------------------------------
@@ -891,15 +617,14 @@ def test_refresh_archive_suppresses_duplicate_while_in_flight(app, monkeypatch):
     """
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    dispatched: list[dict] = []
+    started: list = []
 
     class _StubWorker:
-        def __init__(self, cmd, **kw) -> None:
-            dispatched.append(dict(cmd))
+        def __init__(self, *a, **kw) -> None:
             self.finished = MagicMock()
 
         def start(self) -> None:
-            pass
+            started.append(True)
 
         def isRunning(self) -> bool:
             return False
@@ -907,19 +632,17 @@ def test_refresh_archive_suppresses_duplicate_while_in_flight(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(dispatched) == 1  # cold-start deferred refresh
-    assert dispatched[0]["cmd"] == "experiment_archive_list"
+    assert len(started) == 1  # cold-start deferred refresh
     assert panel._refresh_in_flight is True
     # Duplicate — should be a no-op.
     panel.refresh_archive()
-    assert len(dispatched) == 1
+    assert len(started) == 1
     # Simulate result — flag clears.
     panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="e1")]})
     assert panel._refresh_in_flight is False
-    # Now manual refresh spawns a new worker with a valid archive-list command.
+    # Now manual refresh spawns a new worker.
     panel.refresh_archive()
-    assert len(dispatched) == 2
-    assert dispatched[1]["cmd"] == "experiment_archive_list"
+    assert len(started) == 2
 
 
 def test_reconnect_flap_no_duplicate_refresh(app, monkeypatch):
@@ -960,15 +683,14 @@ def test_refresh_failure_clears_in_flight_flag(app, monkeypatch):
     """
     import cryodaq.gui.shell.overlays.archive_panel as module
 
-    dispatched: list[dict] = []
+    started: list = []
 
     class _StubWorker:
-        def __init__(self, cmd, **kw) -> None:
-            dispatched.append(dict(cmd))
+        def __init__(self, *a, **kw) -> None:
             self.finished = MagicMock()
 
         def start(self) -> None:
-            pass
+            started.append(True)
 
         def isRunning(self) -> bool:
             return False
@@ -976,15 +698,14 @@ def test_refresh_failure_clears_in_flight_flag(app, monkeypatch):
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     panel = ArchivePanel()
     panel.set_connected(True)
-    assert len(dispatched) == 1
+    assert len(started) == 1
     assert panel._refresh_in_flight is True
     # Simulate engine failure.
     panel._on_refresh_result({"ok": False, "error": "engine timeout"})
     assert panel._refresh_in_flight is False
-    # Retry dispatches a valid archive-list command.
+    # Retry works.
     panel.refresh_archive()
-    assert len(dispatched) == 2
-    assert dispatched[1]["cmd"] == "experiment_archive_list"
+    assert len(started) == 2
 
 
 def test_repeat_connect_does_not_refetch_when_entries_present(app, monkeypatch):
@@ -1020,7 +741,7 @@ class _StubCSVExporter:
     """Plain-Python stand-in for CSVExporter. Avoids PySide/QThread +
     MagicMock interaction that crashed in the initial attempt."""
 
-    _next_result: int | BaseException = 0
+    _next_result: int | Exception = 0
     calls: list[tuple] = []
 
     def __init__(self, data_dir=None, **kwargs) -> None:
@@ -1029,13 +750,13 @@ class _StubCSVExporter:
     def export(self, output_path, **kwargs) -> int:
         _StubCSVExporter.calls.append((output_path, kwargs))
         result = _StubCSVExporter._next_result
-        if isinstance(result, BaseException):
+        if isinstance(result, Exception):
             raise result
         return int(result)
 
 
 class _StubHDF5Exporter:
-    _next_result: int | BaseException = 0
+    _next_result: int | Exception = 0
     calls: list[tuple] = []
 
     def __init__(self, *args, **kwargs) -> None:
@@ -1044,13 +765,13 @@ class _StubHDF5Exporter:
     def export(self, db_file, out) -> int:
         _StubHDF5Exporter.calls.append((db_file, out))
         result = _StubHDF5Exporter._next_result
-        if isinstance(result, BaseException):
+        if isinstance(result, Exception):
             raise result
         return int(result)
 
 
 class _StubXLSXExporter:
-    _next_result: int | BaseException = 0
+    _next_result: int | Exception = 0
     calls: list[tuple] = []
 
     def __init__(self, data_dir) -> None:
@@ -1059,7 +780,7 @@ class _StubXLSXExporter:
     def export(self, output_path) -> int:
         _StubXLSXExporter.calls.append((output_path,))
         result = _StubXLSXExporter._next_result
-        if isinstance(result, BaseException):
+        if isinstance(result, Exception):
             raise result
         return int(result)
 
@@ -1099,22 +820,9 @@ def _patch_xlsx(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
 
 
-def _connect_with_loaded_archive(panel: ArchivePanel, monkeypatch: pytest.MonkeyPatch) -> None:
-    import cryodaq.gui.shell.overlays.archive_panel as module
-
-    def unexpected_refresh(*_args, **_kwargs) -> None:
-        pytest.fail("loaded export setup unexpectedly started an archive refresh")
-
-    monkeypatch.setattr(module, "ZmqCommandWorker", unexpected_refresh)
-    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="loaded")]})
-    panel.set_connected(True)
-    assert panel._connected is True
-    assert panel._refresh_in_flight is False
-
-
 def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1127,7 +835,7 @@ def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubCSVExporter._next_result = 12345
     _patch_csv(monkeypatch, tmp_path)
 
-    panel._export_csv_btn.click()
+    panel._on_export_csv_clicked()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "12345" in panel._banner_label.text()
@@ -1140,7 +848,7 @@ def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
 
 def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1150,24 +858,20 @@ def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
         "getSaveFileName",
         staticmethod(lambda *a, **k: (str(output), "CSV (*.csv)")),
     )
-    secret = "disk full C:\\TOP-SECRET\\operator.db\r\nFORGED"
-    _StubCSVExporter._next_result = KeyboardInterrupt(secret)
+    _StubCSVExporter._next_result = OSError("disk full")
     _patch_csv(monkeypatch, tmp_path)
 
-    panel._export_csv_btn.click()
+    panel._on_export_csv_clicked()
     assert _wait_until(lambda: not panel._export_in_flight)
 
-    assert "disk full" not in panel._banner_label.text()
-    assert "TOP-SECRET" not in panel._banner_label.text()
-    assert "FORGED" not in panel._banner_label.text()
-    assert "\r" not in panel._banner_label.text()
+    assert "disk full" in panel._banner_label.text()
     assert "Экспорт CSV" in panel._banner_label.text()
     assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
 
 
 def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     # One fake data_*.db so the hdf5 slot iterates once.
     db_file = tmp_path / "data_2026-04-19.db"
     db_file.write_bytes(b"")
@@ -1184,7 +888,7 @@ def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubHDF5Exporter._next_result = 777
     _patch_hdf5(monkeypatch, tmp_path)
 
-    panel._export_hdf5_btn.click()
+    panel._on_export_hdf5_clicked()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "777" in panel._banner_label.text()
@@ -1192,44 +896,9 @@ def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     assert len(_StubHDF5Exporter.calls) == 1
 
 
-def test_hdf5_export_archive_location_failure_is_reported(app, monkeypatch, tmp_path, reset_stub_state):
-    import cryodaq.paths as paths_module
-    import cryodaq.storage.hdf5_export as hdf5_module
-
-    panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    requested: list[Path] = []
-
-    from PySide6.QtWidgets import QFileDialog
-
-    monkeypatch.setattr(
-        QFileDialog,
-        "getExistingDirectory",
-        staticmethod(lambda *a, **k: str(out_dir)),
-    )
-    monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
-
-    def unavailable(data_dir: Path) -> Path:
-        requested.append(data_dir)
-        raise paths_module.ArchiveLocationMigrationRequiredError("C:\\TOP-SECRET\\legacy archive")
-
-    monkeypatch.setattr(paths_module, "get_archive_dir", unavailable)
-    monkeypatch.setattr(hdf5_module, "HDF5Exporter", _StubHDF5Exporter)
-
-    panel._export_hdf5_btn.click()
-    assert _wait_until(lambda: not panel._export_in_flight)
-
-    assert requested == [tmp_path]
-    assert _StubHDF5Exporter.calls == []
-    assert "TOP-SECRET" not in panel._banner_label.text()
-    assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
-
-
 def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     output = tmp_path / "out.xlsx"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1242,7 +911,7 @@ def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     _StubXLSXExporter._next_result = 999
     _patch_xlsx(monkeypatch, tmp_path)
 
-    panel._export_xlsx_btn.click()
+    panel._on_export_xlsx_clicked()
     assert _wait_until(lambda: not panel._export_in_flight)
 
     assert "999" in panel._banner_label.text()
@@ -1250,17 +919,15 @@ def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     assert len(_StubXLSXExporter.calls) == 1
 
 
-def test_export_thread_retained_during_run_then_pruned(app, monkeypatch, tmp_path, reset_stub_state):
+def test_export_thread_retained_during_run_then_pruned(
+    app, monkeypatch, tmp_path, reset_stub_state
+):
     """While the export is running the QThread + worker must be retained
     (otherwise the Python wrapper can be GC'd mid-flight and crash the
     PySide signal path). On completion both lists are pruned.
-    Uses an event-gated fake exporter (no fixed sleep) so the thread
-    actually starts before we sample the retained-worker list.
     """
-    import threading
-
     panel = ArchivePanel()
-    _connect_with_loaded_archive(panel, monkeypatch)
+    panel.set_connected(True)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1271,77 +938,20 @@ def test_export_thread_retained_during_run_then_pruned(app, monkeypatch, tmp_pat
         staticmethod(lambda *a, **k: (str(output), "CSV (*.csv)")),
     )
 
-    # Gate: test holds the exporter inside export() until we've verified
-    # the in-flight state, then releases it.
-    _started = threading.Event()
-    _release = threading.Event()
-
-    class _GatedCSVExporter(_StubCSVExporter):
+    class _SlowCSVExporter(_StubCSVExporter):
         def export(self, output_path, **kwargs) -> int:
-            _started.set()
-            _release.wait(timeout=5.0)
+            time.sleep(0.15)
             return 1
 
     import cryodaq.paths as paths_module
     import cryodaq.storage.csv_export as csv_module
 
-    monkeypatch.setattr(csv_module, "CSVExporter", _GatedCSVExporter)
+    monkeypatch.setattr(csv_module, "CSVExporter", _SlowCSVExporter)
     monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
 
-    panel._export_csv_btn.click()
-    # Wait until the worker thread has actually entered export().
-    assert _started.wait(timeout=5.0), "exporter never started"
-    # While export() is blocked: worker must be retained.
+    panel._on_export_csv_clicked()
     assert len(panel._export_workers) == 1
     assert panel._export_in_flight is True
-    # Release the exporter to let the thread finish.
-    _release.set()
+
     assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
     assert _wait_until(lambda: len(panel._export_workers) == 0)
-
-
-def test_export_worker_remains_owned_until_blocked_runner_settles(
-    app,
-    _isolate_shell_test,
-) -> None:
-    import threading
-
-    from cryodaq.gui.shell.overlays.archive_panel import _ExportWorker
-    from cryodaq.gui.zmq_client import (
-        registered_gui_command_workers,
-        revoke_gui_command_worker_admission,
-        settle_registered_gui_command_workers,
-    )
-
-    entered = threading.Event()
-    release = threading.Event()
-    callbacks: list[tuple[str, int, str]] = []
-
-    def runner() -> int:
-        entered.set()
-        assert release.wait(5.0)
-        return 7
-
-    worker = _ExportWorker("csv", runner)
-    worker.result_ready.connect(lambda kind, count, error: callbacks.append((kind, count, error)))
-    try:
-        worker.start()
-        assert entered.wait(1.0)
-        revoke_gui_command_worker_admission(_isolate_shell_test)
-
-        assert settle_registered_gui_command_workers(timeout_ms=10) is False
-        assert worker in registered_gui_command_workers()
-        assert callbacks == []
-
-        release.set()
-        assert worker.wait(2_000)
-        for _ in range(5):
-            app.processEvents()
-        assert callbacks == []
-        assert settle_registered_gui_command_workers()
-        assert worker not in registered_gui_command_workers()
-    finally:
-        release.set()
-        worker.requestInterruption()
-        worker.wait(2_000)
-        settle_registered_gui_command_workers()

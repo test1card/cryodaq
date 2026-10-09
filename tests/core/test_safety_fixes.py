@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,13 +21,6 @@ import pytest
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.drivers.contracts import (
-    AcquisitionTiming,
-    DriverTrustClass,
-    SourceOffResult,
-    _issue_registry_runtime_binding,
-)
-from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror test_safety_manager.py conventions)
@@ -38,8 +30,7 @@ from tests.qualification_support import issued_test_qualification_receipt
 def _mock_keithley():
     k = MagicMock()
     k.connected = True
-    k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    k.emergency_off = AsyncMock()
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -47,32 +38,11 @@ def _mock_keithley():
 
 async def _make_manager(*, mock=True, keithley=None, stale=10.0):
     broker = SafetyBroker()
-    binding = None
-    if keithley is not None:
-        keithley.mock = mock
-        binding = _issue_registry_runtime_binding(
-            driver=keithley,
-            timing=AcquisitionTiming(1.0, 1.0, 1.0),
-            registry_provenance="test:safety-fixes",
-            trust_class=DriverTrustClass.REVIEWED_SOURCE,
-            simulation=mock,
-        )
-    mgr = SafetyManager(
-        broker,
-        keithley_driver=keithley,
-        reviewed_source_runtime_binding=binding,
-        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
-        mock=mock,
-    )
+    mgr = SafetyManager(broker, keithley_driver=keithley, mock=mock)
     mgr._config.stale_timeout_s = stale
     mgr._config.cooldown_before_rearm_s = 0.1
     mgr._config.require_keithley_for_run = not mock
     await mgr.start()
-    if not mock:
-        # The real engine installs reviewed connection-generation OFF proof;
-        # these focused driver doubles must model that authority explicitly.
-        generation = await mgr.begin_reviewed_source_connect(keithley, binding, "test setup")
-        assert await mgr.complete_reviewed_source_connect(keithley, binding, generation, "test setup")
     return mgr, broker
 
 
@@ -86,31 +56,6 @@ async def _feed(
     r = Reading.now(channel=channel, value=value, unit=unit, instrument_id="test", status=status)
     await broker.publish(r)
     await asyncio.sleep(0.02)
-
-
-async def _publish_rising(broker, channel, *, start, step, count, base, dt_s=0.5):
-    """Publish `count` rising Kelvin readings on `channel` with EXPLICIT, evenly
-    spaced timestamps (base + i*dt_s).
-
-    The RateEstimator gates on the buffer's *timestamp* span (min_span_s=30 s),
-    not the sample count, so a steep rise must be simulated across a realistic
-    poll window rather than packed into milliseconds of wall-clock. dt_s=0.5 s ×
-    count≥60 gives ≥30 s of span while keeping the test near-instant. Returns the
-    timestamp just past the last sample so callers can chain a second batch.
-    """
-    ts = base
-    for i in range(count):
-        r = Reading(
-            timestamp=base + timedelta(seconds=i * dt_s),
-            instrument_id="test",
-            channel=channel,
-            value=start + i * step,
-            unit="K",
-        )
-        await broker.publish(r)
-        await asyncio.sleep(0.001)
-        ts = base + timedelta(seconds=(i + 1) * dt_s)
-    return ts
 
 
 async def _get_to_running(mgr, broker):
@@ -143,7 +88,9 @@ async def test_fault_latched_not_cleared_by_stop():
         result = await mgr.request_stop()
 
         # State must remain FAULT_LATCHED — a plain stop must not clear the latch
-        assert mgr.state == SafetyState.FAULT_LATCHED, f"Expected FAULT_LATCHED after request_stop, got {mgr.state}"
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"Expected FAULT_LATCHED after request_stop, got {mgr.state}"
+        )
         assert result["ok"] is False, "request_stop() from FAULT_LATCHED should report ok=False"
     finally:
         await mgr.stop()
@@ -166,15 +113,20 @@ async def test_fault_latched_not_cleared_by_emergency():
         k.emergency_off.assert_called()
 
         # The fault latch must persist — emergency_off is NOT an acknowledge
-        assert mgr.state == SafetyState.FAULT_LATCHED, f"emergency_off must not clear FAULT_LATCHED, got {mgr.state}"
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"emergency_off must not clear FAULT_LATCHED, got {mgr.state}"
+        )
         # Production contract: emergency_off() from FAULT_LATCHED returns ok=True
         # but includes latched=True to signal the fault is still active.
         # (Verified in safety_manager.py:410-418: the latched branch returns
         # ok=True, latched=True, with warning="Outputs disabled but fault remains latched")
         assert result["ok"] is True, (
-            f"emergency_off from FAULT_LATCHED should return ok=True (outputs disabled), got ok={result.get('ok')}"
+            f"emergency_off from FAULT_LATCHED should return ok=True (outputs disabled), "
+            f"got ok={result.get('ok')}"
         )
-        assert result.get("latched") is True, f"emergency_off from FAULT_LATCHED must set latched=True, got {result}"
+        assert result.get("latched") is True, (
+            f"emergency_off from FAULT_LATCHED must set latched=True, got {result}"
+        )
     finally:
         await mgr.stop()
 
@@ -200,7 +152,9 @@ async def test_fault_recovery_only_through_acknowledge():
         await _feed(broker)
         await asyncio.sleep(1.5)
 
-        assert mgr.state == SafetyState.READY, f"Expected READY after MANUAL_RECOVERY + good data, got {mgr.state}"
+        assert mgr.state == SafetyState.READY, (
+            f"Expected READY after MANUAL_RECOVERY + good data, got {mgr.state}"
+        )
     finally:
         await mgr.stop()
 
@@ -251,7 +205,9 @@ async def test_nan_value_triggers_fault():
         await _feed(broker, channel="Т7 Нагреватель", value=float("nan"), unit="K")
         await asyncio.sleep(1.5)  # let monitor loop tick
 
-        assert mgr.state == SafetyState.FAULT_LATCHED, f"NaN reading must cause FAULT_LATCHED, got {mgr.state}"
+        assert mgr.state == SafetyState.FAULT_LATCHED, (
+            f"NaN reading must cause FAULT_LATCHED, got {mgr.state}"
+        )
     finally:
         await mgr.stop()
 
@@ -272,7 +228,9 @@ async def test_ok_status_passes():
 
         result = await mgr.request_run(0.5, 40.0, 1.0)
 
-        assert result["ok"] is True, f"request_run must succeed with OK status reading, error: {result.get('error')}"
+        assert result["ok"] is True, (
+            f"request_run must succeed with OK status reading, error: {result.get('error')}"
+        )
         assert mgr.state == SafetyState.RUNNING
     finally:
         await mgr.stop()
@@ -284,28 +242,22 @@ async def test_ok_status_passes():
 
 
 async def test_rate_limit_ignores_non_temperature():
-    """Voltage readings with huge dV/dt must NOT trigger FAULT_LATCHED.
-
-    The voltage channel IS configured as critical so the stale-check machinery
-    is active.  Unit is 'V', not 'K', so _collect_loop must exclude it from
-    the rate estimator.  A slope that would definitely fault a K-channel
-    (>60 samples, +100 V per sample) must leave state == RUNNING.
-    """
+    """Voltage readings with huge dV/dt must NOT trigger FAULT_LATCHED."""
     mgr, broker = await _make_manager(stale=30.0)
-    # Make voltage channel critical — stale machinery is now engaged.
-    # stale_timeout_s=30 and we keep feeding, so stale-check won't fire either.
-    mgr._config.critical_channels = [re.compile(r"Keithley/voltage")]
+    # No critical channels so stale-check won't fire; rate check is unit-gated
+    mgr._config.critical_channels = []
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
-        # Seed a fresh voltage reading so the channel is not stale at run-start
-        await _feed(broker, channel="Keithley/voltage", value=0.0, unit="V")
+        # Get to RUNNING first (no critical channels needed)
+        await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
         await asyncio.sleep(1.5)
-        result = await mgr.request_run(0.5, 40.0, 1.0)
-        assert result["ok"] is True, f"request_run failed: {result.get('error')}"
+        await mgr.request_run(0.5, 40.0, 1.0)
         assert mgr.state == SafetyState.RUNNING
 
-        # Publish >=60 voltage readings at a slope that would fault if unit were K.
-        # Unit is "V" so _collect_loop must gate them out of the rate estimator.
+        # Publish >=60 voltage readings spanning a high dV/dt so the rate estimator
+        # CAN compute a rate (needs >= min_points=60).  Unit is "V" so the rate-check
+        # loop (which gates on unit=="K" via _collect_loop) must never see these
+        # readings in the estimator, and no fault must fire.
         for i in range(65):
             v = float(i) * 100.0  # +100 V per sample → enormous rate if it were K
             r = Reading.now(channel="Keithley/voltage", value=v, unit="V", instrument_id="test")
@@ -315,12 +267,12 @@ async def test_rate_limit_ignores_non_temperature():
         # Allow monitor loop to run
         await asyncio.sleep(1.5)
 
-        # Primary assertion: manager stayed RUNNING — voltage is excluded at the
-        # unit level even though the channel IS critical.
-        assert mgr.state == SafetyState.RUNNING, f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
-        # Secondary: confirm the estimator has NO entry for the voltage channel.
+        # Confirm the estimator has NO entry for the voltage channel (unit-gated)
         assert "Keithley/voltage" not in mgr._rate_estimator.channels(), (
             "Voltage channel must not be pushed into the rate estimator (unit != 'K')"
+        )
+        assert mgr.state == SafetyState.RUNNING, (
+            f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
         )
     finally:
         await mgr.stop()
@@ -332,15 +284,16 @@ async def test_rate_limit_catches_critical_temperature():
     mgr._config.critical_channels = [re.compile("Т1.*")]
     mgr._config.max_dT_dt_K_per_min = 5.0
     try:
-        # The rate estimator gates on the buffer's timestamp SPAN (min_span_s=30 s),
-        # not the sample count, so a steep rise must be simulated across a realistic
-        # ≥30 s poll window rather than packed into milliseconds of wall-clock.
-        # 80 samples × 0.5 s ≈ 40 s span; +1 K/sample ⇒ ~120 K/min, far above the
-        # 5 K/min limit. Timestamps are anchored in the recent past so they stay
-        # monotonic and ≤ now.
-        crit = "Т1 Криостат верх"
-        base = datetime.now(UTC) - timedelta(seconds=90)
-        next_ts = await _publish_rising(broker, crit, start=4.0, step=1.0, count=80, base=base)
+        # Phase 2c CC I.3: SafetyManager rate estimator now requires >=60
+        # samples (was 10) before producing a slope estimate. The test
+        # therefore needs to push enough data to fill the buffer before any
+        # rate-based fault check can trigger.
+        for i in range(80):
+            # +1 K per sample at 1 ms cadence → effectively a steep rise
+            temp = 4.0 + i * 1.0
+            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
+            await broker.publish(r)
+            await asyncio.sleep(0.001)
 
         await asyncio.sleep(1.5)
 
@@ -352,9 +305,12 @@ async def test_rate_limit_catches_critical_temperature():
                 assert mgr.state == SafetyState.FAULT_LATCHED
                 return
 
-        # Feed more rapidly rising samples to keep triggering rate check,
-        # continuing the synthetic clock so the buffer span keeps growing.
-        await _publish_rising(broker, crit, start=84.0, step=1.0, count=80, base=next_ts)
+        # Feed more rapidly rising samples to keep triggering rate check
+        for i in range(80):
+            temp = 84.0 + i * 1.0
+            r = Reading.now(channel="Т1 Криостат верх", value=temp, unit="K", instrument_id="test")
+            await broker.publish(r)
+            await asyncio.sleep(0.001)
 
         await asyncio.sleep(1.5)
 
@@ -380,24 +336,23 @@ async def test_rate_limit_ignores_non_critical_channel():
         assert result["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # Feed rapidly changing data on a NON-critical channel (T4 — disconnected sensor)
-        # across a synthetic ≥30 s span so the rate estimator ACTUALLY computes a
-        # rate for it (it gates on min_span_s=30 s, not sample count). This ensures
-        # the test exercises the critical-channel gate rather than passing only
-        # because the estimator returned None for too-short a window.
-        base = datetime.now(UTC)
-        await _publish_rising(
-            broker, "Т4 Радиатор 2", start=4.0, step=10.0, count=65, base=base
-        )  # +10 K/sample ⇒ well above the 5 K/min limit
+        # Feed >=60 rapidly changing data on a NON-critical channel (T4 — disconnected sensor).
+        # 65 samples guarantees the rate estimator CAN compute a rate for this channel
+        # (needs >= min_points=60), so the test actually exercises the critical-channel
+        # gate rather than just relying on the estimator returning None.
+        for i in range(65):
+            temp = 4.0 + i * 10.0  # +10 K per sample → well above 5 K/min limit
+            r = Reading.now(channel="Т4 Радиатор 2", value=temp, unit="K", instrument_id="test")
+            await broker.publish(r)
+            await asyncio.sleep(0.01)
 
         # Keep critical channel fresh so stale-check doesn't fire
         await _feed(broker, channel="Т1 Криостат верх", value=4.5, unit="K")
         await asyncio.sleep(1.5)
 
-        # Confirm the estimator DID compute a rate for the non-critical channel —
-        # proving the critical-channel gate (not a None rate) is what prevents the fault.
-        assert mgr._rate_estimator.get_rate("Т4 Радиатор 2") is not None, (
-            "Expected a computed rate for Т4 (≥30 s span) to prove the channel gate was tested"
+        # Confirm the estimator DID record the non-critical channel (received enough samples)
+        assert mgr._rate_estimator.buffer_size("Т4 Радиатор 2") >= 60, (
+            "Expected >=60 samples in rate estimator for Т4 to prove the channel gate was tested"
         )
         assert mgr.state == SafetyState.RUNNING, (
             f"Non-critical channel rate must not trigger FAULT_LATCHED, got {mgr.state}"
@@ -455,13 +410,16 @@ async def test_rate_limit_faults_on_critical_channel():
         assert (await mgr.request_run(0.5, 40.0, 1.0))["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # Drive a steep dT/dt on the critical channel. The RateEstimator reports a
-        # rate only once the buffer spans >= min_span_s (30 s) — a poll-rate-
-        # independent gate — so feed 65 rising samples (+0.5 K each, kept < 40 K)
-        # across a synthetic 0.5 s cadence ≈ 32 s span. dT/dt is then far above the
-        # 5 K/min limit. Timestamps continue from the READY-reaching _feed above.
-        base = datetime.now(UTC)
-        await _publish_rising(broker, crit, start=4.5, step=0.5, count=65, base=base)
+        # Drive a steep dT/dt on the critical channel. The RateEstimator needs
+        # >= min_points (60) samples in-window before it reports a rate, so feed
+        # 65 rising samples (+0.5 K each, kept < 40 K). dT/dt is then far above
+        # the 5 K/min limit.
+        for i in range(65):
+            r = Reading.now(
+                channel=crit, value=4.5 + i * 0.5, unit="K", instrument_id="test"
+            )
+            await broker.publish(r)
+            await asyncio.sleep(0.01)
         await asyncio.sleep(1.5)
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
@@ -471,132 +429,5 @@ async def test_rate_limit_faults_on_critical_channel():
         assert "rate" in reason or "dt" in reason or "k/min" in reason, (
             f"fault_reason should name the rate-limit cause, got {mgr.fault_reason!r}"
         )
-    finally:
-        await mgr.stop()
-
-
-# ---------------------------------------------------------------------------
-# S3 (HIGH) — SafetyManager's own rate estimator must NOT ingest non-usable
-# readings; a NaN in the OLS buffer blinds the 5 K/min protection.
-# ---------------------------------------------------------------------------
-
-
-async def test_nonusable_reading_not_pushed_to_rate_estimator():
-    """A NaN/SENSOR_ERROR K reading must never enter the rate-estimator buffer.
-    If it did, _ols_slope_per_min() returns None until the bad point ages out of
-    the 120 s window — the 5 K/min protection goes silently blind. The push must
-    be gated on Reading.is_usable().
-    """
-    mgr, broker = await _make_manager(stale=60.0)
-    mgr._config.critical_channels = [re.compile("Т1.*")]
-    mgr._config.max_dT_dt_K_per_min = 5.0
-    try:
-        crit = "Т1 Криостат верх"
-        base = datetime.now(UTC) - timedelta(seconds=90)
-        # 40 usable rising samples ...
-        ts = await _publish_rising(broker, crit, start=4.0, step=1.0, count=40, base=base)
-        # ... one NaN + SENSOR_ERROR injected mid-stream (would poison OLS) ...
-        await broker.publish(
-            Reading(
-                timestamp=ts,
-                instrument_id="test",
-                channel=crit,
-                value=float("nan"),
-                unit="K",
-                status=ChannelStatus.SENSOR_ERROR,
-            )
-        )
-        await asyncio.sleep(0.02)
-        # ... then more usable rising samples.
-        await _publish_rising(broker, crit, start=44.0, step=1.0, count=40, base=ts + timedelta(seconds=0.5))
-        await asyncio.sleep(0.05)
-
-        rate = mgr._rate_estimator.get_rate(crit)
-        assert rate is not None, "rate must stay computable — a NaN in the OLS buffer would make it return None"
-        assert rate > 5.0, "the steep ramp must still be detectable through the NaN"
-    finally:
-        await mgr.stop()
-
-
-# ---------------------------------------------------------------------------
-# CR-2 third call site — interlock stop_source must honor emergency_off() bool.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_interlock_stop_source_faults_when_off_unconfirmed():
-    """stop_source interlock: emergency_off() returning PHYSICAL_STATE_UNKNOWN (OFF not
-    confirmed) must escalate to FAULT_LATCHED, not fall through to SAFE_OFF."""
-    k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
-    mgr, broker = await _make_manager(mock=False, keithley=k)
-    try:
-        await _get_to_running(mgr, broker)
-        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
-        assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"unconfirmed OFF on interlock stop must latch FAULT, got {mgr.state}"
-        )
-    finally:
-        # The assertion intentionally leaves OFF unverified. The hardened
-        # lifecycle retains HOLD until this explicit later exact proof.
-        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-        await mgr.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "unqualified_result",
-    [
-        pytest.param(1, id="integer-one"),
-        pytest.param("confirmed", id="nonempty-string"),
-        pytest.param(AsyncMock(), id="async-mock-object"),
-        pytest.param(object(), id="truthy-object"),
-    ],
-)
-async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
-    unqualified_result,
-):
-    """Only ``DEVICE_REPORTED_OFF`` may clear active-source evidence after a trip."""
-    k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=unqualified_result)
-    mgr, broker = await _make_manager(mock=False, keithley=k)
-    try:
-        await _get_to_running(mgr, broker)
-        active_before = set(mgr._active_sources)
-        assert active_before
-
-        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
-
-        assert mgr.state is SafetyState.FAULT_LATCHED
-        assert mgr._active_sources == active_before
-        snapshot = mgr.snapshot_operator_safety()
-        assert snapshot.verified_off is False
-        assert any(blocker.code == "reviewed_source_off_unverified" for blocker in snapshot.blockers)
-        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
-        assert source.reason_code == "reviewed_source_off_unverified"
-    finally:
-        # Truthy non-bools are correctly rejected as OFF evidence. Restore an
-        # exact driver OFF proof only for teardown so the stronger HOLD can close.
-        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-        await mgr.stop()
-
-
-@pytest.mark.asyncio
-async def test_interlock_stop_source_accepts_exact_true_off_evidence():
-    k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
-    mgr, broker = await _make_manager(mock=False, keithley=k)
-    try:
-        await _get_to_running(mgr, broker)
-
-        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
-
-        assert mgr.state is SafetyState.SAFE_OFF
-        assert mgr._active_sources == set()
-        snapshot = mgr.snapshot_operator_safety()
-        assert snapshot.verified_off is True
-        assert all(blocker.code != "reviewed_source_off_unverified" for blocker in snapshot.blockers)
-        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
-        assert source.reason_code == "reviewed_source_verified_off"
     finally:
         await mgr.stop()

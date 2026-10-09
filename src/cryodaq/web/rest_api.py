@@ -1035,7 +1035,7 @@ async def post_alarm_ack(
     payload: AlarmAckIn,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
 ) -> dict[str, Any] | JSONResponse:
-    """Квитировать аларм (acknowledged_by = «REST API»)."""
+    """Подтвердить тревогу (acknowledged_by = «REST API»)."""
     if len(idempotency_key) != 32 or any(char not in "0123456789abcdef" for char in idempotency_key):
         raise HTTPException(
             status_code=422,

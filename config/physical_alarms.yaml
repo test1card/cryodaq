@@ -27,7 +27,7 @@ cooldown:
 
   # Watchdog mode — activated automatically after AUTO_DISARMED (cooldown complete).
   # Monitors T_cold against a fixed threshold; fires WARNING if T_cold climbs
-  # above base_temp_K + watchdog_margin_K for watchdog_sustained_s seconds.
+  # above base_temp_K + watchdog_margin_K for watchdog_sustained_min consecutive ticks.
   # Clears when operator calls disarm() or experiment is finalized.
   #
   # Architect rule (2026-05-07): post-cooldown watchdog disabled by
@@ -40,14 +40,11 @@ cooldown:
   watchdog_margin_K: 1.0             # Т12 threshold = base_temp_K + this (default 6.0 K)
   watchdog_sustained_s: 300          # seconds Т12 must stay above threshold before firing
   watchdog_level: WARNING
-  cold_start_skip_margin_K: 5.0
 
   # Channels (must match channels.yaml short IDs).
-  # Declared stand mapping (not yet physically accepted):
-  #   Т11 — configured as the passive plate on GM-cooler stage 1 (~40K floor)
-  #   Т12 — configured as GM-cooler stage 2 / cold point (~2.9K floor)
-  # Physical binding and calibration remain OPEN until recorded under
-  # docs/lab_verification_checklist.md.
+  # Hardware mapping verified by architect at lab 2026-05-03 (C6 resolved):
+  #   Т11 — пассивная плита на 1-й ступени GM-cooler (~40K floor)
+  #   Т12 — 2-я ступень GM-cooler, холодная точка (~2.9K floor)
   cold_channel: "Т12"
   warm_channel: "Т11"
 
@@ -73,22 +70,12 @@ vacuum:
 
   severity: CRITICAL
 
-  # On FIRED, also latch a SafetyManager fault (source OFF + FAULT_LATCHED),
-  # not just the alarm. This is opt-in; if absent, alarm-only is the default.
-  # unattended/cold runs need the source killed on a vacuum incident, not
-  # just an alarm. No auto-clear on pressure recovery: the latch holds
-  # through FAULT_LATCHED → acknowledge → MANUAL_RECOVERY so a vacuum
-  # incident while cold always needs operator eyes. Set false for
-  # attended/debug runs where alarm-only (no source kill) is acceptable.
-  escalate_to_safety: true
-
-# Channel landmarks — F-ChannelLandmarks (system-level declarations).
-# The tracked configuration declares Т11 / Т12 as fixed stage roles, but their
-# physical attachment and calibration are not yet accepted. The query agent
-# gives these configured aliases precedence over experiment-level channels.yaml
-# names; that software resolution does not prove that "азотная плита" is
-# physically connected to Т11. The physical gate is
-# docs/lab_verification_checklist.md.
+# Channel landmarks — F-ChannelLandmarks (system-level, hardware-pinned).
+# Т11 / Т12 are physically bolted to GM-cooler stages and never migrate
+# between experiments. The query agent consults these aliases BEFORE
+# experiment-level channels.yaml names so an operator phrase like
+# "азотная плита" always resolves to Т11 even if a per-experiment alias
+# happened to drift onto another channel.
 landmarks:
   Т11:
     role: warm_stage

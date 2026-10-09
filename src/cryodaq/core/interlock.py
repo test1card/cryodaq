@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import re
 from collections import deque
 from collections.abc import Callable
@@ -29,8 +28,6 @@ from typing import Any
 import yaml
 
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
-from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
 
@@ -45,12 +42,6 @@ _MAX_EVENTS = 1000
 
 # Имя подписки InterlockEngine в DataBroker
 _SUBSCRIPTION_NAME = "interlock_engine"
-
-# NaN-доктрина P2-5: дебаунс непригодных показаний (NaN / error-status) на
-# interlock-каналах. Пороги по умолчанию — переопределяются в interlocks.yaml
-# (секция nonusable_escalation), читаются fail-closed (строгие типы).
-_DEFAULT_NONUSABLE_MIN_DURATION_S = 10.0
-_DEFAULT_NONUSABLE_MIN_SAMPLES = 5
 
 
 class InterlockState(Enum):
@@ -82,10 +73,8 @@ class InterlockCondition:
         Имя действия из словаря actions, переданного в InterlockEngine.
         Например: ``"emergency_off"`` или ``"stop_source"``.
     cooldown_s:
-        Минимальный интервал в секундах между громкими УВЕДОМЛЕНИЯМИ о повторном
-        срабатывании одной и той же блокировки. Защитное действие выполняется при
-        КАЖДОМ нарушении (после re-arm через acknowledge) — кулдаун дедуплицирует
-        только уведомление, но не защиту. По умолчанию 0 (без ограничения).
+        Минимальный интервал в секундах между повторными срабатываниями
+        одной и той же блокировки. По умолчанию 0 (без ограничения).
     """
 
     name: str
@@ -102,13 +91,15 @@ class InterlockCondition:
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
             raise ValueError(
-                f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
+                f"Блокировка '{self.name}': недопустимый оператор сравнения "
+                f"'{self.comparison}'. Допустимы: '>' и '<'."
             )
         try:
             self._pattern = re.compile(self.channel_pattern)
         except re.error as exc:
             raise ValueError(
-                f"Блокировка '{self.name}': некорректный channel_pattern '{self.channel_pattern}': {exc}"
+                f"Блокировка '{self.name}': некорректный channel_pattern "
+                f"'{self.channel_pattern}': {exc}"
             ) from exc
 
     def matches_channel(self, channel: str) -> bool:
@@ -147,23 +138,6 @@ class _InterlockRecord:
     trip_count: int = 0
 
 
-@dataclass
-class _NonUsableWindow:
-    """Окно дебаунса непригодных показаний одного interlock-канала (P2-5).
-
-    ``first_ts`` — время измерения ПЕРВОГО непригодного показания в текущей
-    серии подряд (используется measurement-time, не wall-clock — как F23:
-    корректно под backlog и детерминированно в тестах). ``count`` — число
-    непригодных показаний подряд (сбрасывается годным показанием).
-    ``escalated`` — эскалация в SafetyManager уже выполнена для этого окна
-    (не дублируем на каждом последующем непригодном показании).
-    """
-
-    first_ts: datetime
-    count: int = 0
-    escalated: bool = False
-
-
 class InterlockEngine:
     """Движок блокировок: мониторинг показаний и защитные действия.
 
@@ -194,8 +168,6 @@ class InterlockEngine:
         actions: dict[str, Callable[[], Any]],
         *,
         trip_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
-        alarm_publisher: Any | None = None,
-        dead_channel_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
     ) -> None:
         """Initialize.
 
@@ -209,52 +181,23 @@ class InterlockEngine:
             Optional async/sync callback receiving the full ``InterlockCondition``
             and ``Reading`` context. Called from ``_trip`` ALONGSIDE the
             actions-dict callable. Used by SafetyManager wiring (Phase 2a
-            I.1) so the action name, condition name, channel, and value
+            Codex I.1) so the action name, condition name, channel, and value
             survive the trip path instead of being collapsed by zero-arg
             callbacks.
-        alarm_publisher:
-            Optional object exposing ``publish_diagnostic_alarm(channel_id,
-            severity, age_seconds)`` (AlarmStateManager). Used by P2-5 to emit
-            an alarm-v2 event when a non-usable reading lands on an
-            interlock-protected channel. May be set later via
-            :meth:`set_alarm_publisher`.
-        dead_channel_handler:
-            Optional async/sync callback ``(InterlockCondition, Reading)`` fired
-            by P2-5 when a channel is PERSISTENTLY non-usable (see
-            ``nonusable_escalation`` config). SafetyManager wiring routes this to
-            ``on_interlock_dead_channel`` which gates the fault on the active
-            source lifecycle (RUN_PERMITTED or RUNNING) — SafetyManager remains
-            the sole authority.
         """
         self._broker = broker
         self._actions = actions
         self._trip_handler = trip_handler
-        self._alarm_publisher = alarm_publisher
-        self._dead_channel_handler = dead_channel_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[Reading] | None = None
         self._task: asyncio.Task[None] | None = None
 
-        # P2-5 debounce state: per-channel non-usable window + thresholds.
-        self._nonusable_windows: dict[str, _NonUsableWindow] = {}
-        self._nonusable_min_duration_s = _DEFAULT_NONUSABLE_MIN_DURATION_S
-        self._nonusable_min_samples = _DEFAULT_NONUSABLE_MIN_SAMPLES
-
-    def set_alarm_publisher(self, alarm_publisher: Any) -> None:
-        """Register the alarm-v2 publisher after construction (engine wiring).
-
-        The AlarmStateManager is built after InterlockEngine in engine startup,
-        so this setter lets the engine wire the P2-5 alarm-v2 surface without
-        reordering construction.
-        """
-        self._alarm_publisher = alarm_publisher
-
     # ------------------------------------------------------------------
     # Загрузка конфигурации
     # ------------------------------------------------------------------
 
-    def load_config(self, config_path: Path, *, snapshot: bytes | None = None) -> PhysicalPolicyReceipt:
+    def load_config(self, config_path: Path) -> None:
         """Загрузить блокировки из YAML-файла.
 
         Ожидаемая структура файла::
@@ -286,20 +229,24 @@ class InterlockEngine:
                 f"interlock engine without interlock configuration"
             )
 
-        if snapshot is None:
-            snapshot = config_path.read_bytes()
         try:
-            raw: dict[str, Any] = yaml.safe_load(snapshot)
+            with config_path.open(encoding="utf-8") as fh:
+                raw: dict[str, Any] = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
-            raise InterlockConfigError(f"interlocks.yaml at {config_path}: YAML parse error — {exc}") from exc
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: YAML parse error — {exc}"
+            ) from exc
 
         if not isinstance(raw, dict):
-            raise InterlockConfigError(f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
+            )
 
         entries = raw.get("interlocks", [])
         if not isinstance(entries, list):
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
+                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, "
+                f"got {type(entries).__name__}"
             )
 
         loaded = 0
@@ -318,47 +265,15 @@ class InterlockEngine:
                 loaded += 1
             except (KeyError, ValueError, TypeError, re.error) as exc:
                 raise InterlockConfigError(
-                    f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
+                    f"interlocks.yaml at {config_path}: invalid interlock entry — "
+                    f"{type(exc).__name__}: {exc}"
                 ) from exc
-
-        self._load_nonusable_escalation(raw, config_path)
 
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",
             config_path,
             loaded,
         )
-        return receipt_for_applied_policy("interlocks", config_path, snapshot)
-
-    def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
-        """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.
-
-        Absent → keep defaults (10 s / 5 samples). Present but malformed →
-        raise ``InterlockConfigError`` (strict types, positive finite values).
-        """
-        block = raw.get("nonusable_escalation")
-        if block is None:
-            return
-        if not isinstance(block, dict):
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: 'nonusable_escalation' must be a "
-                f"mapping, got {type(block).__name__}"
-            )
-        try:
-            min_duration_s = float(block.get("min_duration_s", _DEFAULT_NONUSABLE_MIN_DURATION_S))
-            min_samples = int(block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES))
-        except (ValueError, TypeError) as exc:
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — {type(exc).__name__}: {exc}"
-            ) from exc
-        if not math.isfinite(min_duration_s) or min_duration_s <= 0 or min_samples <= 0:
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: nonusable_escalation requires "
-                f"positive finite min_duration_s and positive min_samples "
-                f"(got min_duration_s={min_duration_s}, min_samples={min_samples})"
-            )
-        self._nonusable_min_duration_s = min_duration_s
-        self._nonusable_min_samples = min_samples
 
     def add_condition(self, condition: InterlockCondition) -> None:
         """Добавить блокировку программно.
@@ -384,7 +299,8 @@ class InterlockEngine:
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
-            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | действие: '%s' | кулдаун: %.1f с.",
+            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | "
+            "действие: '%s' | кулдаун: %.1f с.",
             condition.name,
             condition.channel_pattern,
             condition.comparison,
@@ -422,19 +338,16 @@ class InterlockEngine:
 
         Отменяет задачу проверки и отписывается от DataBroker.
         """
-        task = self._task
-        settlement = await cancel_and_settle_tasks(() if task is None else (task,))
-        self._task = None
-        queue = self._queue
-        if queue is not None:
-            removed = await self._broker.unsubscribe(
-                _SUBSCRIPTION_NAME,
-                expected_queue=queue,
-            )
-            if removed is not True:
-                raise RuntimeError("interlock broker did not release the exact queue owner")
-            self._queue = None
-        settlement.raise_if_unsuccessful()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+        await self._broker.unsubscribe(_SUBSCRIPTION_NAME)
+        self._queue = None
         logger.info("InterlockEngine остановлен.")
 
     # ------------------------------------------------------------------
@@ -460,163 +373,50 @@ class InterlockEngine:
 
     async def _process_reading(self, reading: Reading) -> None:
         """Проверить показание против всех подходящих ARMED-блокировок."""
-        # ARMED-блокировки, чей шаблон совпал с каналом показания.
-        matching = [
-            record
-            for record in self._interlocks.values()
-            if record.state == InterlockState.ARMED and record.condition.matches_channel(reading.channel)
-        ]
-
-        # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
-        # interlock-защищённом канале. Пороговое сравнение с NaN всегда даёт
-        # False (IEEE-754), поэтому без этой ветки блокировка молча слепнет на
-        # мёртвом датчике (fail-open на нагреваемой зоне — Т1–Т10 защищены
-        # ТОЛЬКО интерлоками). Годное показание сбрасывает дебаунс; непригодное
-        # обрабатывается и НЕ идёт в пороговое сравнение (иначе ±inf ложно
-        # сработало бы как реальное превышение).
-        if matching:
-            if reading.is_usable():
-                self._nonusable_windows.pop(reading.channel, None)
-            elif math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
-                # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
-                # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
-                # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
-                # That is direct evidence of the guarded hazard — fall through to
-                # the normal threshold-trip loop (is_triggered trips at once), do
-                # NOT wait out the non-usable debounce. NaN (is_triggered False
-                # both ways) and finite-value+error-status carry no direction and
-                # keep the debounce path below. -inf on a '>' interlock (or +inf on
-                # a '<' interlock) is the SAFE side → also debounce. Reset the
-                # window so a prior blip series does not linger past this trip.
-                self._nonusable_windows.pop(reading.channel, None)
-            else:
-                await self._handle_nonusable(reading, matching[0].condition)
-                return
-
-        for record in matching:
+        for record in self._interlocks.values():
             condition = record.condition
+
+            # Проверяем только ARMED-блокировки
+            if record.state != InterlockState.ARMED:
+                continue
+
+            # Проверяем совпадение канала с шаблоном
+            if not condition.matches_channel(reading.channel):
+                continue
+
+            # Проверяем кулдаун
+            if condition.cooldown_s > 0 and record.last_trip_time is not None:
+                now = datetime.now(UTC)
+                elapsed = (now - record.last_trip_time).total_seconds()
+                if elapsed < condition.cooldown_s:
+                    logger.debug(
+                        "Блокировка '%s': кулдаун активен (%.1f / %.1f с) — "
+                        "срабатывание пропущено.",
+                        condition.name,
+                        elapsed,
+                        condition.cooldown_s,
+                    )
+                    continue
 
             # Проверяем условие срабатывания
             if condition.is_triggered(reading.value):
-                # Кулдаун подавляет ТОЛЬКО дублирующее уведомление, но НЕ само
-                # защитное действие. Блокировки латчащие (TRIPPED → ARMED только
-                # через acknowledge оператора); если после acknowledge нарушение
-                # сохраняется, защита обязана сработать снова. Старое поведение
-                # пропускало срабатывание в окне кулдауна — защита «слепла» на
-                # остаток окна. Теперь действие выполняется всегда, а громкое
-                # уведомление — не чаще раза в cooldown_s.
-                in_cooldown = (
-                    condition.cooldown_s > 0
-                    and record.last_trip_time is not None
-                    and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
-                )
-                await self._trip(record, reading, suppress_notification=in_cooldown)
+                await self._trip(record, reading)
 
-    async def _handle_nonusable(self, reading: Reading, condition: InterlockCondition) -> None:
-        """Обработать непригодное показание на interlock-защищённом канале (P2-5).
-
-        Транзиент (одиночный blip): громкий CRITICAL-лог + alarm-v2, БЕЗ trip —
-        оператор не должен терять эксперимент из-за мгновенного сбоя датчика.
-        Персистентность (≥ min_samples подряд И ≥ min_duration_s по времени
-        измерения) → эскалация в SafetyManager (``dead_channel_handler``),
-        который сам решает, латчить ли fault (в RUN_PERMITTED или RUNNING).
-        """
-        window = self._nonusable_windows.get(reading.channel)
-        if window is None:
-            window = _NonUsableWindow(first_ts=reading.timestamp)
-            self._nonusable_windows[reading.channel] = window
-        window.count += 1
-        span_s = (reading.timestamp - window.first_ts).total_seconds()
-
-        # Транзиент: громкий лог + alarm-v2 (защитное действие НЕ выполняется).
-        logger.critical(
-            "!!! НЕПРИГОДНОЕ ПОКАЗАНИЕ НА INTERLOCK-КАНАЛЕ !!! "
-            "Канал: '%s' | Статус: %s | Значение: %.4g | Блокировка: '%s' | "
-            "Непригодных подряд: %d | Длительность серии: %.1f с. "
-            "Транзиент — защитное действие НЕ выполнено.",
-            reading.channel,
-            reading.status.value,
-            reading.value,
-            condition.name,
-            window.count,
-            span_s,
-        )
-        if self._alarm_publisher is not None:
-            try:
-                self._alarm_publisher.publish_diagnostic_alarm(reading.channel, "critical", span_s)
-            except Exception as exc:
-                logger.error(
-                    "Interlock: alarm-v2 publish failed for '%s': %s",
-                    reading.channel,
-                    exc,
-                )
-
-        # Персистентность → эскалация. S1 fail-closed: окно помечается
-        # escalated ТОЛЬКО когда handler подтвердил латч fault (вернул True).
-        # Если SafetyManager отклонил эскалацию вне активного жизненного цикла
-        # источника (например, SAFE_OFF или READY), окно остаётся
-        # не-escalated и КАЖДОЕ последующее непригодное показание повторяет
-        # попытку; первое же показание после перехода в RUN_PERMITTED/RUNNING
-        # латчит fault. Без этого мёртвый канал молча утекал бы навсегда.
-        if (
-            not window.escalated
-            and window.count >= self._nonusable_min_samples
-            and span_s >= self._nonusable_min_duration_s
-        ):
-            logger.critical(
-                "Interlock-канал '%s' непригоден ≥%.0f с и ≥%d показаний подряд — "
-                "эскалация в SafetyManager (блокировка '%s').",
-                reading.channel,
-                self._nonusable_min_duration_s,
-                self._nonusable_min_samples,
-                condition.name,
-            )
-            # No handler wired (standalone/test): nothing can latch a fault, so
-            # mark escalated to avoid re-logging every subsequent sample.
-            escalated = True
-            if self._dead_channel_handler is not None:
-                try:
-                    result = self._dead_channel_handler(condition, reading)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    escalated = bool(result)
-                except Exception as exc:
-                    logger.critical(
-                        "dead_channel_handler failed for interlock '%s' channel '%s': %s",
-                        condition.name,
-                        reading.channel,
-                        exc,
-                        exc_info=True,
-                    )
-                    # Handler raised → no confirmed latch → retry next sample.
-                    escalated = False
-            window.escalated = escalated
-
-    async def _trip(
-        self,
-        record: _InterlockRecord,
-        reading: Reading,
-        *,
-        suppress_notification: bool = False,
-    ) -> None:
+    async def _trip(self, record: _InterlockRecord, reading: Reading) -> None:
         """Выполнить срабатывание блокировки.
 
         Устанавливает состояние TRIPPED, вызывает защитное действие,
         записывает событие и логирует CRITICAL.
-
-        ``suppress_notification=True`` — повторное срабатывание в окне кулдауна:
-        защитное действие выполняется как обычно, но громкое CRITICAL-уведомление
-        и обновление ``last_trip_time`` пропускаются. Кулдаун дедуплицирует только
-        уведомление, не саму защиту.
         """
         condition = record.condition
         now = datetime.now(UTC)
 
         # Смена состояния
         record.state = InterlockState.TRIPPED
+        record.last_trip_time = now
         record.trip_count += 1
 
-        # Запись события (аудит — всегда; защитное действие реально выполняется ниже)
+        # Запись события
         event = InterlockEvent(
             timestamp=now,
             interlock_name=condition.name,
@@ -627,43 +427,30 @@ class InterlockEngine:
         )
         self._events.append(event)
 
-        if suppress_notification:
-            logger.warning(
-                "Блокировка '%s': повторное срабатывание в окне кулдауна "
-                "(%.4g %s %.4g) — защитное действие выполнено, "
-                "дублирующее уведомление подавлено.",
-                condition.name,
-                reading.value,
-                condition.comparison,
-                condition.threshold,
-            )
-        else:
-            record.last_trip_time = now
-            # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
-            logger.critical(
-                "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
-                "Имя: '%s' | Описание: %s | "
-                "Канал: '%s' | Значение: %.4g | "
-                "Порог: %s %.4g | Действие: '%s' | "
-                "Время: %s | Всего срабатываний: %d",
-                condition.name,
-                condition.description,
-                reading.channel,
-                reading.value,
-                condition.comparison,
-                condition.threshold,
-                condition.action,
-                now.isoformat(),
-                record.trip_count,
-            )
+        # КРИТИЧЕСКИЙ лог — виден в любой конфигурации логирования
+        logger.critical(
+            "!!! БЛОКИРОВКА СРАБОТАЛА !!! "
+            "Имя: '%s' | Описание: %s | "
+            "Канал: '%s' | Значение: %.4g | "
+            "Порог: %s %.4g | Действие: '%s' | "
+            "Время: %s | Всего срабатываний: %d",
+            condition.name,
+            condition.description,
+            reading.channel,
+            reading.value,
+            condition.comparison,
+            condition.threshold,
+            condition.action,
+            now.isoformat(),
+            record.trip_count,
+        )
 
         # Вызов защитного действия
         action_callable = self._actions[condition.action]
         try:
             await action_callable()
-            logger.info(
-                "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
-                "авторитетный результат защиты не подтверждён.",
+            logger.critical(
+                "Действие '%s' для блокировки '%s' выполнено успешно.",
                 condition.action,
                 condition.name,
             )
@@ -678,7 +465,7 @@ class InterlockEngine:
                 exc_info=True,
             )
 
-        # Phase 2a I.1: notify the optional trip_handler with FULL
+        # Phase 2a Codex I.1: notify the optional trip_handler with FULL
         # context. SafetyManager uses this to differentiate "stop_source"
         # (soft stop, no fault latch) from "emergency_off" (full latch).
         # The handler is called even if the actions-dict callable above

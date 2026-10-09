@@ -13,6 +13,17 @@ from build_scripts import windows_onedir_smoke as smoke
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-onedir-smoke.yml"
+EXPECTED_SMOKE_CELL_NAMES = (
+    "frozen_driver_imports",
+    "gui_startup_offscreen",
+    "report_render_unicode",
+    "windows_job_timeout",
+    "assistant_h2_agent_off",
+    "assistant_h2_agent_missing",
+    "assistant_replay_exact_off",
+    "assistant_h3_only_allowed_idle",
+    "assistant_h3_only_restart_lock_release",
+)
 
 
 def test_workflow_builds_and_executes_real_windows_onedir() -> None:
@@ -49,6 +60,245 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert 'command = [str(executable), "--mode=gui"]' in source
     assert '"QT_QPA_PLATFORM": "offscreen"' in source
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
+
+
+def test_gui_cell_rejects_a_descendant_that_remains_in_its_windows_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Process:
+        pid = 101
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+
+        def poll(self) -> int | None:
+            events.append("poll")
+            return self.returncode
+
+        def send_signal(self, signum: int) -> None:
+            events.append("signal")
+            self.signals.append(signum)
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            events.append("communicate")
+            self.returncode = 0
+            return b"gui stdout", b"gui stderr"
+
+    class _Job:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            events.append("close")
+            self.close_calls += 1
+
+    process = _Process()
+    job = _Job()
+    creation_flags: list[int] = []
+
+    def create_job(candidate: object) -> _Job | None:
+        events.append("job")
+        return job if candidate is process else None
+
+    def active_processes(candidate: object) -> int:
+        events.append("query")
+        return 1 if candidate is job else 0
+
+    def popen(*_args: object, **kwargs: object) -> _Process:
+        events.append("popen")
+        creation_flags.append(int(kwargs["creationflags"]))
+        return process
+
+    def resume(candidate: object) -> None:
+        assert candidate is process
+        events.append("resume")
+
+    monotonic_values = iter((0.0, 0.0, 0.0, 6.0))
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", popen)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 21, raising=False)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke, "_create_gui_job", create_job)
+    monkeypatch.setattr(smoke, "_resume_gui_process", resume)
+    monkeypatch.setattr(smoke, "_windows_job_active_process_count", active_processes)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
+
+    with pytest.raises(RuntimeError, match=r"descendants survived shutdown: active_processes=1"):
+        smoke._run_gui_startup_cell(Path("CryoDAQ.exe"), tmp_path, tmp_path)
+
+    assert smoke._WINDOWS_CREATE_SUSPENDED == 0x00000004
+    assert creation_flags == [smoke.subprocess.CREATE_NEW_PROCESS_GROUP | smoke._WINDOWS_CREATE_SUSPENDED]
+    assert events.index("popen") < events.index("job") < events.index("resume") < events.index("poll")
+    assert events.index("poll") < events.index("signal")
+    assert events.index("query") < events.index("close")
+    assert process.signals == [smoke.signal.CTRL_BREAK_EVENT]
+    assert job.close_calls == 1
+    assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui stdout"
+
+
+def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
+    source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+
+    assert 'return [str(executable), "--mode=verify-frozen-drivers"]' in source
+    assert "_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)" in source
+
+
+def test_run_smoke_executes_frozen_driver_cell_as_required_production_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "CryoDAQ.exe").write_bytes(b"test placeholder")
+    calls: list[str] = []
+
+    def frozen(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("frozen_driver_imports")
+        return {"name": "frozen_driver_imports", "status": "PASS"}
+
+    def gui(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("gui_startup_offscreen")
+        return {"name": "gui_startup_offscreen", "status": "PASS"}
+
+    def timeout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("windows_job_timeout")
+        return {"name": "windows_job_timeout", "status": "PASS"}
+
+    def named(*_args: object, name: str, **_kwargs: object) -> dict[str, str]:
+        calls.append(name)
+        return {"name": name, "status": "PASS"}
+
+    def ignore_config(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def inventory(*_args: object, **_kwargs: object) -> dict[str, int]:
+        return {"schema": 1}
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", frozen)
+    monkeypatch.setattr(smoke, "_run_gui_startup_cell", gui)
+    monkeypatch.setattr(smoke, "_run_report_cell", named)
+    monkeypatch.setattr(smoke, "_run_job_timeout_cell", timeout)
+    monkeypatch.setattr(smoke, "_run_assistant_cell", named)
+    monkeypatch.setattr(smoke, "_write_periodic_config", ignore_config)
+    monkeypatch.setattr(smoke, "_artifact_inventory", inventory)
+
+    evidence_dir = tmp_path / "success-evidence"
+    assert smoke.run_smoke(dist_dir, evidence_dir) == 0
+    result = json.loads((evidence_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    assert calls == list(EXPECTED_SMOKE_CELL_NAMES)
+    assert [cell["name"] for cell in result["cells"]] == list(EXPECTED_SMOKE_CELL_NAMES)
+    assert result["status"] == "PASS"
+
+    calls.clear()
+
+    def fail_frozen(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("frozen_driver_imports")
+        raise RuntimeError("FROZEN_DRIVER_REQUIRED_CONTROL")
+
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", fail_frozen)
+    failure_dir = tmp_path / "failure-evidence"
+    assert smoke.run_smoke(dist_dir, failure_dir) == 1
+    failure = json.loads((failure_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    assert calls == ["frozen_driver_imports"]
+    assert failure["status"] == "FAIL"
+    assert "FROZEN_DRIVER_REQUIRED_CONTROL" in failure["reason"]
+    assert failure["cells"] == []
+
+
+def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    evidence_dir = tmp_path / "evidence"
+    runtime_root.mkdir()
+    evidence_dir.mkdir()
+    executable = runtime_root / "CryoDAQ.exe"
+    executable.write_bytes(b"test placeholder")
+    expected = smoke._expected_frozen_driver_import_payload()
+    payload = {
+        **expected,
+        "module_files": {module: f"frozen/{module}.py" for module in expected["modules"]},
+    }
+    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(payload) + "\n").encode()
+    captured: dict[str, object] = {}
+
+    def complete(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setenv("PYTHONHOME", "source-interpreter-control")
+    monkeypatch.setenv("PYTHONPATH", "source-tree-control")
+    monkeypatch.setattr(smoke.subprocess, "run", complete)
+
+    cell = smoke._run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)
+
+    assert cell["status"] == "PASS"
+    assert cell["validation"] == expected
+    assert captured["command"] == [str(executable), "--mode=verify-frozen-drivers"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "PYTHONHOME" not in env
+    assert "PYTHONPATH" not in env
+
+    modules = expected["modules"]
+    assert isinstance(modules, list) and modules
+    incomplete = {
+        **payload,
+        "modules": modules[1:],
+        "module_files": {module: payload["module_files"][module] for module in modules[1:]},
+    }
+    incomplete_stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(incomplete) + "\n").encode()
+    with pytest.raises(ValueError, match="does not match the source registry"):
+        smoke._parse_frozen_driver_import_payload(incomplete_stdout)
+
+
+def test_frozen_driver_import_payload_rejects_integer_equality_type_collisions() -> None:
+    expected = smoke._expected_frozen_driver_import_payload()
+    payload = {
+        **expected,
+        "module_files": {module: f"frozen/{module}.py" for module in expected["modules"]},
+    }
+    for field in ("schema", "registry_compat_version"):
+        integer = expected[field]
+        assert type(integer) is int
+        collisions: list[object] = [float(integer)]
+        if integer in (0, 1):
+            collisions.append(bool(integer))
+        for collision in collisions:
+            assert collision == integer and type(collision) is not int
+            malformed = {**payload, field: collision}
+            assert malformed[field] == collision
+            stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(malformed) + "\n").encode()
+            with pytest.raises(ValueError, match="exact field types"):
+                smoke._parse_frozen_driver_import_payload(stdout)
+
+
+def test_frozen_driver_import_payload_rejects_duplicate_json_fields() -> None:
+    expected = smoke._expected_frozen_driver_import_payload()
+    pairs = [
+        ("schema", 999),
+        ("schema", expected["schema"]),
+        ("status", "FAIL"),
+        ("status", expected["status"]),
+        ("registry_compat_version", 999),
+        ("registry_compat_version", expected["registry_compat_version"]),
+        ("modules", []),
+        ("modules", expected["modules"]),
+    ]
+    record = "{" + ",".join(f"{json.dumps(key)}:{json.dumps(value)}" for key, value in pairs) + "}"
+    assert json.loads(record) == expected
+    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + record + "\n").encode()
+
+    with pytest.raises(ValueError, match="repeats field"):
+        smoke._parse_frozen_driver_import_payload(stdout)
 
 
 def test_windows_source_installer_is_ascii_and_reproducible() -> None:
@@ -303,7 +553,9 @@ def test_report_evidence_rejects_malformed_result_report(tmp_path: Path) -> None
         smoke.validate_report_evidence(tmp_path, "exp-1", generation)
 
 
-def test_smoke_summary_fails_closed_on_not_run_or_invalid_status() -> None:
+def test_smoke_summary_fails_closed_on_status_or_roster_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert smoke.smoke_summary([{"name": "pending", "status": "NOT_RUN"}]) == (
         "FAIL",
         "REQUIRED_CELLS_NOT_RUN",
@@ -312,9 +564,30 @@ def test_smoke_summary_fails_closed_on_not_run_or_invalid_status() -> None:
         "FAIL",
         "INVALID_CELL_STATUS",
     )
-    assert smoke.smoke_summary([{"name": "done", "status": "PASS"}]) == (
-        "PASS",
-        None,
+
+    expected_names = EXPECTED_SMOKE_CELL_NAMES
+
+    assert smoke._REQUIRED_SMOKE_CELLS == expected_names
+    valid_cells = [{"name": name, "status": "PASS"} for name in expected_names]
+    assert smoke.smoke_summary(valid_cells) == ("PASS", None)
+
+    missing_driver_cell = [cell for cell in valid_cells if cell["name"] != "frozen_driver_imports"]
+    assert smoke.smoke_summary(missing_driver_cell) == (
+        "FAIL",
+        "REQUIRED_CELL_ROSTER_MISMATCH",
+    )
+    duplicated_cell = [*valid_cells, dict(valid_cells[0])]
+    assert smoke.smoke_summary(duplicated_cell) == (
+        "FAIL",
+        "DUPLICATE_CELL_NAME",
+    )
+
+    duplicate_required = (expected_names[0], expected_names[0], *expected_names[2:])
+    monkeypatch.setattr(smoke, "_REQUIRED_SMOKE_CELLS", duplicate_required)
+    matching_duplicate_cells = [{"name": name, "status": "PASS"} for name in duplicate_required]
+    assert smoke.smoke_summary(matching_duplicate_cells) == (
+        "FAIL",
+        "INVALID_REQUIRED_CELL_ROSTER",
     )
 
 
@@ -346,3 +619,230 @@ def test_local_non_windows_run_records_external_gate_not_a_fake_pass(tmp_path: P
     assert payload["status"] == "FAIL"
     assert payload["reason"] == "RuntimeError:WINDOWS_REQUIRED"
     assert payload["cells"] == []
+
+
+def test_a_timed_out_cell_preserves_its_output_instead_of_discarding_it(tmp_path: Path) -> None:
+    """The hang was the ONE failure that left nothing to diagnose it with.
+
+    `communicate(timeout=...)` raises TimeoutExpired WITHOUT returning what the child
+    already wrote, and both CTRL_BREAK cells re-raised before `_write_log` ran. The
+    real Windows failure at 7b634e0098 left a `reason` string and no output at all,
+    so nobody could see why the GUI would not exit after CTRL_BREAK.
+
+    This drives a genuine TimeoutExpired against a real child that outlives a real
+    deadline, then does what the cells do on their failure path, and asserts the
+    child's output survived.
+    """
+
+    import subprocess
+    import sys
+
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys, time; "
+            "sys.stdout.write('child-stdout-marker\\n'); sys.stdout.flush(); "
+            "sys.stderr.write('child-stderr-marker\\n'); sys.stderr.flush(); "
+            "time.sleep(120)"
+        ),
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+            process.communicate(timeout=2.0)
+        # Exactly what the cells now do before re-raising.
+        process.terminate()
+        process.wait(timeout=10)
+        smoke._preserve_failure_evidence(process, command, tmp_path, "gui_startup_offscreen", excinfo.value)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    stdout_log = tmp_path / "gui_startup_offscreen.stdout.log"
+    stderr_log = tmp_path / "gui_startup_offscreen.stderr.log"
+    assert stdout_log.is_file(), "a timed-out cell wrote no stdout log; its failure cannot be diagnosed"
+    assert stderr_log.is_file(), "a timed-out cell wrote no stderr log; its failure cannot be diagnosed"
+    assert b"child-stdout-marker" in stdout_log.read_bytes(), "the child's stdout was discarded on the timeout path"
+    assert b"child-stderr-marker" in stderr_log.read_bytes(), "the child's stderr was discarded on the timeout path"
+
+
+def test_both_ctrl_break_cells_preserve_evidence_inside_their_failure_handler() -> None:
+    """The previous guard did not bind, and that is the defect it was guarding against.
+
+    It asserted only that the first `_preserve_failure_evidence(` SUBSTRING appeared
+    before the re-raise. Move either call above the `try:` - or anywhere else earlier
+    in the function - and the guard stayed green while `communicate(timeout=20)` could
+    time out without the helper ever executing. A guard that a legal rearrangement can
+    satisfy is not attached to the property it names.
+
+    So this reads control flow instead of text: the call must be a statement INSIDE
+    the `except BaseException:` handler, before the `raise`, in BOTH cells. It also
+    asserts the handler BINDS its exception and passes it on, because the timeout
+    object carries partial output on POSIX and discarding it discards evidence.
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    for cell in (smoke._run_gui_startup_cell, smoke._run_assistant_cell):
+        function = ast.parse(textwrap.dedent(inspect.getsource(cell))).body[0]
+        assert isinstance(function, ast.FunctionDef)
+
+        guarded_tries = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Try)
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "communicate"
+                and any(
+                    keyword.arg == "timeout" and isinstance(keyword.value, ast.Constant) and keyword.value.value == 20
+                    for keyword in call.keywords
+                )
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+        ]
+        assert len(guarded_tries) == 1, (
+            f"{cell.__name__} has {len(guarded_tries)} try statements containing communicate(timeout=20); "
+            "re-check this guard"
+        )
+        handlers = [
+            handler
+            for handler in guarded_tries[0].handlers
+            if isinstance(handler.type, ast.Name) and handler.type.id == "BaseException"
+        ]
+        assert len(handlers) == 1, (
+            f"{cell.__name__}'s bounded communicate has {len(handlers)} BaseException handlers; re-check this guard"
+        )
+        handler = handlers[0]
+        assert handler.name is not None, (
+            f"{cell.__name__} does not bind its failure, so the timeout's own partial output is discarded"
+        )
+
+        preserved_at: int | None = None
+        preserved_call: ast.Call | None = None
+        raised_at: int | None = None
+        for index, statement in enumerate(handler.body):
+            if (
+                preserved_call is None
+                and isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id == "_preserve_failure_evidence"
+            ):
+                preserved_at, preserved_call = index, statement.value
+            if raised_at is None and isinstance(statement, ast.Raise):
+                raised_at = index
+
+        assert preserved_call is not None, (
+            f"{cell.__name__} does not preserve evidence INSIDE its BaseException handler; "
+            "a call anywhere else in the function does not run when communicate() times out"
+        )
+        assert raised_at is not None, f"{cell.__name__} no longer re-raises; its failure would be swallowed"
+        assert preserved_at < raised_at, (
+            f"{cell.__name__} re-raises before preserving evidence, so the log is never written"
+        )
+        assert (
+            preserved_call.args
+            and isinstance(preserved_call.args[-1], ast.Name)
+            and preserved_call.args[-1].id == handler.name
+        ), f"{cell.__name__} does not pass its caught failure, so a POSIX timeout's partial output is thrown away"
+
+
+def test_preserving_evidence_never_replaces_the_real_failure() -> None:
+    """Bookkeeping must not become the error the operator sees.
+
+    A child that cannot be drained, or an evidence directory that cannot be written,
+    is a worse thing to report than the failure that was already happening. Every
+    step in the helper is suppressed for that reason.
+    """
+
+    class _Unusable:
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise OSError("the pipe is gone")
+
+    # An evidence directory that does not exist makes _write_log raise too.
+    smoke._preserve_failure_evidence(_Unusable(), ["x"], Path("/nonexistent-evidence-dir"), "gui_startup_offscreen")
+
+
+def test_a_drain_that_also_times_out_still_writes_what_was_collected(tmp_path: Path) -> None:
+    """Empty logs are worse than no logs: they look like captured evidence.
+
+    An outliving descendant that inherited the parent's stdout or stderr handle keeps
+    the pipe open and the reader blocked, so the second `communicate()` times out too.
+    The first version suppressed that and wrote empty files.
+
+    `TimeoutExpired` carries `.output` and `.stderr`, so both timeouts are evidence
+    and both must be read. The cases below cover drain-only, initial-only, and
+    distinct payloads from both attempts.
+    """
+
+    import subprocess
+
+    argv = ["CryoDAQ.exe", "--mode=gui"]
+
+    class _DrainTimesOutCarryingBytes:
+        """POSIX: the drain times out but hands back what it read."""
+
+        returncode = None
+        poll_calls = 0
+
+        def poll(self) -> int:
+            self.poll_calls += 1
+            return 19
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout-bytes", stderr=b"drain-stderr-bytes")
+
+    drain_process = _DrainTimesOutCarryingBytes()
+    smoke._preserve_failure_evidence(drain_process, argv, tmp_path, "drain_carried", None)
+    assert (tmp_path / "drain_carried.stdout.log").read_bytes() == b"drain-stdout-bytes"
+    assert (tmp_path / "drain_carried.stderr.log").read_bytes() == b"drain-stderr-bytes"
+    assert json.loads((tmp_path / "drain_carried.failure-drain.json").read_text(encoding="utf-8")) == {
+        "process_poll_at_drain": 19,
+        "process_poll_error": None,
+        "schema": 1,
+    }
+    assert drain_process.poll_calls == 1
+
+    class _DrainTimesOutBare:
+        """Windows: `_communicate` raises TimeoutExpired with NOTHING attached."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+    initial = subprocess.TimeoutExpired(argv, 20, output=b"initial-stdout-bytes", stderr=b"initial-stderr-bytes")
+    smoke._preserve_failure_evidence(_DrainTimesOutBare(), argv, tmp_path, "drain_bare", initial)
+    assert (tmp_path / "drain_bare.stdout.log").read_bytes() == b"initial-stdout-bytes", (
+        "the initial timeout's own output was discarded, so a wedged tree leaves an empty log"
+    )
+    assert (tmp_path / "drain_bare.stderr.log").read_bytes() == b"initial-stderr-bytes"
+
+    class _DrainTimesOutWithDistinctBytes:
+        """Both attempts carry unique evidence, so neither one may win by length."""
+
+        returncode = None
+
+        def communicate(self, timeout=None):  # noqa: ANN001, ANN202
+            raise subprocess.TimeoutExpired(argv, timeout, output=b"drain-stdout", stderr=b"drain-stderr")
+
+    distinct_initial = subprocess.TimeoutExpired(
+        argv,
+        20,
+        output=b"initial-stdout\n",
+        stderr=b"initial-stderr\n",
+    )
+    smoke._preserve_failure_evidence(
+        _DrainTimesOutWithDistinctBytes(), argv, tmp_path, "drain_distinct", distinct_initial
+    )
+    assert (tmp_path / "drain_distinct.stdout.log").read_bytes() == b"initial-stdout\ndrain-stdout"
+    assert (tmp_path / "drain_distinct.stderr.log").read_bytes() == b"initial-stderr\ndrain-stderr"

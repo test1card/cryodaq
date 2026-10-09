@@ -26,7 +26,13 @@ from tools.ci_execution_roots import checkout_execution_selection as _checkout_e
 from tools.governance_contract import validate_registry
 
 ACTIVE_GUARD_STATUSES = frozenset({"open", "reopened", "closed"})
-DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining")
+# OB-006 added "release", the tag-triggered job that runs the whole-tree artifact checks.
+# AUDITED BEFORE EXTENDING, because this tuple sits in the guard EXECUTION path rather than in
+# validation: every use is a membership test (:144, :170, :277) or an argparse `choices`
+# (:484), and NOTHING iterates it. So a name here is a permitted value and does not create a
+# per-pull-request obligation. If a site ever walks this tuple demanding evidence per suite,
+# that reasoning fails and the release entry must be reconsidered.
+DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining", "release")
 GUARD_PLATFORMS = frozenset({"posix", "windows"})
 FORBIDDEN_GUARD_MARKERS = frozenset({"skip", "timeout", "xfail"})
 RECEIPT_PREFIX = "CRYODAQ_ACTIVE_GUARD_RECEIPT "
@@ -102,6 +108,12 @@ def suite_for_node(node: str) -> str:
         return "gui"
     if path.startswith(("tests/agents/", "tests/periodic/", "tests/reporting/", "tests/notifications/")):
         return "agents"
+    if path.startswith("tests/release/"):
+        # OB-006.  The `remaining` selection carries `--ignore=tests/release`, so a node here must
+        # NOT resolve to `remaining`: that would declare a guard as running in a job which
+        # explicitly skips it, and the registry-versus-selection check exists to catch exactly
+        # that divergence.  `release` names the tag-triggered job that does run it.
+        return "release"
     if not path.startswith("tests/"):
         raise GuardExecutionError(f"candidate guard is not a pytest node: {node}")
     return "remaining"
@@ -296,6 +308,8 @@ def _normalized_nodeid(nodeid: str) -> str:
 def _matches(guard: str, concrete: str) -> bool:
     if concrete == guard:
         return True
+    if "::" not in guard:
+        return concrete.startswith(f"{guard}::")
     return "[" not in guard.rsplit("::", 1)[-1] and concrete.startswith(f"{guard}[")
 
 
@@ -487,6 +501,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         dest="cryodaq_active_guard_execution_root",
         help="Bind strict guard execution to its declared filesystem authority.",
     )
+    group.addoption(
+        "--cryodaq-active-guard-required-files",
+        action="append",
+        default=None,
+        dest="cryodaq_active_guard_required_files",
+        help="Treat these exact-checkout files as required guards (skip/xfail/deselect refused).",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -498,9 +519,18 @@ def pytest_configure(config: pytest.Config) -> None:
     root = Path(config.rootpath).resolve(strict=True)
     platform = current_guard_platform()
     execution_root = config.getoption("cryodaq_active_guard_execution_root")
+    required_files = tuple(config.getoption("cryodaq_active_guard_required_files") or ())
+    expected = active_guard_specs(root, suite, platform=platform, execution_root=execution_root)
+    if required_files:
+        # A suite may have no registered guards yet still need strict execution of its
+        # whole selection (the release suite).  Treat each required file as a platform-free
+        # guard whose every collected item must execute to one passing phase: the same
+        # marker/deselection/phase machinery then refuses skip, xfail, dynamic-skip and
+        # deselection on it.  This is the release gate's "not plain pytest" promise.
+        expected = expected + tuple(GuardSpec(node=path, ci_partition=suite, platform=None) for path in required_files)
     state = _GuardState(
         suite=suite,
-        expected=active_guard_specs(root, suite, platform=platform, execution_root=execution_root),
+        expected=expected,
         platform=platform,
         collect_only=bool(config.option.collectonly),
     )

@@ -5,7 +5,7 @@ Targets the ``_EventDedup`` class and ``_event_dedup_id`` helper used by
 rolling window. Slice handler logic is intentionally NOT exercised here —
 only the pre-invocation gate.
 
-Cycle 2 (commit 53981a1): the dedup id no longer carries
+Cycle 2 (Codex finding on commit 53981a1): the dedup id no longer carries
 a bucket suffix. Rolling-window timestamp logic lives entirely in
 ``_EventDedup``; the id is just ``alarm:<alarm_id>``.
 """
@@ -45,21 +45,20 @@ def _phase_event() -> EngineEvent:
 
 def test_first_event_is_new():
     d = _EventDedup(window_s=30.0)
-    assert d.should_dispatch("alarm:x") is True
+    assert d.is_new("alarm:x") is True
 
 
 def test_same_event_inside_window_is_dropped():
     d = _EventDedup(window_s=30.0)
-    d.mark_delivered("alarm:x")
-    assert d.should_dispatch("alarm:x") is False
-    assert d.should_dispatch("alarm:x") is False
+    assert d.is_new("alarm:x") is True
+    assert d.is_new("alarm:x") is False
+    assert d.is_new("alarm:x") is False
 
 
 def test_different_events_are_independent():
     d = _EventDedup(window_s=30.0)
-    d.mark_delivered("alarm:a")
-    assert d.should_dispatch("alarm:a") is False
-    assert d.should_dispatch("alarm:b") is True
+    assert d.is_new("alarm:a") is True
+    assert d.is_new("alarm:b") is True
 
 
 def test_rolling_window_collapses_around_boundary():
@@ -73,11 +72,11 @@ def test_rolling_window_collapses_around_boundary():
         return fake_now[0]
 
     with patch.object(time, "monotonic", side_effect=fake_monotonic):
-        d.mark_delivered("alarm:x")
+        assert d.is_new("alarm:x") is True
         fake_now[0] = 1029.9
-        assert d.should_dispatch("alarm:x") is False
+        assert d.is_new("alarm:x") is False
         fake_now[0] = 1030.1  # 0.2 s after previous, not a fresh event
-        assert d.should_dispatch("alarm:x") is False
+        assert d.is_new("alarm:x") is False
 
 
 def test_event_past_window_is_new_again():
@@ -88,9 +87,9 @@ def test_event_past_window_is_new_again():
         return fake_now[0]
 
     with patch.object(time, "monotonic", side_effect=fake_monotonic):
-        d.mark_delivered("alarm:x")
+        assert d.is_new("alarm:x") is True
         fake_now[0] = 1031.0  # past the 30 s window since first sighting
-        assert d.should_dispatch("alarm:x") is True
+        assert d.is_new("alarm:x") is True
 
 
 # ---------------------------------------------------------------------------

@@ -60,11 +60,12 @@ def test_valid_posix_mock_tray_request_emits_bounded_identity_and_data_stream(
         assert authority.emit_data_observed(bridge_pid=os.getpid() + 1000, restart_count=1)
         data = os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
         assert (
-            runner._parse_bridge_data(
+            runner._parse_bridge_stream_record(
                 data,
                 expected_nonce=nonce,
                 expected_launcher_pid=os.getpid(),
                 expected_bridge_pid=os.getpid() + 1000,
+                expected_restart_count=1,
                 after_sequence=0,
             ).sequence
             == 1
@@ -310,6 +311,137 @@ def test_handshake_rejects_parent_replacement_between_observation_and_resolution
             )
         with pytest.raises(OSError):
             os.fstat(write_fd)
+    finally:
+        os.close(read_fd)
+
+
+@_POSIX_HANDSHAKE
+def test_a_bridge_replacement_is_announced_and_the_stream_survives_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An engine restart replaces the bridge on purpose, and the evidence must survive it.
+
+    Before this, the stream was pinned to the FIRST bridge, which was right while an owned
+    engine could never restart. It can now, and every restart replaces the bridge -- a new
+    child must not inherit an old transport -- so the first legitimate replacement
+    quarantined the stream and every later fact was lost. The runner then waited for a data
+    fact that could never arrive and reported that the engine had never recovered.
+
+    The pin is not loosened. The epoch advances, and only across an announced turnover.
+    """
+
+    read_fd, write_fd, nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    first, second = os.getpid() + 1000, os.getpid() + 2000
+    try:
+        authority.emit(bridge_pid=first, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+
+        authority.note_bridge_turnover(bridge_pid=second, restart_count=2)
+        record = runner._parse_bridge_stream_record(
+            os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1),
+            expected_nonce=nonce,
+            expected_launcher_pid=os.getpid(),
+            expected_bridge_pid=first,
+            expected_restart_count=1,
+            after_sequence=0,
+        )
+        assert type(record) is runner._BridgeTurnoverRecord
+        assert (record.retired_bridge_pid, record.bridge_pid, record.restart_count) == (first, second, 2)
+
+        # The new bridge speaks, and it is read against the new epoch.
+        assert authority.emit_data_observed(bridge_pid=second, restart_count=2)
+        data = runner._parse_bridge_stream_record(
+            os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1),
+            expected_nonce=nonce,
+            expected_launcher_pid=os.getpid(),
+            expected_bridge_pid=second,
+            expected_restart_count=2,
+            after_sequence=record.sequence,
+        )
+        assert data.sequence == record.sequence + 1
+    finally:
+        authority.close()
+        os.close(read_fd)
+
+
+@_POSIX_HANDSHAKE
+def test_the_retired_bridge_cannot_speak_after_its_turnover(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Evidence belongs to exactly one process, and the change of process is the point."""
+
+    read_fd, write_fd, _nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    first, second = os.getpid() + 1000, os.getpid() + 2000
+    try:
+        authority.emit(bridge_pid=first, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        authority.note_bridge_turnover(bridge_pid=second, restart_count=2)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+
+        with pytest.raises(RuntimeError, match="bridge identity changed"):
+            authority.emit_data_observed(bridge_pid=first, restart_count=1)
+        # The refusal quarantined the stream, which is the point: closing it again is a
+        # quiet no-op, and the descriptor is already gone.
+        assert authority._closed is True
+    finally:
+        os.close(read_fd)
+
+
+@_POSIX_HANDSHAKE
+@pytest.mark.parametrize(
+    ("what", "changes"),
+    [
+        ("a gap in the count", {"restart_count": 3}),
+        ("a repeated count", {"restart_count": 1}),
+        ("the launcher naming itself", {"bridge_pid": "self"}),
+    ],
+)
+def test_a_turnover_that_does_not_continue_the_epoch_quarantines_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    what: str,
+    changes: dict,
+) -> None:
+    """A gap, a repeat, or this process naming itself is still an unexplained change.
+
+    Parametrized rather than looped because the fixture builds a directory under tmp_path
+    and can therefore run once per test; the loop failed on its second turn for that
+    reason and said nothing about the contract.
+    """
+
+    read_fd, _write_fd, _nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    try:
+        authority.emit(bridge_pid=os.getpid() + 1000, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        call = {"bridge_pid": os.getpid() + 2000, "restart_count": 2}
+        for key, value in changes.items():
+            call[key] = os.getpid() if value == "self" else value
+        with pytest.raises(RuntimeError, match="does not continue the accepted epoch"):
+            authority.note_bridge_turnover(**call)
+        assert authority._closed is True, what
     finally:
         os.close(read_fd)
 

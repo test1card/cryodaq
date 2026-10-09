@@ -12,10 +12,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -26,30 +23,6 @@ if TYPE_CHECKING:
     from cryodaq.core.rate_estimator import RateEstimator
 
 logger = logging.getLogger(__name__)
-
-
-class _UnknownValue:
-    """Substituted for ``{value}`` when the triggering value is unavailable.
-
-    Renders as "—" under any format spec, so a message template can never
-    print a confident ``0.0`` for a reading the evaluator never obtained.
-    Alarm firing is unaffected — only the rendered text changes.
-    """
-
-    __slots__ = ()
-
-    def __format__(self, format_spec: str) -> str:
-        del format_spec
-        return "—"
-
-    def __str__(self) -> str:
-        return "—"
-
-    def __repr__(self) -> str:
-        return "<unknown>"
-
-
-UNKNOWN_VALUE = _UnknownValue()
 
 
 # ---------------------------------------------------------------------------
@@ -70,54 +43,6 @@ class AlarmEvent:
     acknowledged: bool = False
     acknowledged_at: float = 0.0
     acknowledged_by: str = ""
-    acknowledged_reason: str = ""
-    acknowledgement_request_id: str = ""
-    activation_id: int = 0
-    # This distinguishes a held alarm with a broken evaluator from a normally
-    # evaluated active hazard on operator-facing surfaces.
-    evaluator_error: bool = False
-
-
-class AlarmSnapshotUnavailableError(RuntimeError):
-    """The active alarm set cannot be represented by the closed snapshot schema."""
-
-    def __init__(self) -> None:
-        super().__init__("alarm snapshot unavailable")
-
-
-@dataclass(frozen=True)
-class AlarmCanonicalSnapshot:
-    """One synchronous revision, minimal active mapping, and canonical token."""
-
-    state_revision: int
-    active: dict[str, dict[str, Any]]
-    state_token: str
-
-
-_ALARM_SNAPSHOT_MAX_ACTIVE = 128
-_ALARM_SNAPSHOT_MAX_CHANNELS = 64
-_ALARM_SNAPSHOT_MAX_TEXT = 256
-_ALARM_SNAPSHOT_MAX_CANONICAL_BYTES = 60 * 1024
-_ALARM_LEVELS = frozenset({"INFO", "WARNING", "CRITICAL"})
-
-
-def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
-    """Return a detached AlarmEvent, including both mutable containers."""
-    return AlarmEvent(
-        alarm_id=event.alarm_id,
-        level=event.level,
-        message=event.message,
-        triggered_at=event.triggered_at,
-        channels=list(event.channels),
-        values=dict(event.values),
-        acknowledged=event.acknowledged,
-        acknowledged_at=event.acknowledged_at,
-        acknowledged_by=event.acknowledged_by,
-        acknowledged_reason=event.acknowledged_reason,
-        acknowledgement_request_id=event.acknowledgement_request_id,
-        activation_id=event.activation_id,
-        evaluator_error=event.evaluator_error,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +63,7 @@ class PhaseProvider:
     def get_current_phase(self) -> str | None:
         return None
 
-    def get_phase_elapsed_s(self) -> float | None:
+    def get_phase_elapsed_s(self) -> float:
         return 0.0
 
 
@@ -149,7 +74,7 @@ class SetpointProvider:
         self._defaults: dict[str, float] = defaults or {}
 
     def get(self, key: str) -> float:
-        return self._defaults[key]
+        return self._defaults.get(key, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +119,7 @@ class AlarmEvaluator:
         is_active: bool = False,
         active_channels: frozenset[str] | None = None,
     ) -> AlarmEvent | None:
-        """Проверить одну alarm-конфигурацию. None = no event for an inactive alarm.
+        """Проверить одну alarm-конфигурацию. None = не сработал.
 
         Parameters
         ----------
@@ -212,39 +137,20 @@ class AlarmEvaluator:
         try:
             if alarm_type == "threshold":
                 return self._eval_threshold(
-                    alarm_id,
-                    alarm_config,
-                    is_active=is_active,
-                    active_channels=active_channels,
+                    alarm_id, alarm_config,
+                    is_active=is_active, active_channels=active_channels,
                 )
             elif alarm_type == "composite":
-                return self._eval_composite(alarm_id, alarm_config, is_active=is_active)
+                return self._eval_composite(alarm_id, alarm_config)
             elif alarm_type == "rate":
-                return self._eval_rate(
-                    alarm_id,
-                    alarm_config,
-                    is_active=is_active,
-                    active_channels=active_channels,
-                )
+                return self._eval_rate(alarm_id, alarm_config)
             elif alarm_type == "stale":
                 return self._eval_stale(alarm_id, alarm_config)
             else:
-                raise ValueError(f"unknown alarm_type={alarm_type!r}")
+                logger.warning("Неизвестный alarm_type=%r для %s", alarm_type, alarm_id)
+                return None
         except Exception as exc:
             logger.error("Ошибка evaluate %s: %s", alarm_id, exc, exc_info=True)
-            # A broken evaluator is unknown, never evidence that the physical
-            # condition resolved. An inactive alarm must not fire on ignorance;
-            # an active alarm gets a tagged keep-active event instead.
-            if is_active:
-                return AlarmEvent(
-                    alarm_id=alarm_id,
-                    level=str(alarm_config.get("level", "WARNING")),
-                    message=str(alarm_config.get("message", f"Alarm {alarm_id}")),
-                    triggered_at=time.time(),
-                    channels=[],
-                    values={},
-                    evaluator_error=True,
-                )
             return None
 
     # ------------------------------------------------------------------
@@ -266,27 +172,6 @@ class AlarmEvaluator:
         hysteresis: float | None = cfg.get("hysteresis")
 
         for ch in channels:
-            state = self._state.get(ch)
-            if state is None or not state.is_usable:
-                # Unknown input may raise the separate stale alarm, but it is
-                # never affirmative evidence that an active threshold alarm
-                # cleared. Return a deduplicated keep-active event instead.
-                if is_active and (active_channels is None or ch in active_channels):
-                    values = {} if state is None else {ch: state.value}
-                    msg = (
-                        f"{message_tmpl} (данные канала {ch} недоступны)"
-                        if state is None
-                        else self._format_message(message_tmpl, channel=ch, value=state.value)
-                    )
-                    return AlarmEvent(
-                        alarm_id=alarm_id,
-                        level=level,
-                        message=msg,
-                        triggered_at=time.time(),
-                        channels=[ch],
-                        values=values,
-                    )
-                continue
             triggered, value = self._check_threshold_channel(ch, check, cfg)
             if triggered:
                 msg = self._format_message(message_tmpl, channel=ch, value=value)
@@ -347,13 +232,14 @@ class AlarmEvaluator:
             setpoint = self._setpoint.get(cfg["setpoint_source"])
             return abs(value - setpoint) > cfg["threshold"], value
         else:
-            raise ValueError(f"unknown threshold check={check!r}")
+            logger.warning("Неизвестный threshold check=%r", check)
+            return False, value
 
     # ------------------------------------------------------------------
     # composite
     # ------------------------------------------------------------------
 
-    def _eval_composite(self, alarm_id: str, cfg: dict, *, is_active: bool = False) -> AlarmEvent | None:
+    def _eval_composite(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
         operator = cfg.get("operator", "AND")
         conditions = cfg.get("conditions", [])
         level = cfg.get("level", "WARNING")
@@ -362,16 +248,14 @@ class AlarmEvaluator:
         results = [self._eval_condition(c) for c in conditions]
 
         if operator == "AND":
-            fired = self._and_conditions(results)
+            fired = all(results)
         elif operator == "OR":
-            fired = self._or_conditions(results)
+            fired = any(results)
         else:
-            raise ValueError(f"unknown composite operator={operator!r}")
+            logger.warning("Неизвестный composite operator=%r", operator)
+            return None
 
-        # ``None`` is an unknown input, never a false condition. It cannot
-        # activate an inactive alarm, but it must preserve an active alarm's
-        # hazard-specific acknowledgement and annunciation state.
-        if fired is not True and not (fired is None and is_active):
+        if not fired:
             return None
 
         # Collect channels and values
@@ -380,7 +264,7 @@ class AlarmEvaluator:
         for cond in conditions:
             for ch in self._resolve_channels(cond):
                 state = self._state.get(ch)
-                if state and state.is_usable and ch not in channels:
+                if state and ch not in channels:
                     channels.append(ch)
                     values[ch] = state.value
 
@@ -393,51 +277,23 @@ class AlarmEvaluator:
             values=values,
         )
 
-    @staticmethod
-    def _and_conditions(results: list[bool | None]) -> bool | None:
-        """Strong three-valued AND: False dominates; unknown otherwise propagates."""
-        if any(result is False for result in results):
-            return False
-        return True if all(result is True for result in results) else None
-
-    @staticmethod
-    def _or_conditions(results: list[bool | None]) -> bool | None:
-        """Strong three-valued OR: True dominates; unknown otherwise propagates."""
-        if any(result is True for result in results):
-            return True
-        return False if all(result is False for result in results) else None
-
-    def _eval_condition(self, cond: dict) -> bool | None:
-        """Evaluate one sub-condition to True, False, or unknown (None)."""
+    def _eval_condition(self, cond: dict) -> bool:
+        """Вычислить одно sub-condition → bool."""
         check = cond.get("check", "above")
 
         if check == "any_below":
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
-            unknown = False
-            for ch in channels:
-                state = self._state.get(ch)
-                if state is None:
-                    continue
-                if not state.is_usable:
-                    unknown = True
-                elif state.value < threshold:
-                    return True
-            return None if unknown else False
+            return any(
+                (s := self._state.get(ch)) is not None and s.value < threshold for ch in channels
+            )
 
         elif check == "any_above":
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
-            unknown = False
-            for ch in channels:
-                state = self._state.get(ch)
-                if state is None:
-                    continue
-                if not state.is_usable:
-                    unknown = True
-                elif state.value > threshold:
-                    return True
-            return None if unknown else False
+            return any(
+                (s := self._state.get(ch)) is not None and s.value > threshold for ch in channels
+            )
 
         elif check == "above":
             ch = cond.get("channel")
@@ -446,89 +302,60 @@ class AlarmEvaluator:
             # Special: phase_elapsed_s
             if ch == "phase_elapsed_s":
                 elapsed = self._phase.get_phase_elapsed_s()
-                return elapsed > cond["threshold"] if self._is_finite(elapsed) else None
+                return elapsed > cond["threshold"]
             state = self._state.get(ch)
-            if state is None:
-                return False
-            if not state.is_usable:
-                return None
-            return state.value > cond["threshold"]
+            return state is not None and state.value > cond["threshold"]
 
         elif check == "below":
             ch = cond.get("channel")
             if not ch:
                 return False
             state = self._state.get(ch)
-            if state is None:
-                return False
-            if not state.is_usable:
-                return None
-            return state.value < cond["threshold"]
+            return state is not None and state.value < cond["threshold"]
 
         elif check == "rate_above":
             ch = cond.get("channel")
             if not ch:
                 return False
-            state = self._state.get(ch)
-            if state is not None and not state.is_usable:
-                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
-            return rate > cond["threshold"] if self._is_finite(rate) else None
+            return rate is not None and rate > cond["threshold"]
 
         elif check == "rate_below":
             ch = cond.get("channel")
             if not ch:
                 return False
-            state = self._state.get(ch)
-            if state is not None and not state.is_usable:
-                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
-            return rate < cond["threshold"] if self._is_finite(rate) else None
+            return rate is not None and rate < cond["threshold"]
 
         elif check == "rate_near_zero":
             ch = cond.get("channel")
             if not ch:
                 return False
-            state = self._state.get(ch)
-            if state is not None and not state.is_usable:
-                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
             rate_threshold = cond.get("rate_threshold", 0.1)
-            return abs(rate) < rate_threshold if self._is_finite(rate) else None
+            return rate is not None and abs(rate) < rate_threshold
 
         else:
-            raise ValueError(f"unknown composite condition check={check!r}")
+            logger.warning("Неизвестный composite condition check=%r", check)
+            return False
 
     # ------------------------------------------------------------------
     # rate
     # ------------------------------------------------------------------
 
-    def _eval_rate(
-        self,
-        alarm_id: str,
-        cfg: dict,
-        *,
-        is_active: bool = False,
-        active_channels: frozenset[str] | None = None,
-    ) -> AlarmEvent | None:
+    def _eval_rate(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
         channels = self._resolve_channels(cfg)
         check = cfg.get("check", "rate_above")
-        if check not in {"rate_above", "rate_below", "rate_near_zero", "relative_rate_near_zero"}:
-            raise ValueError(f"unknown rate check={check!r}")
         window = cfg.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
         level = cfg.get("level", "WARNING")
         message_tmpl = cfg.get("message", f"Alarm {alarm_id}")
 
         for ch in channels:
-            state = self._state.get(ch)
-            unknown = state is not None and not state.is_usable
             rate = self._rate.get_rate_custom_window(ch, window)
-            if unknown or not self._is_finite(rate):
-                if is_active and (active_channels is None or ch in active_channels):
-                    return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
+            if rate is None:
                 continue
 
             fired = False
@@ -539,28 +366,26 @@ class AlarmEvaluator:
             elif check == "rate_near_zero":
                 fired = abs(rate) < cfg.get("rate_threshold", 0.1)
             elif check == "relative_rate_near_zero":
-                if state is None:
-                    unknown = True
-                elif state.value > 0:
+                state = self._state.get(ch)
+                if state and state.value > 0:
                     rel_rate = abs(rate / state.value)
                     fired = rel_rate < cfg.get("rate_threshold", 0.01)
-
-            if unknown:
-                if is_active and (active_channels is None or ch in active_channels):
-                    return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
-                continue
 
             if fired:
                 # Check additional_condition if present
                 add_cond = cfg.get("additional_condition")
-                if add_cond:
-                    add_result = self._eval_condition(add_cond)
-                    if add_result is not True:
-                        if add_result is None and is_active and (active_channels is None or ch in active_channels):
-                            return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
-                        continue
+                if add_cond and not self._eval_condition(add_cond):
+                    continue
 
-                return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
+                msg = self._format_message(message_tmpl, channel=ch, value=rate)
+                return AlarmEvent(
+                    alarm_id=alarm_id,
+                    level=level,
+                    message=msg,
+                    triggered_at=time.time(),
+                    channels=[ch],
+                    values={ch: rate},
+                )
         return None
 
     # ------------------------------------------------------------------
@@ -579,10 +404,8 @@ class AlarmEvaluator:
             if state is None:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
-            if not state.is_usable or (now - state.timestamp) > timeout:
-                # The channel is stale/unusable — there is no current value.
-                # Rendering 0.0 here told the operator the sensor read zero.
-                msg = self._format_message(message_tmpl, channel=ch, value=UNKNOWN_VALUE)
+            if (now - state.timestamp) > timeout:
+                msg = self._format_message(message_tmpl, channel=ch, value=0.0)
                 return AlarmEvent(
                     alarm_id=alarm_id,
                     level=level,
@@ -597,35 +420,6 @@ class AlarmEvaluator:
     # helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _is_finite(value: object) -> bool:
-        try:
-            return math.isfinite(value)  # type: ignore[arg-type]
-        except TypeError:
-            return False
-
-    def _rate_event(
-        self,
-        alarm_id: str,
-        level: str,
-        message_tmpl: str,
-        channel: str,
-        rate: float | None,
-    ) -> AlarmEvent:
-        known = self._is_finite(rate)
-        # A rate unavailable from the estimator is not a zero measurement.
-        # Preserve the channel identity in ``channels`` (and keep-active firing
-        # behaviour) while omitting the unknown value from the published mapping.
-        values = {channel: rate} if known else {}
-        return AlarmEvent(
-            alarm_id=alarm_id,
-            level=level,
-            message=self._format_message(message_tmpl, channel=channel, value=rate if known else UNKNOWN_VALUE),
-            triggered_at=time.time(),
-            channels=[channel],
-            values=values,
-        )
-
     def _resolve_channels(self, cfg: dict) -> list[str]:
         """Раскрыть каналы из channel / channels / channel_group в config."""
         if "channels" in cfg:
@@ -637,7 +431,7 @@ class AlarmEvaluator:
         return []
 
     @staticmethod
-    def _format_message(template: str, channel: str = "", value: object = 0.0) -> str:
+    def _format_message(template: str, channel: str = "", value: float = 0.0) -> str:
         try:
             return template.format(channel=channel, value=value)
         except (KeyError, ValueError):
@@ -670,18 +464,8 @@ class AlarmStateManager:
     def __init__(self) -> None:
         self._active: dict[str, AlarmEvent] = {}
         self._sustained_since: dict[str, float] = {}
-        self._state_revision = 0
-        self._activation_sequence = 0
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
-
-    @property
-    def state_revision(self) -> int:
-        """Monotonic revision of the authoritative active-alarm state."""
-        return self._state_revision
-
-    def _mark_active_mutation(self) -> None:
-        self._state_revision += 1
 
     def process(
         self,
@@ -698,26 +482,6 @@ class AlarmStateManager:
         """
         sustained_s = config.get("sustained_s")
         hysteresis = config.get("hysteresis")
-
-        # An evaluator exception is a third state: neither a known trigger nor
-        # a known clear. It must not start an inactive alarm and must not clear
-        # an active one. Retain its explicit status on the original event so
-        # acknowledgement and annunciation identity remain stable.
-        if event is not None and event.evaluator_error:
-            active_event = self._active.get(alarm_id)
-            if active_event is not None and not active_event.evaluator_error:
-                active_event.evaluator_error = True
-                self._mark_active_mutation()
-            return None
-
-        # A successful fresh event removes the error marker without creating a
-        # duplicate activation or notification.
-        if event is not None and alarm_id in self._active:
-            active_event = self._active[alarm_id]
-            if active_event.evaluator_error:
-                active_event.evaluator_error = False
-                self._mark_active_mutation()
-            return None
 
         # --- Условие сработало ---
         if event is not None:
@@ -737,25 +501,21 @@ class AlarmStateManager:
             if alarm_id in self._active:
                 return None  # Уже активен, не re-notify
 
-            stored_event = _copy_alarm_event(event)
-            self._activation_sequence += 1
-            stored_event.activation_id = self._activation_sequence
-            self._active[alarm_id] = stored_event
-            self._mark_active_mutation()
+            self._active[alarm_id] = event
             self._history.append(
                 {
                     "alarm_id": alarm_id,
                     "transition": "TRIGGERED",
-                    "at": stored_event.triggered_at,
-                    "level": stored_event.level,
-                    "message": stored_event.message,
+                    "at": event.triggered_at,
+                    "level": event.level,
+                    "message": event.message,
                 }
             )
             logger.info(
                 "ALARM TRIGGERED: %s [%s] %s",
                 alarm_id,
-                stored_event.level,
-                stored_event.message[:80],
+                event.level,
+                event.message[:80],
             )
             return "TRIGGERED"
 
@@ -772,7 +532,6 @@ class AlarmStateManager:
                 return None  # Ещё в зоне гистерезиса
 
             old_event = self._active.pop(alarm_id)
-            self._mark_active_mutation()
             self._history.append(
                 {
                     "alarm_id": alarm_id,
@@ -796,91 +555,8 @@ class AlarmStateManager:
         return True
 
     def get_active(self) -> dict[str, AlarmEvent]:
-        """Текущие активные алармы as fully detached public copies."""
-        return {alarm_id: _copy_alarm_event(event) for alarm_id, event in self._active.items()}
-
-    def snapshot_active_canonical(self) -> AlarmCanonicalSnapshot:
-        """Build the bounded privacy-minimal active snapshot without yielding.
-
-        Validation failures deliberately collapse to one fixed domain error so
-        transport adapters cannot expose hostile alarm content in diagnostics.
-        """
-        try:
-            if len(self._active) > _ALARM_SNAPSHOT_MAX_ACTIVE:
-                raise AlarmSnapshotUnavailableError
-
-            active: dict[str, dict[str, Any]] = {}
-            for alarm_id in sorted(self._active):
-                event = self._active[alarm_id]
-                self._validate_snapshot_text(alarm_id)
-                if event.alarm_id != alarm_id:
-                    raise AlarmSnapshotUnavailableError
-                if type(event.level) is not str or event.level not in _ALARM_LEVELS:
-                    raise AlarmSnapshotUnavailableError
-
-                triggered_at = self._validate_snapshot_number(event.triggered_at)
-                if type(event.channels) is not list:
-                    raise AlarmSnapshotUnavailableError
-                if len(event.channels) > _ALARM_SNAPSHOT_MAX_CHANNELS:
-                    raise AlarmSnapshotUnavailableError
-                channels: list[str] = []
-                for channel in event.channels:
-                    self._validate_snapshot_text(channel)
-                    channels.append(channel)
-                channels = sorted(set(channels))
-
-                if type(event.acknowledged) is not bool:
-                    raise AlarmSnapshotUnavailableError
-                acknowledged_at: float | None = None
-                if event.acknowledged:
-                    acknowledged_at = self._validate_snapshot_number(event.acknowledged_at)
-
-                active[alarm_id] = {
-                    "level": event.level,
-                    "triggered_at": triggered_at,
-                    "channels": channels,
-                    "acknowledged": event.acknowledged,
-                    "acknowledged_at": acknowledged_at,
-                }
-
-            canonical = json.dumps(
-                active,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-            if len(canonical) > _ALARM_SNAPSHOT_MAX_CANONICAL_BYTES:
-                raise AlarmSnapshotUnavailableError
-            token = "sha256:" + hashlib.sha256(canonical).hexdigest()
-            return AlarmCanonicalSnapshot(
-                state_revision=self._state_revision,
-                active=active,
-                state_token=token,
-            )
-        except AlarmSnapshotUnavailableError:
-            raise
-        except (AttributeError, TypeError, ValueError, OverflowError, UnicodeError):
-            raise AlarmSnapshotUnavailableError from None
-
-    @staticmethod
-    def _validate_snapshot_text(value: object) -> None:
-        if type(value) is not str or not value or len(value) > _ALARM_SNAPSHOT_MAX_TEXT:
-            raise AlarmSnapshotUnavailableError
-        encoded = value.encode("utf-8")
-        if len(encoded) > _ALARM_SNAPSHOT_MAX_TEXT or any(
-            ord(character) < 32 or ord(character) == 127 for character in value
-        ):
-            raise AlarmSnapshotUnavailableError
-
-    @staticmethod
-    def _validate_snapshot_number(value: object) -> float:
-        if type(value) not in (int, float):
-            raise AlarmSnapshotUnavailableError
-        result = float(value)
-        if not math.isfinite(result) or result < 0:
-            raise AlarmSnapshotUnavailableError
-        return result
+        """Текущие активные алармы."""
+        return dict(self._active)
 
     def get_history(self, limit: int = 50) -> list[dict]:
         """История переходов (последние limit)."""
@@ -917,7 +593,6 @@ class AlarmStateManager:
             if level == "CRITICAL" and existing.level == "WARNING":
                 existing.level = level
                 existing.message = f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}"
-                self._mark_active_mutation()
                 self._history.append(
                     {
                         "alarm_id": alarm_id,
@@ -932,7 +607,7 @@ class AlarmStateManager:
                     alarm_id,
                     age_seconds,
                 )
-                return _copy_alarm_event(existing)
+                return existing
             return None
 
         event = AlarmEvent(
@@ -943,10 +618,7 @@ class AlarmStateManager:
             channels=[channel_id],
             values={channel_id: age_seconds},
         )
-        self._activation_sequence += 1
-        event.activation_id = self._activation_sequence
         self._active[alarm_id] = event
-        self._mark_active_mutation()
         self._history.append(
             {
                 "alarm_id": alarm_id,
@@ -962,7 +634,7 @@ class AlarmStateManager:
             level,
             age_seconds,
         )
-        return _copy_alarm_event(event)
+        return event
 
     def clear_diagnostic_alarm(self, channel_id: str) -> None:
         """Clear diagnostic alarm for channel when anomaly resolves.
@@ -974,7 +646,6 @@ class AlarmStateManager:
         if alarm_id not in self._active:
             return
         self._active.pop(alarm_id)
-        self._mark_active_mutation()
         self._history.append(
             {
                 "alarm_id": alarm_id,
@@ -985,16 +656,7 @@ class AlarmStateManager:
         )
         logger.info("DIAGNOSTIC ALARM CLEARED: %s", alarm_id)
 
-    def acknowledge(
-        self,
-        alarm_id: str,
-        *,
-        operator: str = "",
-        reason: str = "",
-        expected_activation_id: int | None = None,
-        acknowledged_at: float | None = None,
-        request_id: str | None = None,
-    ) -> dict | None:
+    def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> dict | None:
         """Подтвердить аларм — записать факт подтверждения в историю.
 
         Аларм остаётся в _active до сброса по условию (CLEARED).
@@ -1003,29 +665,11 @@ class AlarmStateManager:
         Returns event dict on new acknowledgement (caller should publish),
         or None if alarm unknown or already acknowledged (idempotent no-op).
         """
-        if acknowledged_at is not None and (
-            type(acknowledged_at) is not float or not math.isfinite(acknowledged_at) or acknowledged_at <= 0.0
-        ):
-            raise ValueError("acknowledged_at must be one positive finite float")
-        if request_id is not None and (
-            type(request_id) is not str
-            or len(request_id) != 32
-            or any(char not in "0123456789abcdef" for char in request_id)
-        ):
-            raise ValueError("request_id must be exactly 32 lowercase hexadecimal characters")
         if alarm_id not in self._active:
             logger.warning("ALARM ACK IGNORED: %s not in active alarms", alarm_id)
             return None
 
         event = self._active[alarm_id]
-        if expected_activation_id is not None and event.activation_id != expected_activation_id:
-            logger.warning(
-                "ALARM ACK IGNORED: %s activation changed (%s != %s)",
-                alarm_id,
-                event.activation_id,
-                expected_activation_id,
-            )
-            return None
         if event.acknowledged:
             logger.debug(
                 "ALARM ACK NOOP: %s already acknowledged by %s",
@@ -1035,73 +679,31 @@ class AlarmStateManager:
             return None
 
         event.acknowledged = True
-        event.acknowledged_at = time.time() if acknowledged_at is None else acknowledged_at
+        event.acknowledged_at = time.time()
         event.acknowledged_by = operator
-        event.acknowledged_reason = reason
-        event.acknowledgement_request_id = "" if request_id is None else request_id
-        self._mark_active_mutation()
 
-        history_entry: dict[str, object] = {
-            "alarm_id": alarm_id,
-            "transition": "ACKNOWLEDGED",
-            "at": event.acknowledged_at,
-            "level": event.level,
-            "operator": operator,
-            "reason": reason,
-        }
-        if request_id is not None:
-            history_entry["request_id"] = request_id
-        self._history.append(history_entry)
+        self._history.append(
+            {
+                "alarm_id": alarm_id,
+                "transition": "ACKNOWLEDGED",
+                "at": event.acknowledged_at,
+                "level": event.level,
+                "operator": operator,
+                "reason": reason,
+            }
+        )
         logger.info(
             "ALARM ACKNOWLEDGED: %s by %s (reason: %s)",
             alarm_id,
             operator or "—",
             reason or "—",
         )
-        result: dict[str, object] = {
+        return {
             "alarm_id": alarm_id,
             "acknowledged_at": event.acknowledged_at,
             "operator": operator,
             "reason": reason,
         }
-        if request_id is not None:
-            result["request_id"] = request_id
-        return result
-
-    def acknowledgement_matches(
-        self,
-        alarm_id: str,
-        *,
-        operator: str,
-        reason: str,
-        request_id: str,
-        expected_activation_id: int,
-        acknowledged_at: float,
-    ) -> bool:
-        """Prove one staged ACK is the exact current in-memory transition."""
-
-        if (
-            type(operator) is not str
-            or type(reason) is not str
-            or type(request_id) is not str
-            or len(request_id) != 32
-            or any(char not in "0123456789abcdef" for char in request_id)
-            or type(expected_activation_id) is not int
-            or type(acknowledged_at) is not float
-            or not math.isfinite(acknowledged_at)
-            or acknowledged_at <= 0.0
-        ):
-            return False
-        event = self._active.get(alarm_id)
-        return bool(
-            event is not None
-            and event.activation_id == expected_activation_id
-            and event.acknowledged is True
-            and event.acknowledged_at == acknowledged_at
-            and event.acknowledged_by == operator
-            and event.acknowledged_reason == reason
-            and event.acknowledgement_request_id == request_id
-        )
 
 
 def tick_alarm(
@@ -1130,7 +732,9 @@ def tick_alarm(
         alarm_cfg.alarm_id,
         alarm_cfg.config,
         is_active=active_event is not None,
-        active_channels=(frozenset(active_event.channels) if active_event is not None else None),
+        active_channels=(
+            frozenset(active_event.channels) if active_event is not None else None
+        ),
     )
     transition = state_mgr.process(alarm_cfg.alarm_id, event, alarm_cfg.config)
     return event, transition

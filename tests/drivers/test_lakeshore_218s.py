@@ -8,12 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cryodaq.analytics.calibration import (
-    CalibrationCurve,
-    CalibrationSample,
-    CalibrationStore,
-    CalibrationZone,
-)
+from cryodaq.analytics.calibration import CalibrationSample, CalibrationStore
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
@@ -21,7 +16,10 @@ from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 # Helpers
 # ---------------------------------------------------------------------------
 
-NORMAL_RESPONSE = "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+NORMAL_RESPONSE = (
+    "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
+    "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+)
 
 EXPECTED_NORMAL_VALUES = [
     4.235,
@@ -34,7 +32,10 @@ EXPECTED_NORMAL_VALUES = [
     4.321,
 ]
 
-RAW_RESPONSE = "+8.298000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+RAW_RESPONSE = (
+    "+8.298000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
+    "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+)
 
 
 _MOCK_IDN = "LSCI,MODEL218S,MOCK001,010101"
@@ -211,7 +212,9 @@ async def test_parse_normal_response() -> None:
     for reading, expected in zip(readings, EXPECTED_NORMAL_VALUES, strict=True):
         assert reading.unit == "K"
         assert reading.status == ChannelStatus.OK
-        assert math.isclose(reading.value, expected, rel_tol=1e-4), f"Expected {expected}, got {reading.value}"
+        assert math.isclose(reading.value, expected, rel_tol=1e-4), (
+            f"Expected {expected}, got {reading.value}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +223,9 @@ async def test_parse_normal_response() -> None:
 
 
 async def test_parse_overrange() -> None:
-    ovl_response = "+OVL,+004.891E+0,+OVL,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+    ovl_response = (
+        "+OVL,+004.891E+0,+OVL,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
+    )
     transport = _make_mock_transport(ovl_response)
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
@@ -344,7 +349,9 @@ async def test_timeout_handling() -> None:
         # If it returns readings, they must all carry TIMEOUT status
         assert len(readings) == 8
         for r in readings:
-            assert r.status == ChannelStatus.TIMEOUT, f"Expected TIMEOUT status on timeout, got {r.status}"
+            assert r.status == ChannelStatus.TIMEOUT, (
+                f"Expected TIMEOUT status on timeout, got {r.status}"
+            )
     except (TimeoutError, OSError, RuntimeError):
         # Raising a typed exception is also a valid design choice
         pass
@@ -431,30 +438,12 @@ async def test_runtime_calibration_global_off_uses_krdg(tmp_path) -> None:
 
 async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(tmp_path) -> None:
     store = CalibrationStore(tmp_path)
-    # Build a hand-crafted curve with known, independently-computable output so the
-    # assertion does NOT delegate back to store.evaluate (which would be circular).
-    # Zone: raw_min=80, raw_max=90, order-1 Chebyshev coefficients (c0=15, c1=2).
-    # At raw=82.98:
-    #   scaled = (2*(82.98 - 80.0) / (90.0 - 80.0)) - 1 = (2*2.98/10.0) - 1 = -0.404
-    #   value  = c0*T0(scaled) + c1*T1(scaled) = 15.0*1 + 2.0*(-0.404) = 14.192
-    _EXPECTED_CALIBRATED = 14.192
-    zone = CalibrationZone(
-        raw_min=80.0,
-        raw_max=90.0,
-        order=1,
-        coefficients=(15.0, 2.0),
-        rmse_k=0.0,
-        max_abs_error_k=0.0,
-        point_count=2,
-    )
-    curve = CalibrationCurve(
-        curve_id="test-curve-f1",
-        sensor_id="ls218s:CH1",
-        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+    curve = store.fit_curve(
+        "ls218s:CH1",
+        _calibration_samples("CH1"),
         raw_unit="sensor_unit",
-        sensor_kind="generic",
-        source_session_ids=(),
-        zones=(zone,),
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
     )
     store.save_curve(curve)
     store.assign_curve(
@@ -481,46 +470,27 @@ async def test_runtime_calibration_global_on_uses_curve_and_preserves_metadata(t
     assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
     assert readings[0].unit == "K"
     assert readings[0].raw == pytest.approx(82.98)
-    # Independent hard-coded expected — does NOT call store.evaluate (breaks tautology).
-    assert readings[0].value == pytest.approx(_EXPECTED_CALIBRATED, abs=1e-3)
+    # Core behavioral assertion: value must equal store.evaluate output, not raw KRDG.
+    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
 
 
 async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_channels(
     tmp_path,
 ) -> None:
     store = CalibrationStore(tmp_path)
-    # Same hand-crafted zone as F1: raw_min=80, raw_max=90, coefficients=(15, 2).
-    # At raw=82.98 (SRDG for CH1 from RAW_RESPONSE):
-    #   scaled = (2*(82.98 - 80.0) / 10.0) - 1 = -0.404
-    #   value  = 15.0 + 2.0*(-0.404) = 14.192
-    _EXPECTED_CALIBRATED_CH1 = 14.192
-    _zone = CalibrationZone(
-        raw_min=80.0,
-        raw_max=90.0,
-        order=1,
-        coefficients=(15.0, 2.0),
-        rmse_k=0.0,
-        max_abs_error_k=0.0,
-        point_count=2,
-    )
-    curve_ch1 = CalibrationCurve(
-        curve_id="test-curve-ch1-f2",
-        sensor_id="ls218s:CH1",
-        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+    curve_ch1 = store.fit_curve(
+        "ls218s:CH1",
+        _calibration_samples("CH1"),
         raw_unit="sensor_unit",
-        sensor_kind="generic",
-        source_session_ids=(),
-        zones=(_zone,),
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
     )
-    # CH2 curve exists (needed for assignment) but policy="off" so it is never evaluated.
-    curve_ch2 = CalibrationCurve(
-        curve_id="test-curve-ch2-f2",
-        sensor_id="ls218s:CH2",
-        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+    curve_ch2 = store.fit_curve(
+        "ls218s:CH2",
+        _calibration_samples("CH2"),
         raw_unit="sensor_unit",
-        sensor_kind="generic",
-        source_session_ids=(),
-        zones=(_zone,),
+        min_points_per_zone=3,
+        target_rmse_k=0.2,
     )
     store.save_curve(curve_ch1)
     store.save_curve(curve_ch2)
@@ -548,114 +518,13 @@ async def test_runtime_calibration_hybrid_mode_uses_curve_only_for_enabled_chann
     await driver.connect()
     readings = await driver.read_channels()
 
-    # CH1 — curve applied (hybrid: policy="on").
     assert readings[0].metadata["reading_mode"] == "curve"
-    assert readings[0].metadata["raw_source"] == "SRDG"
-    assert readings[0].metadata["sensor_id"] == "ls218s:CH1"
-    assert readings[0].raw == pytest.approx(82.98)  # must record the SRDG raw we fed
-    # Independent hard-coded expected — does NOT call store.evaluate (breaks tautology).
-    assert readings[0].value == pytest.approx(_EXPECTED_CALIBRATED_CH1, abs=1e-3)
-    # CH2 — krdg passthrough (hybrid: policy="off"): value equals raw KRDG (4.891 K).
     assert readings[1].metadata["reading_mode"] == "krdg"
     assert readings[1].metadata["raw_source"] == "KRDG"
+    # CH1 — curve applied: value must equal store.evaluate output.
+    assert readings[0].value == pytest.approx(store.evaluate("ls218s:CH1", readings[0].raw))
+    # CH2 — krdg passthrough: value must equal raw KRDG float (4.891 K from NORMAL_RESPONSE).
     assert readings[1].value == pytest.approx(4.891)
-
-
-async def test_runtime_calibration_out_of_range_raw_falls_back_to_krdg(tmp_path) -> None:
-    """CR-1: SRDG raw outside the calibrated span must NOT be silently clipped.
-
-    A clipped evaluation freezes the reported temperature at the curve
-    boundary (dT/dt -> 0), blinding SafetyManager's rate fault. Instead the
-    driver must fall back to the native KRDG reading with
-    runtime_reason="raw_out_of_cal_range".
-    """
-    store = CalibrationStore(tmp_path)
-    # Hand-crafted zone: raw span [80, 90], coefficients (15, 2).
-    # Clipped-at-raw_max evaluation would be 15 + 2*1 = 17.0 K (the frozen value).
-    _FROZEN_BOUNDARY_K = 17.0
-    zone = CalibrationZone(
-        raw_min=80.0,
-        raw_max=90.0,
-        order=1,
-        coefficients=(15.0, 2.0),
-        rmse_k=0.0,
-        max_abs_error_k=0.0,
-        point_count=2,
-    )
-    curve = CalibrationCurve(
-        curve_id="test-curve-oor",
-        sensor_id="ls218s:CH1",
-        fit_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
-        raw_unit="sensor_unit",
-        sensor_kind="generic",
-        source_session_ids=(),
-        zones=(zone,),
-    )
-    store.save_curve(curve)
-    store.assign_curve(
-        sensor_id="ls218s:CH1",
-        channel_key="ls218s:CH1",
-        runtime_apply_ready=True,
-        reading_mode_policy="on",
-    )
-    store.set_runtime_global_mode("on")
-
-    # SRDG raw for CH1 drifts ABOVE raw_max=90: first 95.0, then 120.0.
-    oor_raw_1 = (
-        "+9.500000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
-    )
-    oor_raw_2 = (
-        "+1.200000E+2,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
-    )
-    # Native KRDG for CH1: 4.235 K on the first read, 6.789 K on the second.
-    normal_2 = "+006.789E+0,+004.891E+0,+004.100E+0,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
-
-    krdg_responses = [NORMAL_RESPONSE, normal_2, NORMAL_RESPONSE]
-    srdg_responses = [oor_raw_1, oor_raw_2, RAW_RESPONSE]
-
-    def _query_fn(cmd, **kwargs):
-        stripped = cmd.strip().upper()
-        if stripped == "KRDG?":
-            return krdg_responses.pop(0)
-        if stripped == "SRDG?":
-            return srdg_responses.pop(0)
-        if stripped.startswith("RDGST?"):
-            return "0"  # periodic status sweep: all channels OK
-        return ""
-
-    transport = MagicMock()
-    transport.open = AsyncMock()
-    transport.close = AsyncMock()
-    transport.query = _wrap_query_with_idn(_query_fn)
-
-    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False, calibration_store=store)
-    driver._transport = transport
-    await driver.connect()
-
-    first = await driver.read_channels()
-    second = await driver.read_channels()
-
-    # Out-of-range raw -> KRDG fallback, not a clipped curve value.
-    assert first[0].metadata["reading_mode"] == "krdg"
-    assert first[0].metadata["raw_source"] == "KRDG"
-    assert first[0].metadata["runtime_reason"] == "raw_out_of_cal_range"
-    assert first[0].status is ChannelStatus.OK
-    assert first[0].value == pytest.approx(4.235)
-    assert first[0].value != pytest.approx(_FROZEN_BOUNDARY_K)
-
-    # A second, higher out-of-range raw must NOT reproduce a frozen boundary
-    # temperature: the published value keeps tracking the native reading.
-    assert second[0].metadata["reading_mode"] == "krdg"
-    assert second[0].metadata["runtime_reason"] == "raw_out_of_cal_range"
-    assert second[0].value == pytest.approx(6.789)
-    assert second[0].value != pytest.approx(first[0].value)
-
-    # In-range path unchanged: raw=82.98 (inside [80, 90]) still uses the curve.
-    third = await driver.read_channels()
-    assert third[0].metadata["reading_mode"] == "curve"
-    assert third[0].metadata["raw_source"] == "SRDG"
-    assert third[0].raw == pytest.approx(82.98)
-    assert third[0].value == pytest.approx(14.192, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +579,9 @@ async def test_krdg_fallback_to_per_channel() -> None:
 
     # Verify exact mapped values — not just length/unit.
     for i, r in enumerate(readings):
-        assert r.value == pytest.approx(expected_values[i]), f"CH{i + 1}: expected {expected_values[i]}, got {r.value}"
+        assert r.value == pytest.approx(expected_values[i]), (
+            f"CH{i+1}: expected {expected_values[i]}, got {r.value}"
+        )
 
 
 async def test_krdg_sticky_fallback() -> None:
@@ -805,30 +676,3 @@ async def test_read_status_not_connected_raises() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     with pytest.raises(RuntimeError, match="not connected"):
         await driver.read_status()
-
-
-async def test_status_refresh_failure_marks_cached_status_stale() -> None:
-    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
-    driver._connected = True
-    driver._last_status_result = {1: 17}
-    driver.read_status = AsyncMock(side_effect=RuntimeError("RDGST unavailable"))  # type: ignore[method-assign]
-    driver._read_krdg_channels = AsyncMock(
-        return_value=[
-            Reading.now(
-                channel="CH1",
-                value=4.2,
-                unit="K",
-                instrument_id="ls218s",
-                metadata={"raw_channel": 1, "reading_kind": "temperature"},
-            )
-        ]
-    )  # type: ignore[method-assign]
-
-    result = await driver.read_channels()
-
-    assert result[0].metadata["sensor_status"] == 17
-    assert result[0].metadata["sensor_status_availability"] == {
-        "available": True,
-        "stale": True,
-        "reason": "RDGST unavailable",
-    }

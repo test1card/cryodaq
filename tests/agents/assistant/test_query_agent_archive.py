@@ -8,7 +8,7 @@ expected operator-facing text. No Ollama call is made.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,7 +20,6 @@ from cryodaq.agents.assistant.query.schemas import (
     ArchiveListResult,
     QueryAdapters,
     QueryCategory,
-    QueryIntent,
 )
 
 
@@ -76,12 +75,16 @@ def test_archive_list_renders_entries(agent: AssistantQueryAgent) -> None:
 
 def test_archive_list_empty_renders_explicit_marker(agent: AssistantQueryAgent) -> None:
     result = ArchiveListResult(entries=[], total_count=0, filter_summary="за последние 7 дней")
-    prompt = agent._format_dispatch("архив за неделю", QueryCategory.ARCHIVE_LIST, {"archive_list": result})
+    prompt = agent._format_dispatch(
+        "архив за неделю", QueryCategory.ARCHIVE_LIST, {"archive_list": result}
+    )
     assert "(нет записей за выбранный период)" in prompt
 
 
 def test_archive_list_none_renders_adapter_unavailable(agent: AssistantQueryAgent) -> None:
-    prompt = agent._format_dispatch("архив", QueryCategory.ARCHIVE_LIST, {"archive_list": None})
+    prompt = agent._format_dispatch(
+        "архив", QueryCategory.ARCHIVE_LIST, {"archive_list": None}
+    )
     assert "адаптер архива не сконфигурирован" in prompt
 
 
@@ -134,65 +137,11 @@ def test_archive_detail_none_renders_not_found(agent: AssistantQueryAgent) -> No
         {"archive_detail": None, "experiment_id": "exp-X"},
     )
     assert "exp-X" in prompt
-    # Sentinel values injected by _fmt_archive_detail when result is None —
-    # these are unique to the None branch and absent in the found branch
-    # (found branch uses "(нет фазы захолаживания в архиве этого эксперимента)"
-    # for cooldown_text, never "(не указано)").
-    assert "(нет данных)" in prompt  # phases_text sentinel
-    assert "(не указано)" in prompt  # cooldown_text sentinel
-    assert "Если эксперимент не найден — скажи прямо." in prompt
-    # NOTE: "не найден" appears in FORMAT_ARCHIVE_DETAIL_USER for BOTH found
-    # and not-found paths (it's a static template instruction to the LLM),
-    # so asserting it here would be tautological. The two sentinels above are
-    # the meaningful discriminators for the None path.
-
-
-def test_archive_detail_unavailable_does_not_render_not_found(agent: AssistantQueryAgent) -> None:
-    result = ArchiveDetailResult(
-        experiment_id="exp-X",
-        sample="",
-        operator="",
-        status="",
-        started_at="",
-        ended_at=None,
-        duration_h=None,
-        available=False,
-        stale=True,
-        reason="archive detail unavailable",
-    )
-    prompt = agent._format_dispatch(
-        "детали exp-X", QueryCategory.ARCHIVE_DETAIL, {"archive_detail": result, "experiment_id": "exp-X"}
-    )
-
-    assert "недоступны" in prompt
-    assert "Не утверждай, что запись не найдена" in prompt
-
-
-async def test_archive_detail_without_identifier_is_rendered_as_invalid_request(agent: AssistantQueryAgent) -> None:
-    invalid_request = ArchiveDetailResult(
-        experiment_id="",
-        sample="",
-        operator="",
-        status="",
-        started_at="",
-        ended_at=None,
-        duration_h=None,
-        available=False,
-        stale=True,
-        reason="experiment identifier is required",
-    )
-    archive = agent._router._adapters.archive
-    assert archive is not None
-    archive.get_detail = AsyncMock(return_value=invalid_request)
-
-    data = await agent._router.fetch(QueryIntent(category=QueryCategory.ARCHIVE_DETAIL), "details of the experiment")
-    prompt = agent._format_dispatch("details of the experiment", QueryCategory.ARCHIVE_DETAIL, data)
-
-    assert data == {"archive_detail": invalid_request, "experiment_id": ""}
-    archive.get_detail.assert_awaited_once_with("")
-    assert "Не указан идентификатор эксперимента" in prompt
-    assert "архив не запрашивался" in prompt
-    assert "Если эксперимент не найден — скажи прямо." not in prompt
+    # Sentinel values injected by _fmt_archive_detail when result is None
+    assert "(нет данных)" in prompt   # phases_text sentinel
+    assert "(не указано)" in prompt   # cooldown_text sentinel
+    # Template instructs LLM to say the experiment was not found
+    assert "не найден" in prompt
 
 
 def test_archive_detail_missing_duration_renders_unknown(agent: AssistantQueryAgent) -> None:

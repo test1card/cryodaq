@@ -27,22 +27,6 @@ class QueryCategory(Enum):
     KNOWLEDGE_QUERY = "knowledge_query"
 
 
-def _validate_availability(available: bool, stale: bool, reason: str | None) -> None:
-    """Enforce the one availability contract used by query results."""
-    if type(available) is not bool or type(stale) is not bool:
-        raise ValueError("availability fields must be bool")
-    if not available and not stale:
-        raise ValueError("unavailable availability must be stale")
-    if available and not stale:
-        if reason is not None:
-            raise ValueError("live availability cannot have a reason")
-    elif not isinstance(reason, str) or not reason.strip():
-        raise ValueError("stale or unavailable availability requires a reason")
-
-
-ARCHIVE_DETAIL_INVALID_REQUEST_REASON = "experiment identifier is required"
-
-
 @dataclass
 class QueryIntent:
     category: QueryCategory
@@ -75,12 +59,6 @@ class CooldownETA:
     cooldown_active: bool
     T_cold: float | None = None
     T_warm: float | None = None
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -90,12 +68,6 @@ class VacuumETA:
     target_mbar: float
     trend: str
     confidence: float
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -108,12 +80,6 @@ class RangeStats:
     mean_value: float
     std_value: float
     unit: str = ""
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -127,12 +93,6 @@ class ActiveAlarmInfo:
 @dataclass
 class AlarmStatusResult:
     active: list[ActiveAlarmInfo] = field(default_factory=list)
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
     @property
     def count(self) -> int:
@@ -144,16 +104,10 @@ class ExperimentStatus:
     experiment_id: str
     phase: str | None
     phase_started_at: float | None
-    experiment_age_s: float | None
+    experiment_age_s: float
     target_temp: float | None = None
     sample_id: str | None = None
     experiment_started_human: str | None = None
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -163,12 +117,6 @@ class ArchiveListResult:
     entries: list[dict] = field(default_factory=list)
     total_count: int = 0
     filter_summary: str = ""  # e.g. "за последние 7 дней"
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -184,12 +132,6 @@ class ArchiveDetailResult:
     duration_h: float | None
     phases: list[dict] = field(default_factory=list)
     cooldown_metrics: dict | None = None
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -200,12 +142,6 @@ class AlarmHistoryResult:
     triggered_count: int = 0
     cleared_count: int = 0
     by_alarm_id: dict[str, int] = field(default_factory=dict)
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -239,12 +175,6 @@ class KnowledgeQueryResult:
     hits: list[KnowledgeQueryHit] = field(default_factory=list)
     total_hits: int = 0
     source_kind_filter: str | None = None
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)
 
 
 @dataclass
@@ -273,10 +203,3 @@ class CompositeStatus:
     current_pressure: float | None
     snapshot_empty: bool = False
     snapshot_age_s: float | None = None
-    alarms_available: bool = True
-    available: bool = True
-    stale: bool = False
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        _validate_availability(self.available, self.stale, self.reason)

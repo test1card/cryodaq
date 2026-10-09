@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cryodaq.drivers.base import Reading
+from cryodaq.health.contract import HealthDeviceDescriptor, HealthTelemetrySnapshot
 
 
 @runtime_checkable
@@ -30,6 +31,20 @@ class PassiveSensor(Protocol):
     async def disconnect(self) -> None: ...
 
     async def read_channels(self) -> list[Reading]: ...
+
+
+@runtime_checkable
+class HealthTelemetryDevice(Protocol):
+    """A snapshot-only passive infrastructure-health device.
+
+    Structural conformance grants no authority; construction still requires an
+    exact entry in the static driver registry.
+    """
+
+    @property
+    def health_descriptor(self) -> HealthDeviceDescriptor: ...
+
+    def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot: ...
 
 
 @runtime_checkable
@@ -245,6 +260,25 @@ def is_issued_runtime_binding(value: object) -> bool:
 SharedBusDevice = SharedBusParticipant
 
 
+class CommandEvidence(StrEnum):
+    """Strongest evidence established by a successful command return."""
+
+    REQUESTED = "requested"
+    DEVICE_ACKNOWLEDGED = "device_acknowledged"
+    DEVICE_READBACK_CONFIRMED = "device_readback_confirmed"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandOutcome:
+    """Typed command receipt; device readback is not independent physical proof."""
+
+    evidence: CommandEvidence
+
+    def __post_init__(self) -> None:
+        if type(self.evidence) is not CommandEvidence:
+            raise TypeError("evidence must be an exact CommandEvidence")
+
+
 @runtime_checkable
 class ControlledSource(Protocol):
     """Hazardous source behavior; conformance alone conveys no authority."""
@@ -255,7 +289,7 @@ class ControlledSource(Protocol):
         p_target: float,
         v_compliance: float,
         i_compliance: float,
-    ) -> None: ...
+    ) -> CommandOutcome: ...
 
     async def stop_source(self, channel: str) -> None: ...
 

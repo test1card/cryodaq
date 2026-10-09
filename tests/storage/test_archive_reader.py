@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import sqlite3
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,11 +13,7 @@ pytest.importorskip("pyarrow")
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
-from cryodaq.drivers.base import ChannelStatus, Reading  # noqa: E402
 from cryodaq.storage.archive_reader import ArchiveReader  # noqa: E402
-from cryodaq.storage.cold_rotation import ColdRotationService  # noqa: E402
-from cryodaq.storage.sentinel import SENTINEL  # noqa: E402
-from cryodaq.storage.sqlite_writer import SQLiteWriter  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,7 +35,8 @@ def _create_sqlite_db(db_path: Path, readings: list[tuple]) -> None:
         ")"
     )
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         readings,
     )
     conn.commit()
@@ -86,44 +80,11 @@ def _create_parquet(parquet_path: Path, readings: list[tuple]) -> None:
 
 
 def _write_index(archive_dir: Path, entries: list[dict]) -> None:
-    """Write index.json with real receipts for artifacts created by a test."""
+    """Write archive index.json."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    for entry in entries:
-        archive_rel = entry.get("archive_path")
-        if isinstance(archive_rel, str):
-            archive_path = archive_dir / archive_rel
-            if archive_path.is_file():
-                entry["size_bytes_archive"] = archive_path.stat().st_size
-                entry["checksum_md5"] = hashlib.md5(
-                    archive_path.read_bytes(),
-                    usedforsecurity=False,
-                ).hexdigest()
-                try:
-                    entry["row_count"] = pq.read_metadata(archive_path).num_rows
-                except Exception:
-                    entry.setdefault("row_count", 0)
-        operator_rel = entry.get("operator_log_path")
-        if isinstance(operator_rel, str):
-            operator_path = archive_dir / operator_rel
-            if operator_path.is_file():
-                metadata = pq.read_metadata(operator_path)
-                entry["operator_log_rows"] = metadata.num_rows
-                entry["operator_log_size_bytes"] = operator_path.stat().st_size
-                entry["operator_log_checksum_md5"] = hashlib.md5(
-                    operator_path.read_bytes(),
-                    usedforsecurity=False,
-                ).hexdigest()
-                entry["operator_log_schema"] = (
-                    "operator_log_v2" if "request_fingerprint" in metadata.schema.names else "operator_log_v1"
-                )
-    (archive_dir / "index.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
-
-
-def _assert_archive_unavailable(call) -> RuntimeError:
-    with pytest.raises(RuntimeError) as caught:
-        call()
-    assert type(caught.value).__name__ == "ArchiveUnavailableError"
-    return caught.value
+    (archive_dir / "index.json").write_text(
+        json.dumps({"files": entries}), encoding="utf-8"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +105,9 @@ def test_query_archived_uses_parquet(tmp_path: Path) -> None:
     # Parquet archive for that day
     rel_path = f"year=2026/month=03/{db_name}.parquet"
     parquet_path = archive_dir / rel_path
-    readings = [(base_ts + i, "ls218s", "Т1", 77.0 + i * 0.1, "K", "ok") for i in range(10)]
+    readings = [
+        (base_ts + i, "ls218s", "Т1", 77.0 + i * 0.1, "K", "ok") for i in range(10)
+    ]
     _create_parquet(parquet_path, readings)
 
     _write_index(
@@ -197,7 +160,9 @@ def test_query_recent_uses_sqlite(tmp_path: Path) -> None:
     base_ts = day.timestamp()
     db_name = f"data_{day.date().isoformat()}.db"
 
-    readings = [(base_ts + i, "ls218s", "Т2", 80.0 + i * 0.05, "K", "ok") for i in range(15)]
+    readings = [
+        (base_ts + i, "ls218s", "Т2", 80.0 + i * 0.05, "K", "ok") for i in range(15)
+    ]
     _create_sqlite_db(data_dir / db_name, readings)
 
     # Empty index — no archived files
@@ -220,12 +185,12 @@ def test_query_recent_uses_sqlite(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# test_missing_archive_file_is_unavailable
+# test_missing_archive_file_returns_partial
 # ---------------------------------------------------------------------------
 
 
-def test_missing_archive_file_is_unavailable(tmp_path: Path) -> None:
-    """A receipted source cannot disappear while another day masks the loss."""
+def test_missing_archive_file_returns_partial(tmp_path: Path) -> None:
+    """If indexed Parquet file is missing on disk, gracefully skip it."""
     data_dir = tmp_path / "data"
     archive_dir = tmp_path / "archive"
     data_dir.mkdir()
@@ -238,7 +203,9 @@ def test_missing_archive_file_is_unavailable(tmp_path: Path) -> None:
     # day2 has valid Parquet
     rel2 = f"year=2026/month=03/data_{day2.date().isoformat()}.db.parquet"
     parquet2 = archive_dir / rel2
-    readings2 = [(day2.timestamp() + i, "ls218s", "Т3", 90.0 + i, "K", "ok") for i in range(5)]
+    readings2 = [
+        (day2.timestamp() + i, "ls218s", "Т3", 90.0 + i, "K", "ok") for i in range(5)
+    ]
     _create_parquet(parquet2, readings2)
 
     _write_index(
@@ -265,14 +232,25 @@ def test_missing_archive_file_is_unavailable(tmp_path: Path) -> None:
         ],
     )
 
-    error = _assert_archive_unavailable(
-        lambda: ArchiveReader(data_dir=data_dir, archive_dir=archive_dir).query(
-            channels=["Т3"],
-            from_ts=day1,
-            to_ts=day2 + timedelta(hours=1),
-        )
+    reader = ArchiveReader(data_dir=data_dir, archive_dir=archive_dir)
+    # Query spanning both days
+    result = reader.query(
+        channels=["Т3"],
+        from_ts=day1,
+        to_ts=day2 + timedelta(hours=1),
     )
-    assert error.issue.code.value == "source_missing"
+
+    # day2 data present; day1 gracefully skipped (no exception)
+    assert "Т3" in result
+    assert len(result["Т3"]) == 5
+    # Verify exact day2 values — no day1 timestamps leaked in.
+    day2_ts = day2.timestamp()
+    expected_day2 = [(day2_ts + i, 90.0 + i) for i in range(5)]
+    for i, (ts, val) in enumerate(result["Т3"]):
+        assert ts >= day2_ts, f"point {i}: day1 timestamp leaked (ts={ts} < day2_ts={day2_ts})"
+        assert ts < day2_ts + 86400, f"point {i}: timestamp out of expected range"
+        assert ts == pytest.approx(expected_day2[i][0], abs=1e-3), f"point {i}: ts mismatch"
+        assert val == pytest.approx(expected_day2[i][1], abs=1e-6), f"point {i}: value mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -291,13 +269,17 @@ def test_query_merges_sqlite_and_parquet(tmp_path: Path) -> None:
     old_db_name = f"data_{old_day.date().isoformat()}.db"
     rel_old = f"year=2026/month=03/{old_db_name}.parquet"
     parquet_old = archive_dir / rel_old
-    old_readings = [(old_day.timestamp() + i, "ls218s", "Т4", 70.0 + i, "K", "ok") for i in range(5)]
+    old_readings = [
+        (old_day.timestamp() + i, "ls218s", "Т4", 70.0 + i, "K", "ok") for i in range(5)
+    ]
     _create_parquet(parquet_old, old_readings)
 
     # Recent day — SQLite
     recent_day = datetime(2026, 4, 28, tzinfo=UTC)
     recent_db_name = f"data_{recent_day.date().isoformat()}.db"
-    recent_readings = [(recent_day.timestamp() + i, "ls218s", "Т4", 85.0 + i, "K", "ok") for i in range(3)]
+    recent_readings = [
+        (recent_day.timestamp() + i, "ls218s", "Т4", 85.0 + i, "K", "ok") for i in range(3)
+    ]
     _create_sqlite_db(data_dir / recent_db_name, recent_readings)
 
     _write_index(
@@ -359,7 +341,9 @@ def test_query_channel_filter(tmp_path: Path) -> None:
     db_name = f"data_{day.date().isoformat()}.db"
 
     # Two channels
-    readings = [(base_ts + i, "ls218s", "Т1", 77.0, "K", "ok") for i in range(5)] + [
+    readings = [
+        (base_ts + i, "ls218s", "Т1", 77.0, "K", "ok") for i in range(5)
+    ] + [
         (base_ts + i, "ls218s", "Т2", 80.0, "K", "ok") for i in range(5)
     ]
     _create_sqlite_db(data_dir / db_name, readings)
@@ -411,484 +395,3 @@ def test_query_no_channels_filter_returns_all(tmp_path: Path) -> None:
     assert "Т1" in result
     assert "Т2" in result
     assert "Т3" in result
-
-
-# ---------------------------------------------------------------------------
-# NaN-доктрина: sentinel / legacy raw-inf rows mask to NaN on read (both sources)
-# ---------------------------------------------------------------------------
-
-
-def test_query_sqlite_masks_nonfinite(tmp_path: Path) -> None:
-    day = datetime(2026, 4, 14, tzinfo=UTC)
-    base_ts = day.timestamp()
-    db_path = tmp_path / f"data_{day.date().isoformat()}.db"
-    _create_sqlite_db(
-        db_path,
-        [
-            (base_ts, "ls218s", "Т1", 77.0, "K", "ok"),
-            (base_ts + 1, "ls218s", "Т1", SENTINEL, "K", "sensor_error"),
-            (base_ts + 2, "ls218s", "Т1", float("inf"), "K", "overrange"),  # legacy raw inf
-        ],
-    )
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "arch")
-    out = reader.query(None, day, day + timedelta(seconds=10))
-
-    vals = [v for _, v in out["Т1"]]
-    assert 77.0 in vals, "usable reading must survive"
-    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
-    assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"
-
-
-def test_query_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
-    """operator_log rows survive cold rotation and reach query_operator_log.
-
-    CR-3 preserves the operator_log audit trail as a companion Parquet when a
-    daily SQLite file is rotated and deleted. This pins that query_operator_log
-    reads it back — otherwise the archived audit trail is write-only.
-    """
-    import asyncio
-    import json
-
-    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
-
-    async def _seed_and_rotate() -> ColdRotationService:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_batch(
-            [
-                Reading(
-                    timestamp=day,
-                    instrument_id="ls218s",
-                    channel="T_STAGE",
-                    value=4.3,
-                    unit="K",
-                    status=ChannelStatus.OK,
-                )
-            ]
-        )
-        writer._write_operator_log_entry(
-            timestamp=day,
-            experiment_id="exp-1",
-            author="operator",
-            source="gui",
-            message="cooldown start",
-            tags=("cooldown", "note"),
-        )
-        await writer.stop()
-        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
-        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
-        assert results, "old day must have rotated to Parquet"
-        return service
-
-    asyncio.run(_seed_and_rotate())
-    assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
-
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
-    rows = reader.query_operator_log(day.replace(hour=0, minute=0), day.replace(hour=23, minute=59))
-    assert len(rows) == 1, "rotated cold operator_log entry must be readable"
-    ts, exp_id, author, source, message, tags = rows[0]
-    assert exp_id == "exp-1"
-    assert author == "operator"
-    assert source == "gui"
-    assert message == "cooldown start"
-    assert json.loads(tags) == ["cooldown", "note"]
-
-
-def test_query_operator_log_unions_hot_and_cold(tmp_path: Path) -> None:
-    """A hot day and a rotated cold day both surface, time-ordered."""
-    import asyncio
-
-    cold_day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
-    hot_day = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
-
-    async def _seed() -> None:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_operator_log_entry(
-            timestamp=cold_day,
-            experiment_id=None,
-            author="op",
-            source="gui",
-            message="cold entry",
-            tags=(),
-        )
-        writer._write_batch(
-            [
-                Reading(
-                    timestamp=cold_day,
-                    instrument_id="ls",
-                    channel="T",
-                    value=1.0,
-                    unit="K",
-                    status=ChannelStatus.OK,
-                )
-            ]
-        )
-        writer._write_operator_log_entry(
-            timestamp=hot_day,
-            experiment_id="exp-2",
-            author="op",
-            source="gui",
-            message="hot entry",
-            tags=(),
-        )
-        await writer.stop()
-        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
-        # cold_day is >30d before "now"; hot_day is within 30d → stays hot.
-        results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
-        assert results
-
-    asyncio.run(_seed())
-    assert not (tmp_path / "data_2026-04-14.db").exists()
-    assert (tmp_path / "data_2026-05-30.db").exists()
-
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
-    rows = reader.query_operator_log(cold_day.replace(hour=0), hot_day.replace(hour=23))
-    messages = [r[4] for r in rows]
-    assert messages == ["cold entry", "hot entry"], f"union/order wrong: {messages}"
-
-
-def test_query_operator_log_no_archive_dir(tmp_path: Path) -> None:
-    """No archive dir → hot-only, no crash (behaviour parity pin)."""
-    import asyncio
-
-    day = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
-
-    async def _seed() -> None:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_operator_log_entry(
-            timestamp=day,
-            experiment_id="exp-3",
-            author="op",
-            source="gui",
-            message="hot only",
-            tags=(),
-        )
-        await writer.stop()
-
-    asyncio.run(_seed())
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
-    rows = reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
-    assert [r[4] for r in rows] == ["hot only"]
-
-
-def test_query_operator_log_keeps_receipted_v1_schema_compatibility(tmp_path: Path) -> None:
-    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
-    archive_dir = tmp_path / "archive"
-    operator_rel = "year=2026/month=04/data_2026-04-14.operator_log.parquet"
-    operator_path = archive_dir / operator_rel
-    operator_path.parent.mkdir(parents=True)
-    pq.write_table(
-        pa.table(
-            {
-                "timestamp": pa.array([day.timestamp()], type=pa.float64()),
-                "experiment_id": pa.array(["exp"], type=pa.string()),
-                "author": pa.array(["operator"], type=pa.string()),
-                "source": pa.array(["gui"], type=pa.string()),
-                "message": pa.array(["legacy"], type=pa.string()),
-                "tags": pa.array(["[]"], type=pa.string()),
-            }
-        ),
-        operator_path,
-    )
-    _write_index(
-        archive_dir,
-        [
-            {
-                "original_name": "data_2026-04-14.db",
-                "archive_path": "year=2026/month=04/data_2026-04-14.parquet",
-                "operator_log_path": operator_rel,
-                "operator_log_rows": 1,
-            }
-        ],
-    )
-
-    rows = ArchiveReader(tmp_path, archive_dir).query_operator_log(day.replace(hour=0), day.replace(hour=23))
-
-    assert [row[4] for row in rows] == ["legacy"]
-
-
-@pytest.mark.parametrize("surface", ["readings", "bounded", "operator_log"])
-@pytest.mark.parametrize("receipt_fault", ["wrong", "missing"])
-def test_rotated_readers_reject_invalid_index_receipt(
-    tmp_path: Path,
-    surface: str,
-    receipt_fault: str,
-) -> None:
-    """Only the exact, completely receipted rotated artifact is readable."""
-    import asyncio
-
-    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
-    archive_dir = tmp_path / "archive"
-
-    async def _seed_and_rotate() -> None:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_batch([Reading(day, "ls", "T", 1.0, "K", ChannelStatus.OK)])
-        writer._write_operator_log_entry(
-            timestamp=day,
-            experiment_id="exp",
-            author="operator",
-            source="gui",
-            message="receipted",
-            tags=(),
-        )
-        await writer.stop()
-        service = ColdRotationService(data_dir=tmp_path, archive_dir=archive_dir, age_days=30)
-        assert await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
-
-    asyncio.run(_seed_and_rotate())
-    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
-    field = "operator_log_path" if surface == "operator_log" else "archive_path"
-    artifact = archive_dir / entry[field]
-    if receipt_fault == "missing":
-        checksum_field = "operator_log_checksum_md5" if surface == "operator_log" else "checksum_md5"
-        del entry[checksum_field]
-        (archive_dir / "index.json").write_text(json.dumps({"files": [entry]}), encoding="utf-8")
-    else:
-        table = pq.ParquetFile(artifact).read()
-        column = "message" if surface == "operator_log" else "value"
-        replacement = (
-            pa.array(["unreceipted"] * table.num_rows, type=pa.string())
-            if surface == "operator_log"
-            else pa.array([99.0] * table.num_rows, type=pa.float64())
-        )
-        pq.write_table(table.set_column(table.schema.get_field_index(column), column, replacement), artifact)
-
-    reader = ArchiveReader(tmp_path, archive_dir)
-    if surface == "bounded":
-        result = reader.query_reading_rows_bounded(
-            start=day.replace(hour=0),
-            end=day.replace(hour=0) + timedelta(days=1),
-            channels=("T",),
-            max_channels=1,
-            max_points_per_channel=10,
-            max_total_points=10,
-            max_retained_bytes=65_536,
-            deadline_monotonic=time.monotonic() + 10,
-        )
-        assert result.complete is False
-        assert {issue.code.value for issue in result.issues} == {"parquet_read"}
-    elif surface == "operator_log":
-        error = _assert_archive_unavailable(
-            lambda: reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
-        )
-        assert error.issue.code.value == "parquet_read"
-    else:
-        error = _assert_archive_unavailable(lambda: reader.query_rows(None, None, None))
-        assert error.issue.code.value == "parquet_read"
-
-
-def test_query_rows_rejects_missing_indexed_parquet(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    data_dir.mkdir()
-    hot_day = datetime(2026, 4, 15, tzinfo=UTC)
-    _create_sqlite_db(
-        data_dir / "data_2026-04-15.db",
-        [(hot_day.timestamp(), "ls", "T", 4.2, "K", "ok")],
-    )
-    _write_index(
-        archive_dir,
-        [
-            {
-                "original_name": "data_2026-04-14.db",
-                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
-                "row_count": 1,
-                "size_bytes_archive": 1,
-                "checksum_md5": "0" * 32,
-            }
-        ],
-    )
-
-    reader = ArchiveReader(data_dir, archive_dir)
-    error = _assert_archive_unavailable(lambda: reader.query_rows(None, None, None))
-
-    assert error.issue.code.value == "source_missing"
-
-
-def test_query_rows_rejects_corrupt_indexed_parquet(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    data_dir.mkdir()
-    archive_rel = "year=2026/month=04/data_2026-04-14.db.parquet"
-    corrupt = archive_dir / archive_rel
-    corrupt.parent.mkdir(parents=True)
-    corrupt.write_bytes(b"not a parquet file")
-    _write_index(
-        archive_dir,
-        [{"original_name": "data_2026-04-14.db", "archive_path": archive_rel}],
-    )
-
-    error = _assert_archive_unavailable(lambda: ArchiveReader(data_dir, archive_dir).query_rows(None, None, None))
-
-    assert error.issue.code.value in {"parquet_metadata", "parquet_read"}
-
-
-def test_query_rows_rejects_sqlite_with_invalid_readings_schema(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    db_path = data_dir / "data_2026-04-14.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE unrelated (value REAL)")
-    conn.close()
-
-    error = _assert_archive_unavailable(
-        lambda: ArchiveReader(data_dir, tmp_path / "archive").query_rows(None, None, None)
-    )
-
-    assert error.issue.code.value == "sqlite_read"
-
-
-def test_query_operator_log_rejects_missing_sqlite_table(tmp_path: Path) -> None:
-    day = datetime(2026, 4, 14, tzinfo=UTC)
-    _create_sqlite_db(
-        tmp_path / "data_2026-04-14.db",
-        [(day.timestamp(), "ls", "T", 4.2, "K", "ok")],
-    )
-
-    error = _assert_archive_unavailable(
-        lambda: ArchiveReader(tmp_path, tmp_path / "archive").query_operator_log(day, day + timedelta(hours=1))
-    )
-
-    assert error.issue.code.value == "sqlite_read"
-
-
-def test_query_operator_log_rejects_missing_indexed_sidecar(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    _write_index(
-        archive_dir,
-        [
-            {
-                "original_name": "data_2026-04-14.db",
-                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
-                "operator_log_path": ("year=2026/month=04/data_2026-04-14.db.operator_log.parquet"),
-                "operator_log_rows": 1,
-                "operator_log_size_bytes": 1,
-                "operator_log_checksum_md5": "0" * 32,
-                "operator_log_schema": "operator_log_v1",
-            }
-        ],
-    )
-
-    error = _assert_archive_unavailable(lambda: ArchiveReader(tmp_path, archive_dir).query_operator_log(None, None))
-
-    assert error.issue.code.value == "source_missing"
-
-
-def test_query_operator_log_rejects_unproven_empty_cold_journal(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    _write_index(
-        archive_dir,
-        [
-            {
-                "original_name": "data_2026-04-14.db",
-                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
-            }
-        ],
-    )
-
-    error = _assert_archive_unavailable(lambda: ArchiveReader(tmp_path, archive_dir).query_operator_log(None, None))
-
-    assert error.issue.code.value == "archive_index_invalid"
-
-
-def test_empty_archive_queries_are_complete_empty_success(tmp_path: Path) -> None:
-    data_dir = tmp_path / "data"
-    archive_dir = tmp_path / "archive"
-    data_dir.mkdir()
-    _write_index(archive_dir, [])
-    reader = ArchiveReader(data_dir, archive_dir)
-
-    assert reader.query_rows(None, None, None) == []
-    assert reader.query_operator_log(None, None) == []
-
-
-# ---------------------------------------------------------------------------
-# F2: query() (archived-wins-else-hot) and query_operator_log() (skips hot for
-# rotated days) must, like query_rows(), UNION a restored/backdated hot DB with
-# the archive for an overlap day — else the restored rows are silently shadowed
-# on the history + journal paths while exports (query_rows) already see them.
-# ---------------------------------------------------------------------------
-
-
-def test_query_and_operator_log_union_restored_hot_over_archived_day(tmp_path: Path) -> None:
-    import asyncio
-
-    day = datetime(2026, 4, 14, 12, 0, tzinfo=UTC)
-    dup_ts = day.replace(hour=12)
-    new_ts = day.replace(hour=13)
-    db_name = "data_2026-04-14.db"
-    archive_dir = tmp_path / "archive"
-
-    async def _seed_rotate() -> None:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_batch([Reading(dup_ts, "ls", "T", 1.0, "K", ChannelStatus.OK)])
-        writer._write_operator_log_entry(
-            timestamp=dup_ts, experiment_id=None, author="op", source="gui", message="orig", tags=()
-        )
-        await writer.stop()
-        svc = ColdRotationService(data_dir=tmp_path, archive_dir=archive_dir, age_days=30)
-        assert await svc.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
-
-    asyncio.run(_seed_rotate())
-    assert not (tmp_path / db_name).exists(), "rotation must delete the hot DB"
-
-    async def _restore_backdated() -> None:
-        writer = SQLiteWriter(tmp_path)
-        writer._write_batch(
-            [
-                Reading(dup_ts, "ls", "T", 1.0, "K", ChannelStatus.OK),  # exact duplicate
-                Reading(new_ts, "ls", "T", 2.5, "K", ChannelStatus.OK),  # restored-only
-            ]
-        )
-        writer._write_operator_log_entry(
-            timestamp=dup_ts, experiment_id=None, author="op", source="gui", message="orig", tags=()
-        )  # duplicate
-        writer._write_operator_log_entry(
-            timestamp=new_ts, experiment_id=None, author="op", source="gui", message="restored", tags=()
-        )  # restored-only
-        await writer.stop()
-
-    asyncio.run(_restore_backdated())
-    assert (tmp_path / db_name).exists(), "backdated hot DB now overlaps the archive"
-
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=archive_dir)
-
-    # query(): restored reading must surface; the exact-key duplicate dedups to one.
-    res = reader.query(["T"], day.replace(hour=0), day.replace(hour=23))
-    vals = sorted(v for _t, v in res["T"])
-    assert vals == [1.0, 2.5], f"query() must union restored hot over archive, got {vals}"
-
-    # query_operator_log(): restored journal entry must surface, duplicate deduped.
-    ol = reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
-    msgs = sorted(r[4] for r in ol)
-    assert msgs == ["orig", "restored"], f"operator_log must union+dedup, got {msgs}"
-
-
-def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
-    day = datetime(2026, 4, 14, tzinfo=UTC)
-    base_ts = day.timestamp()
-    archive_relative = "year=2026/month=04/data_2026-04-14.parquet"
-    parquet_path = tmp_path / "arch" / archive_relative
-    _create_parquet(
-        parquet_path,
-        [
-            (base_ts, "ls218s", "Т1", 77.0, "K", "ok"),
-            (base_ts + 1, "ls218s", "Т1", SENTINEL, "K", "sensor_error"),
-            (base_ts + 2, "ls218s", "Т1", float("inf"), "K", "overrange"),
-        ],
-    )
-    _write_index(
-        tmp_path / "arch",
-        [
-            {
-                "original_name": "data_2026-04-14.db",
-                "archive_path": archive_relative,
-            },
-        ],
-    )
-    reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "arch")
-    out = reader.query(None, day, day + timedelta(seconds=10))
-
-    vals = [v for _, v in out["Т1"]]
-    assert 77.0 in vals, "usable reading must survive"
-    assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"
-    assert sum(1 for v in vals if math.isnan(v)) == 2, "sentinel + legacy inf must both mask"

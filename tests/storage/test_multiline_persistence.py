@@ -38,18 +38,17 @@ def _all_channels(db_path: Path) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
-async def test_multiline_reading_writes_to_sqlite(
+async def test_multiline_reading_writes_to_sqlite_before_broker_publish(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    """Proves the SQLiteWriter side of persistence: regardless of channel name,
-    every Reading handed to write_immediate lands in the readings table.
+    """The persistence-first invariant lives at the Scheduler level
+    (scheduler.py:390 → sqlite_writer.write_immediate before
+    broker.publish_batch). The SQLiteWriter itself does no channel
+    filtering, so MultiLine readings persist by construction.
 
-    Note: the persistence-before-publish ordering invariant (scheduler.py:390
-    sqlite_writer.write_immediate → broker.publish_batch) is tested at the
-    Scheduler level in tests/core/test_persistence_ordering.py, not here.
-    This test proves SQLiteWriter accepts MultiLine channel names without
-    filtering — the writer treats channel as an opaque string.
+    This test proves the SQLiteWriter side: regardless of channel name,
+    every Reading we hand to it lands in the readings table.
     """
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
@@ -124,6 +123,47 @@ async def test_multiline_persistence_path_is_channel_agnostic(
     )
 
 
+def test_multiline_parquet_archive_is_channel_agnostic() -> None:
+    """parquet_archive.py reads from the SQLite readings table without
+    a channel filter. Verify the source matches that contract so a
+    future regression that adds a hardcoded filter is caught here.
+    """
+    import inspect
+
+    from cryodaq.storage import parquet_archive
+
+    src = inspect.getsource(parquet_archive)
+    # The archive reads readings via SELECT; ensure no hardcoded
+    # 'WHERE channel NOT LIKE' or 'channel != "MultiLine_*"' filter.
+    forbidden = (
+        "channel NOT LIKE",
+        "channel != 'MultiLine",
+        "channel != \"MultiLine",
+        "MultiLine NOT IN",
+    )
+    for f in forbidden:
+        assert f not in src, f"parquet_archive contains channel filter '{f}'"
+
+
+def test_multiline_cold_rotation_is_channel_agnostic() -> None:
+    """F17 cold rotation reads SQLite rows for archival; the same
+    no-filter contract applies.
+    """
+    import inspect
+
+    from cryodaq.storage import cold_rotation
+
+    src = inspect.getsource(cold_rotation)
+    forbidden = (
+        "channel NOT LIKE",
+        "channel != 'MultiLine",
+        "channel != \"MultiLine",
+        "MultiLine NOT IN",
+    )
+    for f in forbidden:
+        assert f not in src, f"cold_rotation contains channel filter '{f}'"
+
+
 def test_multiline_parquet_archive_runtime_channel_agnostic(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -150,11 +190,7 @@ def test_multiline_parquet_archive_runtime_channel_agnostic(
         _ml_reading("MultiLine_1/env_humidity", 45.0, ts=day.replace(second=2)),
     ]
     writer._write_batch(mixed)
-    # Close (not just drop) the connection so Windows can clean up the temp DB
-    # without a WinError 32 on the still-open file handle.
-    if writer._conn is not None:
-        writer._conn.close()
-    writer._conn = None
+    writer._conn = None  # release connection
 
     assert db_path.exists(), "SQLiteWriter must create the daily DB file"
 
@@ -227,12 +263,6 @@ def test_multiline_cold_rotation_runtime_channel_agnostic(
     ]
     writer = SQLiteWriter(data_dir)
     writer._write_batch(mixed)
-    # Close (not just drop) the connection: cold rotation renames/deletes the
-    # source .db, and Windows refuses that while a file handle is still open
-    # (WinError 32). Dropping the ref relies on GC, which Windows doesn't
-    # release in time.
-    if writer._conn is not None:
-        writer._conn.close()
     writer._conn = None
 
     # Rename to the correct old-day filename (SQLiteWriter uses today's date)

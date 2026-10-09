@@ -6,17 +6,9 @@ import asyncio
 
 import pytest
 
-from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
+from cryodaq.core.broker import DataBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
-from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.base import InstrumentDriver, Reading
-from cryodaq.drivers.contracts import (
-    AcquisitionTiming,
-    BusDescriptor,
-    DriverRuntimeBinding,
-    DriverTrustClass,
-    _issue_registry_runtime_binding,
-)
 
 # ---------------------------------------------------------------------------
 # Concrete mock driver for use in all scheduler tests
@@ -43,19 +35,6 @@ class MockDriver(InstrumentDriver):
     async def read_channels(self) -> list[Reading]:
         self.read_calls += 1
         return [Reading.now("CH1", 4.2, "K", instrument_id="test")]
-
-
-def _bus_binding(driver: InstrumentDriver, bus_id: str, poll_interval_s: float) -> DriverRuntimeBinding:
-    binding = _issue_registry_runtime_binding(
-        driver=driver,
-        timing=AcquisitionTiming(1.0, 1.0, poll_interval_s),
-        registry_provenance="test:explicit-bus",
-        trust_class=DriverTrustClass.PASSIVE_EXTENSION,
-        bus_descriptor=BusDescriptor(bus_id),
-    )
-    with driver_registry._RUNTIME_BINDINGS_LOCK:
-        driver_registry._RUNTIME_BINDINGS[driver] = binding
-    return binding
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +74,7 @@ async def test_mock_driver_polled(broker: DataBroker) -> None:
     queue = await broker.subscribe("test_consumer", maxsize=100)
 
     driver = MockDriver("poller")
-    sched = Scheduler(broker, publish_unpersisted_readings=True)
+    sched = Scheduler(broker)
     sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.01))
 
     await sched.start()
@@ -105,30 +84,6 @@ async def test_mock_driver_polled(broker: DataBroker) -> None:
 
     assert reading.channel == "CH1"
     assert abs(reading.value - 4.2) < 1e-9
-    assert PERSISTENCE_AUTHORITATIVE_METADATA_KEY not in reading.metadata
-
-
-async def test_successful_sqlite_commit_marks_published_reading_authoritative(
-    broker: DataBroker,
-) -> None:
-    class _Writer:
-        is_disk_full = False
-
-        async def write_immediate(self, readings: list[Reading]) -> bool:
-            assert readings
-            return True
-
-    queue = await broker.subscribe("authority_consumer", maxsize=10)
-    driver = MockDriver("authority")
-    sched = Scheduler(broker, sqlite_writer=_Writer())
-    sched.add(InstrumentConfig(driver=driver))
-    state = sched._instruments[driver.name]
-
-    await sched._process_readings(state, await driver.read_channels())
-
-    reading = queue.get_nowait()
-    queue.task_done()
-    assert reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +159,8 @@ async def test_gpib_bus_grouping(broker: DataBroker) -> None:
     usb_driver = MockDriver("keithley")
 
     sched = Scheduler(broker)
-    sched.add(InstrumentConfig(driver=ls1, runtime_binding=_bus_binding(ls1, "GPIB0", 0.01)))
-    sched.add(InstrumentConfig(driver=ls2, runtime_binding=_bus_binding(ls2, "GPIB0", 0.01)))
+    sched.add(InstrumentConfig(driver=ls1, poll_interval_s=0.01, resource_str="GPIB0::12::INSTR"))
+    sched.add(InstrumentConfig(driver=ls2, poll_interval_s=0.01, resource_str="GPIB0::11::INSTR"))
     sched.add(InstrumentConfig(driver=usb_driver, poll_interval_s=0.01, resource_str="USB0::MOCK"))
 
     await sched.start()
@@ -249,35 +204,15 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
             await super().connect()
             concurrent_count -= 1
 
-    # Each driver signals its own event when connect() finishes.
-    d1_connected = asyncio.Event()
-    d2_connected = asyncio.Event()
-
-    _orig_OrderedDriver_connect = OrderedDriver.connect
-
-    async def _patched_connect_d1(self) -> None:
-        await _orig_OrderedDriver_connect(self)
-        d1_connected.set()
-
-    async def _patched_connect_d2(self) -> None:
-        await _orig_OrderedDriver_connect(self)
-        d2_connected.set()
-
     d1 = OrderedDriver("gpib_first")
     d2 = OrderedDriver("gpib_second")
-    d1.connect = lambda: _patched_connect_d1(d1)  # type: ignore[method-assign]
-    d2.connect = lambda: _patched_connect_d2(d2)  # type: ignore[method-assign]
 
     sched = Scheduler(broker)
-    sched.add(InstrumentConfig(driver=d1, runtime_binding=_bus_binding(d1, "GPIB0", 0.05)))
-    sched.add(InstrumentConfig(driver=d2, runtime_binding=_bus_binding(d2, "GPIB0", 0.05)))
+    sched.add(InstrumentConfig(driver=d1, poll_interval_s=0.05, resource_str="GPIB0::12::INSTR"))
+    sched.add(InstrumentConfig(driver=d2, poll_interval_s=0.05, resource_str="GPIB0::11::INSTR"))
 
     await sched.start()
-    # Wait until both connects complete — no fixed sleep.
-    await asyncio.wait_for(
-        asyncio.gather(d1_connected.wait(), d2_connected.wait()),
-        timeout=5.0,
-    )
+    await asyncio.sleep(0.3)
     await sched.stop()
 
     # Both must have connected
@@ -285,7 +220,8 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     assert "gpib_second" in connect_order, f"gpib_second never connected; order={connect_order}"
     # Sequential invariant: at no point were two connects in-flight simultaneously
     assert max_concurrent == 1, (
-        f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. connect_order={connect_order}"
+        f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. "
+        f"connect_order={connect_order}"
     )
 
 

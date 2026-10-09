@@ -36,7 +36,7 @@ Enforce in code via `# DESIGN: RULE-DATA-XXX` comment marker.
 
 **Rationale:** Animated number-counting (common in dashboard marketing UIs) is lying in a lab context. Operator seeing "4.27 K" during the animation might record or act on that value — but it was never actually measured. Only 4.21 and 4.30 existed as real measurements. Interpolation invents data that didn't exist.
 
-Operator trust: once an operator sees the UI animate numbers, they permanently doubt every reading is real vs animated.
+Operator trust: once an operator sees Claude's UI animate numbers, they permanently doubt every reading is real vs animated.
 
 **Applies to:** SensorCell, Keithley value displays, pressure readout, all numeric live data
 
@@ -75,19 +75,13 @@ def update_sensor_value(self, value: float):
 
 **TL;DR:** Don't refresh displayed numbers faster than 2 times per second. Human eye can't read faster; more is noise.
 
-**Statement:** Live numeric displays and chart repaints refresh at most at 2Hz
-(every 500ms). Backend acquisition, persistence, alarm evaluation, and the
-evidence buffer remain full-rate. Each numeric readout shows the latest sample
-at the tick; plots preserve interval extrema or event markers so a short
-excursion cannot disappear between repaints.
+**Statement:** Live numeric displays refresh at most at 2Hz (every 500ms). Backend may poll sensors at higher rates (LakeShore supports 10Hz), but GUI display is throttled. Charts may update at higher rate (line drawing perception tolerates 10Hz+), but their associated numeric readouts throttle.
 
 **Rationale:** At rates above ~3Hz, digits change faster than human eye tracks. Operator sees a blur, not a value. Also wasteful: a 2Hz update of 30 sensor cells is 60 repaint ops/sec; 10Hz is 300 ops/sec for no perceptible benefit.
 
-Charts retain more evidence than digits, but they use the same bounded repaint
-cadence. Peak-preserving decimation retains interval shape without producing
-unreadable motion or increasing repaint load.
+Charts are different: the line has shape; a shape updating at 10Hz is still readable as trend.
 
-**Applies to:** SensorCell, numeric readouts, TopWatchBar values, Keithley displays, live plots
+**Applies to:** SensorCell, numeric readouts, TopWatchBar values, Keithley displays
 
 **Example (good):**
 
@@ -393,8 +387,6 @@ For plots with ≤8 traces, use colors in palette order. For 9+ traces:
 1. Wrap palette (trace 9 reuses color 1)
 2. Differentiate by line dash pattern (solid → dashed → dotted)
 3. NEVER introduce new saturated colors to "get more distinction"
-
-Palette entries MUST remain disjoint from every bundled safety/status color (RULE-COLOR-011). A visible legend or direct label is required for every series, so color is never the sole identity cue. Status colors remain reserved for labeled threshold regions and event annotations.
 
 **Rationale:** Palette is calibrated for perceptual balance. Adding a bright pure color to reach trace 9 destroys balance — one trace visually dominates. Wrapping + dash distinction is the industry-standard approach (see matplotlib/seaborn conventions).
 

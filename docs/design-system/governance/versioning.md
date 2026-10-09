@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-20
+last_updated: 2026-04-17
 ---
 
 # Versioning
@@ -20,18 +20,12 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.3` — operator-state semantic correction: safety green
-is reserved for demonstrated health, ordinary activity/progress uses accent or
-neutral information, and new presentation producers use the single caution
-rung (see `CHANGELOG.md`).
+**Current version:** `1.0.1` — audit fix pass against the v1.0.0 baseline (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
-- Top of `docs/design-system/README.md`
-- `docs/design-system/MANIFEST.md`
 - `docs/design-system/CHANGELOG.md` — human-readable release notes
-- `docs/design-system/GUI_MIGRATION_INVENTORY.md`
-- `docs/design-system/cryodaq-primitives/tray-status.md`
+- Top of `docs/design-system/README.md`
 - Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
 
 ## What's in MAJOR
@@ -138,7 +132,7 @@ Traditional semver assumes a software API. For a design system — which is spec
 - A widget built to v1.x spec no longer matches v2.x spec without modification
 - A theme.py import fails because a token was removed
 - An existing panel's style fails a new lint rule it previously passed
-- A previously-compliant audit now flags a violation
+- A previously-compliant Codex audit now flags a violation
 
 ### Not breaking (despite feeling like change)
 
@@ -217,20 +211,12 @@ Design-system: v1.1.0 (adds ShiftHandover widget, SHIFT_* tokens)
 6. Tag release in git
 7. Announce to operator team + any external consumers
 
-## Current trajectory
+## Post-1.0.0 trajectory
 
 Anticipated versions:
 
-- **v2.0.0** (2026): breaking descriptor-qualified instrument identity API;
-  visual tokens and component anatomy otherwise remain unchanged.
-- **v3.0.0** (2026): the complete GUI corpus must be informative and
-  intentionally beautiful. The breaking compliance expansion rejects generic
-  LabVIEW-style dashboard assembly and requires migration of touched surfaces;
-  safety truth, legibility, provenance, freshness, uncertainty, and the next
-  safe action retain precedence.
-- **Later releases:** light theme, three-layer token migration, or palette
-  restructuring require their own compatibility analysis and release notes;
-  they are not implied by the v2.0.0 identity cutover.
+- **v1.x** (2026-2027): iterations of current design language; component additions; accessibility refinements; operator-feedback-driven tweaks
+- **v2.0** (2027+): light theme introduction OR three-layer token migration OR major palette shift. Timing depends on product need.
 
 ## Rules applied
 
@@ -263,9 +249,3 @@ Anticipated versions:
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.
-- 2026-07-12 (v1.2.0): Reconciled canonical version metadata with the operator-truth, replay-gating, and POD composition contract.
-- 2026-07-14 (v2.0.0): Removed the public bare-reading InstrumentsPanel
-  ingress in favor of descriptor-qualified identity, a caller-breaking API
-  change under this policy.
-- 2026-07-14 (v3.0.0): Added the breaking corpus-wide informative/beautiful
-  composition principle and generic LabVIEW-dashboard anti-pattern.

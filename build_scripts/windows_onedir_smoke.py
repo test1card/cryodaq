@@ -62,6 +62,19 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 )
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
+_FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_REQUIRED_SMOKE_CELLS = (
+    "frozen_driver_imports",
+    "gui_startup_offscreen",
+    "report_render_unicode",
+    "windows_job_timeout",
+    "assistant_h2_agent_off",
+    "assistant_h2_agent_missing",
+    "assistant_replay_exact_off",
+    "assistant_h3_only_allowed_idle",
+    "assistant_h3_only_restart_lock_release",
+)
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -382,6 +395,64 @@ def _seed_experiment(data_dir: Path, experiment_id: str) -> None:
     )
 
 
+def frozen_driver_import_command(executable: Path) -> list[str]:
+    if executable.name.lower() != "cryodaq.exe":
+        raise ValueError("smoke target must be CryoDAQ.exe")
+    return [str(executable), "--mode=verify-frozen-drivers"]
+
+
+def _expected_frozen_driver_import_payload() -> dict[str, object]:
+    from cryodaq.drivers.registry import ALLOWLISTED_DRIVER_MODULES, DRIVER_REGISTRY_COMPAT_VERSION
+
+    return {
+        "schema": 1,
+        "status": "PASS",
+        "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
+        "modules": list(ALLOWLISTED_DRIVER_MODULES),
+    }
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"frozen driver import payload repeats field {key!r}")
+        payload[key] = value
+    return payload
+
+
+def _parse_frozen_driver_import_payload(stdout: bytes) -> dict[str, object]:
+    text = stdout.decode("utf-8", errors="strict")
+    records = [
+        line.removeprefix(_FROZEN_DRIVER_IMPORT_PREFIX)
+        for line in text.splitlines()
+        if line.startswith(_FROZEN_DRIVER_IMPORT_PREFIX)
+    ]
+    if len(records) != 1:
+        raise ValueError(f"frozen driver import emitted {len(records)} result records instead of one")
+    payload = json.loads(records[0], object_pairs_hook=_unique_json_object)
+    expected = _expected_frozen_driver_import_payload()
+    expected_fields = {"schema", "status", "registry_compat_version", "modules", "module_files"}
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise ValueError("frozen driver import payload does not have the exact field set")
+    modules = payload["modules"]
+    module_files = payload["module_files"]
+    if (
+        type(payload["schema"]) is not int
+        or type(payload["status"]) is not str
+        or type(payload["registry_compat_version"]) is not int
+        or type(modules) is not list
+        or any(type(module) is not str for module in modules)
+        or type(module_files) is not dict
+        or set(module_files) != set(modules)
+        or any(type(path) is not str or not path for path in module_files.values())
+    ):
+        raise ValueError("frozen driver import payload does not have exact field types")
+    if {key: payload[key] for key in expected} != expected:
+        raise ValueError(f"frozen driver import payload does not match the source registry: {payload!r}")
+    return expected
+
+
 def frozen_report_command(executable: Path, experiment_id: str, generation_id: str) -> list[str]:
     if executable.name.lower() != "cryodaq.exe":
         raise ValueError("smoke target must be CryoDAQ.exe")
@@ -406,6 +477,155 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
         "stdout_sha256": _sha256(stdout),
         "stderr": stderr.name,
         "stderr_sha256": _sha256(stderr),
+    }
+
+
+# Bounded so a wedged child cannot wedge the harness. This drain runs only AFTER a
+# cell has already failed and its own deadline has already been decided, so it
+# widens no cell's bound - it only decides whether the failure leaves evidence.
+_FAILURE_DRAIN_TIMEOUT_S = 10.0
+
+
+def _timeout_partial_output(error: BaseException | None) -> tuple[bytes, bytes]:
+    """What a `TimeoutExpired` had already collected before it gave up.
+
+    PLATFORM-ASYMMETRIC, which is why this is a named helper and not an inline
+    getattr. Read in CPython 3.14.6 `subprocess.py`:
+
+      - POSIX, lines 1264-1270: `_check_timeout` raises
+        `TimeoutExpired(..., output=b"".join(stdout_seq), stderr=...)`, so the
+        partial reads ARE attached.
+      - Windows, lines 1656/1664/1668: `_communicate` raises
+        `TimeoutExpired(self.args, orig_timeout)` bare. Its reader threads are
+        blocked inside a single `read()` to EOF, so the partial bytes never reach
+        `_stdout_buff` and there is nothing to attach.
+
+    So this recovers evidence wherever the runtime hands it over and returns empty
+    where the runtime never had it. It does not pretend to the caller either way.
+    """
+
+    output = getattr(error, "output", None)
+    stderr = getattr(error, "stderr", None)
+    return (
+        output if isinstance(output, bytes) else b"",
+        stderr if isinstance(stderr, bytes) else b"",
+    )
+
+
+def _merge_partial_output(initial: bytes, drained: bytes) -> bytes:
+    """Keep bytes from both timeout attempts without duplicating cumulative output."""
+
+    if initial in drained:
+        return drained
+    if drained in initial:
+        return initial
+    return initial + drained
+
+
+def _preserve_failure_evidence(
+    process: subprocess.Popen[bytes],
+    command: list[str],
+    evidence_dir: Path,
+    name: str,
+    failure: BaseException | None = None,
+) -> None:
+    """Write what the child produced before this cell failed, then let it fail.
+
+    `communicate(timeout=...)` raises TimeoutExpired WITHOUT returning the output it
+    has already collected, and the failure paths here re-raised before `_write_log`
+    ran. So the one failure anyone actually needs to diagnose - a child that will not
+    exit - was the only failure that left NOTHING to diagnose it with. That is
+    exactly backwards.
+
+    Python's own guidance after a TimeoutExpired is to kill the child and call
+    `communicate()` again; the callers have already terminated and waited by the time
+    they reach here, so this second call joins the reader threads and hands back
+    whatever was buffered.
+
+    This never changes an outcome. The caller still re-raises and the cell still
+    fails; every step is suppressed so a failure to collect evidence cannot replace
+    the real error with a bookkeeping one.
+    """
+
+    poll_error: str | None = None
+    try:
+        returncode_at_drain = process.poll()
+    except Exception as exc:
+        returncode_at_drain = None
+        poll_error = type(exc).__name__
+    with suppress(Exception):
+        _atomic_json(
+            evidence_dir / f"{name}.failure-drain.json",
+            {
+                "schema": 1,
+                "process_poll_at_drain": returncode_at_drain,
+                "process_poll_error": poll_error,
+            },
+        )
+
+    stdout, stderr = _timeout_partial_output(failure)
+    drained_stdout: object = None
+    drained_stderr: object = None
+    try:
+        drained_stdout, drained_stderr = process.communicate(timeout=_FAILURE_DRAIN_TIMEOUT_S)
+    except Exception as drain_error:
+        # The DRAIN can time out too. An outliving descendant that inherited the
+        # parent's stdout or stderr handle keeps the pipe open and the reader
+        # blocked, which is exactly the wedged-process-tree shape this whole change
+        # exists to serve. Swallowing that attempt and writing empty files would be
+        # worse than the original gap, because empty files LOOK like captured
+        # evidence. Take whatever it managed to collect instead.
+        drained_stdout, drained_stderr = _timeout_partial_output(drain_error)
+    if not isinstance(drained_stdout, bytes):
+        drained_stdout = b""
+    if not isinstance(drained_stderr, bytes):
+        drained_stderr = b""
+    # A retry normally returns cumulative output, but keep both byte strings if
+    # the runtime hands us distinct partial reads. Neither timeout is allowed to
+    # discard evidence from the other.
+    stdout = _merge_partial_output(stdout, drained_stdout)
+    stderr = _merge_partial_output(stderr, drained_stderr)
+    with suppress(Exception):
+        _write_log(
+            evidence_dir,
+            name,
+            subprocess.CompletedProcess(command, process.returncode, stdout, stderr),
+        )
+
+
+def _run_frozen_driver_import_cell(
+    executable: Path,
+    root: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    command = frozen_driver_import_command(executable)
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.update({"CRYODAQ_ROOT": str(root), "PYTHONUTF8": "1"})
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    logs = _write_log(evidence_dir, "frozen_driver_imports", completed)
+    if completed.returncode != 0:
+        raise RuntimeError(f"frozen_driver_imports returned {completed.returncode}")
+    try:
+        validation = _parse_frozen_driver_import_payload(completed.stdout)
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"frozen_driver_imports produced invalid evidence: {exc}") from exc
+    return {
+        "name": "frozen_driver_imports",
+        "status": "PASS",
+        "duration_s": round(time.monotonic() - started, 3),
+        "argv": command,
+        "runtime": logs,
+        "validation": validation,
     }
 
 
@@ -451,6 +671,64 @@ def _run_report_cell(
     }
 
 
+def _create_gui_job(process: subprocess.Popen[bytes]) -> Any:
+    """Assign the suspended GUI to its job before application code can run."""
+
+    from cryodaq.report_process import _create_windows_job
+
+    return _create_windows_job(process)
+
+
+def _resume_gui_process(process: subprocess.Popen[bytes]) -> None:
+    """Resume the GUI only after its descendant-tracking job owns it."""
+
+    import psutil
+
+    psutil.Process(process.pid).resume()
+
+
+def _windows_job_active_process_count(job: Any) -> int:
+    """Read the kernel-owned active member count before closing the GUI job."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicAccountingInformation(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_longlong),
+            ("TotalKernelTime", ctypes.c_longlong),
+            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    handle = getattr(job, "_handle", None)
+    if not handle:
+        raise RuntimeError("gui_startup_offscreen job handle is unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    information = BasicAccountingInformation()
+    if not kernel32.QueryInformationJobObject(
+        handle,
+        1,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        None,
+    ):
+        raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+    return int(information.ActiveProcesses)
+
+
 def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> dict[str, Any]:
     """Prove the bundled GUI imports and stays alive in an offscreen Qt session."""
 
@@ -469,9 +747,12 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _WINDOWS_CREATE_SUSPENDED),
     )
+    gui_job: Any = None
     try:
+        gui_job = _create_gui_job(process)
+        _resume_gui_process(process)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -479,12 +760,25 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
             time.sleep(0.1)
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
-    except BaseException:
+        job_active_processes = _windows_job_active_process_count(gui_job)
+        if job_active_processes != 0:
+            raise RuntimeError(
+                f"gui_startup_offscreen descendants survived shutdown: active_processes={job_active_processes}"
+            )
+    except BaseException as failure:
         with suppress(Exception):
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
+        if gui_job is not None:
+            with suppress(Exception):
+                gui_job.close()
+            gui_job = None
+        _preserve_failure_evidence(process, command, evidence_dir, "gui_startup_offscreen", failure)
         raise
+    finally:
+        if gui_job is not None:
+            gui_job.close()
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
     if b"Traceback (most recent call last)" in stdout + stderr:
@@ -496,6 +790,7 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         "status": "PASS",
         "duration_s": round(time.monotonic() - started, 3),
         "argv": command,
+        "job_active_processes_after_shutdown": job_active_processes,
         "runtime": logs,
     }
 
@@ -706,11 +1001,12 @@ def _run_assistant_cell(
             raise RuntimeError("exact-off assistant unexpectedly created H3 state")
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
-    except BaseException:
+    except BaseException as failure:
         with suppress(Exception):
             process.terminate()
         with suppress(Exception):
             process.wait(timeout=5)
+        _preserve_failure_evidence(process, command, evidence_dir, name, failure)
         raise
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     file_log = assistant_log.read_bytes() if assistant_log.is_file() else b""
@@ -804,6 +1100,17 @@ def smoke_summary(cells: list[dict[str, Any]]) -> tuple[str, str | None]:
         return "FAIL", "REQUIRED_CELLS_NOT_RUN"
     if not cells or any(status != "PASS" for status in statuses):
         return "FAIL", "INVALID_CELL_STATUS"
+    if any(type(name) is not str or not name for name in _REQUIRED_SMOKE_CELLS) or len(_REQUIRED_SMOKE_CELLS) != len(
+        set(_REQUIRED_SMOKE_CELLS)
+    ):
+        return "FAIL", "INVALID_REQUIRED_CELL_ROSTER"
+    cell_names = tuple(cell.get("name") for cell in cells)
+    if any(type(name) is not str or not name for name in cell_names):
+        return "FAIL", "INVALID_CELL_NAME"
+    if len(cell_names) != len(set(cell_names)):
+        return "FAIL", "DUPLICATE_CELL_NAME"
+    if cell_names != _REQUIRED_SMOKE_CELLS:
+        return "FAIL", "REQUIRED_CELL_ROSTER_MISMATCH"
     return "PASS", None
 
 
@@ -829,6 +1136,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
+        cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
         cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
         cells.append(
             _run_report_cell(

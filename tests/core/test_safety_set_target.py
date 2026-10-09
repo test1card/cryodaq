@@ -5,16 +5,6 @@ from __future__ import annotations
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
-from tests.qualification_support import issued_test_qualification_receipt
-
-
-def _manager(broker: SafetyBroker, driver: Keithley2604B) -> SafetyManager:
-    return SafetyManager(
-        broker,
-        keithley_driver=driver,
-        mock=True,
-        qualification_receipt=issued_test_qualification_receipt(),
-    )
 
 
 async def _make_running(sm: SafetyManager, channel: str = "smua") -> None:
@@ -32,7 +22,7 @@ async def test_update_target_active_channel() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_target(0.8, channel="smua")
@@ -47,7 +37,7 @@ async def test_update_target_exceeds_max_power() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_target(999.0, channel="smua")
@@ -61,7 +51,7 @@ async def test_update_target_inactive_channel() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
 
     result = await sm.update_target(0.5, channel="smua")
     assert not result["ok"]
@@ -74,7 +64,7 @@ async def test_update_target_fault_latched() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     # Force fault
@@ -92,7 +82,7 @@ async def test_update_target_zero_rejected() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_target(0.0, channel="smua")
@@ -111,7 +101,7 @@ async def test_update_limits_v_comp() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_limits(channel="smua", v_comp=20.0)
@@ -126,7 +116,7 @@ async def test_update_limits_i_comp() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_limits(channel="smua", i_comp=0.5)
@@ -141,7 +131,7 @@ async def test_update_limits_exceeds_max_voltage() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_limits(channel="smua", v_comp=999.0)
@@ -155,7 +145,7 @@ async def test_update_limits_exceeds_max_current() -> None:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = _manager(broker, k)
+    sm = SafetyManager(broker, keithley_driver=k, mock=True)
     await _make_running(sm, "smua")
 
     result = await sm.update_limits(channel="smua", i_comp=999.0)

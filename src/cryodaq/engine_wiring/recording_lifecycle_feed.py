@@ -48,7 +48,10 @@ class RecordingLifecycleFeed:
         "__loop",
         "__owner",
         "__pid",
+        "__persistence_acquisition_epoch",
         "__persistence_active",
+        "__persistence_recoverable",
+        "__persistence_recovery_floor",
         "__persistence_authority",
         "__persistence_epoch",
         "__persistence_freshness_s",
@@ -99,6 +102,24 @@ class RecordingLifecycleFeed:
         self.__persistence_outcome_revision = 0
         self.__persistence_source_revision = 0
         self.__persistence_epoch: str | None = None
+        # The acquisition epoch this segment is bound to, kept apart from the
+        # segment's own id. They start equal, but a recovery segment continues
+        # the SAME acquisition under a NEW persistence id -- the authority
+        # owner refuses to reuse an epoch id it has already seen -- so the two
+        # cannot remain one field.
+        self.__persistence_acquisition_epoch: str | None = None
+        # Recovery is not a general re-open. Two conditions gate it:
+        #
+        # `__persistence_recoverable` -- only an AMBIGUOUS close may be
+        # resumed. A normal STOPPED close was intended, and resuming it would
+        # invent a segment nobody asked for.
+        #
+        # `__persistence_recovery_floor` -- the revision that must be exceeded.
+        # Without it the very receipt that CAUSED the close could be replayed
+        # to open the recovery segment, which proves nothing: it is the failed
+        # commit, not a new one landing after the interruption.
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
         self.__persistence_active = False
         self.__persistence_latched = False
         self.__persistence_last_commit_at: float | None = None
@@ -165,6 +186,9 @@ class RecordingLifecycleFeed:
             self.__terminalize_persistence(PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS)
             raise
         self.__persistence_epoch = epoch_id
+        self.__persistence_acquisition_epoch = epoch_id
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
         self.__persistence_active = True
         self.__persistence_latched = False
         self.__persistence_last_commit_at = None
@@ -173,8 +197,8 @@ class RecordingLifecycleFeed:
     def persistence_committed(self, receipt: CommittedBatchReceipt) -> PersistenceAuthoritySnapshot:
         self.__ensure_loop()
         authority, owner, writer = self.__require_persistence()
-        if not self.__persistence_active or self.__persistence_epoch is None:
-            raise ValueError("direct persistence commit requires an active epoch")
+        # Provenance FIRST, so a forged or foreign receipt can never reach the
+        # recovery branch below.
         if type(receipt) is not CommittedBatchReceipt or not writer.owns_commit(receipt):
             raise ValueError("direct persistence commit lacks exact SQLiteWriter provenance")
         entries = writer.entries_from_commit(receipt)
@@ -183,8 +207,33 @@ class RecordingLifecycleFeed:
             raise ValueError("direct persistence source revision regression")
         if source_revision == self.__persistence_source_revision:
             return owner.snapshot()
-        if self.__owner.snapshot().acquisition_epoch_id != self.__persistence_epoch:
+        if not self.__persistence_active or self.__persistence_epoch is None:
+            # A proven commit arrived while the segment is closed.
+            #
+            # This used to raise forever. SQLite had already committed -- the
+            # scheduler only observes after a receipt exists -- so the data was
+            # on disk while the bookkeeping that tells the operator whether the
+            # record is continuous stayed permanently wedged. On 2026-09-01
+            # that logged "Direct persistence observation failed after a proven
+            # SQLite commit" on repeat.
+            #
+            # The receipt is the verification: it can only be minted by this
+            # writer after a real commit, `owns_commit` proves it is intact and
+            # ours, and a strictly greater commit revision proves the database
+            # accepted a new transaction after the interruption. No query is
+            # added to the commit path; a SELECT would prove strictly less.
+            #
+            # The interrupted interval is not hidden. The old epoch keeps its
+            # terminal receipt, the new segment's id NAMES the recovery, and
+            # relatching LOSSLESS under a different persistence epoch ends the
+            # recording session and mints a new one -- so the discontinuity is
+            # permanent in the identities the operator sees.
+            self.__open_recovery_segment(authority, owner, source_revision)
+        if self.__owner.snapshot().acquisition_epoch_id != self.__persistence_acquisition_epoch:
             self.__terminalize_persistence(PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS)
+            # This receipt is the one that failed. Replaying it must not be
+            # mistaken for a new commit landing after the interruption.
+            self.__persistence_recovery_floor = max(self.__persistence_recovery_floor, source_revision)
             raise ValueError("acquisition epoch does not match direct persistence epoch")
         self.__persistence_outcome_revision += 1
         owner.feed(
@@ -208,6 +257,46 @@ class RecordingLifecycleFeed:
             )
             self.__owner.begin_recording_epoch()
         return owner.snapshot()
+
+    def __open_recovery_segment(
+        self,
+        authority: PersistenceOutcomeAuthority,
+        owner: PersistenceAuthorityOwner,
+        source_revision: int,
+    ) -> None:
+        """Begin a NEW persistence segment that names itself a recovery.
+
+        Bound to the acquisition epoch that is running now, because a segment
+        with nothing to belong to would be a fiction. Refusing until
+        acquisition is running also heals the startup window: commits landing
+        between `scheduler.start()` and `acquisition_running(...)` are refused
+        here and recovered on the next one, instead of wedging the feed for the
+        life of the process.
+        """
+
+        if not self.__persistence_recoverable:
+            raise ValueError("direct persistence recovery requires an ambiguous interruption")
+        if source_revision <= self.__persistence_recovery_floor:
+            raise ValueError("direct persistence recovery requires a commit after the interruption")
+        acquisition_epoch = self.__owner.snapshot().acquisition_epoch_id
+        if acquisition_epoch is None:
+            raise ValueError("direct persistence recovery requires a running acquisition epoch")
+        self.__persistence_outcome_revision += 1
+        segment_epoch = f"{acquisition_epoch}:recovery-{self.__persistence_outcome_revision}"
+        owner.feed(
+            authority.lifecycle(
+                self.__persistence_outcome_revision,
+                segment_epoch,
+                PersistenceOwnerLifecycle.STARTED,
+            )
+        )
+        self.__persistence_epoch = segment_epoch
+        self.__persistence_acquisition_epoch = acquisition_epoch
+        self.__persistence_recoverable = False
+        self.__persistence_recovery_floor = 0
+        self.__persistence_active = True
+        self.__persistence_latched = False
+        self.__persistence_last_commit_at = None
 
     def persistence_rejected(self, record_count: int, reason: str) -> PersistenceAuthoritySnapshot:
         self.__ensure_loop()
@@ -246,6 +335,29 @@ class RecordingLifecycleFeed:
         self,
         lifecycle: PersistenceOwnerLifecycle,
     ) -> PersistenceAuthoritySnapshot:
+        # Only an ambiguous close of a LIVE segment leaves the door open.
+        #
+        # The second condition is not decoration. `Scheduler._observe_persistence_commit`
+        # turns ANY exception from `persistence_committed` into
+        # `persistence_ambiguous()`, and this feed's deliberate refusals ARE
+        # exceptions -- so refusing a commit after a deliberate STOP fed an
+        # "ambiguity" straight back here and minted recoverability from the
+        # refusal itself. The next observation of the same or a later receipt
+        # then opened a recovery segment on a segment that was stopped on
+        # purpose. Requiring an active segment makes the refusal idempotent:
+        # closing what is already closed grants nothing.
+        #
+        # It also covers a failed `persistence_started`, which terminalizes as
+        # ambiguous for a segment that never validly began.
+        #
+        # The guard leaves the flag ALONE rather than clearing it, in both
+        # directions: a refusal must neither grant recoverability nor revoke
+        # it. Clearing was tried first and broke the legitimate case -- after a
+        # genuine ambiguous close, the refusal of a replayed receipt fed
+        # another "ambiguity" back here and cancelled the recovery that was
+        # rightfully pending.
+        if self.__persistence_active:
+            self.__persistence_recoverable = lifecycle is PersistenceOwnerLifecycle.CANCELLATION_AMBIGUOUS
         authority, owner, _writer = self.__require_persistence()
         epoch = self.__persistence_epoch
         if self.__persistence_active and epoch is not None:
@@ -254,6 +366,7 @@ class RecordingLifecycleFeed:
         self.__persistence_active = False
         self.__persistence_latched = True
         self.__persistence_epoch = None
+        self.__persistence_acquisition_epoch = None
         self.__persistence_last_commit_at = None
         if self.__owner.snapshot().persistence_epoch_id is not None:
             self.__persistence_outcome_revision += 1

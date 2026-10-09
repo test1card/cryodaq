@@ -1,8 +1,6 @@
 # CryoDAQ — Alarm / Interlock / Safety Tuning Guide
 
-> Живой документ. Обновлён 2026-07-17 для активного Montana candidate поверх
-> релизной основы v0.64.1. Candidate defaults не являются уже выпущенным
-> поведением и требуют гейтов из `PROJECT_STATUS.md`.
+> Живой документ. Обновлён 2026-04-20 после IV.3 close (HEAD `b06c657`).
 >
 > **Цель:** дать инженеру установки понимание трёх слоёв защиты
 > CryoDAQ, где какие пороги живут, и какие значения предстоит подогнать
@@ -30,18 +28,9 @@
    уведомления (GUI / Telegram / звук), severity levels, phase-aware,
    composite conditions через AND/OR, rate monitoring, stale detection.
 
-Отдельно живут **physical alarms** (`config/physical_alarms.yaml`):
-`CooldownAlarm` и `VacuumGuard`. Это не entries в `alarms_v3.yaml`, а
-отдельные сервисы движка. `VacuumGuard` дополнительно латчит
-SafetyManager через `vacuum.escalate_to_safety` (в Montana candidate по
-умолчанию `true`; в v0.64.1 было opt-in/`false`) —
-эскалация включена для необслуживаемых/холодных прогонов; выставь
-`false` для attended/debug-прогонов, где достаточно alarm-only).
-
-Alarm Engine v1 (конфиг config/alarms.yaml тоже удалён) выведен из
-проекта (B2, миграция v1→v2 завершена) — все его правила либо уже
-дублировались в `alarms_v3.yaml`,
-либо были перенесены туда. Один синтаксис правил, один конфиг.
+Ещё есть **Alarm Engine v1** (`config/alarms.yaml`) — legacy, почти
+всё отключено через `enabled: false`. Не трогай, новые алармы идут
+в v3.
 
 ---
 
@@ -57,17 +46,17 @@ Alarm Engine v1 (конфиг config/alarms.yaml тоже удалён) выве
   ┌──────────────────────────────────────────────────────────────┐
   │              DataBroker (engine, asyncio)                    │
   │  persistence-first: SQLite WAL commit → затем subscribers    │
-  └──┬────────────────┬─────────────────┬─────────────────────────┘
-     │                │                 │
-     ▼                ▼                 ▼
-  ┌──────┐     ┌──────────┐     ┌──────────────┐
-  │Safety│     │Interlock │     │ Alarm v2     │
-  │Mgr   │     │Engine    │     │ Evaluator    │
-  │(fsm) │     │          │     │ + State Mgr  │
-  └──┬───┘     └────┬─────┘     └──────┬───────┘
-     │              │                  │
-     ▼              ▼                  ▼
-  блокирует    emergency_off /    GUI badge +
+  └──┬────────────────┬─────────────────┬─────────────────┬──────┘
+     │                │                 │                 │
+     ▼                ▼                 ▼                 ▼
+  ┌──────┐     ┌──────────┐     ┌──────────────┐   ┌──────────┐
+  │Safety│     │Interlock │     │ Alarm v2     │   │ Alarm v1 │
+  │Mgr   │     │Engine    │     │ Evaluator    │   │ Engine   │
+  │(fsm) │     │          │     │ + State Mgr  │   │ (legacy) │
+  └──┬───┘     └────┬─────┘     └──────┬───────┘   └────┬─────┘
+     │              │                  │                │
+     ▼              ▼                  ▼                ▼
+  блокирует    emergency_off /    GUI badge +       (отключено)
   запуск       stop_source        Telegram +
   источника                       звук
 ```
@@ -87,8 +76,10 @@ SQLite не смог записать, fault. Все слои защиты жи�
 
 ```yaml
 critical_channels:              # обязательны для перехода в RUN
-  - "Т11 .*"                    # 1-я ступень GM-cooler (positionally fixed)
-  - "Т12 .*"                    # 2-я ступень, холодная точка (positionally fixed)
+  - "Т1 .*"                     # верх криостата
+  - "Т7 .*"                     # детектор
+  - "Т11 .*"                    # 1-я ступень GM-cooler (калиброванный)
+  - "Т12 .*"                    # 2-я ступень, холодная точка (калиброванный)
 
 stale_timeout_s: 10.0           # без обновления >10с → FAULT
 heartbeat_timeout_s: 15.0       # Keithley молчит >15с → FAULT
@@ -127,12 +118,12 @@ scheduler_drain_timeout_s: 5.0
 
 | Параметр | Текущее | Что учесть |
 |---|---|---|
-| `critical_channels` | 2 regex (`Т11`, `Т12`) | Сейчас safety FSM гейтится только на positionally-fixed reference-каналы. Не добавляй мобильные per-experiment датчики без отдельного физического обоснования: это создаёт ложные fault'ы при перестановке датчиков. |
+| `critical_channels` | 4 канала | Расширь по списку ключевых датчиков твоей установки. Если Т7 (детектор) у тебя нигде не установлен — убери. |
 | `stale_timeout_s` | 10.0 | LakeShore опрос 2с = 5 poll'ов. Если шум GPIB вызывает ложные timeouts, подними до 15-20с. |
 | `heartbeat_timeout_s` | 15.0 | Keithley USBTMC обычно отвечает <1с. 15с достаточно. |
 | `max_dT_dt_K_per_min` | 5.0 | Консервативно. Mock и calibration runs могут выдать больше. Отслеживай — если false positives, подними до 8-10. |
-| `max_power_w` | 5.0 | Только host-side target cap: вывести из thermal budget нагревателя/криостата. Он исчезает при смерти хоста и не является автономным energy bound. |
-| `max_voltage_v` / `max_current_a` | 40 / 1.0 | Instrument compliance ограничивает применимый envelope нагрузки/прибора, но не гарантирует 5 W и не ограничивает накопленную энергию после смерти хоста. Ужесточить по реальному V/I диапазону. |
+| `max_power_w` | 5.0 | Проверь по datasheet Keithley 2604B (100W per channel) и по thermal budget твоего нагревателя (обычно 100-500 mW). 5W — разумный cap. |
+| `max_voltage_v` / `max_current_a` | 40 / 1.0 | 40V × 1A = 40W > 5W max_power_w. Это OK (защита многослойная). Можно ужесточить: если I<100 mA нормально, поставь 0.2A. |
 | `require_keithley_for_run` | true | В mock должен быть false, в production — true. |
 
 ### Что **не** менять без физического обоснования
@@ -244,11 +235,8 @@ engine:
       unit: K
 ```
 
-**Setpoint T12** — задаётся в `custom_fields` карточки эксперимента и
-остаётся доступен провайдеру setpoints. В текущем shipped
-`alarms_v3.yaml` (v0.64.0) активных правил, которые его потребляют,
-нет: старые `detector_drift`, `detector_unstable`, `cooldown_stall`
-удалены в пользу physical alarms.
+**Setpoint T12** — задаётся в `custom_fields` карточки эксперимента.
+Используется в `detector_drift`, `detector_unstable`, `cooldown_stall`.
 
 ### Channel groups
 
@@ -264,7 +252,7 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 
 ---
 
-## Текущий состав v2 алармов (16 штук)
+## Текущий состав v2 алармов (19 штук)
 
 ### Global (работают всегда, 11 штук)
 
@@ -282,7 +270,7 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 | `disk_space_warning` | диск <10 GB | WARNING | gui |
 | `disk_space_critical` | диск <2 GB | CRITICAL | gui+tg |
 
-### Phase-aware (5 штук)
+### Phase-aware
 
 #### vacuum (2)
 
@@ -291,17 +279,20 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 | `vacuum_insufficient` | P1 >1e-4 mbar через 60 мин | WARNING |
 | `vacuum_stall` | \|dP/P\| <1% за окно при P >1e-5 | INFO |
 
-#### cooldown (1)
+#### cooldown (2)
 
 | Имя | Условие | Уровень |
 |---|---|---|
 | `excessive_cooling_rate` | Т11/Т12 rate < -5 K/мин | WARNING |
+| `cooldown_stall` | Т12 rate≈0 >15мин AND far from setpoint | WARNING |
 
-#### measurement (1)
+#### measurement (3)
 
 | Имя | Условие | Уровень |
 |---|---|---|
-| `shield_warming` | Т12 rate >0.5 K/мин за окно 300с | WARNING |
+| `detector_drift` | Т12 отклон. от setpoint >0.5K >60с | WARNING |
+| `detector_unstable` | Т12 отклон. >2K >10с | CRITICAL |
+| `shield_warming` | Т11 rate >0.5 K/мин >5 мин | WARNING |
 
 #### warmup (1)
 
@@ -339,11 +330,8 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 
 **1.2 `keithley_overpower`**
 ```yaml
-# Сейчас: 4W host alarm, 4.5W host interlock, 5W host target hardcap
+# Сейчас: 4W alarm, 4.5W interlock, 5W hardcap
 ```
-Все три порога реализованы на хосте и не переживают полную смерть процесса;
-это operating guards, а не независимый host-death cutout.
-
 **Что учесть:** для P=const feedback на маленьком нагревателе (типично
 30-100 mW) порог 4W никогда не сработает. Подгони под реальный
 рабочий диапазон: если рабочая мощность <200 mW, alarm на 500 mW.
@@ -357,8 +345,8 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 
 **1.4 `detector_drift` / `detector_unstable`**
 ```yaml
-# Сейчас в shipped alarms_v3.yaml отсутствуют.
-# Если возвращать: setpoint T12 доступен как T12_setpoint (default 4.2K).
+# Сейчас: 0.5K drift (60с) / 2K unstable (10с)
+# setpoint: 4.2K (default)
 ```
 **Что учесть:** для setpoint 4.2K с DT-670 stability ±10 mK — 0.5K
 drift слишком грубо. Можно ужесточить до 0.1K. Для 3K setpoint —
@@ -420,10 +408,9 @@ yaml:data_stale_temperature` — это warning. Safety должен быть с
 = ~200 MB. Если у тебя эксперименты недельные — warning на 10GB может
 срабатывать слишком рано. Поставь пропорционально: `expected_days × 200 MB × 5`.
 
-**3.3 Cooldown stall**
+**3.3 `cooldown_stall` window**
 ```yaml
-# В shipped alarms_v3.yaml отдельного cooldown_stall нет.
-# Ближайший контур — CooldownAlarm в config/physical_alarms.yaml.
+# Т12 rate≈0 (<0.1 K/мин) за 15 мин
 ```
 **Что учесть:** при approach to setpoint rate естественно падает.
 Если твой криостат делает soft landing — 15 мин может быть мало,
@@ -475,8 +462,8 @@ doc. Это снимет "магические числа" для следующ
 
 - `config/safety.yaml` — инварианты запуска, rate-limit, source cap
 - `config/interlocks.yaml` — жёсткие отключения
-- `config/alarms_v3.yaml` — основная и единственная alarm система
-- `config/physical_alarms.yaml` — CooldownAlarm + VacuumGuard
+- `config/alarms.yaml` — **legacy, не трогать**
+- `config/alarms_v3.yaml` — основная alarm система
 - `config/experiment_templates/*.yaml` — setpoints через custom_fields
 - `config/notifications.yaml` — Telegram bot token, chat IDs
 - `config/safety.local.yaml` — override для конкретной машины
@@ -488,6 +475,7 @@ doc. Это снимет "магические числа" для следующ
 
 - `src/cryodaq/core/safety_manager.py` — FSM + preconditions
 - `src/cryodaq/core/interlock.py` — Interlock Engine
+- `src/cryodaq/core/alarm.py` — Alarm Engine v1 (legacy)
 - `src/cryodaq/core/alarm_v2.py` — AlarmEvaluator + StateManager
 - `src/cryodaq/core/alarm_config.py` — загрузчик YAML v3
 - `src/cryodaq/core/alarm_providers.py` — ExperimentPhaseProvider,
@@ -561,5 +549,3 @@ warning + critical.
   severity upgrade). Обновлено после v0.43.0 ship (`c44c575`).
 - 2026-04-20: первая редакция после IV.3 close (`b06c657`). Собрано
   из `safety.yaml`, `interlocks.yaml`, `alarms.yaml`, `alarms_v3.yaml`.
-- 2026-07-08: синхронизация с v0.64.0: `critical_channels` только Т11/Т12,
-  16 активных v2-алармов, physical alarms вынесены в отдельный слой.

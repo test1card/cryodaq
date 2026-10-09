@@ -1,13 +1,12 @@
 """ConductivityPanel — Phase II.5 thermal conductivity overlay.
 
 Supersedes the v1 widget at ``src/cryodaq/gui/widgets/conductivity_panel.py``.
-Aligned with the canonical design-system tokens. Preserves the three public
-auto-sweep guard-state values and the flight-recorder CSV schema while adding
-generation-bound command settlement, explicit outcome-unknown retention, and a
-successful current-generation SafetyManager Stop reply before operator Stop or
-completion is published.
-Exposes ``get_auto_state()`` / ``is_auto_sweep_active()`` as public accessors
-for the ExperimentOverlay finalize guard.
+Aligned with Design System v1.0.1 tokens. Preserves the auto-sweep
+state machine verbatim (operationally critical — drives real
+power-stepping experiments), preserves the flight recorder CSV schema
+(operators rely on it for post-hoc analysis), exposes
+``get_auto_state()`` / ``is_auto_sweep_active()`` as public accessors
+for the ExperimentOverlay finalize guard (II.9 follow-up wiring).
 
 Layout (top to bottom):
     Header (ТЕПЛОПРОВОДНОСТЬ)
@@ -21,10 +20,9 @@ Public API (host push points):
 - ``set_connected(bool)`` — gates auto-sweep Start + shows banner.
   Chain selection / CSV export stay enabled (local work).
 - ``get_auto_state() -> str`` — returns ``"idle"`` / ``"stabilizing"`` /
-  ``"done"``. ``"stabilizing"`` is conservative: it also covers target
-  settlement, Stop-confirmation, and outcome-unknown substates.
-- ``is_auto_sweep_active() -> bool`` — finalize-guard predicate; ``True``
-  does not imply that the auto timer is running or command outcome is known.
+  ``"done"`` for external finalize guards. Mirrors legacy
+  ``_auto_state`` accessor but via a stable public API.
+- ``is_auto_sweep_active() -> bool`` — convenience (state == "stabilizing").
 
 Out of scope (follow-ups):
 - Additional export formats (HDF5, Parquet).
@@ -106,13 +104,19 @@ _POWER_CHANNELS: tuple[str, ...] = (
 def _get_temperature_channels() -> list[tuple[str, str]]:
     """List visible T-prefixed channels as (id, display_name) tuples."""
     mgr = get_channel_manager()
-    return [(ch_id, mgr.get_display_name(ch_id)) for ch_id in mgr.get_all_visible() if ch_id.startswith("Т")]
+    return [
+        (ch_id, mgr.get_display_name(ch_id))
+        for ch_id in mgr.get_all_visible()
+        if ch_id.startswith("Т")
+    ]
 
 
-def _pct_color(_pct: float) -> str:
-    """Render settling progress without making a safety-health assertion."""
-
-    return theme.ACCENT
+def _pct_color(pct: float) -> str:
+    if pct >= 99.0:
+        return theme.STATUS_OK
+    if pct >= 90.0:
+        return theme.STATUS_CAUTION
+    return theme.STATUS_FAULT
 
 
 def _label_font() -> QFont:
@@ -160,8 +164,8 @@ def _style_button(btn: QPushButton, variant: str) -> None:
     if variant == "primary":
         # Phase III.A: primary uses ACCENT (UI activation), not STATUS_OK.
         bg, fg = theme.ACCENT, theme.ON_ACCENT
-    elif variant == "caution":
-        bg, fg = theme.STATUS_CAUTION, theme.ON_PRIMARY
+    elif variant == "warning":
+        bg, fg = theme.STATUS_WARNING, theme.ON_PRIMARY
     elif variant == "accent":
         bg, fg = theme.ACCENT, theme.ON_ACCENT
     else:  # "neutral"
@@ -228,25 +232,13 @@ class ConductivityPanel(QWidget):
 
         self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
 
-        # Public guard state. "stabilizing" is retained through settling,
-        # command-pending, Stop-pending, and outcome-unknown substates until
-        # current-authority Stop settlement permits idle/done publication.
+        # Auto-sweep FSM state (preserved verbatim from v1)
         self._auto_state: str = "idle"
         self._auto_power_list: list[float] = []
         self._auto_step: int = 0
         self._auto_step_start: float = 0.0
         self._auto_results: list[dict] = []
         self._auto_workers: list[ZmqCommandWorker] = []
-        self._auto_connection_generation = 0
-        self._auto_operation_generation = 0
-        self._auto_command_sequence = 0
-        self._auto_settled_command_tokens: set[int] = set()
-        self._auto_pending_token: int | None = None
-        self._auto_pending_stop_intent: str | None = None
-        # Activity and command outcome are independent truth axes.  A lost
-        # reply must retain the last-known ACTIVE state so external finalize
-        # guards cannot be cleared by GUI inference.
-        self._auto_outcome_unknown = False
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -310,7 +302,10 @@ class ConductivityPanel(QWidget):
         layout.setSpacing(theme.SPACE_2)
         title = QLabel("ТЕПЛОПРОВОДНОСТЬ")
         title.setFont(_title_font())
-        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
+        title.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+            f" letter-spacing: 1px;"
+        )
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -320,7 +315,9 @@ class ConductivityPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("conductivityBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
+        self._banner_label.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
+        )
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -339,7 +336,9 @@ class ConductivityPanel(QWidget):
 
         src_cap = QLabel("Источник P:")
         src_cap.setFont(_label_font())
-        src_cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        src_cap.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         layout.addWidget(src_cap)
 
         self._power_combo = QComboBox()
@@ -388,7 +387,9 @@ class ConductivityPanel(QWidget):
 
         caption = QLabel("Цепочка датчиков")
         caption.setFont(_label_font())
-        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        caption.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         layout.addWidget(caption)
 
         # v0.55.2 A3: 2-column grid keeps the channel list compact so the
@@ -460,7 +461,9 @@ class ConductivityPanel(QWidget):
         self._steady_banner_label.setFont(_label_font())
         self._steady_banner_label.setObjectName("steadyBanner")
         self._steady_banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._steady_banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
+        self._steady_banner_label.setContentsMargins(
+            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
+        )
         self._steady_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_steady_banner("", None)
         layout.addWidget(self._steady_banner_label)
@@ -504,7 +507,9 @@ class ConductivityPanel(QWidget):
 
         self._power_label = QLabel("P = ожидание данных")
         self._power_label.setFont(_mono_value_font())
-        self._power_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
+        self._power_label.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
+        )
         indicator_row.addWidget(self._power_label)
         indicator_row.addStretch()
 
@@ -583,9 +588,13 @@ class ConductivityPanel(QWidget):
         layout.addWidget(self._plot, stretch=1)
 
         # Empty state overlay (anchored over the plot widget)
-        self._empty_label = QLabel("Нет данных. Выберите датчики и запустите эксперимент.", self._plot)
+        self._empty_label = QLabel(
+            "Нет данных. Выберите датчики и запустите эксперимент.", self._plot
+        )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        self._empty_label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         self._empty_label.setGeometry(0, 0, 400, 80)
         return card
 
@@ -647,7 +656,9 @@ class ConductivityPanel(QWidget):
 
         self._power_preview = QLabel("")
         self._power_preview.setFont(_label_font())
-        self._power_preview.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        self._power_preview.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         self._power_preview.setWordWrap(True)
         grid.addWidget(self._power_preview, 1, 0, 1, 6)
 
@@ -687,7 +698,7 @@ class ConductivityPanel(QWidget):
         self._auto_start_btn.clicked.connect(self._on_auto_start)
         action_row.addWidget(self._auto_start_btn)
         self._auto_stop_btn = QPushButton("Стоп")
-        _style_button(self._auto_stop_btn, "caution")
+        _style_button(self._auto_stop_btn, "warning")
         self._auto_stop_btn.setEnabled(False)
         self._auto_stop_btn.clicked.connect(self._on_auto_stop)
         action_row.addWidget(self._auto_stop_btn)
@@ -730,7 +741,9 @@ class ConductivityPanel(QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        label.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
+        )
         return label
 
     # ------------------------------------------------------------------
@@ -877,12 +890,10 @@ class ConductivityPanel(QWidget):
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
         ts = reading.timestamp.timestamp()
-        # NaN-доктрина (A3): статус — дискриминатор годности; не годное
-        # температурное показание не питает SteadyStatePredictor.
-        if ch_id is not None and reading.unit == "K" and reading.is_usable():
+        if ch_id is not None and reading.unit == "K":
             # Hide the empty-state overlay only when a real temperature
             # reading lands — a power-only reading has nothing to plot,
-            # so the overlay must stay up until temps arrive. II.5
+            # so the overlay must stay up until temps arrive. Codex II.5
             # residual fix. setVisible(False) is idempotent so we skip
             # the isVisible() pre-check (which is offscreen-Qt flaky).
             self._empty_label.setVisible(False)
@@ -1007,20 +1018,30 @@ class ConductivityPanel(QWidget):
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
 
         self._table.setItem(total_row, 0, _cell("ИТОГО"))
-        self._table.setItem(total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—"))
+        self._table.setItem(
+            total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—")
+        )
         self._table.setItem(total_row, 2, _cell(f"{t_last:.4f}" if math.isfinite(t_last) else "—"))
-        self._table.setItem(total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—"))
+        self._table.setItem(
+            total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—")
+        )
         self._table.setItem(
             total_row,
             4,
             _cell(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"),
         )
-        self._table.setItem(total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—"))
+        self._table.setItem(
+            total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—")
+        )
         self._table.setItem(total_row, 6, _cell(""))
         self._table.setItem(total_row, 7, _cell(""))
         self._table.setItem(total_row, 8, _cell(""))
-        self._table.setItem(total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—"))
-        self._table.setItem(total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—"))
+        self._table.setItem(
+            total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—")
+        )
+        self._table.setItem(
+            total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—")
+        )
 
         bold_font = _mono_cell_font()
         bold_font.setBold(True)
@@ -1040,12 +1061,12 @@ class ConductivityPanel(QWidget):
         min_pct = min(p.percent_settled for p in valid_preds)
         max_tau = max(p.tau_s for p in valid_preds) if valid_preds else 0
         if min_pct >= 99.0:
-            self._set_steady_banner("ГОТОВО — стационар достигнут", theme.ACCENT)
+            self._set_steady_banner("ГОТОВО — стационар достигнут", theme.STATUS_OK)
         elif min_pct >= 95.0:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
             self._set_steady_banner(
                 f"Стабилизация {min_pct:.0f}% — ещё ~{remaining:.0f} мин",
-                theme.ACCENT,
+                theme.STATUS_WARNING,
             )
         else:
             remaining = max_tau * math.log(100.0 / max(100.0 - min_pct, 0.1)) / 60.0
@@ -1058,7 +1079,8 @@ class ConductivityPanel(QWidget):
         self._steady_banner_label.setText(text)
         if not text or color is None:
             self._steady_banner_label.setStyleSheet(
-                f"#steadyBanner {{ background: transparent; border: none; color: {theme.MUTED_FOREGROUND}; }}"
+                f"#steadyBanner {{ background: transparent; border: none;"
+                f" color: {theme.MUTED_FOREGROUND}; }}"
             )
             return
         self._steady_banner_label.setStyleSheet(
@@ -1115,12 +1137,14 @@ class ConductivityPanel(QWidget):
                     stable = False
         if stable:
             self._stability_label.setText(f"Стабильно (dT/dt = {max_rate:.4f} К/мин)")
-            color = theme.ACCENT
+            color = theme.STATUS_OK
         else:
             self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
-            color = theme.STATUS_INFO
+            color = theme.STATUS_WARNING
         self._stability_label.setStyleSheet(
-            f"color: {color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f"color: {color};"
+            f" background: transparent; border: none;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
         )
 
     def _update_plot(self) -> None:
@@ -1143,7 +1167,7 @@ class ConductivityPanel(QWidget):
             self._plot.getPlotItem().setXRange(t_start, now + forecast_s, padding=0.02)
 
     # ------------------------------------------------------------------
-    # Auto-sweep — three public guard states plus generation-bound settlement substates
+    # Auto-sweep (preserved verbatim from v1 semantics)
     # ------------------------------------------------------------------
 
     def _generate_power_list(self) -> list[float]:
@@ -1161,129 +1185,20 @@ class ConductivityPanel(QWidget):
             text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
         self._power_preview.setText("Список мощностей: " + text)
 
-    def _send_auto_cmd(self, cmd: dict, *, stop_intent: str | None = None) -> bool:
-        """Dispatch one generation-bound command while live authority exists."""
-
-        if not self._connected:
-            if self._auto_state == "stabilizing":
-                self._latch_auto_outcome_unknown("Нет живой связи с Engine; команда не отправлена.")
-            return False
-
-        self._auto_command_sequence += 1
-        token = self._auto_command_sequence
-        expected_connection_generation = self._auto_connection_generation
-        expected_operation_generation = self._auto_operation_generation
+    def _send_auto_cmd(self, cmd: dict) -> None:
         worker = ZmqCommandWorker(cmd, parent=self)
-
-        def _completed(
-            result: dict,
-            command_token: int = token,
-            command: dict = dict(cmd),
-            connection_generation: int = expected_connection_generation,
-            operation_generation: int = expected_operation_generation,
-            completed_worker: ZmqCommandWorker = worker,
-            command_stop_intent: str | None = stop_intent,
-        ) -> None:
-            self._on_auto_cmd_result(
-                command_token,
-                command,
-                result,
-                connection_generation,
-                operation_generation,
-                completed_worker,
-                command_stop_intent,
-            )
-
-        worker.finished.connect(_completed)
+        worker.finished.connect(self._on_auto_cmd_result)
         self._auto_workers.append(worker)
-        self._auto_pending_token = token
         worker.start()
-        return True
 
-    def _on_auto_cmd_result(
-        self,
-        token: int,
-        command: dict,
-        result: dict,
-        expected_connection_generation: int,
-        expected_operation_generation: int,
-        worker: ZmqCommandWorker | None = None,
-        stop_intent: str | None = None,
-    ) -> None:
-        """Commit only the exact current operation's authoritative reply."""
-
-        if token in self._auto_settled_command_tokens:
-            logger.warning("Повторный ответ автоизмерения проигнорирован: token=%s", token)
-            return
-        self._auto_settled_command_tokens.add(token)
-        if worker is not None:
-            self._auto_workers = [candidate for candidate in self._auto_workers if candidate is not worker]
-        pending_token = self._auto_pending_token
-        if pending_token is not None and token != pending_token:
-            logger.warning(
-                "Ответ вытесненной авто-команды проигнорирован: %s, token=%s, current=%s",
-                command.get("cmd", "?"),
-                token,
-                pending_token,
-            )
-            return
-        if token == pending_token:
-            self._auto_pending_token = None
-
-        if (
-            expected_connection_generation != self._auto_connection_generation
-            or expected_operation_generation != self._auto_operation_generation
-            or not self._connected
-        ):
-            logger.warning(
-                "Запоздалый ответ автоизмерения проигнорирован: %s, token=%s",
-                command.get("cmd", "?"),
-                token,
-            )
-            return
-
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            error = (
-                str(result.get("error", "неизвестная ошибка"))
-                if isinstance(result, dict)
-                else "некорректный ответ Engine"
-            )
-            logger.warning("Авто-команда Keithley не подтверждена: %s", error)
-            self._auto_pending_stop_intent = None
-            self._latch_auto_outcome_unknown(f"Engine не подтвердил {command.get('cmd', 'команду')}: {error[:120]}")
-            return
-
-        if command.get("cmd") == "keithley_stop":
-            if stop_intent == "complete":
-                self._commit_auto_complete()
-            else:
-                self._commit_auto_stop()
-            return
-
-        self._update_control_enablement()
-
-    def _latch_auto_outcome_unknown(self, reason: str) -> None:
-        """Stop advancement and retain guard-active truth until current Stop succeeds."""
-
-        if self._auto_state != "stabilizing":
-            return
-        self._auto_outcome_unknown = True
-        self._auto_timer.stop()
-        self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText("ИСХОД НЕИЗВЕСТЕН — последнее известное: АВТОИЗМЕРЕНИЕ АКТИВНО. " + reason)
-        self._update_control_enablement()
+    @Slot(dict)
+    def _on_auto_cmd_result(self, result: dict) -> None:
+        self._auto_workers = [w for w in self._auto_workers if w.isRunning()]
+        if not result.get("ok"):
+            logger.warning("Авто-команда Keithley: %s", result.get("error", "?"))
 
     @Slot()
     def _on_auto_start(self) -> None:
-        # Button enablement is presentation only.  The handler owns the final
-        # live-authority check so direct/queued invocation cannot bypass it.
-        if (
-            not self._connected
-            or self._auto_state == "stabilizing"
-            or self._auto_outcome_unknown
-            or self._auto_pending_token is not None
-        ):
-            return
         if len(self._chain) < 2:
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
             return
@@ -1296,9 +1211,6 @@ class ConductivityPanel(QWidget):
         self._auto_step = 0
         self._auto_results = []
         self._auto_state = "stabilizing"
-        self._auto_operation_generation += 1
-        self._auto_outcome_unknown = False
-        self._auto_pending_stop_intent = None
 
         self._auto_start_btn.setEnabled(False)
         self._auto_stop_btn.setEnabled(True)
@@ -1308,64 +1220,32 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
 
         self._auto_step_start = time.monotonic()
-        dispatched = self._send_auto_cmd(
+        self._send_auto_cmd(
             {
                 "cmd": "keithley_set_target",
                 "channel": self._smu_channel(),
                 "p_target": powers[0],
             }
         )
-        if not dispatched:
-            self._latch_auto_outcome_unknown("Начальная команда мощности не отправлена.")
-            return
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
         self._auto_timer.start()
         self.auto_sweep_started.emit()
 
     @Slot()
     def _on_auto_stop(self) -> None:
-        if self._auto_state != "stabilizing" or self._auto_pending_stop_intent is not None:
-            return
-        if not self._connected:
-            self._latch_auto_outcome_unknown(
-                "Останов нельзя отправить без живой связи; состояние источника требует сверки."
-            )
-            return
-        self._auto_timer.stop()
-        self._auto_pending_stop_intent = "operator"
-        self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText("Останов запрошен — ожидается подтверждение отключения источника")
-        self._update_control_enablement()
-        if not self._send_auto_cmd(
-            {"cmd": "keithley_stop", "channel": self._smu_channel()},
-            stop_intent="operator",
-        ):
-            self._auto_pending_stop_intent = None
-            self._latch_auto_outcome_unknown("Команда останова не отправлена.")
-
-    def _commit_auto_stop(self) -> None:
-        """Apply operator stop only after SafetyManager confirms the command."""
-
         self._auto_state = "idle"
-        self._auto_outcome_unknown = False
-        self._auto_pending_stop_intent = None
         self._auto_timer.stop()
+        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
+        self._auto_start_btn.setEnabled(self._connected)
+        self._auto_stop_btn.setEnabled(False)
         self._auto_progress.setVisible(False)
-        self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText("Остановлено оператором — отключение подтверждено")
-        self._update_control_enablement()
-        logger.info("Автоизмерение: остановлено оператором, отключение подтверждено")
+        self._auto_status_label.setText("Остановлено оператором")
+        logger.info("Автоизмерение: остановлено оператором")
         self.auto_sweep_aborted.emit("operator_stop")
 
     @Slot()
     def _auto_tick(self) -> None:
-        if (
-            self._auto_state != "stabilizing"
-            or not self._connected
-            or self._auto_outcome_unknown
-            or self._auto_pending_token is not None
-            or self._auto_pending_stop_intent is not None
-        ):
+        if self._auto_state != "stabilizing":
             return
         elapsed = time.monotonic() - self._auto_step_start
         step_total = len(self._auto_power_list)
@@ -1390,7 +1270,9 @@ class ConductivityPanel(QWidget):
 
         settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
         self._auto_status_label.setText(
-            f"Шаг {step_idx + 1}/{step_total} — P = {P:.4g} Вт — {elapsed:.0f} с — стабил.: {settled_str}"
+            f"Шаг {step_idx + 1}/{step_total} — "
+            f"P = {P:.4g} Вт — {elapsed:.0f} с — "
+            f"стабил.: {settled_str}"
         )
 
         if is_stable:
@@ -1453,39 +1335,22 @@ class ConductivityPanel(QWidget):
         )
 
     def _auto_complete(self) -> None:
-        if self._auto_state != "stabilizing" or self._auto_pending_stop_intent is not None:
-            return
-        self._auto_timer.stop()
-        if not self._connected:
-            self._latch_auto_outcome_unknown("Все точки записаны, но отключение источника не подтверждено.")
-            return
-        self._auto_pending_stop_intent = "complete"
-        self._auto_progress.setValue(99)
-        self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText("Все точки записаны — ожидается подтверждение отключения источника")
-        self._update_control_enablement()
-        if not self._send_auto_cmd(
-            {"cmd": "keithley_stop", "channel": self._smu_channel()},
-            stop_intent="complete",
-        ):
-            self._auto_pending_stop_intent = None
-            self._latch_auto_outcome_unknown("Команда завершающего останова не отправлена.")
-
-    def _commit_auto_complete(self) -> None:
-        """Publish completion only after authoritative source shutdown."""
-
         self._auto_state = "done"
-        self._auto_outcome_unknown = False
-        self._auto_pending_stop_intent = None
+        self._auto_timer.stop()
+        self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
+        self._auto_start_btn.setEnabled(self._connected)
+        self._auto_stop_btn.setEnabled(False)
         self._auto_progress.setValue(100)
-        self._update_control_enablement()
         n = len(self._auto_results)
-        self._auto_status_label.setText(f"Завершено: {n} точек измерено; отключение источника подтверждено")
+        self._auto_status_label.setText(f"Завершено: {n} точек измерено")
         logger.info("Автоизмерение: завершено, %d точек", n)
         if self._auto_results:
             summary_lines = ["Автоизмерение завершено:\n"]
             for i, pt in enumerate(self._auto_results, 1):
-                summary_lines.append(f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, R={pt['R']:.4g}, G={pt['G']:.4g}")
+                summary_lines.append(
+                    f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, "
+                    f"R={pt['R']:.4g}, G={pt['G']:.4g}"
+                )
             QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
         self.auto_sweep_completed.emit(n)
 
@@ -1609,7 +1474,9 @@ class ConductivityPanel(QWidget):
         if len(self._chain) < 2:
             self.show_warning("Выберите минимум 2 датчика в цепочке.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Экспорт теплопроводности", "", "CSV файлы (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт теплопроводности", "", "CSV файлы (*.csv)"
+        )
         if not path:
             return
         out = Path(path)
@@ -1676,15 +1543,9 @@ class ConductivityPanel(QWidget):
     # ------------------------------------------------------------------
 
     def set_connected(self, connected: bool) -> None:
-        connected = bool(connected)
         if connected == self._connected:
             return
         self._connected = connected
-        self._auto_connection_generation += 1
-        if not connected and self._auto_state == "stabilizing":
-            self._auto_pending_token = None
-            self._auto_pending_stop_intent = None
-            self._latch_auto_outcome_unknown("Связь потеряна; результат выполнявшейся команды неизвестен.")
         self._update_control_enablement()
         if not connected:
             self.show_error("Нет связи с engine")
@@ -1692,34 +1553,28 @@ class ConductivityPanel(QWidget):
             self.clear_message()
 
     def _update_control_enablement(self) -> None:
-        # Handler-level authority checks mirror these presentation gates.
-        # Stop is the safe direction, but a GUI without a live Engine link has
-        # no authority to claim it was delivered.
-        active = self._auto_state == "stabilizing"
-        start_ok = (
-            self._connected and not active and not self._auto_outcome_unknown and self._auto_pending_token is None
-        )
-        stop_ok = self._connected and active and self._auto_pending_stop_intent is None
+        # Auto-sweep Start gated on connection. Stop stays enabled while
+        # stabilizing so operator can always abort. Chain selection +
+        # CSV export stay enabled regardless (local work).
+        start_ok = self._connected and self._auto_state != "stabilizing"
         self._auto_start_btn.setEnabled(start_ok)
-        self._auto_stop_btn.setEnabled(stop_ok)
+        self._auto_stop_btn.setEnabled(self._auto_state == "stabilizing")
 
     def get_auto_state(self) -> str:
-        """Return the conservative public auto-sweep guard state.
+        """Public accessor for the auto-sweep FSM state.
 
-        Values are ``"idle"``, ``"stabilizing"``, and ``"done"``.
-        ``"stabilizing"`` includes normal settling, target-command settlement,
-        Stop confirmation, and outcome-unknown retention. External finalize
-        guards must block for every ``"stabilizing"`` substate.
+        Returns one of ``"idle"``, ``"stabilizing"``, ``"done"``.
+
+        Intended for external finalize guards (e.g. ExperimentOverlay v3,
+        II.9 follow-up) that must block experiment finalization while
+        the auto-sweep is actively stabilizing — closing the panel or
+        ending the experiment mid-sweep would leave Keithley powered.
         """
 
         return self._auto_state
 
     def is_auto_sweep_active(self) -> bool:
-        """True while finalization treats the sweep as active or possibly active.
-
-        This does not prove that ``_auto_timer`` is running or that the latest
-        command outcome is known.
-        """
+        """True iff the auto-sweep FSM is actively stabilizing."""
         return self._auto_state == "stabilizing"
 
     # ------------------------------------------------------------------
@@ -1730,7 +1585,7 @@ class ConductivityPanel(QWidget):
         self._set_banner(text, theme.STATUS_INFO)
 
     def show_warning(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_CAUTION)
+        self._set_banner(text, theme.STATUS_WARNING)
 
     def show_error(self, text: str) -> None:
         self._set_banner(text, theme.STATUS_FAULT)

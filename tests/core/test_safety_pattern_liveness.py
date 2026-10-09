@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from shutil import copyfile
 
 import pytest
 import yaml
@@ -66,7 +67,7 @@ from cryodaq.core.housekeeping import (
     load_critical_channels_from_alarms_v3,
     load_protected_channel_patterns,
 )
-from cryodaq.core.interlock import InterlockCondition
+from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_ids
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
@@ -98,17 +99,20 @@ def _load_roster() -> tuple[list[str], list[str]]:
 
 def _load_interlock_conditions() -> list[InterlockCondition]:
     raw = yaml.safe_load(_INTERLOCKS_PATH.read_text(encoding="utf-8"))
+    descriptor_catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
     conditions: list[InterlockCondition] = []
     for entry in raw.get("interlocks", []):
-        # Same construction path as InterlockEngine.load_config
-        # (src/cryodaq/core/interlock.py:311-319): __post_init__ compiles and
-        # validates channel_pattern identically, and matches_channel() is the
-        # production matcher (``_pattern.match``).
+        # Same construction path as InterlockEngine.load_config: resolve the
+        # declared physical source to the post-bind canonical channel_id.
         conditions.append(
             InterlockCondition(
                 name=entry["name"],
                 description=entry.get("description", ""),
-                channel_pattern=entry["channel_pattern"],
+                channel_ids=resolve_interlock_channel_ids(
+                    entry,
+                    config_path=_INTERLOCKS_PATH,
+                    descriptor_catalog=descriptor_catalog,
+                ),
                 threshold=float(entry.get("threshold", 0.0)),
                 comparison=entry.get("comparison", ">"),
                 action=entry.get("action", ""),
@@ -150,8 +154,8 @@ def test_roster_is_populated() -> None:
     INTERLOCK_CONDITIONS,
     ids=[_node_id(c.name) for c in INTERLOCK_CONDITIONS],
 )
-def test_interlock_pattern_matches_canonical_channel(condition: InterlockCondition) -> None:
-    """interlocks.yaml channel_pattern must match >=1 canonical channel_id.
+def test_interlock_binding_matches_canonical_channel(condition: InterlockCondition) -> None:
+    """Each interlock binding must resolve to >=1 canonical channel_id.
 
     InterlockEngine consumes the CANONICAL plane (DataBroker post-bind stream),
     so a pattern written for the raw emitted label (with display-name suffix)
@@ -159,9 +163,8 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     """
     matched = [cid for cid in CANONICAL_CHANNEL_IDS if condition.matches_channel(cid)]
     assert matched, (
-        f"interlock {condition.name!r} channel_pattern "
-        f"{condition.channel_pattern!r} matches NO canonical channel_id "
-        f"(InterlockEngine plane = post-bind Reading.channel). "
+        f"interlock {condition.name!r} binding {sorted(condition.channel_ids)!r} "
+        "matches NO canonical channel_id (InterlockEngine plane = post-bind Reading.channel). "
         f"Roster had {len(CANONICAL_CHANNEL_IDS)} canonical ids; sample: "
         f"{CANONICAL_CHANNEL_IDS[:6]}."
     )
@@ -181,7 +184,7 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
     manager._config.require_keithley_for_run = False
     canonical_before = list(manager._canonical_critical_ids)
     protected = [
-        *load_protected_channel_patterns(_INTERLOCKS_PATH),
+        *load_protected_channel_patterns(_INTERLOCKS_PATH, descriptor_catalog=descriptor_catalog),
         *load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH),
     ]
 
@@ -197,6 +200,55 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
         ("LS218_2", "Т11 Теплообменник 1"): "Т11",
         ("LS218_2", "Т12 Теплообменник 2"): "Т12",
     }
+
+
+def test_adaptive_binding_rejects_raw_label_colliding_with_protected_canonical_id(tmp_path: Path) -> None:
+    """A raw label may not impersonate another sensor's canonical identity."""
+    descriptors_path = tmp_path / "channel_descriptors.yaml"
+    interlocks_path = tmp_path / "interlocks.yaml"
+    alarms_path = tmp_path / "alarms_v3.yaml"
+    copyfile(_DESCRIPTORS_PATH, descriptors_path)
+    copyfile(_INTERLOCKS_PATH, interlocks_path)
+    alarms_path.write_text("global_alarms: {}\nphase_alarms: {}\n", encoding="utf-8")
+
+    manifest = yaml.safe_load(descriptors_path.read_text(encoding="utf-8"))
+    protected_descriptor = next(
+        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т1"
+    )
+    unrelated_descriptor = next(
+        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т2"
+    )
+    protected_binding = next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т1")
+    unrelated_binding = next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т2")
+
+    protected_descriptor["channel_id"] = "protected_sensor_b"
+    protected_binding["channel_id"] = "protected_sensor_b"
+    protected_binding["emitted_channel"] = "protected_sensor_b_raw"
+    unrelated_descriptor["channel_id"] = "unrelated_sensor_a"
+    unrelated_binding["channel_id"] = "unrelated_sensor_a"
+    unrelated_binding["emitted_channel"] = "protected_sensor_b"
+    descriptors_path.write_text(
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    descriptor_catalog = load_live_channel_descriptor_catalog(descriptors_path)
+    manager = SafetyManager(SafetyBroker())
+    manager.load_config(_SAFETY_PATH)
+    manager._config.require_keithley_for_run = False
+
+    resolved = validate_safety_pattern_liveness(
+        descriptor_catalog=descriptor_catalog,
+        interlocks_config_path=interlocks_path,
+        safety_manager=manager,
+        adaptive_throttle_patterns=[r"^protected_sensor_b$"],
+        alarms_config_path=alarms_path,
+    )
+
+    assert resolved == [r"^protected_sensor_b_raw$"], (
+        "the protected sensor's canonical expression must reverse-map to its own raw label, "
+        "not accept another sensor's colliding raw label"
+    )
 
 
 @pytest.mark.parametrize(

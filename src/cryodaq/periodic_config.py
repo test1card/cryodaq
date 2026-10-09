@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.notifications._secrets import SecretStr
 
 _MAX_CONFIG_BYTES = 64 * 1024
@@ -109,8 +110,17 @@ class _ConfigError(ValueError):
         self.text = text
 
 
-class _StrictSafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that refuses ambiguous duplicate mapping keys."""
+class _StrictSafeLoader(OwnedSafeLoader):
+    """Safe YAML loader that refuses ambiguous duplicate mapping keys.
+
+    Derives from the SHARED owned loader rather than repeating its table copies.
+    An earlier version of this class copied them locally, which reads as
+    equivalent and is not: a later hardening that replaces `OwnedSafeLoader`'s
+    copies with package-owned pristine constructors would have left this loader
+    behind on the old, pre-import-poisonable path while the register recorded
+    the class as handled.  `tests/core/test_yaml_loader_table_ownership.py`
+    asserts the subclass relationship so the sharing claim stays checkable.
+    """
 
     def construct_mapping(self, node: yaml.Node, deep: bool = False) -> dict[object, object]:
         if not isinstance(node, yaml.MappingNode):

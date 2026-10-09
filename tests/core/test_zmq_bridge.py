@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 
 import pytest
 
-from cryodaq.core.broker import DataBroker
 from cryodaq.core.zmq_bridge import (
+    _SLOW_COMMANDS,
     HANDLER_TIMEOUT_FAST_S,
     HANDLER_TIMEOUT_SLOW_S,
-    PROTOCOL_VERSION,
     ZMQCommandServer,
-    ZMQPublisher,
     _pack_reading,
     _timeout_for,
     _unpack_reading,
@@ -44,154 +41,6 @@ def _make_reading(
         raw=raw,
         metadata=metadata or {},
     )
-
-
-async def test_publisher_stop_rejects_inflight_required_publication_without_false_receipt() -> None:
-    broker = DataBroker()
-    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
-    send_entered = asyncio.Event()
-    socket_closed: list[int] = []
-    context_terminated: list[bool] = []
-
-    class BlockingSocket:
-        async def send_multipart(self, _frames: list[bytes]) -> None:
-            send_entered.set()
-            await asyncio.Event().wait()
-
-        def close(self, *, linger: int) -> None:
-            socket_closed.append(linger)
-
-    class Context:
-        def term(self) -> None:
-            context_terminated.append(True)
-
-    publisher = ZMQPublisher()
-    publisher._queue = queue
-    publisher._socket = BlockingSocket()  # type: ignore[assignment]
-    publisher._ctx = Context()  # type: ignore[assignment]
-    publisher._session_id = "a" * 32
-    publisher._running = True
-    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
-    publication = asyncio.create_task(
-        broker.publish_required(
-            _make_reading(channel="operator_log", value=21.0, unit=""),
-            request_id="b" * 32,
-            request_fingerprint="c" * 64,
-        )
-    )
-    await asyncio.wait_for(send_entered.wait(), timeout=0.1)
-
-    await publisher.stop()
-
-    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
-        await asyncio.wait_for(publication, timeout=0.1)
-    assert socket_closed == [0]
-    assert context_terminated == [True]
-    assert publisher._task is None
-    assert publisher._queue is None
-    assert queue.empty()
-    await asyncio.wait_for(queue.join(), timeout=0.1)
-
-
-async def test_required_publication_receipt_waits_for_exact_zmq_send_settlement() -> None:
-    broker = DataBroker()
-    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
-    send_entered = asyncio.Event()
-    release_send = asyncio.Event()
-    sent_frames: list[tuple[bytes, bytes]] = []
-
-    class BlockingSocket:
-        async def send_multipart(self, frames: list[bytes]) -> None:
-            sent_frames.append((frames[0], frames[1]))
-            send_entered.set()
-            await release_send.wait()
-
-        def close(self, *, linger: int) -> None:
-            assert linger == 0
-
-    class Context:
-        def term(self) -> None:
-            pass
-
-    publisher = ZMQPublisher()
-    publisher._queue = queue
-    publisher._socket = BlockingSocket()  # type: ignore[assignment]
-    publisher._ctx = Context()  # type: ignore[assignment]
-    publisher._session_id = "a" * 32
-    publisher._running = True
-    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
-    reading = _make_reading(channel="operator_log", value=21.0, unit="")
-    publication = asyncio.create_task(
-        broker.publish_required(
-            reading,
-            request_id="b" * 32,
-            request_fingerprint="c" * 64,
-        )
-    )
-
-    await asyncio.wait_for(send_entered.wait(), timeout=0.1)
-    await asyncio.sleep(0)
-    assert not publication.done()
-    assert len(sent_frames) == 1
-
-    release_send.set()
-    receipt = await asyncio.wait_for(publication, timeout=0.1)
-    assert broker.validates_required_publication(
-        receipt,
-        request_id="b" * 32,
-        request_fingerprint="c" * 64,
-    )
-    assert len(sent_frames) == 1
-    topic, frame = sent_frames[0]
-    assert topic == publisher._topic
-    assert _unpack_reading(frame) == reading
-    assert publisher._total_sent == 1
-    await asyncio.wait_for(queue.join(), timeout=0.1)
-    await publisher.stop()
-
-
-async def test_required_publication_send_failure_issues_no_broker_receipt() -> None:
-    broker = DataBroker()
-    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
-    send_attempted = asyncio.Event()
-    attempts: list[tuple[bytes, bytes]] = []
-
-    class FailingSocket:
-        async def send_multipart(self, frames: list[bytes]) -> None:
-            attempts.append((frames[0], frames[1]))
-            send_attempted.set()
-            raise OSError("forced send failure")
-
-        def close(self, *, linger: int) -> None:
-            assert linger == 0
-
-    class Context:
-        def term(self) -> None:
-            pass
-
-    publisher = ZMQPublisher()
-    publisher._queue = queue
-    publisher._socket = FailingSocket()  # type: ignore[assignment]
-    publisher._ctx = Context()  # type: ignore[assignment]
-    publisher._session_id = "a" * 32
-    publisher._running = True
-    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
-    publication = asyncio.create_task(
-        broker.publish_required(
-            _make_reading(channel="operator_log", value=21.0, unit=""),
-            request_id="b" * 32,
-            request_fingerprint="c" * 64,
-        )
-    )
-
-    await asyncio.wait_for(send_attempted.wait(), timeout=0.1)
-    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
-        await asyncio.wait_for(publication, timeout=0.1)
-    assert len(attempts) == 1
-    assert publisher._total_sent == 0
-    assert publisher.publish_failure_count == 1
-    await asyncio.wait_for(queue.join(), timeout=0.1)
-    await publisher.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -272,24 +121,6 @@ async def test_metadata_preserved() -> None:
     assert abs(result.metadata["offset"] - 0.012) < 1e-12
 
 
-async def test_publisher_adds_its_applied_cold_stage_and_replaces_driver_claim() -> None:
-    sent: list[list[bytes]] = []
-
-    class Socket:
-        async def send_multipart(self, frames: list[bytes]) -> None:
-            sent.append(frames)
-
-    publisher = ZMQPublisher(applied_cold_stage_channel="engine.cold")
-    publisher._socket = Socket()  # type: ignore[assignment]
-    publisher._session_id = "a" * 32
-    await publisher._publish_reading(
-        _make_reading(metadata={"engine_applied": {"cooldown": {"channel_cold": "driver.forgery"}}})
-    )
-
-    published = _unpack_reading(sent[0][1])
-    assert published.metadata["engine_applied"] == {"cooldown": {"channel_cold": "engine.cold"}}
-
-
 # ---------------------------------------------------------------------------
 # 5. Publisher/Subscriber integration via _pack/_unpack (no live sockets)
 # ---------------------------------------------------------------------------
@@ -322,12 +153,7 @@ async def test_publisher_subscriber_integration() -> None:
 
 
 def test_slow_commands_set_covers_experiment_lifecycle() -> None:
-    """Every known-slow command routes to HANDLER_TIMEOUT_SLOW_S, not the fast tier.
-
-    Assert only the behavioral contract: _timeout_for(cmd) == HANDLER_TIMEOUT_SLOW_S.
-    The private _SLOW_COMMANDS set is an implementation detail — membership in it
-    is implied by the routing result, not asserted directly.
-    """
+    """Every known-slow command routes to HANDLER_TIMEOUT_SLOW_S, not the fast tier."""
     for cmd in (
         "experiment_finalize",
         "experiment_stop",
@@ -341,19 +167,19 @@ def test_slow_commands_set_covers_experiment_lifecycle() -> None:
         "calibration_v2_fit",
         "calibration_v2_extract",
     ):
-        assert _timeout_for({"cmd": cmd}) == HANDLER_TIMEOUT_SLOW_S, (
-            f"command {cmd!r} must route to HANDLER_TIMEOUT_SLOW_S"
-        )
+        assert cmd in _SLOW_COMMANDS
+        assert _timeout_for({"cmd": cmd}) == HANDLER_TIMEOUT_SLOW_S
 
 
 def test_slow_commands_covers_safety_critical_hardware_ops() -> None:
-    """HF2 — keithley_emergency_off and keithley_stop must use the slow envelope.
+    """HF2 — keithley_emergency_off and keithley_stop must use the 30 s envelope.
 
     USBTMC under stress (USB reconnect, instrument busy) can take 5–10 s.
     The fast 2-second envelope would cancel the hardware command mid-flight,
     leaving the Keithley output in an unknown state during a fault event.
-    Assert only the routing behavior, not _SLOW_COMMANDS membership directly.
     """
+    assert "keithley_emergency_off" in _SLOW_COMMANDS
+    assert "keithley_stop" in _SLOW_COMMANDS
     assert _timeout_for({"cmd": "keithley_emergency_off"}) == HANDLER_TIMEOUT_SLOW_S
     assert _timeout_for({"cmd": "keithley_stop"}) == HANDLER_TIMEOUT_SLOW_S
 
@@ -397,10 +223,7 @@ async def test_handler_timeout_returns_error_reply_not_silence() -> None:
     assert isinstance(reply, dict)
     assert reply["ok"] is False
     assert reply.get("_handler_timeout") is True
-    assert reply["error_code"] == "command_handler_timeout"
-    assert reply["delivery_state"] == "dispatched"
-    assert reply["commit_state"] == "not_applicable"
-    assert reply["retry_safe"] is True
+    assert "timeout" in reply.get("error", "").lower()
 
 
 @pytest.mark.asyncio
@@ -414,46 +237,10 @@ async def test_handler_exception_returns_error_reply() -> None:
     reply = await server._run_handler({"cmd": "safety_status"})
     assert isinstance(reply, dict)
     assert reply["ok"] is False
-    assert reply["error_code"] == "command_handler_failed"
-    assert reply["delivery_state"] == "dispatched"
-    assert reply["commit_state"] == "not_applicable"
-    assert reply["retry_safe"] is True
-    assert "boom" not in reply.get("error", "")
+    assert "boom" in reply.get("error", "")
     # Exceptions are NOT timeouts — the marker must only fire for
     # the wait_for path.
     assert "_handler_timeout" not in reply
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["timeout", "exception"])
-async def test_handler_failure_logs_never_expose_command_credentials(
-    failure: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Capability material is authorization, never diagnostic payload."""
-
-    secret = "secret-capability-token-must-not-be-logged"
-
-    async def handler(cmd: dict) -> dict:
-        if failure == "timeout":
-            await asyncio.sleep(5.0)
-        raise RuntimeError("injected failure")
-
-    server = ZMQCommandServer(handler=handler, handler_timeout_s=0.01)
-    with caplog.at_level("ERROR"):
-        reply = await server._run_handler(
-            {
-                "cmd": "experiment_finalize",
-                "capability_token": secret,
-                "mutation_capability": "cryodaq_mutation_v1",
-            }
-        )
-
-    assert reply["ok"] is False
-    rendered = "\n".join(record.getMessage() for record in caplog.records)
-    assert secret not in rendered
-    assert "capability_token" not in rendered
-    assert "action=experiment_finalize" in rendered
 
 
 @pytest.mark.asyncio
@@ -520,72 +307,6 @@ async def test_valid_json_non_dict_payload_returns_error_reply() -> None:
         assert isinstance(reply, dict)
         assert reply["ok"] is False
         assert "invalid payload" in reply["error"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Protocol versioning
-# ---------------------------------------------------------------------------
-
-
-def test_protocol_version_constant_is_a_positive_int() -> None:
-    assert isinstance(PROTOCOL_VERSION, int)
-    assert PROTOCOL_VERSION == 2
-
-
-@pytest.mark.asyncio
-async def test_protocol_version_command_answers_without_handler() -> None:
-    """protocol_version is handler-independent — answered by the server
-    class itself, even when no handler is wired (unlike every other
-    command, which returns {"ok": False, "error": "no handler"})."""
-    server = ZMQCommandServer(handler=None)
-    reply = await server._run_handler({"cmd": "protocol_version"})
-    assert reply["ok"] is True
-    assert reply["proto"] == PROTOCOL_VERSION
-    assert reply["server"] == "engine"
-    assert isinstance(reply["app_version"], str) and reply["app_version"]
-
-
-@pytest.mark.asyncio
-async def test_protocol_version_command_uses_explicit_assistant_label() -> None:
-    """Server identity is independent of the configured bind address."""
-    server = ZMQCommandServer(
-        address="tcp://127.0.0.1:6001",
-        handler=None,
-        server_label="assistant",
-    )
-    reply = await server._run_handler({"cmd": "protocol_version"})
-    assert reply["server"] == "assistant"
-
-
-def test_server_label_defaults_to_engine_for_custom_address() -> None:
-    server = ZMQCommandServer(address="tcp://127.0.0.1:6002", handler=None)
-    assert server._server_label() == "engine"
-
-
-@pytest.mark.parametrize("server_label", ["web", "", "ENGINE", None, 1])
-def test_server_label_rejects_unknown_values(server_label) -> None:
-    with pytest.raises(ValueError, match="server_label"):
-        ZMQCommandServer(handler=None, server_label=server_label)
-
-
-def test_client_and_server_protocol_versions_match() -> None:
-    """The GUI mirrors the constant to preserve its no-pyzmq import boundary."""
-    from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
-
-    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION == 2
-
-
-def test_encode_reply_adds_protocol_version() -> None:
-    """_encode_reply is the single place `proto` is injected — verify it
-    adds the authoritative field without disturbing other keys."""
-    server = ZMQCommandServer(handler=None)
-    for reply in (
-        {"ok": True, "cmd": "x"},
-        {"ok": False, "error": "boom"},
-        {"ok": True, "proto": 999},
-    ):
-        encoded = json.loads(server._encode_reply(reply))
-        assert encoded == {**reply, "proto": PROTOCOL_VERSION}
 
 
 def test_gui_client_cmd_reply_timeout_exceeds_server_slow_ceiling() -> None:

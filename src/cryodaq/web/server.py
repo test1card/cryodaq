@@ -21,8 +21,6 @@ For LAN access route via SSH tunnel; never bind 0.0.0.0 directly.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from importlib.metadata import version as _get_version
 
 try:
@@ -31,24 +29,20 @@ except Exception:
     _VERSION = "dev"
 import json
 import logging
-import math
-import threading
+import sqlite3
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import zmq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQSubscriber
+from cryodaq.core.zmq_bridge import ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
-from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
 
@@ -60,195 +54,22 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 _CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
 
-# Bounds for unauthenticated read endpoints — a too-large value would scan
-# every data_*.db into memory (/history) or pull an unbounded log (/api/log)
-# and can OOM the web process. Clamp rather than 500.
-_HISTORY_MAX_MINUTES = 1440  # 24 h — covers the dashboard's longest window
-_LOG_MAX_LIMIT = 2000
-_STATUS_FRESHNESS_S = 10.0
-_MUTATION_PROTOCOL_MAJOR = 1
-_MUTATION_CAPABILITY = "cryodaq_mutation_v1"
-_MUTATION_RECEIPT_SCHEMA = "mutation_compatibility_v1"
-_MUTATION_RECEIPT_KEYS = frozenset(
-    {
-        "schema",
-        "accepted",
-        "server_protocol_major",
-        "required_capability",
-        "capability_token",
-    }
-)
-_MUTATION_ENVELOPE_KEYS = frozenset({"protocol_major", "mutation_capability", "capability_token"})
-_WEB_READ_ONLY_COMMANDS = frozenset(
-    {
-        "mutation_capabilities",
-        "safety_status",
-        "alarm_v2_status",
-        "experiment_status",
-        "log_get",
-    }
-)
-_mutation_lock = threading.Lock()
-_mutation_receipt: dict[str, Any] | None = None
 
-
-def _json_safe_value(value: Any) -> Any:
-    """Return a strict-JSON projection with non-finite floats masked.
-
-    JSON's ``NaN``/``Infinity`` extensions are not valid RFC 8259 values and
-    browsers disagree about how to handle them.  Public monitoring surfaces
-    therefore preserve the reading/status evidence but represent an unknown
-    numeric value as ``null``.
-    """
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {key: _json_safe_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_safe_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe_value(item) for item in value]
-    return value
-
-
-def _requires_mutation_envelope(action: object) -> bool:
-    """Default unknown web commands to the fail-closed mutation path."""
-    return type(action) is not str or not action or action not in _WEB_READ_ONLY_COMMANDS
-
-
-def _send_engine_command_once(cmd: dict[str, Any]) -> dict[str, Any]:
-    """Send exactly one REQ and classify whether a mutation may have landed."""
+def _send_engine_command(cmd: dict) -> dict:
+    """Send a command to the engine via ZMQ REQ/REP. Thread-safe per call."""
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
     sock.setsockopt(zmq.SNDTIMEO, 5000)
     sock.setsockopt(zmq.LINGER, 0)
-    send_started = False
     try:
         sock.connect(_CMD_ADDR)
-        send_started = True
         sock.send_json(cmd)
-        response = sock.recv_json()
-        if type(response) is not dict:
-            raise ValueError("engine response is not an object")
-        return response
-    except Exception as exc:  # noqa: BLE001 - turn transport/codec faults into evidence
-        logger.warning("Web engine command transport failed for %s: %s", cmd.get("cmd"), exc)
-        if send_started and _requires_mutation_envelope(cmd.get("cmd")):
-            return {
-                "ok": False,
-                "error_code": "mutation_outcome_unknown",
-                "error": "Engine did not return a valid mutation receipt; outcome is unknown",
-                "delivery_state": "unknown",
-                "commit_state": "unknown",
-                "retry_safe": False,
-            }
-        return {
-            "ok": False,
-            "error_code": "engine_unavailable",
-            "error": "Engine не отвечает",
-            "delivery_state": "not_confirmed",
-            "retry_safe": True,
-        }
+        return sock.recv_json()
+    except zmq.ZMQError:
+        return {"ok": False, "error": "Engine не отвечает"}
     finally:
         sock.close()
-
-
-def _mutation_discovery_failure() -> dict[str, Any]:
-    return {
-        "ok": False,
-        "error_code": "mutation_protocol_incompatible",
-        "error": "Web mutation compatibility discovery failed; command was not dispatched",
-        "delivery_state": "not_dispatched",
-        "commit_state": "not_committed",
-        "retry_safe": True,
-        "compatibility_receipt": {
-            "schema": _MUTATION_RECEIPT_SCHEMA,
-            "accepted": False,
-            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
-            "required_capability": _MUTATION_CAPABILITY,
-        },
-    }
-
-
-def _ensure_mutation_compatibility() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Discover one strict receipt; concurrent web writes share the flight."""
-    global _mutation_receipt
-    with _mutation_lock:
-        if _mutation_receipt is not None:
-            return dict(_mutation_receipt), None
-        discovery = _send_engine_command_once({"cmd": "mutation_capabilities"})
-        receipt = discovery.get("compatibility_receipt") if type(discovery) is dict else None
-        token = receipt.get("capability_token") if type(receipt) is dict else None
-        valid = (
-            discovery.get("ok") is True
-            and type(receipt) is dict
-            and set(receipt) == _MUTATION_RECEIPT_KEYS
-            and receipt.get("schema") == _MUTATION_RECEIPT_SCHEMA
-            and receipt.get("accepted") is True
-            and type(receipt.get("server_protocol_major")) is int
-            and receipt.get("server_protocol_major") == _MUTATION_PROTOCOL_MAJOR
-            and receipt.get("required_capability") == _MUTATION_CAPABILITY
-            and type(token) is str
-            and 16 <= len(token) <= 512
-            and token.isprintable()
-        )
-        if not valid:
-            _mutation_receipt = None
-            return None, _mutation_discovery_failure()
-        _mutation_receipt = {
-            "schema": receipt["schema"],
-            "accepted": True,
-            "server_protocol_major": receipt["server_protocol_major"],
-            "required_capability": receipt["required_capability"],
-            "capability_token": token,
-        }
-        return dict(_mutation_receipt), None
-
-
-def _invalidate_mutation_compatibility() -> None:
-    global _mutation_receipt
-    with _mutation_lock:
-        _mutation_receipt = None
-
-
-def _send_engine_command(cmd: dict) -> dict:
-    """Dispatch one web command with fail-closed mutation negotiation."""
-    if type(cmd) is not dict:
-        return {
-            "ok": False,
-            "error_code": "command_invalid",
-            "error": "Web engine command must be a plain mapping",
-            "retry_safe": True,
-        }
-    action = cmd.get("cmd")
-    if type(action) is not str or not action:
-        return {
-            "ok": False,
-            "error_code": "command_invalid",
-            "error": "Web engine command requires a non-empty string cmd",
-            "retry_safe": True,
-        }
-    command = {key: value for key, value in cmd.items() if key not in _MUTATION_ENVELOPE_KEYS}
-    if not _requires_mutation_envelope(action):
-        return _send_engine_command_once(command)
-
-    receipt, failure = _ensure_mutation_compatibility()
-    if failure is not None:
-        return failure
-    assert receipt is not None
-    command.update(
-        {
-            "protocol_major": receipt["server_protocol_major"],
-            "mutation_capability": receipt["required_capability"],
-            "capability_token": receipt["capability_token"],
-        }
-    )
-    result = _send_engine_command_once(command)
-    if result.get("error_code") == "mutation_protocol_incompatible":
-        # Refresh only for the next explicit HTTP request; never replay here.
-        _invalidate_mutation_compatibility()
-    return result
 
 
 async def _async_engine_command(cmd: dict) -> dict:
@@ -264,28 +85,6 @@ _DATA_DIR = get_data_dir()
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _Availability:
-    available: bool
-    stale: bool
-    reason: str | None
-
-    def __post_init__(self) -> None:
-        if type(self.available) is not bool or type(self.stale) is not bool:
-            raise ValueError("availability fields must be bool")
-        if not self.available and not self.stale:
-            raise ValueError("unavailable availability must be stale")
-        if self.available and not self.stale:
-            if self.reason is not None:
-                raise ValueError("live availability cannot have a reason")
-        elif not isinstance(self.reason, str) or not self.reason.strip():
-            raise ValueError("stale or unavailable availability requires a reason")
-
-
-class HistoryUnavailable(RuntimeError):
-    """A requested history window could not be fully read from its daily archive."""
-
-
 class _ServerState:
     """Общее состояние для всех WebSocket-клиентов."""
 
@@ -298,10 +97,6 @@ class _ServerState:
         self.instrument_status: dict[str, dict[str, Any]] = {}
         self.clients: set[WebSocket] = set()
         self.subscriber: ZMQSubscriber | None = None
-        self._last_authoritative_reading_at: float | None = None
-        self._availability = _Availability(False, True, "awaiting authoritative ZMQ reading")
-        self._safety_availability = _Availability(False, True, "safety status unavailable")
-        self._alarms_availability = _Availability(False, True, "alarm status unavailable")
         self._lock = asyncio.Lock()
         # Bounded broadcast queue — prevents task explosion under load.
         # Initialised in startup (requires running event loop).
@@ -314,13 +109,11 @@ class _ServerState:
         data = {
             "timestamp": reading.timestamp.isoformat(),
             "channel": reading.channel,
-            "value": _json_safe_value(reading.value),
+            "value": reading.value,
             "unit": reading.unit,
             "status": reading.status.value,
         }
         self.last_readings[reading.channel] = data
-        self._last_authoritative_reading_at = time.monotonic()
-        self._availability = _Availability(True, False, None)
 
         # Определить прибор
         inst_id = reading.instrument_id or ""
@@ -342,46 +135,12 @@ class _ServerState:
             self.instrument_status[inst_id] = {
                 "last_seen": reading.timestamp.isoformat(),
                 "status": reading.status.value,
-                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0) + 1,
+                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0)
+                + 1,
             }
-
-    def invalidate_producer(self, reason: str) -> None:
-        """Retain cached diagnostics while withdrawing producer authority."""
-        self._availability = _Availability(False, True, reason)
-
-    def _availability_json(self) -> _Availability:
-        availability = self._availability
-        if not availability.available:
-            return availability
-        last_reading_at = self._last_authoritative_reading_at
-        if last_reading_at is None:
-            return _Availability(False, True, "awaiting authoritative ZMQ reading")
-        age_s = time.monotonic() - last_reading_at
-        if age_s > _STATUS_FRESHNESS_S:
-            return _Availability(True, True, f"ZMQ reading age exceeds {_STATUS_FRESHNESS_S:g} seconds")
-        return availability
-
-    def _safety_json(self) -> dict[str, Any]:
-        availability = self._safety_availability
-        return {
-            "state": self.safety_state,
-            "available": availability.available,
-            "stale": availability.stale,
-            "reason": availability.reason,
-        }
-
-    def _alarms_json(self) -> dict[str, Any]:
-        availability = self._alarms_availability
-        return {
-            "active": self.active_alarms,
-            "available": availability.available,
-            "stale": availability.stale,
-            "reason": availability.reason,
-        }
 
     def status_json(self) -> dict[str, Any]:
         """Собрать JSON-статус для GET /status."""
-        availability = self._availability_json()
         uptime_s = time.monotonic() - self.start_time
         hours, rem = divmod(int(uptime_s), 3600)
         mins, secs = divmod(rem, 60)
@@ -393,12 +152,7 @@ class _ServerState:
             "instruments": self.instrument_status,
             "safety_state": self.safety_state,
             "active_alarms": self.active_alarms,
-            "safety": self._safety_json(),
-            "alarms": self._alarms_json(),
             "ws_clients": len(self.clients),
-            "available": availability.available,
-            "stale": availability.stale,
-            "reason": availability.reason,
         }
 
 
@@ -414,7 +168,7 @@ async def _broadcast(data: dict[str, Any]) -> None:
     """Отправить JSON всем подключённым WebSocket-клиентам."""
     if not _state.clients:
         return
-    message = json.dumps(_json_safe_value(data), ensure_ascii=False, allow_nan=False)
+    message = json.dumps(data, ensure_ascii=False)
     disconnected: list[WebSocket] = []
     for ws in _state.clients:
         try:
@@ -444,19 +198,14 @@ async def _zmq_to_ws_bridge() -> None:
     """Фоновая задача: получает Reading от ZMQ, рассылает по WebSocket."""
     sub = ZMQSubscriber(callback=_on_reading_callback)
     _state.subscriber = sub
+    await sub.start()
+    logger.info("ZMQ→WS мост запущен")
+    # Задача живёт вечно — остановка через lifespan
     try:
-        await sub.start()
-        logger.info("ZMQ→WS мост запущен")
-        # Задача живёт вечно — остановка через lifespan
         while True:  # noqa: ASYNC110
             await asyncio.sleep(3600)
-    finally:
-        try:
-            await sub.stop()
-        finally:
-            if _state.subscriber is sub:
-                _state.invalidate_producer("ZMQ readings producer stopped")
-                _state.subscriber = None
+    except asyncio.CancelledError:
+        await sub.stop()
 
 
 def _on_reading_callback(reading: Reading) -> None:
@@ -470,9 +219,14 @@ def _on_reading_callback(reading: Reading) -> None:
     if q is None:
         return
 
-    # Build the event from the already-normalised cache entry so the REST and
-    # WebSocket surfaces cannot drift on missing/non-finite value semantics.
-    data = {"type": "reading", **_state.last_readings[reading.channel]}
+    data = {
+        "type": "reading",
+        "timestamp": reading.timestamp.isoformat(),
+        "channel": reading.channel,
+        "value": reading.value,
+        "unit": reading.unit,
+        "status": reading.status.value,
+    }
     try:
         q.put_nowait(data)
     except asyncio.QueueFull:
@@ -500,9 +254,6 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
     Возвращает словарь: channel → [{"t": iso, "v": float, "u": unit}, ...]
     """
-    # Clamp to a sane window — an unauthenticated caller must not be able to
-    # scan the entire archive into memory via ?minutes=99999999.
-    minutes = max(1, min(minutes, _HISTORY_MAX_MINUTES))
     cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     cutoff_epoch = cutoff.timestamp()
 
@@ -511,43 +262,27 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
     if not _DATA_DIR.exists():
         return result
 
-    # Daily filenames use the writer's wall-clock date. Include one preceding
-    # day conservatively for timezone/cross-midnight overlap, but never open
-    # the entire archive for a short dashboard request.
-    oldest_candidate_date = (cutoff - timedelta(days=1)).date()
-    latest_candidate_date = (datetime.now(UTC) + timedelta(days=1)).date()
     for db_path in sorted(_DATA_DIR.glob("data_????-??-??.db")):
-        try:
-            db_date = datetime.strptime(db_path.stem.removeprefix("data_"), "%Y-%m-%d").date()
-        except ValueError:
-            logger.warning("Ignoring malformed daily SQLite filename: %s", db_path.name)
-            continue
-        if not oldest_candidate_date <= db_date <= latest_candidate_date:
-            continue
         conn = None
         try:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT timestamp, channel, value, unit, status FROM readings "
+                "SELECT timestamp, channel, value, unit FROM readings "
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
                 (cutoff_epoch,),
             ).fetchall()
-        except Exception as exc:
-            logger.warning("History query failed for %s: %s", db_path.name, exc)
-            raise HistoryUnavailable("history database unavailable") from exc
+        except Exception:
+            continue
         finally:
             if conn is not None:
                 conn.close()
         for row in rows:
             ch = row["channel"]
-            # NaN-доктрина: mask sentinel / error / legacy ±inf to null — an
-            # unusable reading must never reach the dashboard/REST feed as a number.
-            v = decode(row["value"], row["status"])
             result.setdefault(ch, []).append(
                 {
                     "t": datetime.fromtimestamp(row["timestamp"], tz=UTC).isoformat(),
-                    "v": v if math.isfinite(v) else None,
+                    "v": row["value"],
                     "u": row["unit"],
                 }
             )
@@ -562,54 +297,34 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
 def create_app() -> FastAPI:
     """Создать и настроить FastAPI-приложение."""
-
-    @asynccontextmanager
-    async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        # Initialize loop-owned state only while this application is live.
-        _state.broadcast_q = asyncio.Queue(maxsize=200)
-        pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
-        zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
-        tasks = (zmq_task, pump_task)
-        logger.info("Веб-сервер CryoDAQ запущен")
-        try:
-            yield
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            _state.broadcast_q = None
-            failures = [
-                result
-                for result in results
-                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
-            ]
-            logger.info("Веб-сервер CryoDAQ остановлен")
-            if failures:
-                raise RuntimeError("web background task settlement failed") from failures[0]
-
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
         version=_VERSION,
-        lifespan=_lifespan,
     )
 
-    # Read-only REST facade + Swagger. Imported here (not at module top) to
-    # keep the server<->rest_api import non-circular.
-    from cryodaq.web.rest_api import (
-        BodySizeLimitMiddleware,
-        WriteAuthMiddleware,
-        project_public_experiment,
-        project_public_log_entries,
-        redact_public_payload,
-    )
-    from cryodaq.web.rest_api import router as rest_router
+    _zmq_task: asyncio.Task[None] | None = None
+    _pump_task: asyncio.Task[None] | None = None
 
-    application.add_middleware(BodySizeLimitMiddleware)
-    # Auth before body parsing on every mutating /api/v1 request (H1).
-    application.add_middleware(WriteAuthMiddleware)
-    application.include_router(rest_router)
+    @application.on_event("startup")
+    async def _startup() -> None:
+        nonlocal _zmq_task, _pump_task
+        # Инициализируем очередь в контексте event loop
+        _state.broadcast_q = asyncio.Queue(maxsize=200)
+        _pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
+        _zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
+        logger.info("Веб-сервер CryoDAQ запущен")
+
+    @application.on_event("shutdown")
+    async def _shutdown() -> None:
+        for task in (_zmq_task, _pump_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        logger.info("Веб-сервер CryoDAQ остановлен")
 
     # Статические файлы
     if _STATIC_DIR.exists():
@@ -623,93 +338,48 @@ def create_app() -> FastAPI:
     @application.get("/status")
     async def status() -> dict[str, Any]:
         """JSON-статус системы."""
-        return redact_public_payload(_state.status_json())
+        return _state.status_json()
 
     @application.get("/api/status")
     async def api_status() -> dict[str, Any]:
         """Полный JSON-статус: readings + experiment + shift."""
-        base = redact_public_payload(_state.status_json())
+        base = _state.status_json()
         base["readings"] = _state.last_readings
         # Safety status via engine command
         try:
             safety = await _async_engine_command({"cmd": "safety_status"})
+            base["safety"] = safety if safety.get("ok") else None
             if safety.get("ok"):
                 _state.safety_state = safety.get("state", "unknown")
-                _state._safety_availability = _Availability(True, False, None)
-                base["safety"] = {
-                    **{key: value for key, value in safety.items() if key != "ok"},
-                    **_state._safety_json(),
-                }
-            else:
-                logger.warning("api_status safety fetch non-ok")
-                _state._safety_availability = _Availability(False, True, "safety status unavailable")
-                base["safety"] = _state._safety_json()
-        except Exception as exc:
-            logger.warning("api_status safety fetch failed: %s", exc)
-            _state._safety_availability = _Availability(False, True, "safety status unavailable")
-            base["safety"] = _state._safety_json()
+        except Exception:
+            base["safety"] = None
         # Alarm status via engine command
         try:
             alarms = await _async_engine_command({"cmd": "alarm_v2_status"})
             if alarms.get("ok"):
+                base["active_alarms"] = alarms.get("active", {})
                 _state.active_alarms = alarms.get("active", {})
-                base["active_alarms"] = redact_public_payload(alarms.get("active", {}))
-                _state._alarms_availability = _Availability(True, False, None)
-                base["alarms"] = redact_public_payload(_state._alarms_json())
-            else:
-                logger.warning("api_status alarm fetch non-ok")
-                _state._alarms_availability = _Availability(False, True, "alarm status unavailable")
-                base["alarms"] = redact_public_payload(_state._alarms_json())
         except Exception as exc:
             logger.warning("api_status alarm fetch failed: %s", exc)
-            _state._alarms_availability = _Availability(False, True, "alarm status unavailable")
-            base["alarms"] = redact_public_payload(_state._alarms_json())
-        # Experiment/shift data via ZMQ command. ``experiment`` keeps its
-        # projected shape (object or None) for back-compat, and the separate
-        # ``experiment_available`` flag lets the dashboard tell an unreachable
-        # engine (False) from a reachable engine with no active experiment
-        # (True, ``experiment`` None) — they must not share one shape.
+        # Experiment/shift data via ZMQ command
         try:
             exp = await _async_engine_command({"cmd": "experiment_status"})
-            if exp.get("ok"):
-                base["experiment"] = project_public_experiment(exp)
-                base["experiment_available"] = True
-            else:
-                base["experiment"] = None
-                base["experiment_available"] = False
+            base["experiment"] = exp if exp.get("ok") else None
         except Exception as exc:
             logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
-            base["experiment_available"] = False
-        return redact_public_payload(base)
-
-    @application.get("/api/version")
-    async def api_version() -> dict[str, Any]:
-        """Protocol + app version triple — unauthenticated read, same trust
-        as the other GET routes (see docs/protocol.md)."""
-        return {"proto": PROTOCOL_VERSION, "server": "web", "app_version": _VERSION}
+        return base
 
     @application.get("/api/log")
     async def api_log(limit: int = 10) -> dict[str, Any]:
         """Последние записи журнала."""
-        # Clamp the unauthenticated limit before forwarding to the engine.
-        limit = max(1, min(limit, _LOG_MAX_LIMIT))
         try:
-            result = await _async_engine_command({"cmd": "log_get", "log_scope": "all", "limit": limit})
+            result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):
-                return {
-                    "ok": True,
-                    "entries": project_public_log_entries(result.get("entries", [])),
-                }
+                return {"ok": True, "entries": result.get("entries", [])}
         except Exception as exc:
             logger.warning("api_log fetch failed: %s", exc)
-        return {
-            "ok": False,
-            "entries": [],
-            "available": False,
-            "stale": True,
-            "reason": "operator log unavailable",
-        }
+        return {"ok": False, "entries": []}
 
     @application.get("/history")
     async def history(minutes: int = 60) -> dict[str, Any]:
@@ -725,17 +395,7 @@ def create_app() -> FastAPI:
             }
         """
         loop = asyncio.get_running_loop()
-        try:
-            channels = await loop.run_in_executor(None, _query_history, minutes)
-        except HistoryUnavailable:
-            return JSONResponse(
-                {
-                    "available": False,
-                    "stale": True,
-                    "reason": "history unavailable",
-                },
-                status_code=503,
-            )
+        channels = await loop.run_in_executor(None, _query_history, minutes)
         return {"channels": channels}
 
     @application.websocket("/ws")
@@ -782,36 +442,24 @@ padding:10px 12px;margin-bottom:8px}
 .temp-card .name{font-size:10px;color:#8b949e}
 .temp-card .val{font-size:16px;font-weight:bold}
 .cold{color:#58a6ff} .mid{color:#c9d1d9} .warm{color:#f0883e} .hot{color:#f85149}
-.unavailable{color:#8b949e}
-.availability{display:none;padding:10px 12px;margin-bottom:8px;border:2px solid #f0883e;
-background:#161b22;color:#f0f6fc;font-weight:bold}
-.availability.unavailable{border-color:#f85149}
-#cached-label{display:none;color:#8b949e;font-size:12px;margin:-2px 0 8px}
 .log-entry{font-size:12px;color:#8b949e;padding:2px 0;border-bottom:1px solid #21262d}
 .log-entry .ts{color:#58a6ff}
 #updated{font-size:11px;color:#484f58;text-align:right;padding:4px}
-body.dashboard-stale #updated{color:#f0883e;font-weight:bold}
 </style>
 </head>
 <body>
-<div class="header"><h1>CryoDAQ Monitor</h1>
- <span class="ver"><a href="/docs" style="color:#58a6ff;text-decoration:none">API docs</a> · v__VERSION__</span></div>
+<div class="header"><h1>CryoDAQ Monitor</h1><span class="ver">v__VERSION__</span></div>
 <div class="status-bar">
  <span class="item" id="safety">—</span>
  <span class="item" id="uptime">Аптайм: --:--:--</span>
  <span class="item" id="alarms">—</span>
  <span class="item" id="channels">0 каналов</span>
 </div>
-<div class="availability" id="availability" role="alert"></div>
-<div id="cached-label"></div>
 <div class="section"><div class="section-title">Эксперимент</div><div id="experiment">—</div></div>
 <div class="section"><div class="section-title">Температуры</div>
 <div class="temps" id="temps"></div></div>
 <div class="section"><div class="section-title">Давление</div><div id="pressure">—</div></div>
-<div class="section">
-<div class="section-title">Прочие показания (не классифицированы как температура или давление)</div>
-<div id="other-readings">—</div></div>
-<div class="section"><div class="section-title">Keithley (слоты не настроены)</div><div id="keithley">—</div></div>
+<div class="section"><div class="section-title">Keithley</div><div id="keithley">—</div></div>
 <div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
 <div id="updated"></div>
 <script>
@@ -819,103 +467,60 @@ function escapeHtml(s){if(s==null)return '';return String(s)
  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
  .replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function tempColor(v){if(v<10)return'cold';if(v<100)return'mid';if(v<250)return'warm';return'hot'}
-function isUsableReading(r){return r&&typeof r.value==='number'&&Number.isFinite(r.value)}
-function displayChannelCount(value){return typeof value==='number'&&Number.isFinite(value)?value+' каналов':'— каналов'}
-async function fetchJson(url){const response=await fetch(url);
- if(!response.ok)throw new Error('HTTP '+response.status);
- return response.json()}
-function markRefreshStale(error){
- document.body.classList.add('dashboard-stale');
- document.getElementById('updated').textContent='Данные устарели: '
-  +(error.message||'нет связи')+'. Показаны последние полученные значения.';
-}
-function setAvailability(d){
- const unavailable=d.available===false;
- const stale=d.available===true&&d.stale===true;
- const warning=document.getElementById('availability');
- const cached=document.getElementById('cached-label');
- if(!unavailable&&!stale){
-  warning.style.display='none';warning.textContent='';warning.classList.remove('unavailable');
-  cached.style.display='none';cached.textContent='';return false;
- }
- const label=unavailable?'UNAVAILABLE':'STALE';
- const reason=typeof d.reason==='string'&&d.reason?d.reason:'availability unknown';
- warning.textContent=label+' — '+reason;
- warning.style.display='block';warning.classList.toggle('unavailable',unavailable);
- cached.textContent='last-known values below';cached.style.display='block';
- document.body.classList.add('dashboard-stale');
- return true;
-}
 async function refresh(){
  try{
-  const[d,ld]=await Promise.all([fetchJson('/api/status'),fetchJson('/api/log?limit=5')]);
-  const lastKnown=setAvailability(d);
+  const r=await fetch('/api/status');const d=await r.json();
   document.getElementById('uptime').textContent='Аптайм: '+(d.uptime||'--');
-  document.getElementById('channels').textContent=displayChannelCount(d.channels);
+  document.getElementById('channels').textContent=(d.channels||0)+' каналов';
   // Safety state
   const safety=d.safety;
-  if(safety&&safety.available!==false&&safety.state){
+  if(safety&&safety.state){
    const st=safety.state;
    const el=document.getElementById('safety');
-   el.textContent=(lastKnown?'LAST-KNOWN: ':'')+st.toUpperCase();
+   el.textContent=st.toUpperCase();
    el.style.color=(st==='fault'||st==='fault_latched')?'#f85149':'#3fb950';
-  }else{document.getElementById('safety').textContent=lastKnown?'LAST-KNOWN: —':'—'}
+  }else{document.getElementById('safety').textContent='—'}
   // Alarms
-  const alarmSection=d.alarms;
   const aa=d.active_alarms||{};
   const ac=Object.keys(aa).length;
-  const alarmsUnavailable=alarmSection&&alarmSection.available===false;
-  const alarmsText=alarmsUnavailable?'UNAVAILABLE':(lastKnown?'LAST-KNOWN: ':'')+ac+' алармов';
-  document.getElementById('alarms').textContent=alarmsText;
+  document.getElementById('alarms').textContent=ac+' алармов';
   // Readings
   const readings=d.readings||{};
-  let temps='',pressure='—',other='';
+  let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
   const sorted=Object.entries(readings).sort((a,b)=>a[0].localeCompare(b[0]));
   for(const[ch,r]of sorted){
-   const usable=isUsableReading(r);
-   if(r&&r.unit==='K'){
-    const c=usable?tempColor(r.value):'unavailable';
-    const value=usable?r.value.toFixed(2):'—';
+   if(r.unit==='K'&&ch.match(/^\\u0422|^T/)){
+    const c=tempColor(r.value);
     temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div>`+
-      `<div class="val ${c}"${usable?'':' title="Нет данных"'}>${value}</div></div>`;
-   }else if(r&&r.unit==='mbar'){
-    pressure=usable?r.value.toExponential(2)+' mbar':'— mbar';
-   }else if(r){
-    const value=usable?String(r.value):'—';
-    const unit=typeof r.unit==='string'&&r.unit?r.unit:'единица не объявлена';
-    other+=`<div>${escapeHtml(ch)}: ${escapeHtml(value)} ${escapeHtml(unit)}</div>`;
+      `<div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
    }
+   if(r.unit==='mbar')pressure=r.value.toExponential(2)+' mbar';
+   if(ch.includes('/smua/'))kA=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kA;
+   if(ch.includes('/smub/'))kB=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kB;
   }
   document.getElementById('temps').innerHTML=temps||'Нет данных';
   document.getElementById('pressure').textContent=pressure;
-  document.getElementById('other-readings').innerHTML=other||'Нет данных';
-  document.getElementById('keithley').textContent='A: НЕИЗВЕСТНО │ B: НЕИЗВЕСТНО';
-   // Experiment — distinguish "unavailable" from "no experiment"; an
-   // unreachable engine must never render as an authoritative empty.
-   const exp=d.experiment;
-   if(d.experiment_available===false){
-    document.getElementById('experiment').textContent='Эксперимент: нет связи';
-   }else if(lastKnown){
-    document.getElementById('experiment').textContent=exp&&exp.active_experiment
-     ?'LAST-KNOWN: '+(exp.active_experiment.name||'—')
-     :'Эксперимент: последнее известное состояние недоступно';
-   }else if(exp&&exp.active_experiment){
-    const e=exp.active_experiment;
-    const phase=exp.current_phase?' ['+exp.current_phase+']':'';
-    document.getElementById('experiment').textContent=(e.name||'—')+phase;
-   }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
-  const logUnavailable=ld.available===false;
+  document.getElementById('keithley').textContent='A: '+kA+' │ B: '+kB;
+  // Experiment
+  const exp=d.experiment;
+  if(exp&&exp.active_experiment){
+   const e=exp.active_experiment;
+   const phase=exp.current_phase?' ['+exp.current_phase+']':'';
+   document.getElementById('experiment').textContent=(e.name||'—')+phase;
+  }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
+ }catch(e){document.getElementById('updated').textContent='Ошибка: '+e.message}
+ // Log
+ try{
+  const lr=await fetch('/api/log?limit=5');const ld=await lr.json();
   let html='';
-  for(const e of(!logUnavailable&&ld.ok?ld.entries||[]:[])){
+  for(const e of(ld.entries||[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
    html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> `+
      `[${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
-  const logPlaceholder=logUnavailable?'Журнал: недоступен':(ld.ok?'Нет записей':'Журнал недоступен');
-  document.getElementById('log').innerHTML=html||logPlaceholder;
-  if(!lastKnown){document.body.classList.remove('dashboard-stale');
-   document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();}
- }catch(e){markRefreshStale(e)}
+  document.getElementById('log').innerHTML=html||'Нет записей';
+ }catch(e){}
+ document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
 }
 refresh();setInterval(refresh,5000);
 </script>

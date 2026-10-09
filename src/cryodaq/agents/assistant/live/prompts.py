@@ -223,7 +223,6 @@ SHIFT_HANDOVER_SYSTEM = """\
 - 120-200 слов. Telegram-friendly Markdown.
 """
 
-
 def format_with_brand(template: str, brand_name: str) -> str:
     """Interpolate {brand_name} placeholder in a system prompt template."""
     return template.format(brand_name=brand_name)
@@ -276,7 +275,6 @@ PERIODIC_REPORT_USER = """\
 {calibration_section}
 
 Всего событий: {total_event_count}
-Полнота контекста: {source_completeness}
 
 Сгенерируй краткую сводку для оператора в Telegram. Только русский язык.
 Раздел «Здоровье датчиков» подаётся как агрегат (всего/ОК/ПРЕД/КРИТ);

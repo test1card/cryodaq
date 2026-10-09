@@ -73,11 +73,31 @@ def load_active_experiment_id(data_dir: Path) -> str | None:
         raise ReportContractError("active experiment state is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise ReportContractError("active experiment state root must be a mapping")
-    required = {"schema_version", "app_mode", "active_experiment_id", "updated_at"}
-    if set(payload) != required:
-        raise ReportContractError("active experiment state has unexpected fields")
-    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+    # ExperimentManager has written _STATE_SCHEMA_VERSION = 2 since the H3
+    # cutover, adding revision / fingerprint / transition-receipt fields. This
+    # reader still demanded the v1 four-key envelope, so `set(payload) !=
+    # required` failed on EVERY tick: the report coordinator logged "active
+    # experiment state has unexpected fields" every 30 s and could never
+    # resolve the active experiment, which is why periodic PNG artifacts went
+    # stale while the engine itself was healthy.
+    #
+    # Accept both envelopes, with the same exact key sets the writer uses
+    # (core/experiment.py). Only the two fields this function actually needs
+    # are read from either; the extra v2 fields are the manager's own
+    # transition bookkeeping and carry no meaning here.
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int or schema_version not in (1, 2):
         raise ReportContractError("active experiment state schema is invalid")
+    legacy_keys = {"schema_version", "app_mode", "active_experiment_id", "updated_at"}
+    v2_keys = legacy_keys | {
+        "revision",
+        "state_fingerprint",
+        "last_transition_receipt",
+        "last_transition_receipt_fingerprint",
+        "manager_incarnation",
+    }
+    if set(payload) != (legacy_keys if schema_version == 1 else v2_keys):
+        raise ReportContractError("active experiment state has unexpected fields")
     if payload["app_mode"] not in {"experiment", "debug"}:
         raise ReportContractError("active experiment app_mode is invalid")
     updated_at = payload["updated_at"]

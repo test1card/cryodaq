@@ -37,6 +37,9 @@
   "guard_blobs": {
     "tests/core/test_alarm_config_validation.py": "874f549ec38babc348e152bda229cd3e478f8f9c"
   },
+  "guard_node_sha256": {
+    "tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises": "sha256:0ee3d2e76d2189970237790e5a6a5511ed2c1e34eb928d7ccd285a74f8eda5d8"
+  },
   "guard_nodes": [
     "tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises"
   ],
@@ -46,7 +49,7 @@
     "ALARM-MIXED-SELECTOR-027",
     "ALARM-MIXED-SELECTOR-FALSE-GREEN-199"
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "stderr_bytes_base64": "",
   "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX19fX19fX18gdGVzdF90b3BfbGV2ZWxfY2hhbm5lbHNfYW5kX2NoYW5uZWxfZ3JvdXBfcmFpc2VzIF9fX19fX19fX19fX19fXw0KdGVzdHNcY29yZVx0ZXN0X2FsYXJtX2NvbmZpZ192YWxpZGF0aW9uLnB5OjE2NTQ6IGluIHRlc3RfdG9wX2xldmVsX2NoYW5uZWxzX2FuZF9jaGFubmVsX2dyb3VwX3JhaXNlcw0KICAgIHdpdGggcHl0ZXN0LnJhaXNlcyhBbGFybUNvbmZpZ0Vycm9yLCBtYXRjaD0iY2hhbm5lbF9ncm91cCIpOg0KICAgICAgICAgXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eDQpFICAgRmFpbGVkOiBESUQgTk9UIFJBSVNFIDxjbGFzcyAnY3J5b2RhcS5jb3JlLmFsYXJtX2NvbmZpZy5BbGFybUNvbmZpZ0Vycm9yJz4NCj09PT09PT09PT09PT09PT09PT09PT09PT09PSBzaG9ydCB0ZXN0IHN1bW1hcnkgaW5mbyA9PT09PT09PT09PT09PT09PT09PT09PT09PT0NCkZBSUxFRCB0ZXN0cy9jb3JlL3Rlc3RfYWxhcm1fY29uZmlnX3ZhbGlkYXRpb24ucHk6OnRlc3RfdG9wX2xldmVsX2NoYW5uZWxzX2FuZF9jaGFubmVsX2dyb3VwX3JhaXNlcw0KMSBmYWlsZWQgaW4gMC4xNHMNCg==",

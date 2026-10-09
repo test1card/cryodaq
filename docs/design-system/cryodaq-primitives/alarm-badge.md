@@ -4,15 +4,13 @@ keywords: alarm, badge, notification, count, bell, indicator, active-alarms, hea
 applies_to: header-area alarm count indicator
 status: partial
 implements: legacy inline bell indicator (recently cleaned of emoji per Phase 0 decision)
-last_updated: 2026-07-17
+last_updated: 2026-04-17
 references: rules/color-rules.md, rules/data-display-rules.md, tokens/icons.md
 ---
 
 # AlarmBadge
 
-Compact indicator showing the unacknowledged active-attention alarm count,
-typically embedded near the TopWatchBar or in a dashboard corner. Clicking
-opens the full Alarms panel.
+Compact indicator showing active alarm count, typically embedded near the TopWatchBar or in a dashboard corner. Clicking opens the full Alarms panel.
 
 **When to use:**
 - Top chrome area — companion to TopWatchBar, high-visibility location
@@ -22,9 +20,7 @@ opens the full Alarms panel.
 **When NOT to use:**
 - Inside sensor cells or per-channel widgets — those use their own state via border/color (RULE-A11Y-002)
 - Transient «just fired» notification — use `Toast` for the firing event, AlarmBadge reflects persistent count
-- Historical or backend-cleared alarms. Acknowledged-active alarms leave the
-  attention count but remain visible in the full alarm panel until backend
-  resolution; acknowledgement never clears the hazard.
+- Acknowledged / cleared alarms — badge shows ACTIVE count only
 
 ## AlarmBadge vs Toast vs Dialog
 
@@ -48,7 +44,7 @@ AlarmBadge is the persistent count reflecting the current state. Toast is the "j
 │   bell icon         │                │       MUTED_FOREGROUND│
 │                     │                │       dim             │
 └─────────────────────┘                └─────────────────────┘
-  bg: STATUS_CAUTION                     bg: transparent
+  bg: STATUS_WARNING                     bg: transparent
   text: ON_DESTRUCTIVE                   no border
   radius: RADIUS_SM                      hover: MUTED bg
   padding: SPACE_1 SPACE_2
@@ -66,21 +62,19 @@ Note: 🔔 in diagram shows position; actual implementation uses Lucide `bell` S
 | **Container frame** | Yes | Clickable widget; pill-shaped when alarms present, icon-only when empty |
 | **Bell icon** | Yes | Lucide `bell` SVG, color inherits from state |
 | **Count label** | When count > 0 | Numeric count in FONT_MONO_VALUE |
-| **Severity hint** | Optional | Color ramp: 1 caution/legacy-warning alarm = CAUTION, any FAULT = FAULT; when no alarms, MUTED_FOREGROUND |
+| **Severity hint** | Optional | Color ramp: 1 alarm = WARNING, any FAULT = FAULT; when no alarms, MUTED_FOREGROUND |
 
 ## Invariants
 
 1. **No emoji.** Lucide `bell` SVG only. (RULE-COPY-005)
 2. **Clickable — cursor PointingHand.** Opens Alarms panel on click. (RULE-INTER-011)
 3. **Tooltip mandatory** since this is icon-primary. Tooltip: «3 активные тревоги» or «Нет активных тревог». (RULE-INTER-008)
-4. **Color reflects worst unacknowledged presentation severity.** Legacy
-   `warning` input normalizes to the same caution rung. One fault overrides any
-   number of caution alarms.
+4. **Color reflects worst severity present.** 5 warnings + 0 faults → STATUS_WARNING. 1 fault + 10 warnings → STATUS_FAULT. Highest severity wins.
 5. **Count uses tabular mono font.** Prevents width jitter as count increments. (RULE-TYPO-003)
 6. **Two-channel signal: icon + count.** Not color alone. (RULE-A11Y-002)
 7. **Fires instantly, no fade.** State transitions are fault events. (RULE-INTER-006)
 8. **Empty state stays visible.** Don't hide badge when 0 alarms — operator needs to see that the system is watching. Just dim.
-9. **Click shortcut: Ctrl+M.** It opens the alarms panel; Ctrl+A is analytics.
+9. **Click shortcut: Ctrl+A** (or similar). Register per keyboard-shortcuts registry.
 10. **No animation for count changes.** Old count snaps to new count. No tween. (RULE-DATA-001, RULE-DATA-009)
 
 ## API (proposed)
@@ -90,9 +84,10 @@ Note: 🔔 in diagram shows position; actual implementation uses Lucide `bell` S
 
 @dataclass
 class AlarmSummary:
-    total_active: int           # unacknowledged active-attention count
+    total_active: int           # total count across all severities
     fault_count: int            # faulted alarms
-    caution_count: int          # canonical caution count; legacy warning normalized here
+    warning_count: int          # warnings
+    caution_count: int          # cautions
 
 
 class AlarmBadge(QWidget):
@@ -156,6 +151,11 @@ class AlarmBadge(QWidget):
             bg_color = theme.STATUS_FAULT
             fg_color = theme.ON_DESTRUCTIVE
             icon_color = theme.ON_DESTRUCTIVE
+        elif s.warning_count > 0:
+            severity = "warning"
+            bg_color = theme.STATUS_WARNING
+            fg_color = theme.ON_DESTRUCTIVE
+            icon_color = theme.ON_DESTRUCTIVE
         elif s.caution_count > 0:
             severity = "caution"
             bg_color = theme.STATUS_CAUTION
@@ -211,10 +211,12 @@ class AlarmBadge(QWidget):
             parts = []
             if s.fault_count:
                 parts.append(f"{s.fault_count} аварий")
+            if s.warning_count:
+                parts.append(f"{s.warning_count} предупреждений")
             if s.caution_count:
                 parts.append(f"{s.caution_count} замечаний")
             self.setToolTip(
-                f"{s.total_active} неподтверждённых активных тревог: {', '.join(parts)} (Ctrl+M)"
+                f"{s.total_active} активных тревог: {', '.join(parts)} (Ctrl+A)"
             )
     
     def mouseReleaseEvent(self, event):
@@ -227,7 +229,8 @@ class AlarmBadge(QWidget):
 
 ```
 fault ≥ 1  →  STATUS_FAULT    (red pill)
-fault = 0, caution ≥ 1  →  STATUS_CAUTION  (amber pill)
+fault = 0, warning ≥ 1  →  STATUS_WARNING  (amber pill)
+fault = 0, warning = 0, caution ≥ 1  →  STATUS_CAUTION  (orange pill)
 all counts = 0  →  transparent + dim icon
 ```
 
@@ -247,7 +250,8 @@ The badge is small (height ~30, width depends on count digits). Fits naturally i
 | State | Visual treatment |
 |---|---|
 | **No alarms** | Transparent bg, dim bell icon, no count. Hover: MUTED bg |
-| **Caution present** | STATUS_CAUTION pill, count visible, icon + text high-contrast; legacy warning input is normalized into this same rung |
+| **Caution only** | STATUS_CAUTION pill, count visible, icon + text high-contrast |
+| **Warning present** | STATUS_WARNING pill |
 | **Fault present** | STATUS_FAULT pill |
 | **Click (pressed)** | Pressed state ~100ms, then opens panel |
 | **Focus** | 2px ACCENT border (via :focus) replacing normal border |
@@ -270,8 +274,7 @@ User clicks badge:
     AlarmBadge.clicked  →  ToolRail or MainWindow handler  →  navigate to Alarms panel
 ```
 
-Shortcut: `Ctrl+M` activates the same behavior (open Alarms panel), registered
-via ToolRail or application level. `Ctrl+A` remains analytics.
+Shortcut: `Ctrl+A` should also activate the same behavior (open Alarms panel), registered via tool-rail or application-level.
 
 ## Common mistakes
 
@@ -291,9 +294,7 @@ via ToolRail or application level. `Ctrl+A` remains analytics.
 
 8. **Missing tooltip.** Icon-primary widget without tooltip fails RULE-INTER-008. Tooltip must describe count and severity.
 
-9. **Conflating attention with condition state.** Cleared and historical alarms
-   do not count. Acknowledged-active alarms also leave this attention count,
-   but they remain visibly active in the full panel until backend resolution.
+9. **Showing non-active alarms.** Acknowledged, cleared, or historical alarms don't count here. Only active.
 
 10. **Placing badge in ToolRail slot.** ToolRail slots are navigation, not live counters. Place AlarmBadge near TopWatchBar. ToolRail's alarm slot opens the panel; that's a different concept.
 

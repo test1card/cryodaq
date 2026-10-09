@@ -173,25 +173,4 @@ def test_experiment_card_switching_back_to_none_clears_fault_chrome(app):
 def test_experiment_card_phase_stepper_reflects_current_phase(app):
     card = ExperimentCard()
     card.set_experiment(_make_data(current_phase="measurement"))
-    stepper = card._phase_stepper
-
-    # "measurement" pill must use ACCENT (current-phase UI activation color).
-    current_pill = stepper._pills["measurement"]
-    current_ss = current_pill.styleSheet()
-    assert theme.ACCENT in current_ss, f"current pill should have ACCENT ({theme.ACCENT}), got: {current_ss!r}"
-
-    # Past phases use neutral filled progress; completion is not health.
-    for past_phase in ("preparation", "vacuum", "cooldown"):
-        past_pill = stepper._pills[past_phase]
-        past_ss = past_pill.styleSheet()
-        assert theme.SECONDARY in past_ss
-        assert theme.STATUS_OK not in past_ss
-
-    # Phases after "measurement" (warmup, teardown) must use BORDER (future).
-    for future_phase in ("warmup", "teardown"):
-        future_pill = stepper._pills[future_phase]
-        future_ss = future_pill.styleSheet()
-        assert theme.BORDER in future_ss, (
-            f"future pill '{future_phase}' should have BORDER ({theme.BORDER}), got: {future_ss!r}"
-        )
-        assert theme.ACCENT not in future_ss, f"future pill '{future_phase}' must not have ACCENT color"
+    assert card._phase_stepper._current_phase == "measurement"

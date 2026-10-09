@@ -35,12 +35,12 @@ _MAX_INSIGHTS = 10
 
 # Trigger type → (short label, status color token)
 _TRIGGER_META: dict[str, tuple[str, str]] = {
-    "alarm_fired": ("ТРЕВОГА", theme.STATUS_CAUTION),
+    "alarm_fired": ("ТРЕВОГА", theme.STATUS_WARNING),
     "experiment_finalize": ("ЭКСП", theme.STATUS_INFO),
     "experiment_stop": ("ЭКСП", theme.STATUS_INFO),
     "experiment_abort": ("ПРЕРВАН", theme.STATUS_FAULT),
     "sensor_anomaly_critical": ("ДАТЧИК", theme.STATUS_FAULT),
-    "shift_handover_request": ("СМЕНА", theme.STATUS_CAUTION),
+    "shift_handover_request": ("СМЕНА", theme.STATUS_OK),
     "periodic_report_request": ("ОТЧЁТ", theme.STATUS_INFO),
 }
 _DEFAULT_META = ("СОБЫТИЕ", theme.STATUS_STALE)
@@ -59,14 +59,15 @@ class _TriggerChip(QLabel):
         super().__init__(parent)
         label, color = _TRIGGER_META.get(trigger_event_type, _DEFAULT_META)
         self.setText(label)
-        self.setTextFormat(Qt.TextFormat.PlainText)
         self.setFixedHeight(18)
         font = QFont(theme.FONT_MONO, theme.FONT_SIZE_XS)
         font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         self.setFont(font)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setContentsMargins(6, 0, 6, 0)
-        self.setStyleSheet(f"background: {color}; color: {theme.BACKGROUND}; border-radius: 3px;")
+        self.setStyleSheet(
+            f"background: {color}; color: {theme.BACKGROUND}; border-radius: 3px;"
+        )
 
 
 class _InsightCard(QFrame):
@@ -76,7 +77,8 @@ class _InsightCard(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(
-            f"background: {theme.SURFACE_CARD}; border-radius: 6px; border: 1px solid {theme.BORDER_SUBTLE};"
+            f"background: {theme.SURFACE_CARD}; border-radius: 6px;"
+            f" border: 1px solid {theme.BORDER_SUBTLE};"
         )
 
         root = QVBoxLayout(self)
@@ -88,7 +90,6 @@ class _InsightCard(QFrame):
         header.setSpacing(8)
 
         ts_label = QLabel(entry.timestamp.astimezone().strftime("%H:%M:%S"))
-        ts_label.setTextFormat(Qt.TextFormat.PlainText)
         ts_font = QFont(theme.FONT_MONO, theme.FONT_SIZE_XS)
         ts_label.setFont(ts_font)
         ts_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
@@ -99,11 +100,11 @@ class _InsightCard(QFrame):
         root.addLayout(header)
 
         # LLM text
-        text_label = QLabel()
-        text_label.setTextFormat(Qt.TextFormat.PlainText)
-        text_label.setText(entry.text)
+        text_label = QLabel(entry.text)
         text_label.setWordWrap(True)
-        text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         text_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_SM)
         text_label.setFont(text_font)
         text_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
@@ -141,12 +142,14 @@ class AssistantInsightPanel(QWidget):
         # Panel header
         header_frame = QFrame()
         header_frame.setFixedHeight(40)
-        header_frame.setStyleSheet(f"background: {theme.SURFACE_PANEL}; border-bottom: 1px solid {theme.BORDER};")
+        header_frame.setStyleSheet(
+            f"background: {theme.SURFACE_PANEL};"
+            f" border-bottom: 1px solid {theme.BORDER};"
+        )
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(12, 0, 12, 0)
 
         title = QLabel(f"{self._brand_emoji} {self._brand_name} — ИИ аналитика")
-        title.setTextFormat(Qt.TextFormat.PlainText)
         title_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_BASE)
         title_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         title.setFont(title_font)
@@ -155,7 +158,6 @@ class AssistantInsightPanel(QWidget):
         header_layout.addStretch()
 
         self._count_label = QLabel("")
-        self._count_label.setTextFormat(Qt.TextFormat.PlainText)
         count_font = QFont(theme.FONT_MONO, theme.FONT_SIZE_XS)
         self._count_label.setFont(count_font)
         self._count_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
@@ -182,12 +184,13 @@ class AssistantInsightPanel(QWidget):
         self._scroll = scroll
 
         self._placeholder = QLabel(f"{self._brand_name} ещё не прислала ни одного сообщения.")
-        self._placeholder.setTextFormat(Qt.TextFormat.PlainText)
         placeholder_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_SM)
         self._placeholder.setFont(placeholder_font)
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        self._placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._placeholder.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._cards_layout.addWidget(self._placeholder)
 
     def push_insight(

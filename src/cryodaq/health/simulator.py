@@ -23,7 +23,9 @@ from cryodaq.health.contract import (
     HealthTelemetrySnapshot,
 )
 
-MAX_SIMULATOR_FRAMES = 2**63 - 1
+MAX_SIMULATOR_FRAMES = 2**52
+MAX_DETERMINISTIC_HEALTH_NODE_FRAMES = 1_000_000
+_ORDINARY_COMPONENT_TYPES = frozenset({"compressor", "pump_station", "cryocooler", "support_node"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +91,20 @@ class DeterministicFleetHealthSimulator:
         start = float(start_time_s)
         if not math.isfinite(start) or start < 10.0:
             raise HealthTelemetryError("start_time_s must be finite and >= 10 for deterministic stale cuts")
+        try:
+            tick_s = 1.0 / cadence
+            horizon_s = start + (MAX_SIMULATOR_FRAMES - 1) * tick_s
+        except OverflowError as exc:
+            raise HealthTelemetryError(
+                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
+            ) from exc
+        if (
+            not math.isfinite(tick_s)
+            or not math.isfinite(horizon_s)
+            or start + tick_s <= start
+            or math.ulp(horizon_s) > tick_s
+        ):
+            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
 
         self._seed = seed
         self._cadence_hz = cadence
@@ -243,6 +259,113 @@ class DeterministicFleetHealthSimulator:
             value=value,
             quality=quality,
             source_time_s=observed,
+        )
+
+
+class DeterministicHealthTelemetryNode:
+    """One manually-clocked ordinary-lab node with a stoppable heartbeat."""
+
+    __slots__ = (
+        "_cadence_hz",
+        "_descriptor",
+        "_heartbeat_frames",
+        "_last_heartbeat_s",
+        "_metric_descriptor",
+        "_revision",
+        "_start_time_s",
+    )
+
+    def __init__(
+        self,
+        *,
+        device_id: str,
+        component_type: str,
+        cadence_hz: float = 2.0,
+        start_time_s: float = 10.0,
+        heartbeat_frames: int = MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+        stale_after_s: float = 1.0,
+        disconnected_after_s: float = 5.0,
+    ) -> None:
+        if component_type not in _ORDINARY_COMPONENT_TYPES:
+            raise HealthTelemetryError("component_type must be compressor, pump_station, cryocooler, or support_node")
+        if isinstance(cadence_hz, bool) or not isinstance(cadence_hz, (int, float)):
+            raise TypeError("cadence_hz must be a number")
+        cadence = float(cadence_hz)
+        if not math.isfinite(cadence) or not 0 < cadence <= 2.0:
+            raise HealthTelemetryError("human-readable cadence_hz must be in (0, 2]")
+        if isinstance(start_time_s, bool) or not isinstance(start_time_s, (int, float)):
+            raise TypeError("start_time_s must be a number")
+        start = float(start_time_s)
+        if not math.isfinite(start) or start < 0:
+            raise HealthTelemetryError("start_time_s must be finite and non-negative")
+        try:
+            tick_s = 1.0 / cadence
+            horizon_s = start + (MAX_DETERMINISTIC_HEALTH_NODE_FRAMES - 1) * tick_s
+        except OverflowError as exc:
+            raise HealthTelemetryError(
+                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
+            ) from exc
+        if (
+            not math.isfinite(tick_s)
+            or not math.isfinite(horizon_s)
+            or start + tick_s <= start
+            or math.ulp(horizon_s) > tick_s
+        ):
+            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
+        if type(heartbeat_frames) is not int or not 1 <= heartbeat_frames <= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
+            raise HealthTelemetryError("heartbeat_frames must be a positive bounded integer")
+        self._descriptor = HealthDeviceDescriptor(
+            device_id=device_id,
+            component_type=component_type,
+            provenance="driver-registry:deterministic-health-node/v1",
+            stale_after_s=stale_after_s,
+            disconnected_after_s=disconnected_after_s,
+        )
+        self._cadence_hz = cadence
+        self._start_time_s = start
+        self._heartbeat_frames = heartbeat_frames
+        self._revision = 0
+        self._last_heartbeat_s = start
+        self._metric_descriptor = HealthMetricDescriptor(
+            metric_id="health.load_percent",
+            kind=HealthMetricKind.QUANTITY,
+            unit="%",
+            role="infrastructure_health",
+            display_group="Health",
+        )
+
+    @property
+    def health_descriptor(self) -> HealthDeviceDescriptor:
+        return self._descriptor
+
+    def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
+        if self._revision >= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
+            raise HealthTelemetryError("simulator exhausted its bounded revision space")
+        expected = self._start_time_s + self._revision / self._cadence_hz
+        if (
+            isinstance(observed_time_s, bool)
+            or not isinstance(observed_time_s, (int, float))
+            or not math.isfinite(float(observed_time_s))
+            or not math.isclose(float(observed_time_s), expected, rel_tol=0.0, abs_tol=1e-9)
+        ):
+            raise HealthTelemetryError(f"observed_time_s must follow the configured <=2 Hz cadence ({expected:g})")
+        observed = float(observed_time_s)
+        self._revision += 1
+        if self._revision <= self._heartbeat_frames:
+            self._last_heartbeat_s = observed
+        metric = HealthMetric(
+            descriptor=self._metric_descriptor,
+            value=42.0,
+            quality=HealthQuality.OK,
+            source_time_s=self._last_heartbeat_s,
+        )
+        return HealthTelemetrySnapshot(
+            descriptor=self._descriptor,
+            revision=self._revision,
+            observed_time_s=observed,
+            heartbeat_time_s=self._last_heartbeat_s,
+            mode="running",
+            metrics=(metric,),
         )
 
 

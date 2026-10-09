@@ -33,7 +33,7 @@ from pathlib import Path
 
 import yaml
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QWidget
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
@@ -153,35 +153,14 @@ class AnalyticsView(QWidget):
         # F-MockPredictor: cold-stage live reading routed via
         # set_cold_temperature_reading; replayed on phase swap.
         self._last_cold_temperature_reading: Reading | None = None
-        self._cold_stage_unavailable_reason: str | None = None
 
         # Per-(setter_name, phase) set: suppresses repeat WARNINGs for the
         # same silent-skip within one phase so 33 Hz data streams don't flood
         # the log. Cleared on every phase transition via _apply_layout.
         self._warned_setters: set[tuple[str, str | None]] = set()
 
-        # Outer column: a persistent cooldown-baseline verdict badge on top
-        # (Task 8b — hidden when the feature is disabled or no baseline set),
-        # then the phase-aware grid. The grid lives on an inner container so
-        # `_place_in_slot` / `active_widgets` keep their existing semantics.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
-        outer.setSpacing(theme.SPACE_2)
-
-        from cryodaq.gui.shell.overlays.cooldown_baseline_card import CooldownVerdictBadge
-
-        self._verdict_badge = CooldownVerdictBadge()
-        badge_row = QHBoxLayout()
-        badge_row.setContentsMargins(0, 0, 0, 0)
-        badge_row.setSpacing(theme.SPACE_2)
-        badge_row.addStretch()
-        badge_row.addWidget(self._verdict_badge)
-        outer.addLayout(badge_row)
-
-        grid_host = QWidget()
-        outer.addWidget(grid_host, stretch=1)
-        self._grid = QGridLayout(grid_host)
-        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
         self._grid.setSpacing(theme.SPACE_3)
         # Layout is intentionally NOT applied here. _ensure_overlay in
         # MainWindowV2 calls set_phase() exactly once after construction,
@@ -203,8 +182,6 @@ class AnalyticsView(QWidget):
         self._layout_applied = True
         key = _resolve_phase_key(phase, self._layout_config)
         self._apply_layout(key)
-        # Re-read the on-disk fingerprint/baseline state (cheap, phase-rate).
-        self._verdict_badge.refresh()
 
     def current_phase(self) -> str | None:
         return self._phase
@@ -251,16 +228,6 @@ class AnalyticsView(QWidget):
         that own a SteadyStatePredictor for stationarity detection."""
         self._last_cold_temperature_reading = reading
         self._forward("set_cold_temperature_reading", reading)
-
-    def set_cold_stage_unavailable(self, reason: str) -> None:
-        """Render the exact absence of a cold-stage policy declaration."""
-        self._cold_stage_unavailable_reason = reason
-        self._forward_to(list(self._active.values()), "set_cold_stage_unavailable", reason)
-
-    def clear_cold_stage_unavailable(self) -> None:
-        """Restore the declared cold-stage widget to its live-data state."""
-        self._cold_stage_unavailable_reason = None
-        self._forward_to(list(self._active.values()), "clear_cold_stage_unavailable")
 
     # ------------------------------------------------------------------
     # Layout management
@@ -337,7 +304,8 @@ class AnalyticsView(QWidget):
             if key not in self._warned_setters:
                 self._warned_setters.add(key)
                 logger.warning(
-                    "%s: no active widget in phase=%r implements setter; data dropped. Active widgets: %s",
+                    "%s: no active widget in phase=%r implements setter; data dropped. "
+                    "Active widgets: %s",
                     method,
                     self._phase,
                     [type(w).__name__ for w in self._active.values()],
@@ -356,7 +324,7 @@ class AnalyticsView(QWidget):
         Replaying into preserved (already-active-in-prior-layout)
         widgets would duplicate samples in append-style consumers like
         :class:`TemperatureOverviewWidget` and
-        :class:`PressureCurrentWidget`. Phase III.C fix.
+        :class:`PressureCurrentWidget`. Phase III.C Codex fix.
         """
         if not widgets:
             return
@@ -365,28 +333,30 @@ class AnalyticsView(QWidget):
         if self._last_r_thermal is not None:
             self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)
         if self._last_temperature_readings:
-            self._forward_to(widgets, "set_temperature_readings", self._last_temperature_readings)
+            self._forward_to(
+                widgets, "set_temperature_readings", self._last_temperature_readings
+            )
         if self._last_pressure_reading is not None:
             self._forward_to(widgets, "set_pressure_reading", self._last_pressure_reading)
         if self._last_keithley_readings:
-            self._forward_to(widgets, "set_keithley_readings", self._last_keithley_readings)
+            self._forward_to(
+                widgets, "set_keithley_readings", self._last_keithley_readings
+            )
         if self._last_instrument_health is not None:
-            self._forward_to(widgets, "set_instrument_health", self._last_instrument_health)
+            self._forward_to(
+                widgets, "set_instrument_health", self._last_instrument_health
+            )
         if self._last_vacuum_prediction is not None:
-            self._forward_to(widgets, "set_vacuum_prediction", self._last_vacuum_prediction)
+            self._forward_to(
+                widgets, "set_vacuum_prediction", self._last_vacuum_prediction
+            )
         if self._last_experiment_status is not None:
-            self._forward_to(widgets, "set_experiment_status", self._last_experiment_status)
+            self._forward_to(
+                widgets, "set_experiment_status", self._last_experiment_status
+            )
         if self._last_cold_temperature_reading is not None:
             self._forward_to(
                 widgets,
                 "set_cold_temperature_reading",
                 self._last_cold_temperature_reading,
             )
-        if self._cold_stage_unavailable_reason is not None:
-            self._forward_to(
-                widgets,
-                "set_cold_stage_unavailable",
-                self._cold_stage_unavailable_reason,
-            )
-        else:
-            self._forward_to(widgets, "clear_cold_stage_unavailable")

@@ -1,6 +1,6 @@
-"""Verify interlock action differentiation (Phase 2a I.1).
+"""Verify interlock action differentiation (Phase 2a Codex I.1).
 
-finding: ``stop_source`` and ``emergency_off`` interlocks both
+Codex finding: ``stop_source`` and ``emergency_off`` interlocks both
 collapsed into a full latched fault path because the original engine.py
 wrappers discarded the action name. After Phase 2a, the InterlockEngine's
 new ``trip_handler`` callback delivers the full ``(condition, reading)``
@@ -17,14 +17,13 @@ import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
-from cryodaq.drivers.contracts import SourceOffResult
 
 
 @pytest.fixture
 async def mgr():
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
+    keithley.emergency_off = AsyncMock()
     keithley.start_source = AsyncMock()
     keithley.stop_source = AsyncMock()
 
@@ -88,7 +87,9 @@ async def test_stop_source_allows_request_run_after(mgr):
         i_comp=0.1,
         channel="smua",
     )
-    assert "FAULT" not in str(result.get("error", "")), f"request_run blocked by FAULT despite stop_source: {result}"
+    assert "FAULT" not in str(result.get("error", "")), (
+        f"request_run blocked by FAULT despite stop_source: {result}"
+    )
 
 
 @pytest.mark.asyncio
